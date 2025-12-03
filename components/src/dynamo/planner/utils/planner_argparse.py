@@ -34,7 +34,7 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--namespace",
         default=SLAPlannerDefaults.namespace,
-        help="Namespace",
+        help="Dynamo namespace",
     )
     parser.add_argument(
         "--backend",

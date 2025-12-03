@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 # Source of truth for planner defaults
 class BasePlannerDefaults:
-    namespace = "dynamo"
+    # Namespace from DYN_NAMESPACE env var (injected by operator as "{k8s_namespace}-{dgd_name}")
+    namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
     environment = "kubernetes"
     backend = "vllm"
     no_operation = False
@@ -56,7 +57,6 @@ class LoadPlannerDefaults(BasePlannerDefaults):
 
 
 class SLAPlannerDefaults(BasePlannerDefaults):
-    namespace = os.environ.get("DYN_NAMESPACE", "vllm-disagg-planner")
     # Prometheus endpoint URL for pulling/querying metrics
     metric_pulling_prometheus_endpoint = os.environ.get(
         "PROMETHEUS_ENDPOINT",

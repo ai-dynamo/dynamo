@@ -139,6 +139,8 @@ def generate_dgd_config_with_planner(
 
     # Override profiling-specific arguments with results from profiling
     # Remove and re-add to ensure correct values from profiling context
+    # Note: --namespace is NOT added here; planner gets it from DYN_NAMESPACE env var
+    # which is automatically injected by the operator based on dynamoNamespace
     planner_args = [
         arg
         for arg in planner_args
@@ -154,11 +156,9 @@ def generate_dgd_config_with_planner(
     ]
 
     # Add arguments determined by profiling results
-    frontend_namespace = getattr(config.spec.services["Frontend"], "dynamoNamespace", "dynamo")  # type: ignore[attr-defined]
     cm_mount_path = f"{get_workspace_dir()}/profiling_results"
     planner_args.extend(
         [
-            f"--namespace={frontend_namespace}",
             f"--prefill-engine-num-gpu={best_prefill_mapping.get_num_gpus()}",
             f"--decode-engine-num-gpu={best_decode_mapping.get_num_gpus()}",
             f"--profile-results-dir={cm_mount_path}",
@@ -375,7 +375,6 @@ def _generate_mocker_config_with_planner(
     # Update planner's dynamoNamespace to match mocker's namespace
     mocker_planner_dict["dynamoNamespace"] = mocker_namespace
 
-    # Override --backend to mocker and --namespace to match mocker's dynamoNamespace
     # Planner args use --key=value format, so we need to find and replace
     planner_main_container = mocker_planner_dict.get("extraPodSpec", {}).get(
         "mainContainer", {}
@@ -385,8 +384,6 @@ def _generate_mocker_config_with_planner(
     for arg in planner_args:
         if arg.startswith("--backend="):
             updated_planner_args.append("--backend=mocker")
-        elif arg.startswith("--namespace="):
-            updated_planner_args.append(f"--namespace={mocker_namespace}")
         else:
             updated_planner_args.append(arg)
     planner_main_container["args"] = updated_planner_args
