@@ -270,6 +270,38 @@ get_options() {
         --no-cache)
             NO_CACHE=" --no-cache"
             ;;
+        --dynamo-base-cache-from)
+            if [ "$2" ]; then
+                DYNAMO_BASE_CACHE_FROM="--cache-from $2"
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --dynamo-base-cache-to)
+            if [ "$2" ]; then
+                DYNAMO_BASE_CACHE_TO="--cache-to $2"
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --framework-cache-from)
+            if [ "$2" ]; then
+                FRAMEWORK_CACHE_FROM="--cache-from $2"
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --framework-cache-to)
+            if [ "$2" ]; then
+                FRAMEWORK_CACHE_TO="--cache-to $2"
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
         --cache-from)
             if [ "$2" ]; then
                 CACHE_FROM="--cache-from $2"
@@ -457,8 +489,12 @@ show_help() {
     echo "  [--tensorrtllm-index-url tensorrtllm PyPI index URL if providing the wheel from artifactory]"
     echo "  [--tensorrtllm-git-url tensorrtllm git repository URL for cloning]"
     echo "  [--build-arg additional build args to pass to docker build]"
-    echo "  [--cache-from cache location to start from]"
-    echo "  [--cache-to location where to cache the build output]"
+    echo "  [--cache-from cache location to start from, overrides dynamo-base-cache-from and framework-cache-from]"
+    echo "  [--cache-to location where to cache the build output, overrides dynamo-base-cache-to and framework-cache-to]"
+    echo "  [--dynamo-base-cache-from cache location to start from for dynamo base when building multiple images]"
+    echo "  [--dynamo-base-cache-to location where to cache the dynamo-base build output when building multiple images]"
+    echo "  [--framework-cache-from cache location to start from for frameworks when building multiple images]"
+    echo "  [--framework-cache-to location where to cache the framework build output when building multiple images]"
     echo "  [--tag tag for image]"
     echo "  [--dev-image dev image to build local-dev from]"
     echo "  [--uid user ID for local-dev images (only with --dev-image or --target local-dev)]"
@@ -502,6 +538,16 @@ fi
 # Set the commit sha in the container so we can inspect what build this relates to
 DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA:-$(git rev-parse HEAD)}
 BUILD_ARGS+=" --build-arg DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA "
+
+# Cache arg overrides
+if [[ -n $CACHE_FROM ]]; then
+    DYNAMO_BASE_CACHE_FROM=$CACHE_FROM
+    FRAMEWORK_CACHE_FROM=$CACHE_FROM
+fi
+if [[ -n $CACHE_TO ]]; then
+    DYNAMO_BASE_CACHE_TO=$CACHE_TO
+    FRAMEWORK_CACHE_TO=$CACHE_TO
+fi
 
 # Special handling for vLLM on ARM64 - set required defaults if not already specified by user
 if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
@@ -868,33 +914,33 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         # - SGLANG: Python 3.10, BASE_IMAGE=cuda-dl-base
         # - TRTLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=pytorch
         # Without unique tags, building different frameworks would overwrite each other's names
-        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}-${FRAMEWORK,,}"
-        # Start base image build
-        echo "======================================"
-        echo "Starting Build 1: Base Image"
-        echo "======================================"
+        # DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}-${FRAMEWORK,,}"
+        # # Start base image build
+        # echo "======================================"
+        # echo "Starting Build 1: Base Image"
+        # echo "======================================"
 
-        # Create build log directory for BuildKit reports
-        BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
-        mkdir -p "${BUILD_LOG_DIR}"
-        BASE_BUILD_LOG="${BUILD_LOG_DIR}/base-image-build.log"
+        # # Create build log directory for BuildKit reports
+        # BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
+        # mkdir -p "${BUILD_LOG_DIR}"
+        # BASE_BUILD_LOG="${BUILD_LOG_DIR}/base-image-build.log"
 
-        # Use BuildKit for enhanced metadata
-        if [ -z "$RUN_PREFIX" ]; then
-            if docker buildx version &>/dev/null; then
-                docker buildx build --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            else
-                DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            fi
+        # # Use BuildKit for enhanced metadata
+        # if [ -z "$RUN_PREFIX" ]; then
+        #     if docker buildx version &>/dev/null; then
+        #         docker buildx build --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+        #         BUILD_EXIT_CODE=${PIPESTATUS[0]}
+        #     else
+        #         DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+        #         BUILD_EXIT_CODE=${PIPESTATUS[0]}
+        #     fi
 
-            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
-                exit ${BUILD_EXIT_CODE}
-            fi
-        else
-            $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-        fi
+        #     if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+        #         exit ${BUILD_EXIT_CODE}
+        #     fi
+        # else
+        #     $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        # fi
 
         # Start framework build
         echo "======================================"
@@ -903,12 +949,12 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
 
         FRAMEWORK_BUILD_LOG="${BUILD_LOG_DIR}/framework-${FRAMEWORK,,}-build.log"
 
-        BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
+        # BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
 
         # Use BuildKit for enhanced metadata
         if [ -z "$RUN_PREFIX" ]; then
             if docker buildx version &>/dev/null; then
-                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
+                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $FRAMEWORK_CACHE_FROM $FRAMEWORK_CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
                 BUILD_EXIT_CODE=${PIPESTATUS[0]}
             else
                 DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
