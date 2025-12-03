@@ -15,9 +15,11 @@ use std::collections::HashSet;
 /// Supports extracting backend configurations from environment variables:
 /// - `DYN_KVBM_NIXL_BACKEND_UCX=true` - Enable UCX backend with default params
 /// - `DYN_KVBM_NIXL_BACKEND_GDS=false` - Explicitly disable GDS backend
-/// - Valid values: true/false, 1/0, on/off, yes/no (case-insensitive)
-/// - Invalid values (e.g., "maybe", "random") will cause an error
-/// - Custom params (e.g., `DYN_KVBM_NIXL_BACKEND_UCX_PARAM1=value`) will cause an error
+/// - `DYN_KVBM_NIXL_BACKEND_OBJ_BUCKET=my-bucket` - Custom parameter for OBJ backend
+/// - Valid enable values: true/false, 1/0, on/off, yes/no (case-insensitive)
+///
+/// Custom parameters use the pattern: `DYN_KVBM_NIXL_BACKEND_{BACKEND}_{PARAM}=value`
+/// These are parsed by `NixlAgent::create_backend_params_from_env()` at agent creation time.
 ///
 /// # Examples
 ///
@@ -32,7 +34,7 @@ use std::collections::HashSet;
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct NixlBackendConfig {
-    /// Set of enabled backends (just backend names, no custom params yet)
+    /// Set of enabled backends
     backends: HashSet<String>,
 }
 
@@ -46,24 +48,35 @@ impl NixlBackendConfig {
     ///
     /// Extracts backends from `DYN_KVBM_NIXL_BACKEND_<backend>=<value>` variables.
     ///
+    /// Custom parameters like `DYN_KVBM_NIXL_BACKEND_OBJ_BUCKET=...` are allowed
+    /// and will be parsed by `NixlAgent::create_backend_params_from_env()` at
+    /// agent creation time.
+    ///
     /// # Errors
-    /// Returns an error if:
-    /// - Custom parameters are detected (not yet supported)
-    /// - Invalid boolean values are provided (must be truthy or falsey)
+    /// Returns an error if invalid boolean values are provided for backend enablement.
     pub fn from_env() -> Result<Self> {
         let mut backends = HashSet::new();
+        let mut backends_with_params = HashSet::new();
 
         // Extract all environment variables that match our pattern
-        for (key, value) in std::env::vars() {
+        for (key, _value) in std::env::vars() {
             if let Some(remainder) = key.strip_prefix("DYN_KVBM_NIXL_BACKEND_") {
                 // Check if there's an underscore (indicating custom params)
+                if let Some(underscore_pos) = remainder.find('_') {
+                    // This is a custom parameter like DYN_KVBM_NIXL_BACKEND_OBJ_BUCKET
+                    // Extract the backend name (before the underscore)
+                    let backend_name = remainder[..underscore_pos].to_uppercase();
+                    backends_with_params.insert(backend_name);
+                }
+            }
+        }
+
+        // Now extract simple backend enablement variables
+        for (key, value) in std::env::vars() {
+            if let Some(remainder) = key.strip_prefix("DYN_KVBM_NIXL_BACKEND_") {
+                // Skip if it contains underscore (custom param, not enablement)
                 if remainder.contains('_') {
-                    bail!(
-                        "Custom NIXL backend parameters are not yet supported. \
-                         Found: {}. Please use only DYN_KVBM_NIXL_BACKEND_<backend>=true \
-                         to enable backends with default parameters.",
-                        key
-                    );
+                    continue;
                 }
 
                 // Simple backend enablement (e.g., DYN_KVBM_NIXL_BACKEND_UCX=true)
@@ -80,6 +93,9 @@ impl NixlBackendConfig {
                 }
             }
         }
+
+        // Add backends that have custom parameters (even if not explicitly enabled)
+        backends.extend(backends_with_params);
 
         // Default to UCX if no backends specified
         if backends.is_empty() {

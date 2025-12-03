@@ -147,6 +147,11 @@ fn compute_single_block_checksum(
                     file.read_exact(&mut system_region)?;
                     hasher.update(system_region.as_slice());
                 }
+                StorageKind::Object(_) => {
+                    // Object storage checksums are handled by NIXL's OBJ plugin
+                    // For now, skip checksumming object storage regions
+                    tracing::warn!("Checksum computation for object storage not yet implemented");
+                }
             }
         }
     }

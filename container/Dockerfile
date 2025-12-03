@@ -167,7 +167,11 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         libibumad \
         libibumad-devel \
         librdmacm-devel \
-        numactl-devel
+        numactl-devel \
+        libcurl-devel \
+        openssl-devel \
+        libuuid-devel \
+        zlib-devel
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
@@ -186,6 +190,27 @@ RUN set -eux; \
 
 # Point build tools explicitly at the modern protoc
 ENV PROTOC=/usr/local/bin/protoc
+
+# Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
+ARG AWS_SDK_CPP_VERSION=1.11.581
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    git clone --recurse-submodules --depth 1 --branch ${AWS_SDK_CPP_VERSION} \
+        https://github.com/aws/aws-sdk-cpp.git /tmp/aws-sdk-cpp && \
+    mkdir -p /tmp/aws-sdk-cpp/build && \
+    cd /tmp/aws-sdk-cpp/build && \
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_ONLY="s3" \
+        -DENABLE_TESTING=OFF \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DBUILD_SHARED_LIBS=ON && \
+    make -j$(nproc) && \
+    make install && \
+    rm -rf /tmp/aws-sdk-cpp && \
+    ldconfig && \
+    /tmp/use-sccache.sh show-stats "AWS SDK C++"
 
 # Set environment variables first so they can be used in COPY commands
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \

@@ -16,12 +16,12 @@ use crate::block_manager::v2::physical::layout::physical::PhysicalLayout;
 
 use super::{
     BlockDimension, FullyContiguousLayout, LayerSeparateLayout, Layout, LayoutConfig, MemoryRegion,
-    physical::NixlMetadata,
+    ObjectLayout, physical::NixlMetadata,
 };
 
 use crate::block_manager::v2::memory::{
-    DiskStorage, NixlCompatible, NixlDescriptor, OffsetMemoryRegion, OwnedMemoryRegion,
-    RegisteredView, StorageKind, SystemStorage, register_with_nixl,
+    DiskStorage, NixlCompatible, NixlDescriptor, ObjectStorage, OffsetMemoryRegion,
+    OwnedMemoryRegion, RegisteredView, StorageKind, SystemStorage, register_with_nixl,
 };
 use anyhow::{Result, anyhow, bail};
 #[allow(unused_imports)]
@@ -42,6 +42,7 @@ const REGION_ALIGNMENT: usize = 512;
 pub enum LayoutKind {
     FullyContiguous,
     LayerSeparate { block_dim: BlockDimension },
+    ObjectLayout,
 }
 
 /// Allocation strategies for builder-managed memory.
@@ -49,9 +50,9 @@ pub enum LayoutKind {
 enum AllocationKind {
     System,
     Pinned { numa_aware: bool },
-
     Device { device_id: u32 },
     Disk { path: Option<PathBuf> },
+    Object { bucket: String, key: u64 },
 }
 
 /// Memory provisioning plan (either provided regions or an allocation request).
@@ -201,6 +202,20 @@ impl<M> PhysicalLayoutBuilder<HasConfig, NoLayout, M> {
             memory_plan,
         )
     }
+
+    /// Select the object storage layout variant.
+    ///
+    /// This layout is designed for object storage where each block represents
+    /// one complete object. Supports both single-object and batch operations.
+    pub fn object_layout(self) -> PhysicalLayoutBuilder<HasConfig, HasLayout, M> {
+        let (agent, config, _layout, memory_plan) = self.into_parts();
+        PhysicalLayoutBuilder::<HasConfig, HasLayout, M>::from_parts(
+            agent,
+            config,
+            Some(LayoutKind::ObjectLayout),
+            memory_plan,
+        )
+    }
 }
 
 impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
@@ -243,6 +258,64 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
         path: Option<PathBuf>,
     ) -> PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
         self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::Disk { path }))
+    }
+
+    /// Allocate object storage backed memory.
+    ///
+    /// # Arguments
+    /// * `bucket` - bucket name
+    /// * `key` - object key
+    pub fn allocate_object(
+        self,
+        bucket: String,
+        key: u64,
+    ) -> PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
+        self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::Object { bucket, key }))
+    }
+
+    /// Allocate multiple objects for batch operations.
+    ///
+    /// This enables efficient batch transfers where each block ID maps to a different object.
+    ///
+    /// # Arguments
+    /// * `bucket` - bucket name
+    /// * `keys` - object keys (one per block, block_id=N maps to keys[N])
+    ///
+    /// # Returns
+    /// Builder with multiple objects allocated and registered with NIXL
+    pub fn allocate_objects(
+        self,
+        bucket: String,
+        keys: Vec<u64>,
+    ) -> Result<PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory>> {
+        if keys.is_empty() {
+            bail!("allocate_objects requires at least one key");
+        }
+
+        let (agent, config, layout_kind, _memory) = self.into_parts();
+
+        let cfg = config.as_ref()
+            .ok_or_else(|| anyhow!("LayoutConfig not set before allocate_objects"))?;
+
+        // Create one ObjectStorage per key
+        let entries = keys
+            .into_iter()
+            .map(|key| {
+                allocate_object_entry(
+                    cfg.required_bytes(),
+                    &agent,
+                    bucket.clone(),
+                    key,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(PhysicalLayoutBuilder::<HasConfig, HasLayout, HasMemory>::from_parts(
+            agent,
+            config,
+            layout_kind,
+            Some(MemoryPlan::Provided(entries)),
+        ))
     }
 
     /// Use existing NIXL-compatible memory regions supplied by the caller.
@@ -332,6 +405,14 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
                 let layout = LayerSeparateLayout::new(config.clone(), regions, block_dim)?;
                 Arc::new(layout)
             }
+            LayoutKind::ObjectLayout => {
+                let regions: Vec<OwnedMemoryRegion> = entries
+                    .iter()
+                    .map(|entry| Arc::clone(&entry.region))
+                    .collect();
+                let layout = ObjectLayout::new(config.clone(), regions)?;
+                Arc::new(layout)
+            }
         };
 
         Ok(PhysicalLayout::new_local(layout, kind, metadata))
@@ -387,11 +468,13 @@ fn allocate_regions(
         AllocationKind::Pinned { numa_aware } => {
             allocate_pinned_entry(reserve_size, agent, numa_aware)?
         }
-
         AllocationKind::Device { device_id } => {
             allocate_device_entry(reserve_size, agent, device_id)?
         }
         AllocationKind::Disk { path } => allocate_disk_entry(reserve_size, agent, path)?,
+        AllocationKind::Object { bucket, key } => {
+            allocate_object_entry(reserve_size, agent, bucket, key)?
+        }
     };
 
     create_offset_entries(base_entry, sizes, REGION_ALIGNMENT)
@@ -430,6 +513,18 @@ fn allocate_disk_entry(
     register_storage(storage, agent)
 }
 
+fn allocate_object_entry(
+    size: usize,
+    agent: &NixlAgent,
+    bucket: String,
+    key: u64,
+) -> Result<MemoryEntry> {
+    let storage = ObjectStorage::new(&bucket, key, size).map_err(|e| {
+        anyhow!("failed to allocate object storage ({size} bytes) in bucket {bucket} with key {key}: {e}")
+    })?;
+    register_storage(storage, agent)
+}
+
 // When testing, we allow unregistered layouts to help with test time. NIXL + UCX is very expensive to setup
 // so we only use that backend when it's needed.
 #[cfg(test)]
@@ -452,6 +547,10 @@ where
         StorageKind::Disk(_) => {
             // Disk storage needs POSIX for regular I/O OR GDS for GPU direct I/O
             agent.has_backend("POSIX") || agent.has_backend("GDS_MT")
+        }
+        StorageKind::Object(_) => {
+            // Object storage is always registered via NIXL's OBJ plugin
+            agent.has_backend("OBJ")
         }
     };
 
@@ -583,6 +682,20 @@ fn compute_allocation_sizes(config: &LayoutConfig, kind: &LayoutKind) -> Result<
             let per_layer = mul_chain(&factors)?;
             Ok(vec![per_layer; config.num_layers])
         }
+        LayoutKind::ObjectLayout => {
+            // Each object (block) contains all layers
+            // Size per object = num_layers × outer_dim × page_size × inner_dim × dtype_bytes
+            let factors = [
+                config.num_layers,
+                config.outer_dim,
+                config.page_size,
+                config.inner_dim,
+                config.dtype_width_bytes,
+            ];
+            let per_object = mul_chain(&factors)?;
+            // Return one size per object (num_blocks = number of objects)
+            Ok(vec![per_object; config.num_blocks])
+        }
     }
 }
 
@@ -651,16 +764,33 @@ fn derive_storage_kind(entries: &[MemoryEntry]) -> Result<StorageKind> {
 
     for entry in entries.iter().skip(1) {
         let kind = entry.region.storage_kind();
-        if kind != first_kind {
-            bail!(
-                "all memory regions must share the same storage location (found {:?} and {:?})",
-                first_kind,
-                kind
-            );
+
+        // For object storage, allow different keys (different objects)
+        // Just check that they're both Object storage
+        match (&first_kind, &kind) {
+            (StorageKind::Object(_), StorageKind::Object(_)) => {
+                // Both are object storage, keys can differ - this is OK
+                continue;
+            }
+            _ => {
+                // For other storage types, must match exactly
+                if kind != first_kind {
+                    bail!(
+                        "all memory regions must share the same storage location (found {:?} and {:?})",
+                        first_kind,
+                        kind
+                    );
+                }
+            }
         }
     }
 
-    Ok(first_kind)
+    // For object storage with multiple keys, return Object(0) as a generic marker
+    // The actual keys are tracked in the individual memory regions
+    match first_kind {
+        StorageKind::Object(_) => Ok(StorageKind::Object(0)),
+        other => Ok(other),
+    }
 }
 
 fn derive_nixl_metadata(agent: &NixlAgent, entries: &[MemoryEntry]) -> Result<NixlMetadata> {
@@ -688,6 +818,7 @@ fn derive_nixl_metadata(agent: &NixlAgent, entries: &[MemoryEntry]) -> Result<Ni
                 StorageKind::Pinned => (MemType::Dram, 0),
                 StorageKind::Device(id) => (MemType::Vram, id as u64),
                 StorageKind::Disk(id) => (MemType::File, id),
+                StorageKind::Object(id) => (MemType::Object, id),
             };
             Ok(NixlMetadata::new(
                 agent.name().to_string(),

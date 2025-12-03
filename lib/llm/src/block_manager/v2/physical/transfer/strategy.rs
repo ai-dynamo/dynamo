@@ -209,6 +209,30 @@ fn select_direct_strategy(
                 }
             }
         }
+
+        // Object storage transfers - always use NIXL
+        (Object(_), System) | (Object(_), Pinned) => TransferPlan::Direct(NixlReadFlipped),
+        (System, Object(_)) | (Pinned, Object(_)) => TransferPlan::Direct(NixlWrite),
+        (Object(_), Device(_)) => TransferPlan::TwoHop {
+            first: NixlReadFlipped,
+            bounce_location: Pinned,
+            second: CudaAsyncH2D,
+        },
+        (Device(_), Object(_)) => TransferPlan::TwoHop {
+            first: CudaAsyncD2H,
+            bounce_location: Pinned,
+            second: NixlWrite,
+        },
+        (Object(_), Disk(_)) | (Disk(_), Object(_)) => TransferPlan::TwoHop {
+            first: NixlReadFlipped,
+            bounce_location: Pinned,
+            second: NixlWrite,
+        },
+        (Object(_), Object(_)) => TransferPlan::TwoHop {
+            first: NixlReadFlipped,
+            bounce_location: Pinned,
+            second: NixlWrite,
+        },
     }
 }
 
@@ -239,6 +263,13 @@ fn select_remote_strategy(src: StorageKind, capabilities: &TransferCapabilities)
         // Disk → Remote - always stage through host
         Disk(_) => TransferPlan::TwoHop {
             first: NixlWrite,
+            bounce_location: Pinned,
+            second: NixlWrite,
+        },
+
+        // Object → Remote - stage through host
+        Object(_) => TransferPlan::TwoHop {
+            first: NixlReadFlipped,
             bounce_location: Pinned,
             second: NixlWrite,
         },

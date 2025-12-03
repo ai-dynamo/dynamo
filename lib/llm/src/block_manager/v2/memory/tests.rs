@@ -65,6 +65,37 @@ fn test_memory_descriptor() {
     assert_eq!(desc.size, 4096);
 }
 
+#[test]
+fn test_object_storage() {
+    let storage = ObjectStorage::new("test-bucket", 12345, 4096).unwrap();
+    assert_eq!(storage.size(), 4096);
+    assert_eq!(storage.bucket(), "test-bucket");
+    assert_eq!(storage.key(), 12345);
+    assert!(matches!(storage.storage_kind(), StorageKind::Object(12345)));
+    // Object storage has no memory address (managed by NIXL)
+    assert_eq!(storage.addr(), 0);
+}
+
+#[test]
+fn test_object_storage_nixl_descriptor() {
+    let storage = ObjectStorage::new("my-bucket", 99999, 8192).unwrap();
+    let descriptor = storage.nixl_descriptor().expect("should have nixl descriptor");
+
+    assert_eq!(descriptor.addr, 0);
+    assert_eq!(descriptor.size, 8192);
+    assert_eq!(descriptor.mem_type, nixl_sys::MemType::Object);
+    assert_eq!(descriptor.device_id, 99999);
+}
+
+#[test]
+fn test_object_storage_type_erasure() {
+    let storage = ObjectStorage::new("bucket", 42, 2048).unwrap();
+    let erased: OwnedMemoryRegion = erase_storage(storage);
+
+    assert_eq!(erased.size(), 2048);
+    assert!(matches!(erased.storage_kind(), StorageKind::Object(42)));
+}
+
 #[cfg(feature = "testing-cuda")]
 mod cuda_tests {
     use super::*;

@@ -111,6 +111,11 @@ pub fn fill_blocks(
                         file.sync_all()?;
                         file.flush()?;
                     }
+                    StorageKind::Object(_) => {
+                        // Object storage fill is handled by NIXL's OBJ plugin
+                        // For testing, we skip filling object storage regions
+                        tracing::warn!("Fill for object storage not yet implemented");
+                    }
                 }
             }
         }

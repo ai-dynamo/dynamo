@@ -7,6 +7,72 @@ use super::BounceBufferSpec;
 use derive_builder::Builder;
 use std::{ops::Range, sync::Arc};
 
+/// Hints for how to build transfer descriptors.
+///
+/// These hints control how blocks are mapped to descriptors, applicable to
+/// any backend that uses descriptors (NIXL object storage, GDS disk, RDMA, etc.)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DescriptorHint {
+    /// Auto-detect from layout characteristics (default).
+    #[default]
+    Auto,
+
+    /// One descriptor per block, each at its own offset within a shared target.
+    ///
+    /// Use cases:
+    /// - Object: byte-range reads from one object key (TP partitions)
+    /// - Disk: reads from different offsets in one file
+    /// - RDMA: reads from different offsets in remote memory
+    ///
+    /// ```text
+    /// Shared Target (object / file / remote buffer):
+    /// ┌───────┬───────┬───────┬───────┐
+    /// │  0    │  1    │  2    │  3    │  (offsets)
+    /// └───────┴───────┴───────┴───────┘
+    ///    ↓       ↓       ↓       ↓
+    /// Block 0  Block 1  Block 2  Block 3
+    /// ```
+    PerBlockWithOffset,
+
+    /// One descriptor per block, each targeting a unique destination.
+    ///
+    /// Use cases:
+    /// - Object: write to separate object keys (one-to-one mapping)
+    /// - Disk: write to separate files
+    /// - RDMA: write to separate remote buffers
+    ///
+    /// ```text
+    /// Block 0 → Target A (key/file/buffer 0)
+    /// Block 1 → Target B (key/file/buffer 1)
+    /// Block 2 → Target C (key/file/buffer 2)
+    /// ```
+    PerBlockUniqueTarget,
+
+    /// All blocks coalesced into a single descriptor to one target.
+    ///
+    /// Use cases:
+    /// - Object: write all blocks to one object key
+    /// - Disk: write all blocks to one file region
+    /// - RDMA: single large transfer
+    ///
+    /// ```text
+    /// Block 0  Block 1  Block 2  Block 3
+    ///    └────────┴────────┴────────┘
+    ///                 ↓
+    ///          Single Target
+    /// ```
+    Coalesced,
+
+    /// Batch contiguous block ranges into fewer descriptors.
+    ///
+    /// Example: [0,1,2, 10,11, 50] → 3 descriptors instead of 6
+    ///
+    /// Use cases:
+    /// - Host memory transfers with fragmented block lists
+    /// - Reducing descriptor overhead for large transfers
+    BatchedRanges,
+}
+
 /// Options for configuring transfer operations.
 ///
 /// This structure provides configuration for block and layer transfers,
@@ -45,6 +111,22 @@ pub struct TransferOptions {
     /// source → bounce buffer → destination.
     #[builder(default, setter(strip_option, into))]
     pub bounce_buffer: Option<Arc<dyn BounceBufferSpec>>,
+
+    /// Hint for how to build transfer descriptors.
+    ///
+    /// When `Auto` (default), the executor will analyze layout characteristics
+    /// to determine the optimal descriptor pattern. Providing explicit hints
+    /// can skip detection overhead and ensure correct behavior.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // TP partition read: byte-range reads from shared object
+    /// let options = TransferOptions::builder()
+    ///     .descriptor_hint(DescriptorHint::PerBlockWithOffset)
+    ///     .build()?;
+    /// ```
+    #[builder(default)]
+    pub descriptor_hint: DescriptorHint,
 }
 
 impl TransferOptions {

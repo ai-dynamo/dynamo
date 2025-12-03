@@ -101,7 +101,7 @@ dialoguer = { version = "0.11", default-features = false, features = [
 
 # block_manager
 aligned-vec = { version = "0.6.4", optional = true }
-nixl-sys = { version = "=0.7.1", optional = true }
+nixl-sys = { git = "https://github.com/cheese-head/nixl.git", branch = "cheese-head/rust-param-bindings", optional = true }
 cudarc = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
 
@@ -176,6 +176,7 @@ rstest_reuse = "0.7.0"
 serial_test = "3"
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 tempfile = "3.17.1"
+tracing-subscriber = { workspace = true }
 insta = { version = "1.41", features = [
   "glob",
   "json",
