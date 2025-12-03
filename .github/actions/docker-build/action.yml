@@ -58,7 +58,7 @@ runs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
       with:
-        driver: docker
+        driver: docker-container
     - name: Cleanup
       if: always()
       shell: bash
@@ -75,21 +75,26 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         PLATFORM: ${{ inputs.platform }}
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+<<<<<<< HEAD
         GITHUB_RUN_ID: ${{ github.run_id }}
         GITHUB_JOB: ${{ github.job }}
+=======
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+>>>>>>> b5064b0982d9a8940a14714f2249e666fb7ac205
       run: |
+        set -x
         # Determine image tag
         if [ -n "${{ inputs.image_tag }}" ]; then
           IMAGE_TAG="${{ inputs.image_tag }}"
         else
           IMAGE_TAG="${{ inputs.framework }}:latest"
         fi
-        ARCH="${PLATFORM##*/}"           # turns linux/amd64 to amd64
 
         BUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
 
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+<<<<<<< HEAD
 
         # Create build logs directory
         mkdir -p build-logs
@@ -98,7 +103,18 @@ runs:
         echo "📝 Build log will be saved to: ${BUILD_LOG_FILE}"
 
         # Collect optional overrides provided by the workflow
+=======
+        # Set --cache-from args and set --cache-to if this is a main commit
+>>>>>>> b5064b0982d9a8940a14714f2249e666fb7ac205
         EXTRA_ARGS=""
+        EXTRA_ARGS+=" --dynamo-base-cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:dynamo-base-${{ inputs.framework }}-${PLATFORM##*/}-cache"
+        EXTRA_ARGS+=" --framework-cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache"
+        # if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+        EXTRA_ARGS+=" --dynamo-base-cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:dynamo-base-${{ inputs.framework }}-${PLATFORM##*/}-cache,mode=max"
+        EXTRA_ARGS+=" --framework-cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache,mode=max"
+        # fi
+        echo "$EXTRA_ARGS"
+        # Collect optional overrides provided by the workflow
         if [ -n "${{ inputs.base_image_tag }}" ]; then
           EXTRA_ARGS+=" --base-image-tag ${{ inputs.base_image_tag }}"
         fi
@@ -118,8 +134,6 @@ runs:
           --vllm-max-jobs 10 \
           --framework ${{ inputs.framework }} \
           --platform ${{ inputs.platform }} \
-          --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-dynamo-base-${ARCH} \
-          --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-framework-${ARCH} \
           --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
           --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"

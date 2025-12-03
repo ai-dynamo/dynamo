@@ -69,8 +69,6 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -125,8 +123,6 @@ jobs:
           push_tag: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
           aws_push: 'false'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
 
   vllm:
@@ -181,8 +177,6 @@ jobs:
           # OPS-1145: Switch aws_push to true
           aws_push: 'false'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
@@ -245,8 +239,6 @@ jobs:
           # OPS-1145: Switch aws_push to true
           aws_push: 'false'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
@@ -309,8 +301,6 @@ jobs:
           # OPS-1145: Switch aws_push to true
           aws_push: 'false'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}

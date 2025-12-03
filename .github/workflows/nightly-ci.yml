@@ -130,7 +130,6 @@ jobs:
           azure_push: 'false'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
 
   sglang-framework:
     strategy:
