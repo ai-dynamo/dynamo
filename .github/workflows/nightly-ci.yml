@@ -276,13 +276,11 @@ jobs:
 
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
-        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/docker-login
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull nightly image
-        if: steps.check_build.outputs.skip != 'true'
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
@@ -291,7 +289,6 @@ jobs:
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run Unit Tests
-        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
@@ -344,20 +341,17 @@ jobs:
           echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
 
           if [ "$BUILD_STATUS" != "success" ]; then
-            echo "Build failed or did not complete successfully. Skipping tests."
-            echo "skip=true" >> $GITHUB_OUTPUT
-            exit 0
+            echo "Build failed or did not complete successfully. Marking tests as failed."
+            exit 1
           fi
 
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
-        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/docker-login
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull nightly image
-        if: steps.check_build.outputs.skip != 'true'
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
@@ -366,7 +360,6 @@ jobs:
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run Integration Tests
-        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
@@ -425,13 +418,11 @@ jobs:
 
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
-        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/docker-login
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull nightly image
-        if: steps.check_build.outputs.skip != 'true'
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
@@ -440,7 +431,6 @@ jobs:
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run E2E Tests (gpu_1)
-        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
@@ -493,20 +483,17 @@ jobs:
           echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
 
           if [ "$BUILD_STATUS" != "success" ]; then
-            echo "Build failed or did not complete successfully. Skipping tests."
-            echo "skip=true" >> $GITHUB_OUTPUT
-            exit 0
+            echo "Build failed or did not complete successfully. Marking tests as failed."
+            exit 1
           fi
 
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
-        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/docker-login
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull nightly image
-        if: steps.check_build.outputs.skip != 'true'
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
@@ -515,7 +502,6 @@ jobs:
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run E2E Tests (gpu_2)
-        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
@@ -556,22 +542,22 @@ jobs:
           # - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
           - { framework: vllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "router and not slow" }
           - { framework: vllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "planner and not slow" }
-          - { framework: vllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: " (kvbm or kvbm_v2) and not slow" }
+          - { framework: vllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: " (kvbm or kvbm_v2) " }
           - { framework: vllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "router and not slow" }
           - { framework: vllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "planner and not slow" }
           - { framework: vllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "kvbm and not slow" }
           - { framework: trtllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "router and not slow" }
           - { framework: trtllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "planner and not slow" }
-          - { framework: trtllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: " (kvbm or kvbm_v2) and not slow" }
+          - { framework: trtllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: " (kvbm or kvbm_v2) " }
           - { framework: trtllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "router and not slow" }
           - { framework: trtllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "planner and not slow" }
-          - { framework: trtllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: " (kvbm or kvbm_v2) and not slow" }
+          - { framework: trtllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: " (kvbm or kvbm_v2) " }
           - { framework: sglang, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "router and not slow" }
           - { framework: sglang, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "planner and not slow" }
-          - { framework: sglang, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: " (kvbm or kvbm_v2) and not slow" }
+          - { framework: sglang, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: " (kvbm or kvbm_v2) " }
           - { framework: sglang, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "router and not slow" }
           - { framework: sglang, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "planner and not slow" }
-          - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: " (kvbm or kvbm_v2) and not slow" }
+          - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: " (kvbm or kvbm_v2) " }
 
     steps:
       - uses: actions/checkout@v4
@@ -605,20 +591,17 @@ jobs:
           echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
 
           if [ "$BUILD_STATUS" != "success" ]; then
-            echo "Build failed or did not complete successfully. Skipping tests."
-            echo "skip=true" >> $GITHUB_OUTPUT
-            exit 0
+            echo "Build failed or did not complete successfully. Marking tests as failed."
+            exit 1
           fi
 
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
-        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/docker-login
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull nightly image
-        if: steps.check_build.outputs.skip != 'true'
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
@@ -627,7 +610,6 @@ jobs:
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run Component Tests (${{ matrix.component }})
-        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
