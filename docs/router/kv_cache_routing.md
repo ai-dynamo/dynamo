@@ -31,7 +31,7 @@ The main KV-aware routing arguments:
 
 - `--no-track-active-blocks`: Disables tracking of active blocks (blocks being used for ongoing generation/decode phases). By default, the router tracks active blocks for load balancing. Disable this when routing to workers that only perform prefill (no decode phase), as tracking decode load is not relevant. This reduces router overhead and simplifies state management.
 
-- `--busy-threshold`: Threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache usage. When a worker's KV cache active blocks exceed this percentage of total blocks, it will be marked as busy and excluded from routing. If not set, busy detection is disabled. This feature works with all routing modes (`--router-mode kv|round-robin|random`) as long as backend engines emit `ForwardPassMetrics`.
+- `--busy-threshold`: Initial threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache usage. When a worker's KV cache active blocks exceed this percentage of total blocks, it will be marked as busy and excluded from routing. If not set, busy detection is disabled. This feature works with all routing modes (`--router-mode kv|round-robin|random`) as long as backend engines emit `ForwardPassMetrics`. The threshold can be dynamically updated at runtime via the `/busy_threshold` HTTP endpoint (see [Dynamic Threshold Configuration](#dynamic-threshold-configuration)).
 
 - `--router-ttl`: Time-to-live in seconds for blocks in the router's local cache predictions. Blocks older than this duration will be automatically expired and removed from the router's radix tree. Defaults to 120.0 seconds when `--no-kv-events` is used. This helps manage memory usage by removing stale cache predictions that are unlikely to be accurate.
 
@@ -582,3 +582,31 @@ This approach gives you complete control over routing decisions, allowing you to
 - **Balance load**: Consider both `potential_prefill_tokens` and `potential_decode_blocks` together
 
 See [KV Router Architecture](../router/README.md) for performance tuning details.
+
+## Dynamic Threshold Configuration
+
+The busy threshold can be updated at runtime without restarting the frontend. The frontend exposes HTTP endpoints at `/busy_threshold`:
+
+**Get or set a model's threshold (POST):**
+```bash
+# Set threshold for a model
+curl -X POST http://localhost:8000/busy_threshold \
+  -H "Content-Type: application/json" \
+  -d '{"model": "meta-llama/Llama-2-7b-hf", "threshold": 0.85}'
+# Response: {"model": "meta-llama/Llama-2-7b-hf", "threshold": 0.85}
+
+# Get current threshold (omit threshold field)
+curl -X POST http://localhost:8000/busy_threshold \
+  -H "Content-Type: application/json" \
+  -d '{"model": "meta-llama/Llama-2-7b-hf"}'
+# Response: {"model": "meta-llama/Llama-2-7b-hf", "threshold": 0.85}
+# Or if not configured: {"model": "...", "threshold": null}
+```
+
+**List all configured thresholds (GET):**
+```bash
+curl http://localhost:8000/busy_threshold
+# Response: {"thresholds": [{"model": "meta-llama/Llama-2-7b-hf", "threshold": 0.85}]}
+```
+
+This allows you to tune the busy threshold based on observed system behavior without service interruption.

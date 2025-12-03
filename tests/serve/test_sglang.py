@@ -44,7 +44,7 @@ sglang_configs = {
         name="aggregated",
         directory=sglang_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        marks=[pytest.mark.gpu_1],
         model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
@@ -186,6 +186,22 @@ sglang_configs = {
                 repeat_count=1,
                 expected_response=["Generated 3 embeddings with dimension"],
             ),
+        ],
+    ),
+    "completions_only": SGLangConfig(
+        name="completions_only",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1],
+        model="deepseek-ai/deepseek-llm-7b-base",
+        script_args=[
+            "--model-path",
+            "deepseek-ai/deepseek-llm-7b-base",
+            "--dyn-endpoint-types",
+            "completions",
+        ],
+        request_payloads=[
+            completion_payload_default(),
         ],
     ),
 }

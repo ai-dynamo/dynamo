@@ -34,7 +34,7 @@ class CUDAFaultInjector:
                     If None, uses default relative to this module.
         """
         if lib_dir is None:
-            lib_dir = Path(__file__).parent.parent / "cuda-fault-injection"
+            lib_dir = Path(__file__).parent.parent / "cuda_fault_injection"
 
         self.lib_dir = lib_dir
         self.lib_path = lib_dir / "fake_cuda_xid79.so"

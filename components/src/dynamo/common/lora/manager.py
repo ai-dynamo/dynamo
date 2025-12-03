@@ -106,13 +106,9 @@ class LoRAManager:
 
     def is_cached(self, lora_uri: str) -> bool:
         """Check if LoRA is already cached locally."""
-        cache_key = self._uri_to_cache_key(lora_uri)
+        cache_key = LoRADownloader.uri_to_cache_key(lora_uri)
         return self._downloader.is_cached(cache_key)
 
     def _uri_to_cache_key(self, uri: str) -> str:
-        return (
-            uri.replace("://", "__")
-            .replace(".", "_")
-            .replace("/", "_")
-            .replace("\\", "_")
-        )
+        """Convert URI to cache key. Delegates to Rust for consistency."""
+        return LoRADownloader.uri_to_cache_key(uri)
