@@ -199,6 +199,154 @@ spec:
         averageValue: "5"
 ```
 
+### HPA with Dynamo Metrics
+
+Dynamo exports several metrics useful for autoscaling. These are available at the `/metrics` endpoint on each frontend pod.
+
+> **See also**: For a complete list of all Dynamo metrics, see the [Metrics Reference](../observability/metrics.md). For Prometheus and Grafana setup, see the [Prometheus and Grafana Setup Guide](../observability/prometheus-grafana.md).
+
+#### Available Dynamo Metrics
+
+| Metric | Type | Description | Good for scaling |
+|--------|------|-------------|------------------|
+| `dynamo_frontend_queued_requests` | Gauge | Requests waiting in HTTP queue | ✅ Prefill |
+| `dynamo_frontend_inflight_requests` | Gauge | Concurrent requests to engine | ✅ All services |
+| `dynamo_frontend_time_to_first_token_seconds` | Histogram | TTFT latency | ✅ Prefill |
+| `dynamo_frontend_inter_token_latency_seconds` | Histogram | ITL latency | ✅ Decode |
+| `dynamo_frontend_request_duration_seconds` | Histogram | Total request duration | ⚠️ General |
+| `kvstats_gpu_cache_usage_percent` | Gauge | GPU KV cache usage (0-1) | ✅ Decode |
+
+#### Metric Labels
+
+Dynamo metrics include these labels for filtering:
+
+| Label | Description | Example |
+|-------|-------------|---------|
+| `dynamo_namespace` | Unique DGD identifier (`{k8s-namespace}-{dgd-name}`) | `llm-serving-my-deployment` |
+| `model` | Model being served | `meta-llama/Llama-3-70B` |
+
+> **Note**: When you have multiple DGDs in the same namespace, use `dynamo_namespace` to filter metrics for a specific DGD.
+
+#### Example: Scale Prefill Based on TTFT
+
+This example scales **Prefill workers** when Time To First Token (TTFT) exceeds 500ms. Note that TTFT is measured at the Frontend, but reflects Prefill performance.
+
+First, configure Prometheus Adapter to expose the TTFT metric:
+
+```yaml
+# Prometheus Adapter ConfigMap (add to your existing config)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-adapter-config
+  namespace: monitoring
+data:
+  config.yaml: |
+    rules:
+    # TTFT p95 from frontend - used to scale prefill
+    - seriesQuery: 'dynamo_frontend_time_to_first_token_seconds_bucket{namespace!=""}'
+      resources:
+        overrides:
+          namespace: {resource: "namespace"}
+      name:
+        as: "dynamo_ttft_p95_seconds"
+      metricsQuery: |
+        histogram_quantile(0.95,
+          sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{<<.LabelMatchers>>}[5m])) 
+          by (le, namespace, dynamo_namespace)
+        )
+```
+
+Then create the HPA targeting the Prefill adapter:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: prefill-ttft-hpa
+  namespace: llm-serving
+spec:
+  scaleTargetRef:
+    apiVersion: nvidia.com/v1alpha1
+    kind: DynamoGraphDeploymentScalingAdapter
+    name: my-llm-deployment-prefill      # ← Target: PREFILL adapter
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: dynamo_ttft_p95_seconds
+        selector:
+          matchLabels:
+            # Filter by DGD using dynamo_namespace label
+            dynamo_namespace: "llm-serving-my-llm-deployment"
+      target:
+        type: Value
+        value: "500m"  # Scale up when TTFT p95 > 500ms
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300    # Wait 5 min before scaling down
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0      # Scale up immediately
+      policies:
+      - type: Pods
+        value: 2
+        periodSeconds: 30
+```
+
+**How it works:**
+1. Frontend pods export `dynamo_frontend_time_to_first_token_seconds` histogram
+2. Prometheus Adapter calculates p95 TTFT per `dynamo_namespace`
+3. HPA monitors this metric for your specific DGD
+4. When TTFT p95 > 500ms, HPA scales up the Prefill adapter
+5. Adapter controller syncs the replica count to the DGD
+6. More Prefill workers are created, reducing TTFT
+
+#### Example: Scale Decode Based on Queue Depth
+
+```yaml
+# Prometheus Adapter rule
+rules:
+- seriesQuery: 'dynamo_frontend_queued_requests{namespace!=""}'
+  resources:
+    overrides:
+      namespace: {resource: "namespace"}
+  name:
+    as: "dynamo_queued_requests"
+  metricsQuery: |
+    sum(<<.Series>>{<<.LabelMatchers>>}) by (namespace, dynamo_namespace)
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: decode-queue-hpa
+  namespace: llm-serving
+spec:
+  scaleTargetRef:
+    apiVersion: nvidia.com/v1alpha1
+    kind: DynamoGraphDeploymentScalingAdapter
+    name: my-llm-deployment-decode
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: dynamo_queued_requests
+        selector:
+          matchLabels:
+            dynamo_namespace: "llm-serving-my-llm-deployment"
+      target:
+        type: Value
+        value: "10"  # Scale up when queue > 10 requests
+```
+
 ## Autoscaling with KEDA
 
 KEDA extends Kubernetes with event-driven autoscaling, supporting 50+ scalers.
@@ -331,11 +479,11 @@ Avoid configuring multiple autoscalers for the same service:
 
 ### 2. Use Appropriate Metrics
 
-| Service Type | Recommended Metrics |
-|--------------|---------------------|
-| Frontend | CPU utilization, request rate |
-| Prefill | Queue depth, TTFT (Time To First Token) |
-| Decode | KV cache utilization, ITL (Inter-Token Latency) |
+| Service Type | Recommended Metrics | Dynamo Metric |
+|--------------|---------------------|---------------|
+| Frontend | CPU utilization, request rate | `dynamo_frontend_requests_total` |
+| Prefill | Queue depth, TTFT | `dynamo_frontend_queued_requests`, `dynamo_frontend_time_to_first_token_seconds` |
+| Decode | KV cache utilization, ITL | `kvstats_gpu_cache_usage_percent`, `dynamo_frontend_inter_token_latency_seconds` |
 
 ### 3. Configure Stabilization Windows
 
@@ -381,8 +529,30 @@ kubectl describe dgdsa my-llm-deployment-decode -n llm-serving
 # Check HPA status
 kubectl describe hpa decode-hpa -n llm-serving
 
-# Verify metrics are available
+# Verify metrics are available in Kubernetes metrics API
 kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1
+kubectl get --raw /apis/external.metrics.k8s.io/v1beta1
+```
+
+### Metrics Not Available
+
+If HPA shows `<unknown>` for metrics:
+
+```bash
+# Check if Dynamo metrics are being scraped
+kubectl port-forward -n llm-serving pod/<frontend-pod> 8000:8000
+curl http://localhost:8000/metrics | grep dynamo_frontend
+
+# Example output:
+# dynamo_frontend_queued_requests{model="meta-llama/Llama-3-70B"} 2
+# dynamo_frontend_inflight_requests{model="meta-llama/Llama-3-70B"} 5
+
+# Verify Prometheus is scraping the metrics
+kubectl port-forward -n monitoring svc/prometheus-server 9090:9090
+# Then query: dynamo_frontend_time_to_first_token_seconds_bucket
+
+# Check Prometheus Adapter logs
+kubectl logs -n monitoring deployment/prometheus-adapter
 ```
 
 ### Rapid Scaling Up and Down
@@ -399,4 +569,6 @@ If you see unstable scaling:
 - [KEDA Documentation](https://keda.sh/)
 - [Prometheus Adapter](https://github.com/kubernetes-sigs/prometheus-adapter)
 - [Planner Documentation](../planner/sla_planner.md)
+- [Dynamo Metrics Reference](../observability/metrics.md)
+- [Prometheus and Grafana Setup](../observability/prometheus-grafana.md)
 
