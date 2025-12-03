@@ -57,7 +57,7 @@ vllm:time_to_first_token_seconds_count{model_name="meta-llama/Llama-3.1-8B"} 165
         """Test vLLM use case: filter to vllm: metrics and exclude python_/process_."""
         result = get_prometheus_expfmt(
             vllm_registry,
-            metric_prefix_filter="vllm:",
+            metric_prefix_filters=["vllm:"],
             exclude_prefixes=["python_", "process_"],
         )
 
