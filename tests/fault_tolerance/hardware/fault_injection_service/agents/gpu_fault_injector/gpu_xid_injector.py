@@ -190,6 +190,7 @@ class GPUXIDInjectorKernel:
             f"Found {len(gpu_dirs)} GPU directories in {proc_path}: {gpu_dirs}"
         )
 
+        available_minors = []
         for pci_addr in gpu_dirs:
             info_file = f"{proc_path}/{pci_addr}/information"
 
@@ -198,7 +199,14 @@ class GPUXIDInjectorKernel:
                     for line in f:
                         if line.startswith("Device Minor:"):
                             # Parse: "Device Minor:    0" → 0
-                            device_minor = int(line.split(":")[1].strip())
+                            parts = line.split(":")
+                            if len(parts) < 2:
+                                logger.warning(
+                                    f"Unexpected format in {info_file}: {line.strip()}"
+                                )
+                                continue
+                            device_minor = int(parts[1].strip())
+                            available_minors.append(device_minor)
 
                             if device_minor == gpu_id:
                                 logger.info(
@@ -206,14 +214,17 @@ class GPUXIDInjectorKernel:
                                     f"via /proc (Device Minor: {device_minor})"
                                 )
                                 return pci_addr
-            except Exception as e:
+            except (IOError, OSError) as e:
                 logger.warning(f"Could not read {info_file}: {e}")
+                continue
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Could not parse Device Minor from {info_file}: {e}")
                 continue
 
         # GPU ID not found
         raise ValueError(
             f"GPU {gpu_id} not found in {proc_path}. "
-            f"Available Device Minors: {gpu_dirs}"
+            f"Available Device Minors: {sorted(available_minors)}"
         )
 
     def _normalize_pci_address(self, pci_addr: str) -> str:
