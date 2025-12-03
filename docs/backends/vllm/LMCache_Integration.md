@@ -167,6 +167,17 @@ lmcache_config = {
    - Shared context across sessions
    - Long-running services with warm caches
 
+## Metrics and Monitoring
+
+When LMCache is enabled with `--connector lmcache` and `DYN_SYSTEM_PORT` is set, LMCache metrics are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
+
+**Requirements to access LMCache metrics:**
+- `--connector lmcache` - Enables LMCache
+- `DYN_SYSTEM_PORT=8081` - Enables metrics HTTP endpoint
+- `PROMETHEUS_MULTIPROC_DIR` (optional) - If not set, Dynamo manages it internally. Only set explicitly if you need control over the metrics directory.
+
+For detailed information on LMCache metrics, including the complete list of available metrics and how to access them, see the **[LMCache Metrics section](prometheus.md#lmcache-metrics)** in the vLLM Prometheus Metrics Guide.
+
 ## References and Additional Resources
 
 - [LMCache Documentation](https://docs.lmcache.ai/index.html) - Comprehensive guide and API reference
