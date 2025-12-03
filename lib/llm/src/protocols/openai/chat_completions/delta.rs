@@ -259,7 +259,6 @@ impl DeltaGenerator {
     ///
     /// # Returns
     /// * An [`dynamo_async_openai::types::CreateChatCompletionStreamResponse`] instance representing the choice.
-    #[allow(deprecated)]
     pub fn create_choice(
         &mut self,
         index: u32,
@@ -271,6 +270,7 @@ impl DeltaGenerator {
     }
 
     /// Internal method to build a streaming chat completion response with optional tool_calls.
+    #[allow(deprecated)]
     fn build_choice(
         &mut self,
         index: u32,
