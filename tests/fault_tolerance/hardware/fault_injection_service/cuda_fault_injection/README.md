@@ -62,8 +62,8 @@ This library simulates **software/orchestration-level failures** that occur when
 import sys
 from pathlib import Path
 
-# Add cuda-fault-injection to path
-cuda_injection_dir = Path(__file__).parent.parent / "cuda-fault-injection"
+# Add cuda_fault_injection to path
+cuda_injection_dir = Path(__file__).parent.parent / "cuda_fault_injection"
 sys.path.insert(0, str(cuda_injection_dir))
 
 from inject_into_pods import (

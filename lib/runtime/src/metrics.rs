@@ -1483,6 +1483,7 @@ mod test_metricsregistry_nats {
     use crate::pipeline::PushRouter;
     use crate::{DistributedRuntime, Runtime};
     use tokio::time::{Duration, sleep};
+    #[ignore = "Deprecated - NATS related code to be deleted soon"]
     #[tokio::test]
     async fn test_drt_nats_metrics() {
         // Setup real DRT and registry using the test-friendly constructor
@@ -1543,6 +1544,7 @@ mod test_metricsregistry_nats {
         println!("✓ DistributedRuntime NATS metrics integration test passed!");
     }
 
+    #[ignore = "Deprecated - NATS related code to be deleted soon"]
     #[tokio::test]
     async fn test_nats_metric_names() {
         // This test only tests the existence of the NATS metrics. It does not check
@@ -1633,6 +1635,7 @@ mod test_metricsregistry_nats {
     /// Creates endpoint, sends test messages + 10k byte message, validates metrics (NATS + work handler)
     /// at initial state and post-activity state. Ensures byte thresholds, message counts, and processing
     /// times are within expected ranges. Tests end-to-end client-server communication and metrics collection.
+    #[ignore = "Deprecated - NATS related code to be deleted soon"]
     #[tokio::test]
     async fn test_nats_metrics_values() -> anyhow::Result<()> {
         struct MessageHandler {}

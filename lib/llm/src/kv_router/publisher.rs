@@ -328,10 +328,10 @@ pub async fn start_zmq_listener(
                     zmq_endpoint,
                     batch.events.len(),
                     seq,
-                    batch.data_parallel_rank
+                    batch.data_parallel_rank.unwrap_or(0)
                 );
 
-                let dp_rank = batch.data_parallel_rank;
+                let dp_rank = batch.data_parallel_rank.unwrap_or(0) as u32;
                 for raw_event in batch.events.into_iter() {
                     let event = convert_event(raw_event, seq, kv_block_size, dp_rank, &warning_count);
                     if tx.send(event).is_err() {
@@ -474,12 +474,27 @@ pub fn create_stored_blocks(
 // Types mirroring the Python msgspec-defined structures -------------------
 // -------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Serialize)]
 struct KvEventBatch {
     ts: f64,
     events: Vec<RawKvEvent>,
     #[serde(alias = "dp_rank")]
-    data_parallel_rank: u32, // we are ignoring this for now
+    data_parallel_rank: Option<i32>,
+}
+
+impl<'de> Deserialize<'de> for KvEventBatch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Deserialize from array format: [timestamp, [events], data_parallel_rank]
+        let arr: (f64, Vec<RawKvEvent>, Option<i32>) = Deserialize::deserialize(deserializer)?;
+        Ok(KvEventBatch {
+            ts: arr.0,
+            events: arr.1,
+            data_parallel_rank: arr.2,
+        })
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
@@ -498,7 +513,7 @@ impl BlockHashValue {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type")] // msgspec encodes variant tag as a string when `tag=True`
 enum RawKvEvent {
     BlockStored {
@@ -1131,7 +1146,7 @@ mod tests_startup_helpers {
         let batch = KvEventBatch {
             ts: 0.0,
             events,
-            data_parallel_rank: 1,
+            data_parallel_rank: Some(1),
         };
 
         let payload = Bytes::from(rmps::to_vec(&batch).unwrap());

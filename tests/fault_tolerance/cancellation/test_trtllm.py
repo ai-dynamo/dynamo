@@ -21,6 +21,13 @@ from tests.utils.payloads import check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
 
+pytestmark = [
+    pytest.mark.trtllm,
+    pytest.mark.gpu_1,
+    pytest.mark.e2e,
+    pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
+]
+
 
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with TensorRT-LLM backend"""
@@ -127,10 +134,6 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.trtllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.nightly
 def test_request_cancellation_trtllm_aggregated(
     request, runtime_services, predownload_models
@@ -205,10 +208,6 @@ def test_request_cancellation_trtllm_aggregated(
                 logger.info(f"{description} detected successfully")
 
 
-@pytest.mark.trtllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.nightly
 def test_request_cancellation_trtllm_decode_cancel(
     request, runtime_services, predownload_models
@@ -282,11 +281,7 @@ def test_request_cancellation_trtllm_decode_cancel(
                 )
 
 
-@pytest.mark.trtllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
 @pytest.mark.nightly
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 def test_request_cancellation_trtllm_prefill_cancel(
     request, runtime_services, predownload_models
 ):
@@ -369,10 +364,6 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 )
 
 
-@pytest.mark.trtllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.xfail(
     reason="May fail due to unknown reason with TRT-LLM or backend implementation",
     strict=False,
