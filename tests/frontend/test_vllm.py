@@ -214,6 +214,7 @@ def _validate_chat_response(response: requests.Response) -> Dict[str, Any]:
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.post_merge
 @pytest.mark.model(TEST_MODEL)
 def test_reasoning_effort(request, runtime_services, predownload_models) -> None:
     """High reasoning effort should yield more detailed reasoning than low effort."""
@@ -280,6 +281,7 @@ def test_reasoning_effort(request, runtime_services, predownload_models) -> None
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.post_merge
 @pytest.mark.model(TEST_MODEL)
 def test_tool_calling(request, runtime_services, predownload_models) -> None:
     """Test tool calling functionality with weather and system health tools."""
@@ -322,6 +324,7 @@ def test_tool_calling(request, runtime_services, predownload_models) -> None:
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(TEST_MODEL)
 def test_tool_calling_second_round(
     request, runtime_services, predownload_models
@@ -388,6 +391,7 @@ def test_tool_calling_second_round(
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(TEST_MODEL)
 def test_reasoning(request, runtime_services, predownload_models) -> None:
     """Test reasoning functionality with a mathematical problem."""

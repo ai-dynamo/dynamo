@@ -159,7 +159,9 @@ class ChatPayload(BasePayload):
 class ToolCallingChatPayload(ChatPayload):
     """ChatPayload that validates tool calls in the response."""
 
-    expected_tool_name: Optional[str] = None
+    def __init__(self, *args, expected_tool_name: Optional[str] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.expected_tool_name = expected_tool_name
 
     def validate(self, response, content: str) -> None:
         """Validate that tool calls exist in the response."""

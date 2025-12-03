@@ -10,11 +10,19 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Final
 
 from vllm.inputs import TokensPrompt
+from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
-from dynamo.llm import ZmqKvEventPublisher
+from dynamo.llm import (
+    ModelInput,
+    ModelType,
+    ZmqKvEventPublisher,
+    lora_name_to_id,
+    register_llm,
+    unregister_llm,
+)
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
@@ -28,6 +36,32 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+# LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
+# None = not yet initialized, False = disabled/failed, LoRAManager = initialized
+_lora_manager = None
+
+
+def get_lora_manager():
+    """Get the LoRAManager singleton, initializing it on first call if enabled."""
+    global _lora_manager
+
+    if _lora_manager is not None:
+        return _lora_manager
+
+    if os.environ.get("DYN_LORA_ENABLED", "").lower() in ("true", "1", "yes"):
+        try:
+            from dynamo.common.lora import LoRAManager
+
+            _lora_manager = LoRAManager()
+            logger.info("LoRAManager initialized successfully")
+            return _lora_manager
+        except Exception as e:
+            logger.warning(
+                f"Failed to initialize LoRAManager: {e}. URI-based LoRA loading will be disabled."
+            )
+
+    return None
 
 
 def build_sampling_params(
@@ -86,17 +120,24 @@ class BaseWorkerHandler(ABC):
         default_sampling_params,
         model_max_len: int | None = None,
         enable_multimodal: bool = False,
+        generate_endpoint=None,
+        config=None,
     ):
         self.runtime = runtime
         self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
         self.kv_publishers: list[ZmqKvEventPublisher] | None = None
+        self.generate_endpoint = generate_endpoint
+        self.config = config
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
         self.image_loader = ImageLoader()
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.enable_multimodal = enable_multimodal
+        # LoRA tracking
+        self.lora_id_for_name: dict[str, int] = {}
+        self.lora_name_to_path: dict[str, str] = {}
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -143,6 +184,296 @@ class BaseWorkerHandler(ABC):
         """Add a temporary directory to be cleaned up later."""
         if temp_dir is not None:
             self.temp_dirs.append(temp_dir)
+
+    async def load_lora(self, request=None):
+        """
+        Load a LoRA adapter dynamically into the vLLM's AsyncLLM engine.
+
+        Request format:
+        {
+            "lora_name": str,
+            "source": {
+                "uri": str  # e.g., "s3://bucket/path" or "file:///path"
+            }
+        }
+        """
+        try:
+            if request is None:
+                yield {
+                    "status": "error",
+                    "message": "Request is required with 'lora_name' and 'source.uri'",
+                }
+                return
+
+            lora_name = request.get("lora_name")
+            if not lora_name:
+                yield {
+                    "status": "error",
+                    "message": "'lora_name' is required in request",
+                }
+                return
+
+            # Debug: Log the incoming request
+            logger.debug(f"load_lora request keys: {list(request.keys())}")
+            logger.debug(f"load_lora request: {request}")
+
+            # Check for URI-based API format (source.uri)
+            source = request.get("source")
+            if not source or not isinstance(source, dict):
+                yield {
+                    "status": "error",
+                    "message": "'source' object is required in request",
+                }
+                return
+
+            lora_uri = source.get("uri")
+            if not lora_uri:
+                yield {
+                    "status": "error",
+                    "message": "'source.uri' is required in request",
+                }
+                return
+
+            # Use LoRAManager to download from URI
+            lora_manager = get_lora_manager()
+            if lora_manager is None:
+                yield {
+                    "status": "error",
+                    "message": "LoRAManager not initialized. Set DYN_LORA_ENABLED=true to enable URI-based LoRA loading.",
+                }
+                return
+
+            logger.info(f"Downloading LoRA adapter: {lora_name} from {lora_uri}")
+            download_result = await lora_manager.download_lora(lora_uri)
+
+            if download_result["status"] != "success":
+                yield {
+                    "status": "error",
+                    "message": f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
+                }
+                return
+
+            lora_path = download_result["local_path"]
+            logger.debug(f"LoRA downloaded to: {lora_path}")
+
+            # Generate deterministic ID from lora_name before using it
+            lora_id = lora_name_to_id(lora_name)
+
+            # Add the LoRA to the engine
+            await self.engine_client.add_lora(
+                LoRARequest(
+                    lora_name=lora_name, lora_int_id=lora_id, lora_path=lora_path
+                )
+            )
+
+            # Track the LoRA
+            self.lora_id_for_name[lora_name] = lora_id
+            self.lora_name_to_path[lora_name] = lora_path
+            logger.info(
+                f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
+            )
+
+            # Publish LoRA as a ModelDeploymentCard with format:
+            # v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}
+            # This allows the frontend to discover it and route correctly to the worker instance
+
+            if self.generate_endpoint is not None and self.config is not None:
+                logger.debug(
+                    f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self.generate_endpoint}"
+                )
+                try:
+                    logger.debug(f"Publishing LoRA '{lora_name}' ModelDeploymentCard")
+
+                    # Mark this as a LoRA in user_data
+                    user_data = {
+                        "lora_adapter": True,
+                        "lora_id": lora_id,
+                    }
+
+                    # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
+                    await register_llm(
+                        model_input=ModelInput.Tokens,
+                        model_type=ModelType.Chat | ModelType.Completions,
+                        endpoint=self.generate_endpoint,
+                        model_path=self.config.model,
+                        kv_cache_block_size=self.config.engine_args.block_size,
+                        user_data=user_data,
+                        lora_name=lora_name,
+                        base_model_path=self.config.model,
+                    )
+                    logger.info(
+                        f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
+                    )
+                except Exception as e:
+                    import traceback
+
+                    logger.error(
+                        f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
+                    )
+                    logger.debug(f"Traceback: {traceback.format_exc()}")
+
+                    # Rollback: remove the LoRA from the engine to maintain consistency
+                    try:
+                        logger.debug(
+                            f"Rolling back: removing LoRA '{lora_name}' from engine"
+                        )
+                        await self.engine_client.remove_lora(lora_id)
+                        # Remove from tracking dictionaries
+                        if lora_name in self.lora_id_for_name:
+                            del self.lora_id_for_name[lora_name]
+                        if lora_name in self.lora_name_to_path:
+                            del self.lora_name_to_path[lora_name]
+                        logger.debug(f"Successfully rolled back LoRA '{lora_name}'")
+                    except Exception as rollback_error:
+                        logger.error(
+                            f"Failed to rollback LoRA {lora_name}: {rollback_error}"
+                        )
+
+                    # Return error status since registration failed
+                    yield {
+                        "status": "error",
+                        "message": f"Failed to register LoRA '{lora_name}' in discovery registry: {str(e)}",
+                        "lora_name": lora_name,
+                    }
+                    return
+            else:
+                logger.debug(
+                    f"Cannot publish LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}, config={self.config}"
+                )
+
+            yield {
+                "status": "success",
+                "message": f"LoRA adapter '{lora_name}' loaded successfully",
+                "lora_name": lora_name,
+                "lora_id": lora_id,
+            }
+        except Exception as e:
+            logger.error(f"Failed to load LoRA adapter: {e}")
+            yield {"status": "error", "message": str(e)}
+
+    async def unload_lora(self, request=None):
+        """
+        Unload a LoRA adapter dynamically from the vLLM's AsyncLLM engine.
+        Expected request format:
+        {
+            "lora_name": str,
+        }
+        """
+        try:
+            if request is None:
+                yield {
+                    "status": "error",
+                    "message": "Request is required with 'lora_name' field",
+                }
+                return
+            lora_name = request.get("lora_name")
+            if not lora_name:
+                yield {
+                    "status": "error",
+                    "message": "'lora_name' is required in request",
+                }
+                return
+
+            # Check if the LoRA exists
+            if lora_name not in self.lora_id_for_name:
+                yield {
+                    "status": "error",
+                    "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.lora_id_for_name.keys())}",
+                }
+                return
+
+            logger.debug(f"Unloading LoRA adapter: {lora_name}")
+            lora_id = self.lora_id_for_name[lora_name]
+            lora_path = self.lora_name_to_path.get(lora_name)
+
+            await self.engine_client.remove_lora(lora_id)
+
+            # Remove from tracking dictionaries
+            del self.lora_id_for_name[lora_name]
+            if lora_name in self.lora_name_to_path:
+                del self.lora_name_to_path[lora_name]
+
+            # Unregister the LoRA model from the model registry (outside lock)
+            if self.generate_endpoint is not None:
+                logger.debug(f"Unregistering LoRA '{lora_name}' ModelDeploymentCard")
+                try:
+                    await unregister_llm(
+                        endpoint=self.generate_endpoint,
+                        lora_name=lora_name,
+                    )
+                    logger.info(
+                        f"Successfully unregistered LoRA '{lora_name}' ModelDeploymentCard"
+                    )
+                except Exception as e:
+                    import traceback
+
+                    logger.error(
+                        f"Failed to unregister LoRA {lora_name} ModelDeploymentCard: {e}"
+                    )
+                    logger.debug(f"Traceback: {traceback.format_exc()}")
+
+                    # Rollback: re-add the LoRA to the engine to maintain consistency
+                    try:
+                        logger.debug(
+                            f"Rolling back: re-adding LoRA '{lora_name}' to engine"
+                        )
+                        await self.engine_client.add_lora(
+                            LoRARequest(
+                                lora_name=lora_name,
+                                lora_int_id=lora_id,
+                                lora_path=lora_path,
+                            )
+                        )
+                        # Re-add to tracking dictionaries
+                        self.lora_id_for_name[lora_name] = lora_id
+                        if lora_path:
+                            self.lora_name_to_path[lora_name] = lora_path
+                        logger.debug(f"Successfully rolled back LoRA '{lora_name}'")
+                    except Exception as rollback_error:
+                        logger.error(
+                            f"Failed to rollback LoRA {lora_name}: {rollback_error}"
+                        )
+
+                    # Return error status since unregistration failed
+                    yield {
+                        "status": "error",
+                        "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {str(e)}",
+                        "lora_name": lora_name,
+                    }
+                    return
+            else:
+                logger.debug(
+                    f"Cannot unregister LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}"
+                )
+
+            logger.info(
+                f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"
+            )
+            yield {
+                "status": "success",
+                "message": f"LoRA adapter '{lora_name}' unloaded successfully",
+                "lora_name": lora_name,
+                "lora_id": lora_id,
+            }
+        except Exception as e:
+            logger.error(f"Failed to unload LoRA adapter: {e}")
+            yield {"status": "error", "message": str(e)}
+
+    async def list_loras(self, request=None):
+        """
+        List all loaded LoRA adapters.
+        Returns a dictionary of lora_name -> lora_id mappings.
+        """
+        try:
+            loras = dict(self.lora_id_for_name)
+            yield {
+                "status": "success",
+                "loras": loras,
+                "count": len(loras),
+            }
+        except Exception as e:
+            logger.error(f"Failed to list LoRA adapters: {e}")
+            yield {"status": "error", "message": str(e)}
 
     def cleanup(self):
         """Clean up resources including temporary directories."""
@@ -226,13 +557,30 @@ class BaseWorkerHandler(ABC):
         }
 
     async def generate_tokens(
-        self, prompt, sampling_params, request_id, data_parallel_rank=None
+        self,
+        prompt,
+        sampling_params,
+        request_id,
+        data_parallel_rank=None,
+        lora_request=None,
     ):
         try:
+            # Log LoRA usage for this generation (debug level to avoid log spam)
+            if lora_request:
+                logger.debug(
+                    f"Starting token generation for request {request_id} with LoRA: "
+                    f"{lora_request.lora_name} (ID: {lora_request.lora_int_id})"
+                )
+            else:
+                logger.debug(
+                    f"Starting token generation for request {request_id} (no LoRA)"
+                )
+
             gen = self.engine_client.generate(
                 prompt,
                 sampling_params,
                 request_id,
+                lora_request=lora_request,
                 data_parallel_rank=data_parallel_rank,
             )
 
@@ -242,6 +590,11 @@ class BaseWorkerHandler(ABC):
                     # res is vllm's RequestOutput
 
                     if not res.outputs:
+                        if lora_request:
+                            logger.debug(
+                                f"Request {request_id} with LoRA {lora_request.lora_name} "
+                                "returned no outputs"
+                            )
                         yield {"finish_reason": "error", "token_ids": []}
                         break
 
@@ -255,6 +608,18 @@ class BaseWorkerHandler(ABC):
                         ] = BaseWorkerHandler._build_completion_usage(
                             request_output=res
                         )
+                        # Log completion with LoRA info (debug level to avoid log spam)
+                        if lora_request:
+                            logger.debug(
+                                f"Completed token generation for request {request_id} with LoRA "
+                                f"{lora_request.lora_name}: {next_total_toks} output tokens, "
+                                f"finish_reason={output.finish_reason}"
+                            )
+                        else:
+                            logger.debug(
+                                f"Completed token generation for request {request_id}: "
+                                f"{next_total_toks} output tokens, finish_reason={output.finish_reason}"
+                            )
                     if output.stop_reason:
                         out["stop_reason"] = output.stop_reason
                     yield out
@@ -281,6 +646,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         default_sampling_params,
         model_max_len: int | None = None,
         enable_multimodal: bool = False,
+        generate_endpoint=None,
+        config=None,
     ):
         super().__init__(
             runtime,
@@ -289,6 +656,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             default_sampling_params,
             model_max_len,
             enable_multimodal,
+            generate_endpoint,
+            config,
         )
 
     async def generate(self, request, context):
@@ -327,12 +696,36 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prefill_result.get("prompt_tokens_details") if prefill_result else None
         )
 
+        # Extract LoRA request if present
+        # Check if model name matches a loaded LoRA adapter
+        lora_request = None
+        model_name = request.get("model")
+
+        if model_name and model_name in self.lora_id_for_name:
+            lora_id = self.lora_id_for_name[model_name]
+            lora_request = LoRARequest(
+                lora_name=model_name,
+                lora_int_id=lora_id,
+                lora_path=self.lora_name_to_path[model_name],
+            )
+            logger.info(
+                f"Decode request {request_id} will use LoRA adapter: {model_name} (ID: {lora_id})"
+            )
+        else:
+            logger.debug(
+                f"Decode request {request_id} has no LoRA specified (model: {model_name})"
+            )
+
         dp_rank = request.get("dp_rank", None)
 
         async with self._abort_monitor(context, request_id):
             try:
                 async for tok in self.generate_tokens(
-                    prompt, sampling_params, request_id, data_parallel_rank=dp_rank
+                    prompt,
+                    sampling_params,
+                    request_id,
+                    data_parallel_rank=dp_rank,
+                    lora_request=lora_request,
                 ):
                     if prefill_result is not None and "completion_usage" in tok:
                         tok["completion_usage"][
@@ -355,6 +748,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         default_sampling_params,
         model_max_len: int | None = None,
         enable_multimodal: bool = False,
+        generate_endpoint=None,
+        config=None,
     ):
         super().__init__(
             runtime,
@@ -363,6 +758,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             default_sampling_params,
             model_max_len,
             enable_multimodal,
+            generate_endpoint,
+            config,
         )
 
     async def generate(self, request, context):
@@ -403,12 +800,37 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1
 
+        # Extract LoRA request if present
+        # Check if model name matches a loaded LoRA adapter
+        lora_request = None
+        model_name = request.get("model")
+
+        if model_name and model_name in self.lora_id_for_name:
+            lora_id = self.lora_id_for_name[model_name]
+            lora_request = LoRARequest(
+                lora_name=model_name,
+                lora_int_id=lora_id,
+                lora_path=self.lora_name_to_path[model_name],
+            )
+            logger.info(
+                f"Prefill request {request_id} will use LoRA adapter: {model_name} (ID: {lora_id}), "
+                f"path: {self.lora_name_to_path[model_name]}"
+            )
+        else:
+            logger.debug(
+                f"Prefill request {request_id} has no LoRA specified (model: {model_name})"
+            )
+
         dp_rank = request.get("dp_rank", None)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
                 gen = self.engine_client.generate(
-                    prompt, sampling_params, request_id, data_parallel_rank=dp_rank
+                    prompt,
+                    sampling_params,
+                    request_id,
+                    data_parallel_rank=dp_rank,
+                    lora_request=lora_request,
                 )
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
@@ -433,6 +855,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                             request_output=res
                         ),
                     }
+
+                    # Log prefill completion with LoRA info
+                    if lora_request:
+                        logger.info(
+                            f"Prefill completed for request {request_id} with LoRA {lora_request.lora_name}: "
+                            f"generated {len(token_ids)} token(s), "
+                            f"has_kv_params={res.kv_transfer_params is not None}"
+                        )
 
                     yield output
             except asyncio.CancelledError:
