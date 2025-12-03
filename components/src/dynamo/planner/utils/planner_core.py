@@ -115,6 +115,9 @@ class PlannerPrometheusMetrics:
             f"{prefix}:predicted_num_d", "Predicted number of decode replicas"
         )
 
+        # Cumulative GPU usage
+        self.gpu_hours = Gauge(f"{prefix}:gpu_hours", "Cumulative GPU hours used")
+
 
 class Planner:
     def __init__(
@@ -213,6 +216,9 @@ class Planner:
             # Initialize Prometheus metrics
             self.prometheus_metrics = PlannerPrometheusMetrics()
 
+            # Track cumulative GPU hours
+            self.cumulative_gpu_hours = 0.0
+
             # Start Prometheus HTTP server if port is specified
             if self.prometheus_port != 0:
                 try:
@@ -300,6 +306,19 @@ class Planner:
         if self.prometheus_port != 0:
             self.prometheus_metrics.num_p_workers.set(len(self.p_endpoints))
             self.prometheus_metrics.num_d_workers.set(len(self.d_endpoints))
+
+            # Calculate and accumulate GPU hours for this interval
+            # TODO: track startup and shutdown times to get more accurate GPU hours
+            interval_gpu_hours = (
+                (
+                    len(self.p_endpoints) * self.args.prefill_engine_num_gpu
+                    + len(self.d_endpoints) * self.args.decode_engine_num_gpu
+                )
+                * self.args.adjustment_interval
+                / 3600
+            )
+            self.cumulative_gpu_hours += interval_gpu_hours
+            self.prometheus_metrics.gpu_hours.set(self.cumulative_gpu_hours)
 
         # Prometheus returns seconds, convert to milliseconds
         self.last_metrics.ttft = (
