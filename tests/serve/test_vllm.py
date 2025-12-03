@@ -4,6 +4,7 @@
 import base64
 import logging
 import os
+import random
 from dataclasses import dataclass, field
 
 import pytest
@@ -57,6 +58,22 @@ vllm_configs = {
         script_name="agg_lmcache.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(min_num_requests=6, backend="vllm"),
+            metric_payload_default(min_num_requests=6, backend="lmcache"),
+        ],
+    ),
+    "aggregated_lmcache_multiproc": VLLMConfig(
+        name="aggregated_lmcache_multiproc",
+        directory=vllm_dir,
+        script_name="agg_lmcache_multiproc.sh",
+        marks=[pytest.mark.gpu_1],
+        model="Qwen/Qwen3-0.6B",
+        env={
+            "PROMETHEUS_MULTIPROC_DIR": f"/tmp/prometheus_multiproc_test_{os.getpid()}_{random.randint(0, 10000)}"
+        },
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
