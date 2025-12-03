@@ -81,14 +81,6 @@ runs:
       uses: ./.github/actions/docker-login
       with:
         ngc_ci_access_token: ${{ inputs.ngc_ci_access_token }}
-    - name: Cleanup
-      if: always()
-      shell: bash
-      run: |
-        # Clean up dangling/untagged images only, preserve build cache for subsequent builds
-        docker image prune -f
-        # Remove old containers older than 24 hours
-        docker container prune -f --filter "until=24h" || true
     - name: Build image
       id: build
       shell: bash
