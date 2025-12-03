@@ -61,17 +61,27 @@ class TestConfig:
     def __init__(self):
         # Detect if running in-cluster
         self.in_cluster = os.getenv("KUBERNETES_SERVICE_HOST") is not None
+        self.k8s_available = False
+        self.k8s_core = None
 
-        if self.in_cluster:
-            config.load_incluster_config()
-            self.api_base_url = "http://fault-injection-api.fault-injection-system.svc.cluster.local:8080"
-        else:
-            config.load_kube_config()
+        try:
+            if self.in_cluster:
+                config.load_incluster_config()
+                self.api_base_url = "http://fault-injection-api.fault-injection-system.svc.cluster.local:8080"
+            else:
+                config.load_kube_config()
+                self.api_base_url = os.getenv(
+                    "FAULT_INJECTION_API", "http://localhost:8080"
+                )
+            self.k8s_core = client.CoreV1Api()
+            self.k8s_available = True
+        except Exception:
+            # No kubeconfig available (e.g., CI environment)
+            # Tests will be skipped at runtime, but import won't fail
             self.api_base_url = os.getenv(
                 "FAULT_INJECTION_API", "http://localhost:8080"
             )
 
-        self.k8s_core = client.CoreV1Api()
         self.namespace = os.getenv("TEST_NAMESPACE", "dynamo-test")
         self.nvsentinel_namespace = os.getenv("NVSENTINEL_NAMESPACE", "nvsentinel")
 
