@@ -123,5 +123,6 @@ def start_services(request, runtime_services):
 @pytest.mark.pre_merge
 @pytest.mark.model(TEST_MODEL)
 def test_echo() -> None:
+    triton_echo_client.check_health()
     triton_echo_client.run_infer()
     triton_echo_client.get_config()
