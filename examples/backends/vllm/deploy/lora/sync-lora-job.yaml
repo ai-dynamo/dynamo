@@ -26,8 +26,8 @@ spec:
         - secretRef:
             name: minio-secret
         env:
-        # - name: AWS_REGION   # set this to your aws region
-        #   value: us-east-1
+        - name: AWS_REGION   # set this to your aws region
+          value: us-east-1
         - name: AWS_ALLOW_HTTP # remove/disable this if you are using a S3 endpoint or secure MinIO
           value: "true"
         - name: LORA_ROOT_PATH
