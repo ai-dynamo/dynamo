@@ -94,7 +94,7 @@ pub trait CommonExtProvider {
     fn common_ext(&self) -> Option<&CommonExt>;
 
     /// Guided Decoding Options
-    fn get_guided_json(&self) -> Option<&serde_json::Value>;
+    fn get_guided_json(&self) -> Option<serde_json::Value>;
     fn get_guided_regex(&self) -> Option<String>;
     fn get_guided_grammar(&self) -> Option<String>;
     fn get_guided_choice(&self) -> Option<Vec<String>>;

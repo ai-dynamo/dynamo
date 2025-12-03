@@ -16,7 +16,9 @@ pub mod completions;
 pub mod embeddings;
 pub mod models;
 pub mod nvext;
+pub mod partial_json;
 pub mod responses;
+pub mod tools;
 pub mod validate;
 
 use validate::{
@@ -131,7 +133,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         let guided_whitespace_pattern = self.get_guided_whitespace_pattern();
 
         let guided_decoding = match common::GuidedDecodingOptions::from_optional(
-            guided_json.cloned(),
+            guided_json,
             guided_regex,
             guided_choice,
             guided_grammar,
