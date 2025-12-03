@@ -179,23 +179,14 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Run unit tests
+      - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and vllm and gpu_1"
+          pytest_marks: "pre_merge and vllm"
           framework: "vllm"
-          test_type: "unit"
-          platform_arch: ${{ matrix.platform.arch }}
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and vllm and gpu_1 and not slow"
-          framework: "vllm"
-          test_type: "e2e, gpu_1"
+          test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
 
   sglang:
@@ -246,23 +237,14 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Run unit tests
+      - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and sglang and gpu_1"
+          pytest_marks: "pre_merge and sglang"
           framework: "sglang"
-          test_type: "unit"
-          platform_arch: ${{ matrix.platform.arch }}
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and sglang and gpu_1"
-          framework: "sglang"
-          test_type: "e2e, gpu_1"
+          test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
 
   trtllm:
@@ -313,23 +295,14 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Run unit tests
+      - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and trtllm and gpu_1"
+          pytest_marks: "pre_merge and trtllm"
           framework: "trtllm"
-          test_type: "unit"
-          platform_arch: ${{ matrix.platform.arch }}
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and trtllm and gpu_1 and not slow"
-          framework: "trtllm"
-          test_type: "e2e, gpu_1"
+          test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
 
   deploy-test-fault-tolerance:

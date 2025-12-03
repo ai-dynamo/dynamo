@@ -46,6 +46,9 @@ ARG ARCH_ALT=x86_64
 ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
 FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 
+# Copy cuda tools and libs from base image
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
+
 ########################################################
 ########## Framework Development Image ################
 ########################################################
@@ -66,6 +69,8 @@ FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 
 # Use dynamo base image (see /container/Dockerfile for more details)
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
+
+COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
 ARG PYTHON_VERSION
 
@@ -90,9 +95,6 @@ RUN apt-get update -y \
 # generic dev name .so so we symlink .s0.1 -> .so
 RUN ln -sf /usr/lib/aarch64-linux-gnu/libmlx5.so.1 /usr/lib/aarch64-linux-gnu/libmlx5.so || true
 
-### VIRTUAL ENVIRONMENT SETUP ###
-
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # Create virtual environment
 RUN mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
@@ -178,15 +180,41 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # This fixes NVML InvalidArgument errors when CUDA_VISIBLE_DEVICES is set
 ENV CUDA_DEVICE_ORDER=PCI_BUS_ID
 
+# Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image
+COPY --from=base /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
+COPY --from=base /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
+COPY --from=base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
+COPY --from=base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
+COPY --from=base /usr/local/cuda/include/ /usr/local/cuda/include/
+COPY --from=base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
+COPY --from=base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
+RUN ln -s /usr/local/cuda/lib64/libcublas.so.12 /usr/local/cuda/lib64/libcublas.so
+RUN ln -s /usr/local/cuda/lib64/libcublasLt.so.12 /usr/local/cuda/lib64/libcublasLt.so
+
+# DeepGemm runs nvcc for JIT kernel compilation, however the CUDA include path
+# is not properly set for complilation. Set CPATH to help nvcc find the headers.
+ENV CPATH=/usr/local/cuda/include
+
+### COPY NATS & ETCD ###
+# Copy nats and etcd from dev image
+COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
+ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
+
+# Copy uv to system /bin
+COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
+
+# Create dynamo user with group 0 for OpenShift compatibility
+RUN userdel -r ubuntu > /dev/null 2>&1 || true \
+    && useradd -m -s /bin/bash -g 0 dynamo \
+    && [ `id -u dynamo` -eq 1000 ] \
+    && mkdir -p /home/dynamo/.cache /opt/dynamo \
+    && chown -R dynamo: /workspace /home/dynamo /opt/dynamo \
+    && chmod -R g+w /workspace /home/dynamo/.cache /opt/dynamo
+
 ARG ARCH_ALT
 ARG PYTHON_VERSION
-ARG ENABLE_KVBM
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 # Install Python, build-essential and python3-dev as apt dependencies
 RUN apt-get update && \
@@ -211,41 +239,18 @@ RUN apt-get update && \
         cuda-command-line-tools-12-8 && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image
-COPY --from=framework /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
-COPY --from=framework /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
-COPY --from=framework /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
-COPY --from=framework /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
-COPY --from=framework /usr/local/cuda/include/ /usr/local/cuda/include/
-COPY --from=framework /usr/local/cuda/nvvm /usr/local/cuda/nvvm
-COPY --from=framework /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
-RUN ln -s /usr/local/cuda/lib64/libcublas.so.12 /usr/local/cuda/lib64/libcublas.so
-RUN ln -s /usr/local/cuda/lib64/libcublasLt.so.12 /usr/local/cuda/lib64/libcublasLt.so
-
-### COPY NATS & ETCD ###
-# Copy nats and etcd from dev image
-COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
-COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
-ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
-
-# DeepGemm runs nvcc for JIT kernel compilation, however the CUDA include path
-# is not properly set for complilation. Set CPATH to help nvcc find the headers.
-ENV CPATH=/usr/local/cuda/include
-
-# Copy uv to system /bin
-COPY --from=framework /bin/uv /bin/uvx /bin/
-
-# Create dynamo user with group 0 for OpenShift compatibility
-RUN userdel -r ubuntu > /dev/null 2>&1 || true \
-    && useradd -m -s /bin/bash -g 0 dynamo \
-    && [ `id -u dynamo` -eq 1000 ] \
-    && mkdir -p /home/dynamo/.cache /opt/dynamo \
-    && chown -R dynamo: /workspace /home/dynamo /opt/dynamo \
-    && chmod -R g+w /workspace /home/dynamo/.cache /opt/dynamo
-
 USER dynamo
 ENV HOME=/home/dynamo
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+
+### VIRTUAL ENVIRONMENT SETUP ###
+# Copy entire virtual environment from framework container with correct ownership
+COPY --chown=dynamo: --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+
+# Copy vllm with correct ownership
+COPY --chown=dynamo: --from=framework /opt/vllm /opt/vllm
 
 # Copy UCX and NIXL to system directories
 COPY --chown=dynamo: --from=dynamo_base /usr/local/ucx /usr/local/ucx
@@ -260,16 +265,12 @@ $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib/ucx:\
 $LD_LIBRARY_PATH
 
-### VIRTUAL ENVIRONMENT SETUP ###
-
-# Copy entire virtual environment from framework container with correct ownership
-COPY --chown=dynamo: --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
-
-# Copy vllm with correct ownership
-COPY --chown=dynamo: --from=framework /opt/vllm /opt/vllm
+# Copy local files
+COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
+COPY --chown=dynamo: benchmarks/ /workspace/benchmarks/
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
-COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
+ARG ENABLE_KVBM
 COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
@@ -278,10 +279,8 @@ RUN uv pip install \
     && if [ "${ENABLE_KVBM}" = "true" ]; then \
         uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
        fi \
-    && cd /opt/dynamo/benchmarks \
-    && UV_GIT_LFS=1 uv pip install --no-cache . \
-    && cd - \
-    && rm -rf /opt/dynamo/benchmarks
+    && cd /workspace/benchmarks \
+    && UV_GIT_LFS=1 uv pip install --no-cache .
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
@@ -291,11 +290,13 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
 
-# Copy benchmarks, examples, and tests for CI with correct ownership
-COPY --chown=dynamo: . /workspace/
-
-# Copy attribution files
-COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
+# Copy tests, benchmarks, deploy and components for CI
+COPY --chown=dynamo: tests /workspace/tests
+COPY --chown=dynamo: examples /workspace/examples
+COPY --chown=dynamo: deploy /workspace/deploy
+COPY --chown=dynamo: recipes/ /workspace/recipes/
+COPY --chown=dynamo: components/ /workspace/components/
+COPY --chown=dynamo: lib/ /workspace/lib/
 
 # Setup launch banner in common directory accessible to all users
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
@@ -308,6 +309,8 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
 USER dynamo
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
@@ -329,9 +332,6 @@ FROM runtime AS dev
 
 # Don't want ubuntu to be editable, just change uid and gid.
 ARG WORKSPACE_DIR=/workspace
-
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 USER root
 # Install utilities as root
