@@ -75,12 +75,9 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         PLATFORM: ${{ inputs.platform }}
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
-<<<<<<< HEAD
         GITHUB_RUN_ID: ${{ github.run_id }}
         GITHUB_JOB: ${{ github.job }}
-=======
         GITHUB_REF_NAME: ${{ github.ref_name }}
->>>>>>> b5064b0982d9a8940a14714f2249e666fb7ac205
       run: |
         set -x
         # Determine image tag
@@ -94,7 +91,6 @@ runs:
         echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
 
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-<<<<<<< HEAD
 
         # Create build logs directory
         mkdir -p build-logs
@@ -103,9 +99,7 @@ runs:
         echo "📝 Build log will be saved to: ${BUILD_LOG_FILE}"
 
         # Collect optional overrides provided by the workflow
-=======
         # Set --cache-from args and set --cache-to if this is a main commit
->>>>>>> b5064b0982d9a8940a14714f2249e666fb7ac205
         EXTRA_ARGS=""
         EXTRA_ARGS+=" --dynamo-base-cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:dynamo-base-${{ inputs.framework }}-${PLATFORM##*/}-cache"
         EXTRA_ARGS+=" --framework-cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache"
