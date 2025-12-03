@@ -467,9 +467,6 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
-    load_lora_endpoint = component.endpoint("load_lora")
-    unload_lora_endpoint = component.endpoint("unload_lora")
-    list_loras_endpoint = component.endpoint("list_loras")
 
     factory = StatLoggerFactory(
         component,
@@ -529,6 +526,32 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
+    # Register engine routes for LoRA management (accessible via /engine/*)
+    async def load_lora_handler(body: dict) -> dict:
+        """Handle /engine/load_lora requests"""
+        async for result in handler.load_lora(body):
+            return result
+        return {"status": "error", "message": "No response from load_lora handler"}
+
+    async def unload_lora_handler(body: dict) -> dict:
+        """Handle /engine/unload_lora requests"""
+        async for result in handler.unload_lora(body):
+            return result
+        return {"status": "error", "message": "No response from unload_lora handler"}
+
+    async def list_loras_handler(body: dict) -> dict:
+        """Handle /engine/list_loras requests"""
+        async for result in handler.list_loras(body):
+            return result
+        return {"status": "error", "message": "No response from list_loras handler"}
+
+    runtime.register_engine_route("load_lora", load_lora_handler)
+    runtime.register_engine_route("unload_lora", unload_lora_handler)
+    runtime.register_engine_route("list_loras", list_loras_handler)
+    logger.info(
+        "Registered engine routes: /engine/load_lora, /engine/unload_lora, /engine/list_loras"
+    )
+
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
         # Parse endpoint types from --dyn-endpoint-types flag
         model_type = parse_endpoint_types(config.dyn_endpoint_types)
@@ -568,18 +591,6 @@ async def init(runtime: DistributedRuntime, config: Config):
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks,
-                metrics_labels=[("model", config.served_model_name or config.model)],
-            ),
-            load_lora_endpoint.serve_endpoint(
-                handler.load_lora,
-                metrics_labels=[("model", config.served_model_name or config.model)],
-            ),
-            unload_lora_endpoint.serve_endpoint(
-                handler.unload_lora,
-                metrics_labels=[("model", config.served_model_name or config.model)],
-            ),
-            list_loras_endpoint.serve_endpoint(
-                handler.list_loras,
                 metrics_labels=[("model", config.served_model_name or config.model)],
             ),
         )
