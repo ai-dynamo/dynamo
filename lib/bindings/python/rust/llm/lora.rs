@@ -85,4 +85,11 @@ impl LoRADownloader {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Validation failed: {}", e))
         })
     }
+
+    /// Convert a LoRA URI to a cache key.
+    /// This ensures consistent cache key generation across Rust and Python.
+    #[staticmethod]
+    fn uri_to_cache_key(uri: &str) -> String {
+        RsLoRACache::uri_to_cache_key(uri)
+    }
 }

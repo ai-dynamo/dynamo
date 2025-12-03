@@ -23,6 +23,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
 ]
 
 
