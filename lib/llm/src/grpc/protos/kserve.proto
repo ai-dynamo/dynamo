@@ -105,7 +105,9 @@ message ServerReadyResponse
   //@@
   //@@  .. cpp:var:: bool ready
   //@@
-  //@@     True if the inference server is ready, false if not ready. The inference server is considered ready if it has any registered models, since models can freely be registered and unregistered at runtime.
+  //@@     True if the inference server is ready, false if not ready. The server
+  //@@     is considered ready if it has any registered models, since models
+  //@@     can freely be registered and unregistered at runtime.
   //@@
   bool ready = 1;
 }
