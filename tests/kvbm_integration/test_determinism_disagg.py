@@ -38,6 +38,7 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.gpu_2,
+    pytest.mark.nightly,
 ]
 
 

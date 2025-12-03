@@ -20,10 +20,9 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher, event};
 use parking_lot::Mutex;
+use tokio_util::sync::CancellationToken;
 
-use crate::storage::key_value_store::KeyValue;
-
-use super::{Key, KeyValueBucket, KeyValueStore, StoreError, StoreOutcome, WatchEvent};
+use super::{Bucket, Key, KeyValue, Store, StoreError, StoreOutcome, WatchEvent};
 
 /// How long until a key expires. We keep the keys alive by touching the files.
 /// 10s is the same as our etcd lease expiry.
@@ -35,6 +34,7 @@ const MIN_KEEP_ALIVE: Duration = Duration::from_secs(1);
 /// Treat as a singleton
 #[derive(Clone)]
 pub struct FileStore {
+    cancel_token: CancellationToken,
     root: PathBuf,
     connection_id: u64,
     /// Directories we may have created files in, for shutdown cleanup and keep-alive.
@@ -43,8 +43,9 @@ pub struct FileStore {
 }
 
 impl FileStore {
-    pub(super) fn new<P: Into<PathBuf>>(root_dir: P) -> Self {
+    pub(super) fn new<P: Into<PathBuf>>(cancel_token: CancellationToken, root_dir: P) -> Self {
         let fs = FileStore {
+            cancel_token,
             root: root_dir.into(),
             connection_id: rand::random::<u64>(),
             active_dirs: Arc::new(Mutex::new(HashMap::new())),
@@ -54,15 +55,26 @@ impl FileStore {
         fs
     }
 
-    /// Keep our files alive and delete expired keys. Does not return.
-    /// We run this in a real thread so it doesn't get delayed by tokio runtime load.
-    /// It doesn't need any cleanup so we don't use cancellation token.
-    fn expiry_thread(&self) -> ! {
+    /// Keep our files alive and delete expired keys.
+    ///
+    /// Does not return until cancellation token cancelled. On shutdown the process will
+    /// often exit before we detect cancellation. That's fine.
+    /// We run this in a real thread so it doesn't get delayed by tokio runtime under heavy load.
+    fn expiry_thread(&self) {
         loop {
             let ttl = self.shortest_ttl();
             let keep_alive_interval = cmp::max(ttl / 3, MIN_KEEP_ALIVE);
 
+            // Check before and after the sleep
+            if self.cancel_token.is_cancelled() {
+                break;
+            }
+
             thread::sleep(keep_alive_interval);
+
+            if self.cancel_token.is_cancelled() {
+                break;
+            }
 
             self.keep_alive();
             if let Err(err) = self.delete_expired_files() {
@@ -100,7 +112,7 @@ impl FileStore {
 }
 
 #[async_trait]
-impl KeyValueStore for FileStore {
+impl Store for FileStore {
     type Bucket = Directory;
 
     /// A "bucket" is a directory
@@ -278,7 +290,7 @@ impl fmt::Display for Directory {
 }
 
 #[async_trait]
-impl KeyValueBucket for Directory {
+impl Bucket for Directory {
     /// Write a file to the directory
     async fn insert(
         &self,
@@ -471,15 +483,16 @@ fn to_fs_err<E: std::error::Error>(err: E) -> StoreError {
 mod tests {
     use std::collections::HashSet;
 
-    use crate::storage::key_value_store::{
-        FileStore, Key, KeyValueBucket as _, KeyValueStore as _,
-    };
+    use tokio_util::sync::CancellationToken;
+
+    use crate::storage::kv::{Bucket as _, FileStore, Key, Store as _};
 
     #[tokio::test]
     async fn test_entries_full_path() {
         let t = tempfile::tempdir().unwrap();
 
-        let m = FileStore::new(t.path());
+        let cancel_token = CancellationToken::new();
+        let m = FileStore::new(cancel_token.clone(), t.path());
         let bucket = m.get_or_create_bucket("v1/tests", None).await.unwrap();
         let _ = bucket
             .insert(&Key::new("key1/multi/part".to_string()), "value1".into(), 0)
@@ -491,6 +504,7 @@ mod tests {
             .unwrap();
         let entries = bucket.entries().await.unwrap();
         let keys: HashSet<Key> = entries.into_keys().collect();
+        cancel_token.cancel(); // stop the background thread
 
         assert!(keys.contains(&Key::new("v1/tests/key1/multi/part".to_string())));
         assert!(keys.contains(&Key::new("v1/tests/key2".to_string())));

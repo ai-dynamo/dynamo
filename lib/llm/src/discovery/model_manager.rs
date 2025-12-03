@@ -9,12 +9,17 @@ use std::{
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::oneshot;
 
-use dynamo_runtime::{component::Endpoint, storage::key_value_store::Key};
-use dynamo_runtime::{prelude::DistributedRuntimeProvider, protocols::EndpointId};
+use crate::discovery::KvWorkerMonitor;
+
+use dynamo_runtime::{
+    component::{Client, Endpoint, build_transport_type},
+    discovery::DiscoverySpec,
+    prelude::DistributedRuntimeProvider,
+    protocols::EndpointId,
+};
 
 use crate::{
-    discovery::KV_ROUTERS_ROOT_PATH,
-    kv_router::{KvRouter, KvRouterConfig, scheduler::DefaultWorkerSelector},
+    kv_router::{KvRouter, KvRouterConfig, router_endpoint_id, scheduler::DefaultWorkerSelector},
     model_card::ModelDeploymentCard,
     model_type::ModelType,
     types::{
@@ -44,7 +49,12 @@ pub enum ModelManagerError {
     ModelAlreadyExists(String),
 }
 
-// Don't implement Clone for this, put it in an Arc instead.
+/// Central manager for model engines, routing, and configuration.
+///
+/// Manages model lifecycle including engines, KV routers, prefill coordination,
+/// and per-model busy thresholds for load-based request rejection.
+///
+/// Note: Don't implement Clone for this, put it in an Arc instead.
 pub struct ModelManager {
     // We read a lot and write rarely, so these three are RwLock
     completion_engines: RwLock<ModelEngines<OpenAICompletionsStreamingEngine>>,
@@ -58,6 +68,11 @@ pub struct ModelManager {
     cards: Mutex<HashMap<String, ModelDeploymentCard>>,
     kv_choosers: Mutex<HashMap<EndpointId, Arc<KvRouter>>>,
     prefill_router_activators: Mutex<HashMap<String, PrefillActivationState>>,
+
+    /// Per-model worker monitors for dynamic KV cache load rejection.
+    /// Key: model name, Value: cloneable monitor (all fields are Arc).
+    /// HTTP endpoint can update thresholds via monitor.set_threshold().
+    worker_monitors: RwLock<HashMap<String, KvWorkerMonitor>>,
 }
 
 impl Default for ModelManager {
@@ -77,6 +92,7 @@ impl ModelManager {
             cards: Mutex::new(HashMap::new()),
             kv_choosers: Mutex::new(HashMap::new()),
             prefill_router_activators: Mutex::new(HashMap::new()),
+            worker_monitors: RwLock::new(HashMap::new()),
         }
     }
 
@@ -310,23 +326,28 @@ impl ModelManager {
         }
 
         let client = endpoint.client().await?;
-        let store = endpoint.component().drt().store();
-        let router_bucket = store
-            .get_or_create_bucket(KV_ROUTERS_ROOT_PATH, None)
-            .await?;
-        let router_uuid = uuid::Uuid::new_v4();
-        // In lib/llm/src/kv_router/subscriber.rs we filter on component.service_name() so this
-        // must have that prefix.
-        let router_key = Key::new(format!(
-            "{}/{}/{}",
-            endpoint.component().service_name(),
-            endpoint.name(),
-            router_uuid,
-        ));
-        let json_router_config = serde_json::to_vec_pretty(&kv_router_config.unwrap_or_default())?;
-        router_bucket
-            .insert(&router_key, json_router_config.into(), 0)
-            .await?;
+
+        // Register router via discovery mechanism
+        let discovery = endpoint.component().drt().discovery();
+        let instance_id = discovery.instance_id();
+        let request_plane_mode = endpoint.drt().request_plane();
+
+        // Build transport for router endpoint based on request plane mode
+        // Use KV_ROUTER_COMPONENT as the component name to distinguish from the generate endpoint's component
+        let router_endpoint_id = router_endpoint_id(endpoint.id().namespace);
+        let transport = build_transport_type(request_plane_mode, &router_endpoint_id, instance_id);
+
+        let discovery_spec = DiscoverySpec::Endpoint {
+            namespace: router_endpoint_id.namespace.clone(),
+            component: router_endpoint_id.component.clone(),
+            endpoint: router_endpoint_id.name.clone(),
+            transport,
+        };
+
+        discovery.register(discovery_spec).await?;
+
+        // Use instance_id (hex) as the consumer ID for NATS consumer coordination
+        let consumer_id = instance_id.to_string();
 
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
         let chooser = KvRouter::new(
@@ -335,7 +356,7 @@ impl ModelManager {
             kv_cache_block_size,
             Some(selector),
             kv_router_config,
-            router_uuid.to_string(),
+            consumer_id,
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);
@@ -462,6 +483,83 @@ impl ModelManager {
         let reasoning_parser = None; // TODO: Implement reasoning parser
 
         crate::protocols::openai::ParsingOptions::new(tool_call_parser, reasoning_parser)
+    }
+
+    /// Gets or sets the busy threshold for a model via its worker monitor.
+    ///
+    /// This is the primary API for HTTP endpoints and external callers.
+    /// The threshold (0.0 to 1.0) controls when workers are marked as "busy"
+    /// based on KV cache utilization.
+    ///
+    /// # Arguments
+    ///
+    /// * `model` - The model name
+    /// * `threshold` - `Some(value)` to set, `None` to get existing
+    ///
+    /// # Returns
+    ///
+    /// The threshold value as f64, or `None` if no monitor exists for this model.
+    /// Note: Setting a threshold for a non-existent model returns `None` (monitor
+    /// must be created via `get_or_create_worker_monitor` during model discovery).
+    pub fn busy_threshold(&self, model: &str, threshold: Option<f64>) -> Option<f64> {
+        let monitors = self.worker_monitors.read();
+        let monitor = monitors.get(model)?;
+
+        match threshold {
+            Some(value) => {
+                monitor.set_threshold(value);
+                Some(value)
+            }
+            None => Some(monitor.threshold()),
+        }
+    }
+
+    /// Gets or creates a worker monitor for a model.
+    ///
+    /// If a monitor already exists, updates its threshold and returns a clone.
+    /// If no monitor exists, creates one with the given client and threshold.
+    ///
+    /// # Arguments
+    ///
+    /// * `model` - The model name
+    /// * `client` - The client for subscribing to KV metrics (only used if creating new)
+    /// * `threshold` - The initial/updated threshold value (0.0-1.0)
+    ///
+    /// # Returns
+    ///
+    /// A cloneable monitor that shares state with the stored instance.
+    pub fn get_or_create_worker_monitor(
+        &self,
+        model: &str,
+        client: Arc<Client>,
+        threshold: f64,
+    ) -> KvWorkerMonitor {
+        let mut monitors = self.worker_monitors.write();
+
+        if let Some(existing) = monitors.get(model) {
+            existing.set_threshold(threshold);
+            existing.clone()
+        } else {
+            let monitor = KvWorkerMonitor::new(client, threshold);
+            monitors.insert(model.to_string(), monitor.clone());
+            monitor
+        }
+    }
+
+    /// Gets an existing worker monitor for a model, if one exists.
+    pub fn get_worker_monitor(&self, model: &str) -> Option<KvWorkerMonitor> {
+        self.worker_monitors.read().get(model).cloned()
+    }
+
+    /// Lists all models that have worker monitors (and thus busy thresholds) configured.
+    ///
+    /// Returns a vector of (model_name, threshold_value) tuples.
+    pub fn list_busy_thresholds(&self) -> Vec<(String, f64)> {
+        self.worker_monitors
+            .read()
+            .iter()
+            .map(|(k, monitor)| (k.clone(), monitor.threshold()))
+            .collect()
     }
 }
 

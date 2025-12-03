@@ -15,7 +15,6 @@ use crate::{
     distributed::RequestPlaneMode,
     pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint},
     protocols::EndpointId,
-    storage::key_value_store,
     traits::DistributedRuntimeProvider,
     transports::nats,
 };
@@ -62,6 +61,22 @@ impl EndpointConfigBuilder {
         F: FnMut(EndpointStats) -> serde_json::Value + Send + Sync + 'static,
     {
         self._stats_handler(Some(Box::new(handler)))
+    }
+
+    /// Register an async engine in the local endpoint registry for direct in-process calls
+    pub fn register_local_engine(
+        self,
+        engine: crate::local_endpoint_registry::LocalAsyncEngine,
+    ) -> Result<Self> {
+        if let Some(endpoint) = &self.endpoint {
+            let registry = endpoint.drt().local_endpoint_registry();
+            registry.register(endpoint.name.clone(), engine);
+            tracing::debug!(
+                "Registered engine for endpoint '{}' in local registry",
+                endpoint.name
+            );
+        }
+        Ok(self)
     }
 
     pub async fn start(self) -> Result<()> {
@@ -257,7 +272,7 @@ impl EndpointConfigBuilder {
 /// - HTTP: Uses full URL path including endpoint name (e.g., http://host:port/v1/rpc/endpoint_name)
 /// - TCP: Includes endpoint name for routing (e.g., host:port/endpoint_name)
 /// - NATS: Uses subject-based addressing (unique per endpoint)
-fn build_transport_type(
+pub fn build_transport_type(
     mode: RequestPlaneMode,
     endpoint_id: &EndpointId,
     connection_id: u64,

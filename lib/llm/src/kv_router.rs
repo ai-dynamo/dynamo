@@ -14,6 +14,7 @@ use dynamo_runtime::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
     },
+    protocols::EndpointId,
     protocols::annotated::Annotated,
     traits::DistributedRuntimeProvider,
 };
@@ -73,6 +74,28 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 // for radix tree snapshot storage
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
+
+// for router discovery registration
+pub const KV_ROUTER_COMPONENT: &str = "kv-router";
+pub const KV_ROUTER_ENDPOINT: &str = "generate";
+
+/// Creates an EndpointId for the KV router in the given namespace.
+pub fn router_endpoint_id(namespace: String) -> EndpointId {
+    EndpointId {
+        namespace,
+        component: KV_ROUTER_COMPONENT.to_string(),
+        name: KV_ROUTER_ENDPOINT.to_string(),
+    }
+}
+
+/// Creates a DiscoveryQuery for the KV router in the given namespace.
+pub fn router_discovery_query(namespace: String) -> DiscoveryQuery {
+    DiscoveryQuery::Endpoint {
+        namespace,
+        component: KV_ROUTER_COMPONENT.to_string(),
+        endpoint: KV_ROUTER_ENDPOINT.to_string(),
+    }
+}
 
 /// A trait that users can implement to define custom selection logic
 pub trait WorkerSelector {
@@ -254,7 +277,7 @@ impl KvRouter {
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
-        consumer_uuid: String,
+        consumer_id: String,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         let component = endpoint.component();
@@ -311,7 +334,7 @@ impl KvRouter {
             runtime_configs_rx,
             selector,
             kv_router_config.router_replica_sync,
-            consumer_uuid.clone(),
+            consumer_id.clone(),
         )
         .await?;
 
@@ -321,7 +344,7 @@ impl KvRouter {
         {
             start_kv_router_background(
                 component.clone(),
-                consumer_uuid,
+                consumer_id,
                 kv_indexer.event_sender(),
                 kv_indexer.remove_worker_sender(),
                 kv_router_config

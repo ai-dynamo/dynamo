@@ -5,10 +5,7 @@ use crate::component::{Component, Instance};
 use crate::pipeline::PipelineError;
 use crate::pipeline::network::manager::NetworkManager;
 use crate::service::{ComponentNatsServerPrometheusMetrics, ServiceClient, ServiceSet};
-use crate::storage::key_value_store::{
-    EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, KeyValueStoreSelect,
-    MemoryStore,
-};
+use crate::storage::kv::{self, Store as _};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     component::{self, ComponentBuilder, Endpoint, Namespace},
@@ -48,7 +45,7 @@ pub struct DistributedRuntime {
     runtime: Runtime,
 
     nats_client: Option<transports::nats::Client>,
-    store: KeyValueStoreManager,
+    store: kv::Manager,
     network_manager: Arc<NetworkManager>,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
@@ -72,6 +69,9 @@ pub struct DistributedRuntime {
 
     // Health Status
     system_health: Arc<parking_lot::Mutex<SystemHealth>>,
+
+    // Local endpoint registry for in-process calls
+    local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry,
 
     // This hierarchy's own metrics registry
     metrics_registry: MetricsRegistry,
@@ -104,15 +104,15 @@ impl DistributedRuntime {
         let runtime_clone = runtime.clone();
 
         let store = match selected_kv_store {
-            KeyValueStoreSelect::Etcd(etcd_config) => {
+            kv::Selector::Etcd(etcd_config) => {
                 let etcd_client = etcd::Client::new(*etcd_config, runtime_clone).await.inspect_err(|err|
                     // The returned error doesn't show because of a dropped runtime error, so
                     // log it first.
                     tracing::error!(%err, "Could not connect to etcd. Pass `--store-kv ..` to use a different backend or start etcd."))?;
-                KeyValueStoreManager::etcd(etcd_client)
+                kv::Manager::etcd(etcd_client)
             }
-            KeyValueStoreSelect::File(root) => KeyValueStoreManager::file(root),
-            KeyValueStoreSelect::Memory => KeyValueStoreManager::memory(),
+            kv::Selector::File(root) => kv::Manager::file(runtime.primary_token(), root),
+            kv::Selector::Memory => kv::Manager::memory(),
         };
 
         let nats_client = match nats_config {
@@ -198,6 +198,7 @@ impl DistributedRuntime {
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
             request_plane,
+            local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry::new(),
         };
 
         if let Some(nats_client_for_metrics) = nats_client_for_metrics {
@@ -319,6 +320,13 @@ impl DistributedRuntime {
         self.system_health.clone()
     }
 
+    /// Get the local endpoint registry for in-process endpoint calls
+    pub fn local_endpoint_registry(
+        &self,
+    ) -> &crate::local_endpoint_registry::LocalEndpointRegistry {
+        &self.local_endpoint_registry
+    }
+
     pub fn connection_id(&self) -> u64 {
         self.discovery_client.instance_id()
     }
@@ -377,7 +385,7 @@ impl DistributedRuntime {
 
     /// An interface to store things outside of the process. Usually backed by something like etcd.
     /// Currently does key-value, but will grow to include whatever we need to store.
-    pub fn store(&self) -> &KeyValueStoreManager {
+    pub fn store(&self) -> &kv::Manager {
         &self.store
     }
 
@@ -546,7 +554,7 @@ async fn nats_metrics_worker(
 
 #[derive(Dissolve)]
 pub struct DistributedConfig {
-    pub store_backend: KeyValueStoreSelect,
+    pub store_backend: kv::Selector,
     pub nats_config: Option<nats::ClientOptions>,
     pub request_plane: RequestPlaneMode,
 }
@@ -555,7 +563,7 @@ impl DistributedConfig {
     pub fn from_settings() -> DistributedConfig {
         let request_plane = RequestPlaneMode::from_env();
         DistributedConfig {
-            store_backend: KeyValueStoreSelect::Etcd(Box::default()),
+            store_backend: kv::Selector::Etcd(Box::default()),
             nats_config: if request_plane.is_nats() {
                 Some(nats::ClientOptions::default())
             } else {
@@ -572,7 +580,7 @@ impl DistributedConfig {
         };
         let request_plane = RequestPlaneMode::from_env();
         DistributedConfig {
-            store_backend: KeyValueStoreSelect::Etcd(Box::new(etcd_config)),
+            store_backend: kv::Selector::Etcd(Box::new(etcd_config)),
             nats_config: if request_plane.is_nats() {
                 Some(nats::ClientOptions::default())
             } else {
@@ -586,7 +594,7 @@ impl DistributedConfig {
     /// same process.
     pub fn process_local() -> DistributedConfig {
         DistributedConfig {
-            store_backend: KeyValueStoreSelect::Memory,
+            store_backend: kv::Selector::Memory,
             nats_config: None,
             // This won't be used in process local, so we likely need a "none" option to
             // communicate that and avoid opening the ports.
@@ -666,11 +674,11 @@ pub mod distributed_test_utils {
     /// Note: Settings are read from environment variables inside DistributedRuntime::from_settings
     #[cfg(feature = "integration")]
     pub async fn create_test_drt_async() -> super::DistributedRuntime {
-        use crate::{storage::key_value_store::KeyValueStoreSelect, transports::nats};
+        use crate::{storage::kv, transports::nats};
 
         let rt = crate::Runtime::from_current().unwrap();
         let config = super::DistributedConfig {
-            store_backend: KeyValueStoreSelect::Memory,
+            store_backend: kv::Selector::Memory,
             nats_config: Some(nats::ClientOptions::default()),
             request_plane: crate::distributed::RequestPlaneMode::default(),
         };
