@@ -922,7 +922,7 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
 
         # # Create build log directory for BuildKit reports
         # BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
-        # mkdir -p "${BUILD_LOG_DIR}"
+        mkdir -p "${BUILD_LOG_DIR}"
         # BASE_BUILD_LOG="${BUILD_LOG_DIR}/base-image-build.log"
 
         # # Use BuildKit for enhanced metadata
