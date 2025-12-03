@@ -125,9 +125,17 @@ export_stats_json() {
                 key = key "_seconds"
             }
 
+            # Check if value is a valid JSON number (integer or single decimal)
+            # Version strings like "0.8.2" need to be quoted
+            is_number = (value ~ /^[0-9]+$/ || value ~ /^[0-9]+\.[0-9]+$/)
+
             # Print JSON field
             if (!first) print ","
-            printf "  \"%s\": %s", key, value
+            if (is_number) {
+                printf "  \"%s\": %s", key, value
+            } else {
+                printf "  \"%s\": \"%s\"", key, value
+            }
             first = 0
         }
     }
