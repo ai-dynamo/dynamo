@@ -185,7 +185,10 @@ class GPUXIDInjectorKernel:
             )
 
         # Iterate through all GPU directories
-        gpu_dirs = os.listdir(proc_path)
+        try:
+            gpu_dirs = os.listdir(proc_path)
+        except (PermissionError, OSError) as e:
+            raise FileNotFoundError(f"Cannot access {proc_path}: {e}")
         logger.debug(
             f"Found {len(gpu_dirs)} GPU directories in {proc_path}: {gpu_dirs}"
         )
