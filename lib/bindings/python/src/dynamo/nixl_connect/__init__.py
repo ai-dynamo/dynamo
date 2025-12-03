@@ -1016,7 +1016,7 @@ class Descriptor:
                 device=f"{self._data_device}",
                 ptr=self._data_ptr,
                 size=self._data_size,
-            )
+            )  # type: ignore[operator]
 
         return self._serialized
 
