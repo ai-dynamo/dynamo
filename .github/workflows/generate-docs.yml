@@ -443,7 +443,7 @@ jobs:
 
       - name: Flush Akamai cache
         # Only run if cache flush is needed AND Akamai is enabled
-        if: ${{ steps.publish.outputs.perform_flush == 'true' && vars.AKAMAI_ENABLED == 'true' }}
+        if: ${{ steps.publish.outputs.perform_flush == 'true' && vars.DOCS_AKAMAI_ENABLED == 'true' }}
         env:
           S3_PATH: ${{ steps.publish.outputs.s3_target_path }}
           REQUEST_NAME: ${{ steps.publish.outputs.request_name }}
