@@ -955,8 +955,6 @@ impl Drop for ActiveSequencesMultiWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_runtime::{DistributedRuntime, Runtime};
-    use std::sync::Arc;
 
     #[test]
     fn test_active_sequences_shared_blocks() {
@@ -987,9 +985,15 @@ mod tests {
         assert_eq!(seq_manager.active_blocks(), 0);
         assert_eq!(seq_manager.active_tokens(), 0);
     }
+}
+
+#[cfg(all(test, feature = "integration"))]
+mod integration_tests {
+    use super::*;
+    use dynamo_runtime::{DistributedRuntime, Runtime};
+    use std::sync::Arc;
 
     #[tokio::test]
-    #[ignore]
     async fn test_multi_worker_cross_instance_sync() -> Result<()> {
         // Initialize logging once
         dynamo_runtime::logging::init();
@@ -1154,7 +1158,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_multi_worker_no_token_sequence_sync() -> Result<()> {
         // Initialize logging once
         dynamo_runtime::logging::init();
