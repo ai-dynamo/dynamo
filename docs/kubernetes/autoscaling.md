@@ -231,30 +231,45 @@ Dynamo metrics include these labels for filtering:
 
 This example scales **Prefill workers** when Time To First Token (TTFT) exceeds 500ms. Note that TTFT is measured at the Frontend, but reflects Prefill performance.
 
-First, configure Prometheus Adapter to expose the TTFT metric:
+First, configure Prometheus Adapter to expose the TTFT metric. Add this to your Helm values file (e.g., `prometheus-adapter-values.yaml`):
 
 ```yaml
-# Prometheus Adapter ConfigMap (add to your existing config)
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: prometheus-adapter-config
-  namespace: monitoring
-data:
-  config.yaml: |
-    rules:
-    # TTFT p95 from frontend - used to scale prefill
-    - seriesQuery: 'dynamo_frontend_time_to_first_token_seconds_bucket{namespace!=""}'
-      resources:
-        overrides:
-          namespace: {resource: "namespace"}
-      name:
-        as: "dynamo_ttft_p95_seconds"
-      metricsQuery: |
-        histogram_quantile(0.95,
-          sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{<<.LabelMatchers>>}[5m]))
-          by (le, namespace, dynamo_namespace)
-        )
+# prometheus-adapter-values.yaml
+prometheus:
+  url: http://prometheus-kube-prometheus-prometheus.monitoring.svc
+  port: 9090
+
+rules:
+  external:
+  # TTFT p95 from frontend - used to scale prefill
+  - seriesQuery: 'dynamo_frontend_time_to_first_token_seconds_bucket{namespace!=""}'
+    resources:
+      overrides:
+        namespace: {resource: "namespace"}
+    name:
+      as: "dynamo_ttft_p95_seconds"
+    metricsQuery: |
+      histogram_quantile(0.95,
+        sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{<<.LabelMatchers>>}[5m])) 
+        by (le, namespace, dynamo_namespace)
+      )
+```
+
+Then install or upgrade the Helm release:
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+helm upgrade --install prometheus-adapter prometheus-community/prometheus-adapter \
+  -n monitoring --create-namespace \
+  -f prometheus-adapter-values.yaml
+```
+
+Verify the metric is available:
+
+```bash
+kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/<your-namespace>/dynamo_ttft_p95_seconds" | jq
 ```
 
 Then create the HPA targeting the Prefill adapter:
@@ -286,11 +301,11 @@ spec:
         value: "500m"  # Scale up when TTFT p95 > 500ms
   behavior:
     scaleDown:
-      stabilizationWindowSeconds: 300    # Wait 5 min before scaling down
+      stabilizationWindowSeconds: 60    # Wait 1 min before scaling down
       policies:
       - type: Pods
         value: 1
-        periodSeconds: 60
+        periodSeconds: 30
     scaleUp:
       stabilizationWindowSeconds: 0      # Scale up immediately
       policies:
@@ -309,9 +324,10 @@ spec:
 
 #### Example: Scale Decode Based on Queue Depth
 
+Add this rule to your `prometheus-adapter-values.yaml` (alongside the TTFT rule):
+
 ```yaml
-# Prometheus Adapter rule
-rules:
+# Add to rules.external in prometheus-adapter-values.yaml
 - seriesQuery: 'dynamo_frontend_queued_requests{namespace!=""}'
   resources:
     overrides:
@@ -320,8 +336,11 @@ rules:
     as: "dynamo_queued_requests"
   metricsQuery: |
     sum(<<.Series>>{<<.LabelMatchers>>}) by (namespace, dynamo_namespace)
+```
 
----
+Then create the HPA:
+
+```yaml
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
