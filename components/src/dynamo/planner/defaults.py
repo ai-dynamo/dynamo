@@ -21,7 +21,6 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from dynamo.planner.kube import get_current_k8s_namespace
 from dynamo.planner.utils.exceptions import (
     DuplicateSubComponentError,
     SubComponentNotFoundError,
@@ -32,17 +31,10 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-def _get_prometheus_port_from_env():
-    """
-    Get prometheus port from environment variables if set.
-    Otherwise, return 0, which means not reporting metrics using prometheus.
-    """
-    return os.environ.get("PLANNER_PROMETHEUS_PORT", 0)
-
-
 # Source of truth for planner defaults
 class BasePlannerDefaults:
-    namespace = "dynamo"
+    # Namespace from DYN_NAMESPACE env var (injected by operator as "{k8s_namespace}-{dgd_name}")
+    namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
     environment = "kubernetes"
     backend = "vllm"
     no_operation = False
@@ -52,7 +44,8 @@ class BasePlannerDefaults:
     min_endpoint = 1  # applies to both decode and prefill
     decode_engine_num_gpu = 1
     prefill_engine_num_gpu = 1
-    prometheus_port = _get_prometheus_port_from_env()
+    # Port for exposing planner's own metrics (0 means disabled)
+    metric_reporting_prometheus_port = int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
 
 
 class LoadPlannerDefaults(BasePlannerDefaults):
@@ -63,29 +56,12 @@ class LoadPlannerDefaults(BasePlannerDefaults):
     prefill_queue_scale_down_threshold = 0.2
 
 
-def _get_default_prometheus_endpoint(port: str, namespace: str):
-    """Compute default prometheus endpoint using environment variables and Kubernetes service discovery"""
-    prometheus_endpoint = os.environ.get("PROMETHEUS_ENDPOINT", "").strip()
-    if prometheus_endpoint:
-        logger.debug("Using PROMETHEUS_ENDPOINT override: %s", prometheus_endpoint)
-        return prometheus_endpoint
-
-    k8s_namespace = get_current_k8s_namespace()
-    if k8s_namespace and k8s_namespace != "default":
-        prometheus_service = f"{namespace}-prometheus"
-        return f"http://{prometheus_service}.{k8s_namespace}.svc.cluster.local:{port}"
-    else:
-        logger.warning(
-            f"Cannot determine Prometheus endpoint. Running in namespace '{k8s_namespace}'. "
-            "Ensure the planner is deployed in a Kubernetes cluster with proper namespace configuration."
-        )
-        return f"{namespace}-prometheus"
-
-
 class SLAPlannerDefaults(BasePlannerDefaults):
-    port = os.environ.get("PROMETHEUS_PORT", "9090")
-    namespace = os.environ.get("DYN_NAMESPACE", "vllm-disagg-planner")
-    prometheus_endpoint = _get_default_prometheus_endpoint(port, namespace)
+    # Prometheus endpoint URL for pulling/querying metrics
+    metric_pulling_prometheus_endpoint = os.environ.get(
+        "PROMETHEUS_ENDPOINT",
+        "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090",
+    )
     profile_results_dir = "profiling_results"
     isl = 3000  # in number of tokens
     osl = 150  # in number of tokens
