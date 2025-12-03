@@ -23,6 +23,14 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
+pytestmark = [
+    pytest.mark.vllm,
+    pytest.mark.gpu_1,
+    pytest.mark.e2e,
+    pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
+    pytest.mark.nightly,
+]
+
 
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with vLLM backend"""
@@ -100,11 +108,6 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.nightly
 def test_request_migration_vllm_worker_failure(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -151,11 +154,6 @@ def test_request_migration_vllm_worker_failure(
                 verify_migration_occurred(frontend)
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.nightly
 def test_request_migration_vllm_graceful_shutdown(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -203,11 +201,6 @@ def test_request_migration_vllm_graceful_shutdown(
                 verify_migration_occurred(frontend)
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.nightly
 def test_no_request_migration_vllm_worker_failure(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -268,11 +261,6 @@ def test_no_request_migration_vllm_worker_failure(
                     ), f"Unexpected migration message: {e}"
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.nightly
 def test_no_request_migration_vllm_graceful_shutdown(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
