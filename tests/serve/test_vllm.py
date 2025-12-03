@@ -21,51 +21,9 @@ from tests.utils.payload_builder import (
     completion_payload_default,
     metric_payload_default,
 )
-from tests.utils.payloads import ChatPayload
+from tests.utils.payloads import ToolCallingChatPayload
 
 logger = logging.getLogger(__name__)
-
-
-class ToolCallingChatPayload(ChatPayload):
-    """Custom ChatPayload that validates tool calls in the response."""
-
-    def __init__(self, *args, expected_tool_name: str = None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.expected_tool_name = expected_tool_name
-
-    def validate(self, response, content: str) -> None:
-        """Validate that tool calls exist in the response."""
-        # First run the standard validation
-        super().validate(response, content)
-
-        # Then validate tool calls specifically
-        response_data = response.json()
-        choices = response_data.get("choices", [])
-        assert choices, "Response missing choices"
-
-        message = choices[0].get("message", {})
-        tool_calls = message.get("tool_calls", [])
-
-        assert tool_calls, "Expected model to generate tool calls but none found"
-        logger.info(f"✓ Tool calls detected: {len(tool_calls)} call(s)")
-
-        # Validate tool call structure
-        for i, tc in enumerate(tool_calls):
-            assert "function" in tc, f"Tool call {i} missing 'function' field"
-            function = tc.get("function", {})
-            assert "name" in function, f"Tool call {i} missing function name"
-            assert "arguments" in function, f"Tool call {i} missing function arguments"
-            logger.info(
-                f"  [{i}] Function: {function.get('name')}, Args: {function.get('arguments')[:100]}..."
-            )
-
-        # If expected tool name is provided, validate it
-        if self.expected_tool_name:
-            tool_names = [tc.get("function", {}).get("name") for tc in tool_calls]
-            assert (
-                self.expected_tool_name in tool_names
-            ), f"Expected tool '{self.expected_tool_name}' not found. Available tools: {tool_names}"
-            logger.info(f"✓ Expected tool '{self.expected_tool_name}' was called")
 
 
 @dataclass
@@ -361,7 +319,7 @@ vllm_configs = {
     "aggregated_toolcalling": VLLMConfig(
         name="aggregated_toolcalling",
         directory=vllm_dir,
-        script_name="agg_toolcalling.sh",
+        script_name="agg_multimodal.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.multimodal],
         model="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
         script_args=[
@@ -369,7 +327,7 @@ vllm_configs = {
             "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
             "--max-model-len",
             "10000",
-            "--tool-parser",
+            "--dyn-tool-call-parser",
             "hermes",
         ],
         delayed_start=0,
