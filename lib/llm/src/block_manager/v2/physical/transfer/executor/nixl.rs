@@ -24,11 +24,10 @@ pub(crate) struct DescriptorParams<'a> {
 }
 use crate::block_manager::v2::physical::transfer::executor::contiguous_transfer::{
     build_batched_contiguous_transfer, build_multi_descriptor_transfer,
+    build_per_block_offset_transfer, build_per_block_unique_target_transfer,
     build_single_descriptor_transfer,
 };
-use crate::block_manager::v2::physical::transfer::executor::object_transfer::{
-    build_object_storage_transfer, get_object_device_id,
-};
+use crate::block_manager::v2::physical::transfer::executor::object_transfer::get_object_device_id;
 use crate::block_manager::v2::memory::StorageKind;
 use crate::block_manager::v2::physical::transfer::context::TransferCompleteNotification;
 use anyhow::{anyhow, Result};
@@ -400,6 +399,18 @@ fn build_descriptors(
 
     tracing::debug!("Descriptor strategy: {:?} (requested: {:?})", resolved_hint, hint);
 
+    // Check if either side involves object storage (needs per-block device IDs)
+    let src_is_object = matches!(src.location(), StorageKind::Object(_));
+    let dst_is_object = matches!(dst.location(), StorageKind::Object(_));
+    let involves_object = src_is_object || dst_is_object;
+
+    // Device ID closure for object storage (per-block keys) or None for others
+    let get_device_id_fn: Option<&dyn Fn(&PhysicalLayout, usize, u64) -> u64> = if involves_object {
+        Some(&|layout, block_id, default_id| get_object_device_id(layout, block_id, default_id))
+    } else {
+        None
+    };
+
     match resolved_hint {
         DescriptorHint::Coalesced => {
             // Single descriptor covering all blocks
@@ -410,20 +421,20 @@ fn build_descriptors(
         }
         DescriptorHint::PerBlockWithOffset => {
             // One descriptor per block, each at its own offset (reads)
-            build_object_storage_transfer(
+            build_per_block_offset_transfer(
                 src, dst, src_block_ids, dst_block_ids, layers,
                 src_device_id, dst_device_id, src_dl, dst_dl,
-                &|layout, block_id, default_id| get_object_device_id(layout, block_id, default_id),
-                true, // is_read = true
+                get_device_id_fn,
             )
         }
         DescriptorHint::PerBlockUniqueTarget => {
             // One descriptor per block, each to unique target (writes)
-            build_object_storage_transfer(
+            // Object storage requires zero offset (doesn't support partial writes)
+            build_per_block_unique_target_transfer(
                 src, dst, src_block_ids, dst_block_ids, layers,
                 src_device_id, dst_device_id, src_dl, dst_dl,
-                &|layout, block_id, default_id| get_object_device_id(layout, block_id, default_id),
-                false, // is_read = false
+                get_device_id_fn,
+                dst_is_object, // force_zero_offset for object storage writes
             )
         }
         DescriptorHint::BatchedRanges => {
