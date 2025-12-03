@@ -42,7 +42,6 @@ spec:
             - Qwen/Qwen3-8B
             - --gpu-memory-utilization
             - "0.45"
-            - --disable-log-requests
             - --max-model-len
             - "32000"
             - --enforce-eager
