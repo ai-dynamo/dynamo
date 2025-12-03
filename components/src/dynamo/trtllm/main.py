@@ -39,7 +39,14 @@ import dynamo.nixl_connect as nixl_connect
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
+from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    ZmqKvEventPublisher,
+    ZmqKvEventPublisherConfig,
+    register_llm,
+)
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
@@ -235,6 +242,39 @@ async def init(runtime: DistributedRuntime, config: Config):
             )
             sys.exit(1)
 
+    trtllm_zmq_bind_endpoint = None  # Endpoint for TensorRT-LLM to bind and publish
+    consolidator_output_endpoint = (
+        None  # Endpoint where consolidator publishes (workers subscribe to this)
+    )
+
+    try:
+        from kvbm.trtllm_integration.consolidator_config import (
+            get_consolidator_endpoints,
+            should_enable_consolidator,
+        )
+
+        if should_enable_consolidator(arg_map):
+            # get_consolidator_endpoints returns (trtllm_bind_endpoint, output_bind_endpoint, output_connect_endpoint)
+            consolidator_endpoints = get_consolidator_endpoints()
+            trtllm_zmq_bind_endpoint = consolidator_endpoints[0]  # TRTLLM bind endpoint
+            consolidator_output_endpoint = consolidator_endpoints[
+                1
+            ]  # Consolidator output bind endpoint (for KVBM connector)
+            consolidator_output_connect_endpoint = consolidator_endpoints[
+                2
+            ]  # Consolidator output connect endpoint (for worker publisher)
+    except ImportError:
+        # kvbm package is not installed
+        logging.info(
+            "kvbm package not installed - skipping KV event consolidator setup."
+        )
+    except Exception as e:
+        logging.error(
+            f"Failed to set up consolidator endpoints: {e}. "
+            "Continuing without KV event consolidation.",
+            exc_info=True,
+        )
+
     logging.info(f"TensorRT-LLM engine args: {arg_map}")
     engine_args = arg_map
 
@@ -400,6 +440,26 @@ async def init(runtime: DistributedRuntime, config: Config):
             # Use model_path as fallback if served_model_name is not provided
             model_name_for_metrics = config.served_model_name or config.model_path
             metrics_labels = [("model", model_name_for_metrics)]
+
+            # Create worker-side publisher for consolidated events if consolidator is enabled
+            # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
+            consolidator_publisher = None
+            if consolidator_output_endpoint:
+                # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
+                consolidator_config = ZmqKvEventPublisherConfig(
+                    worker_id=int(endpoint.connection_id()),
+                    kv_block_size=config.kv_block_size,
+                    zmq_endpoint=consolidator_output_connect_endpoint,
+                    zmq_topic="",  # Empty topic = all topics
+                )
+                consolidator_publisher = ZmqKvEventPublisher(
+                    component, consolidator_config
+                )
+                logging.info(
+                    f"Created worker-side publisher for consolidated events: "
+                    f"subscribing to {consolidator_output_connect_endpoint}, worker_id={endpoint.connection_id()}"
+                )
+
             async with get_publisher(
                 component,
                 engine,
@@ -407,6 +467,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 int(endpoint.connection_id()),
                 config.kv_block_size,
                 metrics_labels,
+                zmq_endpoint=trtllm_zmq_bind_endpoint,
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
@@ -415,6 +476,10 @@ async def init(runtime: DistributedRuntime, config: Config):
                     metrics_labels=metrics_labels,
                     health_check_payload=health_check_payload,
                 )
+
+            # Shutdown consolidator publisher if it was created
+            if consolidator_publisher:
+                consolidator_publisher.shutdown()
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
             await endpoint.serve_endpoint(
