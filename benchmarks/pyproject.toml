@@ -40,7 +40,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@5554d2eb8206738c66048bf2d72183e9bcd85759",
+    "aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@release/0.4.0",
     "networkx",
     "pandas",
     "pydantic>=2",
