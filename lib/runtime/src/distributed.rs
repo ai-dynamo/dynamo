@@ -3,17 +3,15 @@
 
 use crate::component::{Component, Instance};
 use crate::pipeline::PipelineError;
-use crate::storage::key_value_store::{
-    EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, KeyValueStoreSelect,
-    MemoryStore,
-};
+use crate::pipeline::network::manager::NetworkManager;
+use crate::service::{ComponentNatsServerPrometheusMetrics, ServiceClient, ServiceSet};
+use crate::storage::kv::{self, Store as _};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     component::{self, ComponentBuilder, Endpoint, Namespace},
     discovery::Discovery,
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
-    service::ServiceClient,
     transports::{etcd, nats, tcp},
 };
 use crate::{discovery, system_status_server, transports};
@@ -22,9 +20,12 @@ use super::utils::GracefulShutdownTracker;
 use crate::SystemHealth;
 use crate::runtime::Runtime;
 
+// Used instead of std::cell::OnceCell because get_or_try_init there is nightly
 use async_once_cell::OnceCell;
+
 use std::fmt;
 use std::sync::{Arc, OnceLock, Weak};
+use std::time::Duration;
 use tokio::sync::watch::Receiver;
 
 use anyhow::Result;
@@ -44,9 +45,9 @@ pub struct DistributedRuntime {
     runtime: Runtime,
 
     nats_client: Option<transports::nats::Client>,
-    store: KeyValueStoreManager,
+    store: kv::Manager,
+    network_manager: Arc<NetworkManager>,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
-    network_manager: Arc<OnceCell<Arc<crate::pipeline::network::manager::NetworkManager>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
     request_plane: RequestPlaneMode,
 
@@ -68,6 +69,9 @@ pub struct DistributedRuntime {
 
     // Health Status
     system_health: Arc<parking_lot::Mutex<SystemHealth>>,
+
+    // Local endpoint registry for in-process calls
+    local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry,
 
     // This hierarchy's own metrics registry
     metrics_registry: MetricsRegistry,
@@ -100,15 +104,15 @@ impl DistributedRuntime {
         let runtime_clone = runtime.clone();
 
         let store = match selected_kv_store {
-            KeyValueStoreSelect::Etcd(etcd_config) => {
+            kv::Selector::Etcd(etcd_config) => {
                 let etcd_client = etcd::Client::new(*etcd_config, runtime_clone).await.inspect_err(|err|
                     // The returned error doesn't show because of a dropped runtime error, so
                     // log it first.
                     tracing::error!(%err, "Could not connect to etcd. Pass `--store-kv ..` to use a different backend or start etcd."))?;
-                KeyValueStoreManager::etcd(etcd_client)
+                kv::Manager::etcd(etcd_client)
             }
-            KeyValueStoreSelect::File(root) => KeyValueStoreManager::file(root),
-            KeyValueStoreSelect::Memory => KeyValueStoreManager::memory(),
+            kv::Selector::File(root) => kv::Manager::file(runtime.primary_token(), root),
+            kv::Selector::Memory => kv::Manager::memory(),
         };
 
         let nats_client = match nats_config {
@@ -135,8 +139,6 @@ impl DistributedRuntime {
             health_endpoint_path,
             live_endpoint_path,
         )));
-
-        let nats_client_for_metrics = nats_client.clone();
 
         // Initialize discovery client based on backend configuration
         let discovery_backend =
@@ -171,20 +173,32 @@ impl DistributedRuntime {
             }
         };
 
+        let component_registry = component::Registry::new();
+        let nats_client_for_metrics = nats_client.clone();
+
+        // NetworkManager for request plane
+        let network_manager = NetworkManager::new(
+            runtime.child_token(),
+            nats_client.clone().map(|c| c.client().clone()),
+            component_registry.clone(),
+            request_plane,
+        );
+
         let distributed_runtime = Self {
             runtime,
             store,
+            network_manager: Arc::new(network_manager),
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
-            network_manager: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             discovery_metadata,
-            component_registry: component::Registry::new(),
+            component_registry,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
             request_plane,
+            local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry::new(),
         };
 
         if let Some(nats_client_for_metrics) = nats_client_for_metrics {
@@ -306,6 +320,13 @@ impl DistributedRuntime {
         self.system_health.clone()
     }
 
+    /// Get the local endpoint registry for in-process endpoint calls
+    pub fn local_endpoint_registry(
+        &self,
+    ) -> &crate::local_endpoint_registry::LocalEndpointRegistry {
+        &self.local_endpoint_registry
+    }
+
     pub fn connection_id(&self) -> u64 {
         self.discovery_client.instance_id()
     }
@@ -325,10 +346,6 @@ impl DistributedRuntime {
         self.discovery_client.clone()
     }
 
-    pub(crate) fn service_client(&self) -> Option<ServiceClient> {
-        self.nats_client().map(|nc| ServiceClient::new(nc.clone()))
-    }
-
     pub async fn tcp_server(&self) -> Result<Arc<tcp::server::TcpStreamServer>> {
         Ok(self
             .tcp_server
@@ -341,32 +358,12 @@ impl DistributedRuntime {
             .clone())
     }
 
-    /// Get the network manager (lazy initialization)
+    /// Get the network manager
     ///
     /// The network manager consolidates all network configuration and provides
     /// unified access to request plane servers and clients.
-    pub async fn network_manager(
-        &self,
-    ) -> Result<Arc<crate::pipeline::network::manager::NetworkManager>> {
-        use crate::pipeline::network::manager::NetworkManager;
-
-        let manager = self
-            .network_manager
-            .get_or_try_init(async {
-                // Get NATS client if available
-                let nats_client = self.nats_client().map(|c| c.client().clone());
-
-                // NetworkManager handles all config reading and mode selection
-                anyhow::Ok(NetworkManager::new(
-                    self.child_token(),
-                    nats_client,
-                    self.component_registry.clone(),
-                    self.request_plane,
-                ))
-            })
-            .await?;
-
-        Ok(manager.clone())
+    pub fn network_manager(&self) -> Arc<NetworkManager> {
+        self.network_manager.clone()
     }
 
     /// Get the request plane server (convenience method)
@@ -376,40 +373,7 @@ impl DistributedRuntime {
         &self,
     ) -> Result<Arc<dyn crate::pipeline::network::ingress::unified_server::RequestPlaneServer>>
     {
-        let manager = self.network_manager().await?;
-        manager.server().await
-    }
-
-    /// DEPRECATED: Use network_manager().server() instead
-    #[deprecated(note = "Use request_plane_server() or network_manager().server() instead")]
-    pub async fn http_server(
-        &self,
-    ) -> Result<Arc<crate::pipeline::network::ingress::http_endpoint::SharedHttpServer>> {
-        // For backward compatibility, try to downcast
-        let _server = self.request_plane_server().await?;
-        // This will only work if we're actually in HTTP mode
-        // For now, just return an error suggesting the new API
-        anyhow::bail!(
-            "http_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types."
-        )
-    }
-
-    /// DEPRECATED: Use network_manager().server() instead
-    #[deprecated(note = "Use request_plane_server() or network_manager().server() instead")]
-    pub async fn shared_tcp_server(
-        &self,
-    ) -> Result<Arc<crate::pipeline::network::ingress::shared_tcp_endpoint::SharedTcpServer>> {
-        // For backward compatibility, try to downcast
-        let _server = self.request_plane_server().await?;
-        // This will only work if we're actually in TCP mode
-        // For now, just return an error suggesting the new API
-        anyhow::bail!(
-            "shared_tcp_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types."
-        )
-    }
-
-    pub fn nats_client(&self) -> Option<&nats::Client> {
-        self.nats_client.as_ref()
+        self.network_manager().server().await
     }
 
     /// Get system status server information if available
@@ -421,7 +385,7 @@ impl DistributedRuntime {
 
     /// An interface to store things outside of the process. Usually backed by something like etcd.
     /// Currently does key-value, but will grow to include whatever we need to store.
-    pub fn store(&self) -> &KeyValueStoreManager {
+    pub fn store(&self) -> &kv::Manager {
         &self.store
     }
 
@@ -441,11 +405,156 @@ impl DistributedRuntime {
     pub fn instance_sources(&self) -> Arc<Mutex<InstanceMap>> {
         self.instance_sources.clone()
     }
+
+    /// TODO: This is a temporary KV router measure for component/component.rs EventPublisher impl for
+    /// Component, to allow it to publish to NATS. KV Router is the only user.
+    pub(crate) async fn kv_router_nats_publish(
+        &self,
+        subject: String,
+        payload: bytes::Bytes,
+    ) -> anyhow::Result<()> {
+        let Some(nats_client) = self.nats_client.as_ref() else {
+            anyhow::bail!("KV router's EventPublisher requires NATS");
+        };
+        Ok(nats_client.client().publish(subject, payload).await?)
+    }
+
+    /// TODO: This is a temporary KV router measure for component/component.rs EventSubscriber impl for
+    /// Component, to allow it to subscribe to NATS. KV Router is the only user.
+    pub(crate) async fn kv_router_nats_subscribe(
+        &self,
+        subject: String,
+    ) -> Result<async_nats::Subscriber> {
+        let Some(nats_client) = self.nats_client.as_ref() else {
+            anyhow::bail!("KV router's EventSubscriber requires NATS");
+        };
+        Ok(nats_client.client().subscribe(subject).await?)
+    }
+
+    /// Start NATS metrics service in the background to isolate the async,
+    /// and because we don't need it yet.
+    /// TODO: This and the things it calls should be in a nats module somewhere.
+    pub fn start_stats_service(&self, component: Component) {
+        let drt = self.clone();
+        self.runtime().secondary().spawn(async move {
+            let service_name = component.service_name();
+            if let Err(err) = drt.add_stats_service(component).await {
+                tracing::error!(error = %err, component = service_name, "Failed starting stats service");
+            }
+        });
+    }
+
+    /// Gather NATS metrics
+    async fn add_stats_service(&self, component: Component) -> anyhow::Result<()> {
+        let service_name = component.service_name();
+
+        // Pre-check to save cost of creating the service, but don't hold the lock
+        if self
+            .component_registry()
+            .inner
+            .lock()
+            .await
+            .services
+            .contains_key(&service_name)
+        {
+            // The NATS service is per component, but it is called from `serve_endpoint`, and there
+            // are often multiple endpoints for a component (e.g. `clear_kv_blocks` and `generate`).
+            tracing::trace!("Service {service_name} already exists");
+            return Ok(());
+        }
+
+        let Some(nats_client) = self.nats_client.as_ref() else {
+            anyhow::bail!("Cannot create NATS service without NATS.");
+        };
+        let description = None;
+        let (nats_service, stats_reg) =
+            crate::component::service::build_nats_service(nats_client, &component, description)
+                .await?;
+
+        let mut guard = self.component_registry().inner.lock().await;
+        if !guard.services.contains_key(&service_name) {
+            // Normal case
+            guard.services.insert(service_name.clone(), nats_service);
+            guard.stats_handlers.insert(service_name.clone(), stats_reg);
+
+            tracing::info!("Added NATS / stats service {service_name}");
+
+            drop(guard);
+        } else {
+            drop(guard);
+            let _ = nats_service.stop().await;
+            // The NATS service is per component, but it is called from `serve_endpoint`, and there
+            // are often multiple endpoints for a component (e.g. `clear_kv_blocks` and `generate`).
+            // TODO: Is this still true?
+            return Ok(());
+        }
+
+        let cancel_token = self.primary_token();
+        let service_client = self
+            .nats_client
+            .as_ref()
+            .map(|nc| ServiceClient::new(nc.clone()))
+            .ok_or_else(|| {
+                anyhow::anyhow!("Stats service requires NATS client to collect service metrics.")
+            })?;
+        // If there is another component with the same service name, this will fail.
+        let component_metrics = ComponentNatsServerPrometheusMetrics::new(&component)?;
+
+        self.runtime().secondary().spawn(nats_metrics_worker(
+            cancel_token,
+            service_client,
+            component_metrics,
+            component,
+        ));
+        Ok(())
+    }
+}
+
+/// Add Prometheus metrics for this component's NATS service stats.
+///
+/// Starts a background task that periodically requests service statistics from NATS
+/// and updates the corresponding Prometheus metrics. The first scrape happens immediately,
+/// then subsequent scrapes occur at a fixed interval of 9.8 seconds (MAX_WAIT_MS),
+/// which should be near or smaller than typical Prometheus scraping intervals to ensure
+/// metrics are fresh when Prometheus collects them.
+async fn nats_metrics_worker(
+    cancel_token: CancellationToken,
+    service_client: ServiceClient,
+    component_metrics: ComponentNatsServerPrometheusMetrics,
+    component: Component,
+) {
+    const MAX_WAIT_MS: Duration = Duration::from_millis(9800); // Should be <= Prometheus scrape interval
+    let timeout = Duration::from_millis(500);
+    let mut interval = tokio::time::interval(MAX_WAIT_MS);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let service_name = component.service_name();
+    loop {
+        tokio::select! {
+            result = service_client.collect_services(&service_name, timeout) => {
+                match result {
+                    Ok(service_set) => {
+                        component_metrics.update_from_service_set(&service_set);
+                    }
+                    Err(err) => {
+                        tracing::error!("Background scrape failed for {service_name}: {err}",);
+                        component_metrics.reset_to_zeros();
+                    }
+                }
+            }
+            _ = cancel_token.cancelled() => {
+                tracing::trace!("nats_metrics_worker stopped");
+                break;
+            }
+        }
+
+        interval.tick().await;
+    }
 }
 
 #[derive(Dissolve)]
 pub struct DistributedConfig {
-    pub store_backend: KeyValueStoreSelect,
+    pub store_backend: kv::Selector,
     pub nats_config: Option<nats::ClientOptions>,
     pub request_plane: RequestPlaneMode,
 }
@@ -454,7 +563,7 @@ impl DistributedConfig {
     pub fn from_settings() -> DistributedConfig {
         let request_plane = RequestPlaneMode::from_env();
         DistributedConfig {
-            store_backend: KeyValueStoreSelect::Etcd(Box::default()),
+            store_backend: kv::Selector::Etcd(Box::default()),
             nats_config: if request_plane.is_nats() {
                 Some(nats::ClientOptions::default())
             } else {
@@ -471,13 +580,25 @@ impl DistributedConfig {
         };
         let request_plane = RequestPlaneMode::from_env();
         DistributedConfig {
-            store_backend: KeyValueStoreSelect::Etcd(Box::new(etcd_config)),
+            store_backend: kv::Selector::Etcd(Box::new(etcd_config)),
             nats_config: if request_plane.is_nats() {
                 Some(nats::ClientOptions::default())
             } else {
                 None
             },
             request_plane,
+        }
+    }
+
+    /// A DistributedConfig that isn't distributed, for when the frontend and backend are in the
+    /// same process.
+    pub fn process_local() -> DistributedConfig {
+        DistributedConfig {
+            store_backend: kv::Selector::Memory,
+            nats_config: None,
+            // This won't be used in process local, so we likely need a "none" option to
+            // communicate that and avoid opening the ports.
+            request_plane: RequestPlaneMode::Tcp,
         }
     }
 }
@@ -553,11 +674,11 @@ pub mod distributed_test_utils {
     /// Note: Settings are read from environment variables inside DistributedRuntime::from_settings
     #[cfg(feature = "integration")]
     pub async fn create_test_drt_async() -> super::DistributedRuntime {
-        use crate::{storage::key_value_store::KeyValueStoreSelect, transports::nats};
+        use crate::{storage::kv, transports::nats};
 
         let rt = crate::Runtime::from_current().unwrap();
         let config = super::DistributedConfig {
-            store_backend: KeyValueStoreSelect::Memory,
+            store_backend: kv::Selector::Memory,
             nats_config: Some(nats::ClientOptions::default()),
             request_plane: crate::distributed::RequestPlaneMode::default(),
         };

@@ -23,7 +23,6 @@ When running vLLM through Dynamo, vLLM engine metrics are automatically passed t
 |---------------|-------------|---------|---------|
 | `DYN_SYSTEM_PORT` | System metrics/health port. Required to expose `/metrics` endpoint. | `-1` (disabled) | `8081` |
 | `--connector` | KV connector to use. Use `lmcache` to enable LMCache metrics. | `nixl` | `--connector lmcache` |
-| `ENABLE_LMCACHE` | Sets Dynamo's recommended LMCache defaults (optional). | Not set | `ENABLE_LMCACHE=1` |
 
 ## Getting Started Quickly
 
@@ -117,15 +116,9 @@ To access LMCache metrics, both of these are required:
 1. `--connector lmcache` - Enables LMCache in vLLM
 2. `DYN_SYSTEM_PORT=8081` - Enables Dynamo's metrics HTTP endpoint
 
-**Minimal example:**
+**Example:**
 ```bash
 DYN_SYSTEM_PORT=8081 \
-python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector lmcache
-```
-
-**Recommended (with Dynamo defaults):**
-```bash
-DYN_SYSTEM_PORT=8081 ENABLE_LMCACHE=1 \
 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector lmcache
 ```
 
@@ -143,7 +136,7 @@ curl -s localhost:8081/metrics | grep "^lmcache:"
 ## Implementation Details
 
 - vLLM v1 uses multiprocess metrics collection via `prometheus_client.multiprocess`
-- `PROMETHEUS_MULTIPROC_DIR`: vLLM sets this environment variable to a temporary directory where multiprocess metrics are stored as memory-mapped files. Each worker process writes its metrics to separate files in this directory, which are aggregated when `/metrics` is scraped.
+- `PROMETHEUS_MULTIPROC_DIR`: (optional). By default, Dynamo automatically manages this environment variable, setting it to a temporary directory where multiprocess metrics are stored as memory-mapped files. Each worker process writes its metrics to separate files in this directory, which are aggregated when `/metrics` is scraped. Users only need to set this explicitly where complete control over the metrics directory is required.
 - Dynamo uses `MultiProcessCollector` to aggregate metrics from all worker processes
 - Metrics are filtered by the `vllm:` and `lmcache:` prefixes before being exposed (when LMCache is enabled)
 - The integration uses Dynamo's `register_engine_metrics_callback()` function with the global `REGISTRY`

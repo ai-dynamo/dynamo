@@ -1002,8 +1002,7 @@ mod tests {
 
         // Create namespace and shared component for both seq_managers
         let namespace = distributed.namespace("test_cross_instance_sync")?;
-        let mut component = namespace.component("sequences")?;
-        component.add_stats_service().await?;
+        let component = namespace.component("sequences")?;
 
         // Create multi-worker sequence managers with:
         // - Worker 0 with dp_size=2 (dp_ranks 0 and 1)
@@ -1168,8 +1167,7 @@ mod tests {
 
         // Create namespace and shared component for both seq_managers
         let namespace = distributed.namespace("test_no_token_seq_sync")?;
-        let mut component = namespace.component("sequences")?;
-        component.add_stats_service().await?;
+        let component = namespace.component("sequences")?;
 
         // Create multi-worker sequence managers with ALL workers [0, 1, 2]
         // Both use the same component to ensure event synchronization works

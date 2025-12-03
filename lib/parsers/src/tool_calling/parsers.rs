@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::config::{ToolCallConfig, ToolCallParserType};
+use super::config::{ParserConfig, ToolCallConfig};
 use super::harmony::{
     detect_tool_call_start_harmony, find_tool_call_end_position_harmony,
     parse_tool_calls_harmony_complete,
@@ -50,25 +50,25 @@ pub async fn try_tool_call_parse(
     config: &ToolCallConfig,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     // Use match statement (Rust's switch statement) to call the appropriate parser
-    match config.format {
-        ToolCallParserType::Json => {
-            let (results, normal_content) = try_tool_call_parse_json(message, &config.json)?;
+    match &config.parser_config {
+        ParserConfig::Json(json_config) => {
+            let (results, normal_content) = try_tool_call_parse_json(message, json_config)?;
             Ok((results, normal_content))
         }
-        ToolCallParserType::Harmony => {
+        ParserConfig::Harmony(json_config) => {
             let (results, normal_content) =
-                parse_tool_calls_harmony_complete(message, &config.json).await?;
+                parse_tool_calls_harmony_complete(message, json_config).await?;
             Ok((results, normal_content))
         }
-        ToolCallParserType::Pythonic => {
+        ParserConfig::Pythonic => {
             let (results, normal_content) = try_tool_call_parse_pythonic(message)?;
             Ok((results, normal_content))
         }
-        ToolCallParserType::Typescript => {
+        ParserConfig::Typescript => {
             anyhow::bail!("Typescript parser not implemented");
         }
-        ToolCallParserType::Xml => {
-            let (results, normal_content) = try_tool_call_parse_xml(message)?;
+        ParserConfig::Xml(xml_config) => {
+            let (results, normal_content) = try_tool_call_parse_xml(message, xml_config)?;
             Ok((results, normal_content))
         }
     }
@@ -109,16 +109,16 @@ pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::
     };
 
     match parser_map.get(parser_key) {
-        Some(config) => match config.format {
-            ToolCallParserType::Json => Ok(detect_tool_call_start_json(chunk, &config.json)),
-            ToolCallParserType::Harmony => {
-                Ok(detect_tool_call_start_harmony(chunk, &config.json, false))
+        Some(config) => match &config.parser_config {
+            ParserConfig::Json(json_config) => Ok(detect_tool_call_start_json(chunk, json_config)),
+            ParserConfig::Harmony(json_config) => {
+                Ok(detect_tool_call_start_harmony(chunk, json_config, false))
             }
-            ToolCallParserType::Pythonic => Ok(detect_tool_call_start_pythonic(chunk)),
-            ToolCallParserType::Typescript => {
+            ParserConfig::Pythonic => Ok(detect_tool_call_start_pythonic(chunk)),
+            ParserConfig::Typescript => {
                 anyhow::bail!("Typescript parser not implemented");
             }
-            ToolCallParserType::Xml => Ok(detect_tool_call_start_xml(chunk)),
+            ParserConfig::Xml(xml_config) => Ok(detect_tool_call_start_xml(chunk, xml_config)),
         },
         None => anyhow::bail!(
             "Parser '{}' is not implemented. Available parsers: {:?}",
@@ -136,23 +136,25 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> usi
     };
 
     match parser_map.get(parser_key) {
-        Some(config) => match config.format {
-            ToolCallParserType::Json => {
+        Some(config) => match &config.parser_config {
+            ParserConfig::Json(json_config) => {
                 // For "default", use "nemotron_deci" as the effective parser; otherwise, use the provided parser_key
                 let effective_parser = if parser_key == "default" {
                     "nemotron_deci"
                 } else {
                     parser_key
                 };
-                find_tool_call_end_position_json(chunk, effective_parser, &config.json)
+                find_tool_call_end_position_json(chunk, effective_parser, json_config)
             }
-            ToolCallParserType::Harmony => find_tool_call_end_position_harmony(chunk, &config.json),
-            ToolCallParserType::Pythonic => find_tool_call_end_position_pythonic(chunk),
-            ToolCallParserType::Typescript => {
+            ParserConfig::Harmony(json_config) => {
+                find_tool_call_end_position_harmony(chunk, json_config)
+            }
+            ParserConfig::Pythonic => find_tool_call_end_position_pythonic(chunk),
+            ParserConfig::Typescript => {
                 // Typescript parser not implemented
                 chunk.len()
             }
-            ToolCallParserType::Xml => find_tool_call_end_position_xml(chunk),
+            ParserConfig::Xml(xml_config) => find_tool_call_end_position_xml(chunk, xml_config),
         },
         None => {
             // Unknown parser, return full content length
@@ -280,12 +282,11 @@ mod tests {
         let (result, content) = try_tool_call_parse(
             input,
             &ToolCallConfig {
-                format: ToolCallParserType::Json,
-                json: JsonParserConfig {
+                parser_config: ParserConfig::Json(JsonParserConfig {
                     tool_call_start_tokens: vec!["<|python_tag|>".to_string()],
                     tool_call_end_tokens: vec!["".to_string()],
                     ..Default::default()
-                },
+                }),
             },
         )
         .await
@@ -534,13 +535,12 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     async fn test_ibm_granite_40_tiny_preview_simple() {
         let input = r#"[{"arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}, "name": "get_weather"}]"#;
         let config = ToolCallConfig {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
+            parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec![],
                 tool_call_end_tokens: vec![],
                 arguments_keys: vec!["arguments".to_string()],
                 ..Default::default()
-            },
+            }),
         };
         let (result, content) = try_tool_call_parse(input, &config).await.unwrap();
         assert_eq!(content, Some("".to_string()));
@@ -946,13 +946,12 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
 ]"#;
         let config = ToolCallConfig {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
+            parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec![],
                 tool_call_end_tokens: vec![],
                 arguments_keys: vec!["arguments".to_string()],
                 ..Default::default()
-            },
+            }),
         };
         let (result, content) = try_tool_call_parse(input, &config).await.unwrap();
         assert_eq!(content, Some("".to_string()));
@@ -969,13 +968,12 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     async fn test_salesforce_llama_xlam_2_8b_fc_r_simple() {
         let input = r#"[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]"#;
         let config = ToolCallConfig {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
+            parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec![],
                 tool_call_end_tokens: vec![],
                 arguments_keys: vec!["arguments".to_string()],
                 ..Default::default()
-            },
+            }),
         };
         let (result, content) = try_tool_call_parse(input, &config).await.unwrap();
         assert_eq!(content, Some("".to_string()));
@@ -1314,33 +1312,37 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
 
         // Test that "fun" is detected as a potential tool call start (for streaming jailing)
         let config = super::get_tool_parser_map().get("phi4").unwrap();
+        let json_config = match &config.parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
 
         // Test detection of partial tokens
         use super::super::json::detect_tool_call_start_json;
         assert!(
-            detect_tool_call_start_json("fun", &config.json),
+            detect_tool_call_start_json("fun", json_config),
             "'fun' should be detected as potential start"
         );
         assert!(
-            detect_tool_call_start_json("f", &config.json),
+            detect_tool_call_start_json("f", json_config),
             "'f' should be detected as potential start"
         );
         assert!(
-            detect_tool_call_start_json("func", &config.json),
+            detect_tool_call_start_json("func", json_config),
             "'func' should be detected as potential start"
         );
         assert!(
-            detect_tool_call_start_json("functo", &config.json),
+            detect_tool_call_start_json("functo", json_config),
             "'functo' should be detected as potential start"
         );
 
         // Test that unrelated text is not detected
         assert!(
-            !detect_tool_call_start_json("hello", &config.json),
+            !detect_tool_call_start_json("hello", json_config),
             "'hello' should not be detected"
         );
         assert!(
-            !detect_tool_call_start_json("xyz", &config.json),
+            !detect_tool_call_start_json("xyz", json_config),
             "'xyz' should not be detected"
         );
     }

@@ -35,17 +35,11 @@ use crate::{
     config::HealthStatus,
     distributed::RequestPlaneMode,
     metrics::{MetricsHierarchy, MetricsRegistry, prometheus_names},
+    service::ServiceClient,
     service::ServiceSet,
-    transports::etcd::{ETCD_ROOT_PATH, EtcdPath},
 };
 
-use super::{
-    DistributedRuntime, Runtime,
-    traits::*,
-    transports::etcd::{COMPONENT_KEYWORD, ENDPOINT_KEYWORD},
-    transports::nats::Slug,
-    utils::Duration,
-};
+use super::{DistributedRuntime, Runtime, traits::*, transports::nats::Slug, utils::Duration};
 
 use crate::pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint};
 use crate::protocols::EndpointId;
@@ -71,10 +65,7 @@ mod registry;
 pub mod service;
 
 pub use client::Client;
-
-/// The root key-value path where each instance registers itself in.
-/// An instance is namespace+component+endpoint+lease_id and must be unique.
-pub const INSTANCE_ROOT_PATH: &str = "v1/instances";
+pub use endpoint::build_transport_type;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -150,13 +141,12 @@ impl PartialOrd for Instance {
 /// You can also issue a request to a [Component]'s [Endpoint] by creating a [Client].
 #[derive(Educe, Builder, Clone, Validate)]
 #[educe(Debug)]
-#[builder(pattern = "owned")]
+#[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
 pub struct Component {
     #[builder(private)]
     #[educe(Debug(ignore))]
     drt: Arc<DistributedRuntime>,
 
-    // todo - restrict the namespace to a-z0-9-_A-Z
     /// Name of the component
     #[builder(setter(into))]
     #[validate(custom(function = "validate_allowed_chars"))]
@@ -232,25 +222,9 @@ impl MetricsHierarchy for Component {
 }
 
 impl Component {
-    /// The component part of an instance path in key-value store.
-    pub fn instance_root(&self) -> String {
-        let ns = self.namespace.name();
-        let cp = &self.name;
-        format!("{INSTANCE_ROOT_PATH}/{ns}/{cp}")
-    }
-
     pub fn service_name(&self) -> String {
         let service_name = format!("{}_{}", self.namespace.name(), self.name);
         Slug::slugify(&service_name).to_string()
-    }
-
-    pub fn path(&self) -> String {
-        format!("{}/{}", self.namespace.name(), self.name)
-    }
-
-    pub fn etcd_path(&self) -> EtcdPath {
-        EtcdPath::new_component(&self.namespace.name(), &self.name)
-            .expect("Component name and namespace should be valid")
     }
 
     pub fn namespace(&self) -> &Namespace {
@@ -296,142 +270,21 @@ impl Component {
         instances.sort();
         Ok(instances)
     }
-
-    /// Scrape ServiceSet, which contains NATS stats as well as user defined stats
-    /// embedded in data field of ServiceInfo.
-    pub async fn scrape_stats(&self, timeout: Duration) -> anyhow::Result<ServiceSet> {
-        // Debug: scraping stats for component
-        let service_name = self.service_name();
-        let Some(service_client) = self.drt().service_client() else {
-            anyhow::bail!("ServiceSet is gathered via NATS, do not call this in non-NATS setups.");
-        };
-        service_client
-            .collect_services(&service_name, timeout)
-            .await
-    }
-
-    /// Add Prometheus metrics for this component's NATS service stats.
-    ///
-    /// Starts a background task that periodically requests service statistics from NATS
-    /// and updates the corresponding Prometheus metrics. The first scrape happens immediately,
-    /// then subsequent scrapes occur at a fixed interval of 9.8 seconds (MAX_WAIT_MS),
-    /// which should be near or smaller than typical Prometheus scraping intervals to ensure
-    /// metrics are fresh when Prometheus collects them.
-    pub fn start_scraping_nats_service_component_metrics(&self) -> anyhow::Result<()> {
-        const MAX_WAIT_MS: std::time::Duration = std::time::Duration::from_millis(9800); // Should be <= Prometheus scrape interval
-
-        // If there is another component with the same service name, this will fail.
-        let component_metrics = ComponentNatsServerPrometheusMetrics::new(self)?;
-
-        let component_clone = self.clone();
-
-        // Start a background task that scrapes stats every 5 seconds
-        let m = component_metrics.clone();
-        let c = component_clone.clone();
-
-        // Use the DRT's runtime handle to spawn the background task.
-        // We cannot use regular `tokio::spawn` here because:
-        // 1. This method may be called from contexts without an active Tokio runtime
-        //    (e.g., tests that create a DRT in a blocking context)
-        // 2. Tests often create a temporary runtime just to build the DRT, then drop it
-        // 3. `tokio::spawn` requires being called from within a runtime context
-        // By using the DRT's own runtime handle, we ensure the task runs in the
-        // correct runtime that will persist for the lifetime of the component.
-        c.drt().runtime().secondary().spawn(async move {
-            let timeout = std::time::Duration::from_millis(500);
-            let mut interval = tokio::time::interval(MAX_WAIT_MS);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-            loop {
-                match c.scrape_stats(timeout).await {
-                    Ok(service_set) => {
-                        m.update_from_service_set(&service_set);
-                    }
-                    Err(err) => {
-                        tracing::error!(
-                            "Background scrape failed for {}: {}",
-                            c.service_name(),
-                            err
-                        );
-                        m.reset_to_zeros();
-                    }
-                }
-
-                interval.tick().await;
-            }
-        });
-
-        Ok(())
-    }
-
-    /// TODO
-    ///
-    /// This method will scrape the stats for all available services
-    /// Returns a stream of `ServiceInfo` objects.
-    /// This should be consumed by a `[tokio::time::timeout_at`] because each services
-    /// will only respond once, but there is no way to know when all services have responded.
-    pub async fn stats_stream(&self) -> anyhow::Result<()> {
-        unimplemented!("collect_stats")
-    }
-
-    // Gather NATS metrics
-    pub async fn add_stats_service(&mut self) -> anyhow::Result<()> {
-        let service_name = self.service_name();
-
-        // Pre-check to save cost of creating the service, but don't hold the lock
-        if self
-            .drt
-            .component_registry()
-            .inner
-            .lock()
-            .await
-            .services
-            .contains_key(&service_name)
-        {
-            // The NATS service is per component, but it is called from `serve_endpoint`, and there
-            // are often multiple endpoints for a component (e.g. `clear_kv_blocks` and `generate`).
-            tracing::trace!("Service {service_name} already exists");
-            return Ok(());
-        }
-
-        let Some(nats_client) = self.drt.nats_client() else {
-            anyhow::bail!("Cannot create NATS service without NATS.");
-        };
-        let description = None;
-        let (nats_service, stats_reg) =
-            service::build_nats_service(nats_client, self, description).await?;
-
-        let mut guard = self.drt.component_registry().inner.lock().await;
-        if !guard.services.contains_key(&service_name) {
-            // Normal case
-            guard.services.insert(service_name.clone(), nats_service);
-            guard.stats_handlers.insert(service_name.clone(), stats_reg);
-
-            tracing::info!("Added NATS / stats service {service_name}");
-
-            drop(guard);
-        } else {
-            drop(guard);
-            let _ = nats_service.stop().await;
-            // The NATS service is per component, but it is called from `serve_endpoint`, and there
-            // are often multiple endpoints for a component (e.g. `clear_kv_blocks` and `generate`).
-            return Ok(());
-        }
-
-        if let Err(err) = self.start_scraping_nats_service_component_metrics() {
-            tracing::debug!(
-                "Metrics registration failed for '{}': {}",
-                self.service_name(),
-                err
-            );
-        }
-        Ok(())
-    }
 }
 
 impl ComponentBuilder {
     pub fn from_runtime(drt: Arc<DistributedRuntime>) -> Self {
         Self::default().drt(drt)
+    }
+
+    pub fn build(self) -> Result<Component, anyhow::Error> {
+        let component = self.build_internal()?;
+        // If this component is using NATS, gather it's metrics
+        let drt = component.drt();
+        if drt.request_plane().is_nats() {
+            drt.start_stats_service(component.clone());
+        }
+        Ok(component)
     }
 }
 
@@ -516,74 +369,6 @@ impl Endpoint {
         &self.component
     }
 
-    // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
-    pub fn path(&self) -> String {
-        format!(
-            "{}/{}/{}",
-            self.component.path(),
-            ENDPOINT_KEYWORD,
-            self.name
-        )
-    }
-
-    /// The endpoint part of an instance path in etcd
-    pub fn etcd_root(&self) -> String {
-        let component_path = self.component.instance_root();
-        let endpoint_name = &self.name;
-        format!("{component_path}/{endpoint_name}")
-    }
-
-    /// The endpoint as an EtcdPath object
-    pub fn etcd_path(&self) -> EtcdPath {
-        EtcdPath::new_endpoint(
-            &self.component.namespace().name(),
-            self.component.name(),
-            &self.name,
-        )
-        .expect("Endpoint name and component name should be valid")
-    }
-
-    /// The fully path of an instance in etcd
-    pub fn etcd_path_with_lease_id(&self, lease_id: u64) -> String {
-        format!("{INSTANCE_ROOT_PATH}/{}", self.unique_path(lease_id))
-    }
-
-    /// Full path of this endpoint with forward slash separators, including lease id
-    pub fn unique_path(&self, lease_id: u64) -> String {
-        let ns = self.component.namespace().name();
-        let cp = self.component.name();
-        let ep = self.name();
-        format!("{ns}/{cp}/{ep}/{lease_id:x}")
-    }
-
-    /// The endpoint as an EtcdPath object with instance ID
-    pub fn etcd_path_object_with_lease_id(&self, instance_id: i64) -> EtcdPath {
-        EtcdPath::new_endpoint_with_lease(
-            &self.component.namespace().name(),
-            self.component.name(),
-            &self.name,
-            instance_id,
-        )
-        .expect("Endpoint name and component name should be valid")
-    }
-
-    pub fn name_with_id(&self, instance_id: u64) -> String {
-        format!("{}-{:x}", self.name, instance_id)
-    }
-
-    pub fn subject(&self) -> String {
-        format!("{}.{}", self.component.service_name(), self.name)
-    }
-
-    /// Subject to an instance of the [Endpoint] with a specific lease id
-    pub fn subject_to(&self, lease_id: u64) -> String {
-        format!(
-            "{}.{}",
-            self.component.service_name(),
-            self.name_with_id(lease_id)
-        )
-    }
-
     pub async fn client(&self) -> anyhow::Result<client::Client> {
         client::Client::new(self.clone()).await
     }
@@ -652,10 +437,10 @@ impl Namespace {
 
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
     pub fn component(&self, name: impl Into<String>) -> anyhow::Result<Component> {
-        Ok(ComponentBuilder::from_runtime(self.runtime.clone())
+        ComponentBuilder::from_runtime(self.runtime.clone())
             .name(name)
             .namespace(self.clone())
-            .build()?)
+            .build()
     }
 
     /// Create a [`Namespace`] in the parent namespace
@@ -665,10 +450,6 @@ impl Namespace {
             .name(name.into())
             .parent(Some(Arc::new(self.clone())))
             .build()?)
-    }
-
-    pub fn etcd_path(&self) -> String {
-        format!("{ETCD_ROOT_PATH}{}", self.name())
     }
 
     pub fn name(&self) -> String {
@@ -690,106 +471,3 @@ fn validate_allowed_chars(input: &str) -> Result<(), ValidationError> {
         Err(ValidationError::new("invalid_characters"))
     }
 }
-
-// TODO - enable restrictions to the character sets allowed for namespaces,
-// components, and endpoints.
-//
-// Put Validate traits on the struct and use the `validate_allowed_chars` method
-// to validate the fields.
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use validator::Validate;
-
-//     #[test]
-//     fn test_valid_names() {
-//         // Valid strings
-//         let valid_inputs = vec![
-//             "abc",        // Lowercase letters
-//             "abc123",     // Letters and numbers
-//             "a-b-c",      // Letters with hyphens
-//             "a_b_c",      // Letters with underscores
-//             "a-b_c-123",  // Mixed valid characters
-//             "a",          // Single character
-//             "a_b",        // Short valid pattern
-//             "123456",     // Only numbers
-//             "a---b_c123", // Repeated hyphens/underscores
-//         ];
-
-//         for input in valid_inputs {
-//             let result = validate_allowed_chars(input);
-//             assert!(result.is_ok(), "Expected '{}' to be valid", input);
-//         }
-//     }
-
-//     #[test]
-//     fn test_invalid_names() {
-//         // Invalid strings
-//         let invalid_inputs = vec![
-//             "abc!",     // Invalid character `!`
-//             "abc@",     // Invalid character `@`
-//             "123$",     // Invalid character `$`
-//             "foo.bar",  // Invalid character `.`
-//             "foo/bar",  // Invalid character `/`
-//             "foo\\bar", // Invalid character `\`
-//             "abc#",     // Invalid character `#`
-//             "abc def",  // Spaces are not allowed
-//             "foo,",     // Invalid character `,`
-//             "",         // Empty string
-//         ];
-
-//         for input in invalid_inputs {
-//             let result = validate_allowed_chars(input);
-//             assert!(result.is_err(), "Expected '{}' to be invalid", input);
-//         }
-//     }
-
-//     // #[test]
-//     // fn test_struct_validation_valid() {
-//     //     // Struct with valid data
-//     //     let valid_data = InputData {
-//     //         name: "valid-name_123".to_string(),
-//     //     };
-//     //     assert!(valid_data.validate().is_ok());
-//     // }
-
-//     // #[test]
-//     // fn test_struct_validation_invalid() {
-//     //     // Struct with invalid data
-//     //     let invalid_data = InputData {
-//     //         name: "invalid!name".to_string(),
-//     //     };
-//     //     let result = invalid_data.validate();
-//     //     assert!(result.is_err());
-
-//     //     if let Err(errors) = result {
-//     //         let error_map = errors.field_errors();
-//     //         assert!(error_map.contains_key("name"));
-//     //         let name_errors = &error_map["name"];
-//     //         assert_eq!(name_errors[0].code, "invalid_characters");
-//     //     }
-//     // }
-
-//     #[test]
-//     fn test_edge_cases() {
-//         // Edge cases
-//         let edge_inputs = vec![
-//             ("-", true),   // Single hyphen
-//             ("_", true),   // Single underscore
-//             ("a-", true),  // Letter with hyphen
-//             ("-", false),  // Repeated hyphens
-//             ("-a", false), // Hyphen at the beginning
-//             ("a-", false), // Hyphen at the end
-//         ];
-
-//         for (input, expected_validity) in edge_inputs {
-//             let result = validate_allowed_chars(input);
-//             if expected_validity {
-//                 assert!(result.is_ok(), "Expected '{}' to be valid", input);
-//             } else {
-//                 assert!(result.is_err(), "Expected '{}' to be invalid", input);
-//             }
-//         }
-//     }
-// }
