@@ -281,6 +281,7 @@ impl DeltaGenerator {
     ) -> NvCreateChatCompletionStreamResponse {
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
             content: text,
+            function_call: None,
             tool_calls,
             role: if self.msg_counter == 0 {
                 Some(dynamo_async_openai::types::Role::Assistant)
