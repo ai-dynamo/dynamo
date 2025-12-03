@@ -470,6 +470,13 @@ impl JailedStream {
                 if let Some(chat_response) = response.data.as_ref() {
                     let mut all_emissions = Vec::new();
 
+                    if chat_response.choices.is_empty() {
+                        // No choices processed (e.g., usage-only chunk)
+                        // Pass through as-is to preserve usage and other metadata
+                        yield response;
+                        continue;
+                    }
+
                     // Process each choice independently using the new architecture
                     for choice in &chat_response.choices {
                         if let Some(ref content) = choice.delta.content {
@@ -888,14 +895,14 @@ impl JailedStreamBuilder {
             if let Some(config) = parser_map.get(parser_name.as_str()) {
                 // Auto-populate start sequences if none configured
                 if self.jail_start_sequences.is_empty() {
-                    self.jail_start_sequences = config.json.tool_call_start_tokens.clone();
+                    self.jail_start_sequences = config.parser_config.tool_call_start_tokens();
                 }
 
                 // Auto-populate end sequences if none configured
                 if self.jail_end_sequences.is_empty() {
                     self.jail_end_sequences = config
-                        .json
-                        .tool_call_end_tokens
+                        .parser_config
+                        .tool_call_end_tokens()
                         .iter()
                         .filter(|&s| !s.is_empty())
                         .cloned()
@@ -915,7 +922,7 @@ impl JailedStreamBuilder {
             let parser_map = get_tool_parser_map();
             if let Some(config) = parser_map.get(parser_name.as_str()) {
                 // Add start tokens from the parser config
-                all_patterns.extend(config.json.tool_call_start_tokens.clone());
+                all_patterns.extend(config.parser_config.tool_call_start_tokens());
             }
         }
 

@@ -5,7 +5,8 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # run ingress with KV router
-python -m dynamo.frontend --router-mode kv --http-port=8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python -m dynamo.frontend --router-mode kv &
 
 # run decode workers on GPU 0 and 1, without enabling KVBM
 # NOTE: remove --enforce-eager for production use

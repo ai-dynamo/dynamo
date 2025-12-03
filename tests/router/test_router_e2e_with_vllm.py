@@ -18,6 +18,13 @@ from tests.utils.managed_process import ManagedProcess
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.e2e,
+    pytest.mark.vllm,
+    pytest.mark.model(MODEL_NAME),
+]
 SPEEDUP_RATIO = 10.0
 PORTS = [
     8011,
@@ -269,11 +276,8 @@ class VLLMProcess:
         time.sleep(2)
 
 
-@pytest.mark.e2e
 @pytest.mark.gpu_1
-@pytest.mark.vllm
 @pytest.mark.skip(reason="All vLLM tests disabled for now")
-@pytest.mark.model(MODEL_NAME)
 def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers):
     """
     Quick e2e sanity test for KV router with vLLM engine instances.
@@ -302,7 +306,7 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
         vllm_workers.__enter__()
 
-        # Run basic router test (starts router internally, vLLM workers need frontend readiness check)
+        # Run basic router test (starts router internally and waits for workers to be ready)
         _test_router_basic(
             engine_workers=vllm_workers,
             block_size=BLOCK_SIZE,
@@ -310,7 +314,6 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
             frontend_port=PORTS[0],
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
-            wait_for_frontend=True,  # vLLM workers need time to load models
             frontend_timeout=180,  # 3 minutes should be plenty for TinyLlama
             store_backend="etcd",  # Explicit for clarity
         )
@@ -320,11 +323,8 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
             vllm_workers.__exit__(None, None, None)
 
 
-@pytest.mark.e2e
-@pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.skip(reason="All vLLM tests disabled for now")
-@pytest.mark.model(MODEL_NAME)
 def test_router_decisions_vllm_multiple_workers(
     request, runtime_services, predownload_tokenizers
 ):
@@ -372,11 +372,8 @@ def test_router_decisions_vllm_multiple_workers(
             vllm_workers.__exit__(None, None, None)
 
 
-@pytest.mark.e2e
-@pytest.mark.vllm
 @pytest.mark.gpu_2
 @pytest.mark.skip(reason="All vLLM tests disabled for now")
-@pytest.mark.model(MODEL_NAME)
 def test_router_decisions_vllm_dp(request, runtime_services, predownload_tokenizers):
     """Validate KV cache prefix reuse with vLLM by sending progressive requests with overlapping prefixes.
     Same flow as test_router_decisions_vllm_multiple_workers; force first request to (worker_id, dp_rank=1).

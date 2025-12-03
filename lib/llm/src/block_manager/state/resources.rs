@@ -28,9 +28,9 @@ impl Resources {
             event_mgr.clone()
         } else if let Some(consolidator_config) = config.consolidator_config.clone() {
             tracing::info!(
-                "Creating DynamoEventManager with kv event consolidator config: vllm={}, output={}",
-                consolidator_config.vllm_event_endpoint,
-                consolidator_config.consolidated_event_endpoint
+                "Creating DynamoEventManager with kv event consolidator config: engine={}, source={:?}",
+                consolidator_config.engine_event_endpoint,
+                consolidator_config.engine_source
             );
             // Create DynamoEventManager with consolidator config (async)
             match DynamoEventManager::new_with_config(consolidator_config).await {

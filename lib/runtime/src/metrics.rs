@@ -1483,6 +1483,7 @@ mod test_metricsregistry_nats {
     use crate::pipeline::PushRouter;
     use crate::{DistributedRuntime, Runtime};
     use tokio::time::{Duration, sleep};
+    #[ignore = "Deprecated - NATS related code to be deleted soon"]
     #[tokio::test]
     async fn test_drt_nats_metrics() {
         // Setup real DRT and registry using the test-friendly constructor
@@ -1543,6 +1544,7 @@ mod test_metricsregistry_nats {
         println!("✓ DistributedRuntime NATS metrics integration test passed!");
     }
 
+    #[ignore = "Deprecated - NATS related code to be deleted soon"]
     #[tokio::test]
     async fn test_nats_metric_names() {
         // This test only tests the existence of the NATS metrics. It does not check
@@ -1553,10 +1555,7 @@ mod test_metricsregistry_nats {
 
         // Create a namespace and component from the DRT
         let namespace = drt.namespace("ns789").unwrap();
-        let mut component = namespace.component("comp789").unwrap();
-
-        // Create a service to trigger metrics callback registration
-        component.add_stats_service().await.unwrap();
+        let component = namespace.component("comp789").unwrap();
 
         // Get component output which should include NATS client metrics
         // Additional checks for NATS client metrics (without checking specific values)
@@ -1636,6 +1635,7 @@ mod test_metricsregistry_nats {
     /// Creates endpoint, sends test messages + 10k byte message, validates metrics (NATS + work handler)
     /// at initial state and post-activity state. Ensures byte thresholds, message counts, and processing
     /// times are within expected ranges. Tests end-to-end client-server communication and metrics collection.
+    #[ignore = "Deprecated - NATS related code to be deleted soon"]
     #[tokio::test]
     async fn test_nats_metrics_values() -> anyhow::Result<()> {
         struct MessageHandler {}
@@ -1662,11 +1662,10 @@ mod test_metricsregistry_nats {
         let runtime = Runtime::from_current()?;
         let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
         let namespace = drt.namespace("ns123").unwrap();
-        let mut component = namespace.component("comp123").unwrap();
+        let component = namespace.component("comp123").unwrap();
         let ingress = Ingress::for_engine(MessageHandler::new()).unwrap();
 
         let _backend_handle = tokio::spawn(async move {
-            component.add_stats_service().await.unwrap();
             let endpoint = component
                 .endpoint("echo")
                 .endpoint_builder()

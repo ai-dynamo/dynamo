@@ -11,9 +11,7 @@ use async_trait::async_trait;
 use rand::Rng as _;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::storage::key_value_store::{Key, KeyValue, WatchEvent};
-
-use super::{KeyValueBucket, KeyValueStore, StoreError, StoreOutcome};
+use super::{Bucket, Key, KeyValue, Store, StoreError, StoreOutcome, WatchEvent};
 
 #[derive(Clone, Debug)]
 enum MemoryEvent {
@@ -71,7 +69,7 @@ impl MemoryStore {
 }
 
 #[async_trait]
-impl KeyValueStore for MemoryStore {
+impl Store for MemoryStore {
     type Bucket = MemoryBucketRef;
 
     async fn get_or_create_bucket(
@@ -112,7 +110,7 @@ impl KeyValueStore for MemoryStore {
 }
 
 #[async_trait]
-impl KeyValueBucket for MemoryBucketRef {
+impl Bucket for MemoryBucketRef {
     async fn insert(
         &self,
         key: &Key,
@@ -182,7 +180,7 @@ impl KeyValueBucket for MemoryBucketRef {
         };
         for (key, (_rev, v)) in &bucket.data {
             seen_keys.insert(key.clone());
-            let item = KeyValue::new(key.clone(), v.clone());
+            let item = KeyValue::new(Key::new(key.clone()), v.clone());
             existing_items.push(WatchEvent::Put(item));
         }
         drop(data_lock);
@@ -203,25 +201,29 @@ impl KeyValueBucket for MemoryBucketRef {
                         if seen_keys.contains(&key) {
                             continue;
                         }
-                        let item = KeyValue::new(key, value);
+                        let item = KeyValue::new(Key::new(key), value);
                         yield WatchEvent::Put(item);
                     },
                     Some(MemoryEvent::Delete { key }) => {
-                        yield WatchEvent::Delete(Key::from_raw(key));
+                        yield WatchEvent::Delete(Key::new(key));
                     }
                 }
             }
         }))
     }
 
-    async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError> {
+    async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
         let locked_data = self.inner.data.lock();
         match locked_data.get(&self.name) {
-            Some(bucket) => Ok(bucket
-                .data
-                .iter()
-                .map(|(k, (_rev, v))| ([self.name.clone(), k.to_string()].join("/"), v.clone()))
-                .collect()),
+            Some(bucket) => {
+                let mut out = HashMap::new();
+                for (k, (_rev, v)) in bucket.data.iter() {
+                    let key = Key::new([self.name.clone(), k.to_string()].join("/"));
+                    let value = v.clone();
+                    out.insert(key, value);
+                }
+                Ok(out)
+            }
             None => Err(StoreError::MissingBucket(self.name.clone())),
         }
     }
@@ -229,27 +231,24 @@ impl KeyValueBucket for MemoryBucketRef {
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::kv::{Bucket as _, Key, MemoryStore, Store as _};
     use std::collections::HashSet;
-
-    use crate::storage::key_value_store::{
-        Key, KeyValueBucket as _, KeyValueStore as _, MemoryStore,
-    };
 
     #[tokio::test]
     async fn test_entries_full_path() {
         let m = MemoryStore::new();
         let bucket = m.get_or_create_bucket("bucket1", None).await.unwrap();
         let _ = bucket
-            .insert(&Key::new("key1"), "value1".into(), 0)
+            .insert(&Key::new("key1".to_string()), "value1".into(), 0)
             .await
             .unwrap();
         let _ = bucket
-            .insert(&Key::new("key2"), "value2".into(), 0)
+            .insert(&Key::new("key2".to_string()), "value2".into(), 0)
             .await
             .unwrap();
         let entries = bucket.entries().await.unwrap();
-        let keys: HashSet<String> = entries.into_keys().collect();
-        assert!(keys.contains("bucket1/key1"));
-        assert!(keys.contains("bucket1/key2"));
+        let keys: HashSet<Key> = entries.into_keys().collect();
+        assert!(keys.contains(&Key::new("bucket1/key1".to_string())));
+        assert!(keys.contains(&Key::new("bucket1/key2".to_string())));
     }
 }
