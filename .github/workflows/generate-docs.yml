@@ -426,26 +426,34 @@ jobs:
           S3_PATH: ${{ steps.paths.outputs.s3_path }}
           VERSION: ${{ steps.vars.outputs.version }}
           PUBLISHED_VERSION: ${{ steps.publish_version.outputs.published || 'false' }}
-          # PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
+          PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
         shell: bash
         run: |
           set -euo pipefail
           echo "s3_target_path=${S3_PATH}" >> "$GITHUB_OUTPUT"
           echo "request_name=Publish docs from ${GITHUB_REPOSITORY}@${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
 
-          # Only flush cache if we actually published something
-          # if [[ "${PUBLISHED_VERSION}" == "true" ]] || [[ "${PUBLISHED_DEV}" == "true" ]]; then
+          # Determine what to flush based on what was published
+          # - Version publish: flush entire path (versions.json updated in all archive dirs)
+          # - Dev publish only: flush just the dev directory
           if [[ "${PUBLISHED_VERSION}" == "true" ]]; then
             echo "perform_flush=true" >> "$GITHUB_OUTPUT"
+            echo "flush_path=${S3_PATH}" >> "$GITHUB_OUTPUT"
+            echo "::notice::Will flush entire ${S3_PATH} (version publish updates all archives)"
+          elif [[ "${PUBLISHED_DEV}" == "true" ]]; then
+            echo "perform_flush=true" >> "$GITHUB_OUTPUT"
+            echo "flush_path=${S3_PATH}/dev" >> "$GITHUB_OUTPUT"
+            echo "::notice::Will flush ${S3_PATH}/dev only (dev publish)"
           else
             echo "perform_flush=false" >> "$GITHUB_OUTPUT"
+            echo "flush_path=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Flush Akamai cache
         # Only run if cache flush is needed AND Akamai is enabled
         if: ${{ steps.publish.outputs.perform_flush == 'true' && vars.DOCS_AKAMAI_ENABLED == 'true' }}
         env:
-          S3_PATH: ${{ steps.publish.outputs.s3_target_path }}
+          FLUSH_PATH: ${{ steps.publish.outputs.flush_path }}
           REQUEST_NAME: ${{ steps.publish.outputs.request_name }}
           # Use repository variable or secret for notification emails
           # Format: JSON array of email addresses, e.g., '["email1@example.com", "email2@example.com"]'
@@ -463,6 +471,8 @@ jobs:
           sudo apt-get install -y -qq jq xsltproc
           pip install -q httpie httpie-edgegrid
 
+          echo "Flushing Akamai cache for path: ${FLUSH_PATH}"
+
           # Generate Akamai ECCU request XML using the XSLT template
           XSLT_TEMPLATE="${GITHUB_WORKSPACE}/.github/workflows/templates/akamai-eccu-flush.xslt"
 
@@ -472,7 +482,7 @@ jobs:
           fi
 
           # Process XSLT to generate ECCU request XML
-          xsltproc --stringparam target-path "${S3_PATH}" "${XSLT_TEMPLATE}" "${XSLT_TEMPLATE}" | \
+          xsltproc --stringparam target-path "${FLUSH_PATH}" "${XSLT_TEMPLATE}" "${XSLT_TEMPLATE}" | \
             sed 's/xmlns:match="x" //' > /tmp/flush.xml
 
           # Prepare Akamai EdgeGrid credentials
@@ -511,8 +521,9 @@ jobs:
           S3_PATH: ${{ steps.paths.outputs.s3_path }}
           PUBLISHED_VERSION: ${{ steps.publish_version.outputs.published || 'false' }}
           # PUBLISHED_LATEST: ${{ steps.publish_latest.outputs.published || 'false' }}
-          # PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
+          PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
           CACHE_FLUSHED: ${{ steps.publish.outputs.perform_flush }}
+          FLUSH_PATH: ${{ steps.publish.outputs.flush_path }}
         run: |
           echo "## 📚 Documentation Publishing Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -528,17 +539,16 @@ jobs:
             #   echo "- ⏭️ **Latest:** not updated (manual dispatch or /not-latest flag)" >> $GITHUB_STEP_SUMMARY
             # fi
           fi
-          # if [[ "${PUBLISHED_DEV}" == "true" ]]; then
-          #   echo "- ✅ **Dev:** \`s3://.../${S3_PATH}/dev\` (main branch)" >> $GITHUB_STEP_SUMMARY
-          # fi
-          # if [[ "${PUBLISHED_VERSION}" != "true" ]] && [[ "${PUBLISHED_DEV}" != "true" ]]; then
-          if [[ "${PUBLISHED_VERSION}" != "true" ]]; then
+          if [[ "${PUBLISHED_DEV}" == "true" ]]; then
+            echo "- ✅ **Dev:** \`s3://.../${S3_PATH}/dev\` (main branch)" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [[ "${PUBLISHED_VERSION}" != "true" ]] && [[ "${PUBLISHED_DEV}" != "true" ]]; then
             echo "- ⚠️ No documentation was published" >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Cache" >> $GITHUB_STEP_SUMMARY
           if [[ "${CACHE_FLUSHED}" == "true" ]]; then
-            echo "- ✅ Akamai cache flush requested" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Akamai cache flush requested for \`${FLUSH_PATH}\`" >> $GITHUB_STEP_SUMMARY
           else
             echo "- ⏭️ Cache flush skipped (nothing published or Akamai disabled)" >> $GITHUB_STEP_SUMMARY
           fi
