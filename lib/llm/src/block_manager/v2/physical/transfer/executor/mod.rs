@@ -26,6 +26,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // Re-export the NIXL transfer builder for public use
 pub use nixl::NixlTransferBuilder;
 
+// Re-export for testing (used by descriptor_tests)
+#[cfg(feature = "testing-nixl")]
+#[allow(unused_imports)]
+pub(crate) use nixl::{DescriptorParams, build_descriptors};
+
 /// Execute a transfer between two physical layouts.
 ///
 /// This is an internal entry point for all transfer operations called by TransportManager.

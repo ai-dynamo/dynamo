@@ -373,7 +373,7 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
 /// Build NIXL descriptors based on descriptor hint (or auto-detection).
 ///
 /// Uses explicit hints when provided, otherwise auto-detects from layout characteristics.
-fn build_descriptors(
+pub(crate) fn build_descriptors(
     params: &DescriptorParams,
     src_dl: &mut XferDescList,
     dst_dl: &mut XferDescList,
