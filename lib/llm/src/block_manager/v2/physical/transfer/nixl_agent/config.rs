@@ -57,6 +57,7 @@ impl NixlBackendConfig {
     pub fn from_env() -> Result<Self> {
         let mut backends = HashSet::new();
         let mut backends_with_params = HashSet::new();
+        let mut explicitly_disabled = HashSet::new();
 
         // Extract all environment variables that match our pattern
         for (key, _value) in std::env::vars() {
@@ -86,16 +87,20 @@ impl NixlBackendConfig {
                         backends.insert(backend_name);
                     }
                     Ok(false) => {
-                        // Explicitly disabled, don't add to backends
-                        continue;
+                        // Explicitly disabled, track it
+                        explicitly_disabled.insert(backend_name);
                     }
                     Err(e) => bail!("Invalid value for {}: {}", key, e),
                 }
             }
         }
 
-        // Add backends that have custom parameters (even if not explicitly enabled)
-        backends.extend(backends_with_params);
+        // Add backends that have custom parameters, but only if not explicitly disabled
+        for backend in backends_with_params {
+            if !explicitly_disabled.contains(&backend) {
+                backends.insert(backend);
+            }
+        }
 
         // Default to UCX if no backends specified
         if backends.is_empty() {

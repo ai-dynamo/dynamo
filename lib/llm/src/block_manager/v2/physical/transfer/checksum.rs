@@ -149,8 +149,13 @@ fn compute_single_block_checksum(
                 }
                 StorageKind::Object(_) => {
                     // Object storage checksums are handled by NIXL's OBJ plugin
-                    // For now, skip checksumming object storage regions
-                    tracing::warn!("Checksum computation for object storage not yet implemented");
+                    // Checksumming object storage requires fetching data from remote storage,
+                    // which is not yet implemented. Return an error rather than computing
+                    // an incorrect checksum.
+                    return Err(anyhow!(
+                        "Checksum computation for object storage is not yet implemented. \
+                         Object storage data must be fetched from remote storage before checksumming."
+                    ));
                 }
             }
         }
