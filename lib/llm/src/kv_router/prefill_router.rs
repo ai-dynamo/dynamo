@@ -250,10 +250,11 @@ impl PrefillRouter {
     }
 
     /// Execute prefill with the given router and extract structured result
-    async fn execute_prefill_with_router(
-        router: InnerPrefillRouter,
+    async fn execute_prefill(
+        router: Option<InnerPrefillRouter>,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
+        let router = router.ok_or(PrefillError::NotActivated)?;
         let mut prefill_response = router
             .generate(request)
             .await
@@ -319,12 +320,10 @@ impl PrefillRouter {
 
     /// Spawn prefill as a background task
     fn spawn_prefill_task(&self, prefill_request: SingleIn<PreprocessedRequest>) {
-        let Some(router) = self.prefill_router.get().cloned() else {
-            return;
-        };
+        let router = self.prefill_router.get().cloned();
 
         tokio::spawn(async move {
-            match Self::execute_prefill_with_router(router, prefill_request).await {
+            match Self::execute_prefill(router, prefill_request).await {
                 Ok(_) => {
                     tracing::debug!("Prefill background task completed");
                 }
@@ -340,10 +339,7 @@ impl PrefillRouter {
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
-        let Some(router) = self.prefill_router.get().cloned() else {
-            return Err(PrefillError::NotActivated);
-        };
-        Self::execute_prefill_with_router(router, request).await
+        Self::execute_prefill(self.prefill_router.get().cloned(), request).await
     }
 }
 
