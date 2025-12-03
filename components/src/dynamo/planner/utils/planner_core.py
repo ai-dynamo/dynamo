@@ -61,54 +61,58 @@ class Metrics:
 class PlannerPrometheusMetrics:
     """Container for all Planner Prometheus metrics."""
 
-    def __init__(self):
+    def __init__(self, prefix: str = "planner"):
         # Worker counts
-        self.num_p_workers = Gauge("planner:num_p_workers", "Number of prefill workers")
-        self.num_d_workers = Gauge("planner:num_d_workers", "Number of decode workers")
+        self.num_p_workers = Gauge(
+            f"{prefix}:num_p_workers", "Number of prefill workers"
+        )
+        self.num_d_workers = Gauge(
+            f"{prefix}:num_d_workers", "Number of decode workers"
+        )
 
         # Observed metrics
         self.observed_ttft = Gauge(
-            "planner:observed_ttft", "Observed time to first token (ms)"
+            f"{prefix}:observed_ttft", "Observed time to first token (ms)"
         )
         self.observed_itl = Gauge(
-            "planner:observed_itl", "Observed inter-token latency (ms)"
+            f"{prefix}:observed_itl", "Observed inter-token latency (ms)"
         )
         self.observed_request_rate = Gauge(
-            "planner:observed_request_rate", "Observed request rate (req/s)"
+            f"{prefix}:observed_request_rate", "Observed request rate (req/s)"
         )
         self.observed_request_duration = Gauge(
-            "planner:observed_request_duration", "Observed request duration (s)"
+            f"{prefix}:observed_request_duration", "Observed request duration (s)"
         )
         self.observed_isl = Gauge(
-            "planner:observed_isl", "Observed input sequence length"
+            f"{prefix}:observed_isl", "Observed input sequence length"
         )
         self.observed_osl = Gauge(
-            "planner:observed_osl", "Observed output sequence length"
+            f"{prefix}:observed_osl", "Observed output sequence length"
         )
 
         # Correction factors
         self.p_correction_factor = Gauge(
-            "planner:p_correction_factor", "Prefill correction factor"
+            f"{prefix}:p_correction_factor", "Prefill correction factor"
         )
         self.d_correction_factor = Gauge(
-            "planner:d_correction_factor", "Decode correction factor"
+            f"{prefix}:d_correction_factor", "Decode correction factor"
         )
 
         # Predicted metrics
         self.predicted_request_rate = Gauge(
-            "planner:predicted_request_rate", "Predicted request rate (req/s)"
+            f"{prefix}:predicted_request_rate", "Predicted request rate (req/s)"
         )
         self.predicted_isl = Gauge(
-            "planner:predicted_isl", "Predicted input sequence length"
+            f"{prefix}:predicted_isl", "Predicted input sequence length"
         )
         self.predicted_osl = Gauge(
-            "planner:predicted_osl", "Predicted output sequence length"
+            f"{prefix}:predicted_osl", "Predicted output sequence length"
         )
         self.predicted_num_p = Gauge(
-            "planner:predicted_num_p", "Predicted number of prefill replicas"
+            f"{prefix}:predicted_num_p", "Predicted number of prefill replicas"
         )
         self.predicted_num_d = Gauge(
-            "planner:predicted_num_d", "Predicted number of decode replicas"
+            f"{prefix}:predicted_num_d", "Predicted number of decode replicas"
         )
 
 
