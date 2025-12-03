@@ -1036,6 +1036,7 @@ class KvRouterConfig:
         router_ttl_secs: float = 120.0,
         router_max_tree_size: int = 1024,
         router_prune_target_ratio: float = 0.8,
+        enable_local_kvindexers: bool = False,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1051,6 +1052,7 @@ class KvRouterConfig:
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
             router_max_tree_size: Maximum tree size before pruning (default: 1024)
             router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
+            enable_local_kvindexers: Enable worker-local KV indexers for recovery queries (default: False)
         """
         ...
 

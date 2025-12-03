@@ -1285,6 +1285,316 @@ impl Drop for KvIndexer {
     }
 }
 
+// -------------------------------------------------
+// Decentralized router: LocalKvIndexer for workers
+// -------------------------------------------------
+
+/// A thin wrapper around KvIndexer that buffers recent events
+/// (e.g. which may be queued by router upon startup)
+///
+pub struct LocalKvIndexer {
+    /// The underlying indexer
+    indexer: KvIndexer,
+    /// Circular buffer of recent events
+    /// Stores (worker_id, event) tuples
+    event_buffer: std::sync::Mutex<std::collections::VecDeque<(WorkerId, KvCacheEvent)>>,
+    /// Maximum number of events to keep in buffer
+    max_buffer_size: usize,
+}
+
+impl LocalKvIndexer {
+    /// create a new LocalKvIndexer pointing to a KvIndexer.
+    pub fn new(
+        token: CancellationToken,
+        kv_block_size: u32,
+        metrics: Arc<KvIndexerMetrics>,
+        max_buffer_size: usize,
+    ) -> Self {
+        Self {
+            indexer: KvIndexer::new(token, kv_block_size, metrics),
+            event_buffer: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(
+                max_buffer_size,
+            )), // circular buffer for O(1) pop
+            max_buffer_size,
+        }
+    }
+
+    /// get the N most recent events (returned in oldest->newest order)
+    pub fn get_recent_events(&self, n: usize) -> Vec<(WorkerId, KvCacheEvent)> {
+        // TODO what if n > buffer size
+        let buffer = self.event_buffer.lock().unwrap();
+        buffer.iter().rev().take(n).cloned().rev().collect()
+    }
+
+    /// get all buffered events (oldest first)
+    pub fn get_all_buffered_events(&self) -> Vec<(WorkerId, KvCacheEvent)> {
+        let buffer = self.event_buffer.lock().unwrap();
+        buffer.iter().cloned().collect()
+    }
+
+    /// Returns events in [start_id, end_id)
+    pub fn get_events_in_id_range(
+        &self,
+        start_id: u64,
+        end_id: u64,
+    ) -> Vec<(WorkerId, KvCacheEvent)> {
+        let buffer = self.event_buffer.lock().unwrap();
+        if buffer.is_empty() {
+            tracing::warn!("No events in buffer yet; returning empty result.");
+            return Vec::new();
+        }
+        if start_id >= end_id {
+            tracing::warn!(
+                start_id,
+                end_id,
+                "Requested start id is greater than or equal to end id; returning empty result."
+            );
+            return Vec::new();
+        }
+
+        let first_id = buffer.front().map(|(_, event)| event.event_id).unwrap();
+        let last_id = buffer.back().map(|(_, event)| event.event_id).unwrap();
+
+        let start_idx = match buffer.binary_search_by_key(&start_id, |(_, event)| event.event_id) {
+            Ok(idx) => idx,
+            Err(_) if start_id < first_id => {
+                tracing::warn!(
+                    start_id,
+                    first_id,
+                    "Requested start id precedes buffered range; clamping to oldest. TODO: implement logic to pull older events into buffer."
+                );
+                0
+            }
+            Err(_) if start_id > last_id => {
+                tracing::error!(
+                    start_id,
+                    last_id,
+                    "Requested start id is newer than any buffered event; returning empty result."
+                );
+                return Vec::new();
+            }
+            Err(insertion_point) => insertion_point,
+        };
+
+        let end_idx = match buffer.binary_search_by_key(&end_id, |(_, event)| event.event_id) {
+            Ok(idx) => idx,
+            Err(_) if end_id < first_id => {
+                return Vec::new();
+            }
+            Err(_) if end_id > last_id => {
+                tracing::warn!(
+                    end_id,
+                    last_id,
+                    "Requested end id exceeds buffered range; clamping to newest. TODO: maybe just error if requesting events which do not exist yet."
+                );
+                buffer.len()
+            }
+            Err(insertion_point) => insertion_point,
+        };
+
+        buffer
+            .iter()
+            .skip(start_idx)
+            .take(end_idx.saturating_sub(start_idx))
+            .cloned()
+            .collect()
+    }
+
+    /// Record an event in the buffer
+    fn record_event(&self, worker_id: WorkerId, event: KvCacheEvent) {
+        let mut buffer = self.event_buffer.lock().unwrap();
+
+        // Check that event id is consecutive to last one
+        if let Some((_, last_event)) = buffer.back()
+            && event.event_id != last_event.event_id + 1
+        {
+            let expected = last_event.event_id + 1;
+            tracing::warn!(
+                worker_id,
+                expected,
+                got = event.event_id,
+                "Non-consecutive KV event id; buffer may have gaps"
+            );
+            // panics in debug mode. TODO do we want it to abort in production too?
+            debug_assert_eq!(expected, event.event_id, "KV events should be consecutive");
+        }
+
+        // Add to back
+        buffer.push_back((worker_id, event));
+
+        // Remove from front if over capacity (circular buffer behavior)
+        while buffer.len() > self.max_buffer_size {
+            buffer.pop_front();
+        }
+    }
+
+    /// Apply event with buffering.
+    ///
+    /// This records the event in the buffer and forwards it to the underlying indexer.
+    pub async fn apply_event_with_buffer(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        let worker_id = event.worker_id;
+        let kv_event = event.event.clone();
+
+        // Record in buffer
+        self.record_event(worker_id, kv_event);
+
+        // Forward to underlying indexer
+        self.indexer
+            .event_sender()
+            .send(event)
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)
+    }
+
+    /// Clear the event buffer.
+    pub fn clear_buffer(&self) {
+        let mut buffer = self.event_buffer.lock().unwrap();
+        buffer.clear();
+    }
+
+    /// Get the current buffer size.
+    pub fn buffer_len(&self) -> usize {
+        let buffer = self.event_buffer.lock().unwrap();
+        buffer.len()
+    }
+
+    // Delegation methods to underlying KvIndexer
+    /// Get a sender for `RouterEvent`s.
+    pub fn event_sender(&self) -> mpsc::Sender<RouterEvent> {
+        self.indexer.event_sender()
+    }
+
+    /// Get a sender for dump requests (snapshot events).
+    pub fn snapshot_event_sender(&self) -> mpsc::Sender<DumpRequest> {
+        self.indexer.snapshot_event_sender()
+    }
+
+    /// Get a sender for worker removal requests.
+    pub fn remove_worker_sender(&self) -> mpsc::Sender<WorkerId> {
+        self.indexer.remove_worker_sender()
+    }
+
+    /// Get a sender for get workers requests.
+    pub fn get_workers_sender(&self) -> mpsc::Sender<GetWorkersRequest> {
+        self.indexer.get_workers_sender()
+    }
+
+    /// Get the KV block size.
+    pub fn block_size(&self) -> u32 {
+        self.indexer.block_size()
+    }
+}
+
+#[cfg(test)]
+mod local_kv_indexer_tests {
+    use super::*;
+
+    fn make_indexer_with_events(ids: &[u64]) -> LocalKvIndexer {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            32,
+        );
+        {
+            let mut buffer = indexer.event_buffer.lock().unwrap();
+            for &id in ids {
+                buffer.push_back((
+                    0,
+                    KvCacheEvent {
+                        event_id: id,
+                        data: KvCacheEventData::Cleared,
+                        dp_rank: 0,
+                    },
+                ));
+            }
+        }
+        indexer
+    }
+
+    #[test]
+    fn returns_slice_within_range() {
+        let indexer = make_indexer_with_events(&[1, 2, 3, 4, 5]);
+        let mut result = indexer.get_events_in_id_range(2, 4);
+        let mut ids: Vec<u64> = result.iter().map(|(_, event)| event.event_id).collect();
+        assert_eq!(ids, vec![2, 3]); // return slice within range
+
+        result = indexer.get_events_in_id_range(2, 6);
+        ids = result.iter().map(|(_, event)| event.event_id).collect();
+        assert_eq!(ids, vec![2, 3, 4, 5]); // clamp max (TODO error instead?)
+
+        result = indexer.get_events_in_id_range(0, 4);
+        ids = result.iter().map(|(_, event)| event.event_id).collect();
+        assert_eq!(ids, vec![1, 2, 3]); // clamp min (TODO error instead?)
+
+        result = indexer.get_events_in_id_range(0, 0);
+        ids = result.iter().map(|(_, event)| event.event_id).collect();
+        assert!(ids.is_empty()); // return empty when start is before buffer
+    }
+}
+
+// Implement KvIndexerInterface by delegating to the underlying indexer
+#[async_trait]
+impl KvIndexerInterface for LocalKvIndexer {
+    async fn find_matches(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<OverlapScores, KvRouterError> {
+        self.indexer.find_matches(sequence).await
+    }
+
+    async fn find_matches_for_request(
+        &self,
+        tokens: &[u32],
+    ) -> Result<OverlapScores, KvRouterError> {
+        self.indexer.find_matches_for_request(tokens).await
+    }
+
+    async fn apply_event(&mut self, event: RouterEvent) {
+        // Use the buffering version
+        let _ = self.apply_event_with_buffer(event).await;
+    }
+
+    async fn remove_worker(&mut self, worker: WorkerId) {
+        let _ = self.indexer.remove_worker_sender().send(worker).await;
+    }
+
+    fn shutdown(&mut self) {
+        // Note: Since indexer is Arc<KvIndexer>, we can't call mutable methods directly.
+        // The indexer will be shut down when the CancellationToken is cancelled
+        // or when the last Arc reference is dropped.
+    }
+
+    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        self.indexer.dump_events().await
+    }
+
+    async fn process_routing_decision(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
+        // TODO I guess the local kvindexers have little use for this method?
+        // Keeping it here now to implement the trait fully
+        self.indexer
+            .process_routing_decision(worker, local_hashes, sequence_hashes)
+            .await
+    }
+
+    async fn process_routing_decision_for_request(
+        &self,
+        tokens: &[u32],
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        // TODO I guess the local kvindexers have little use for this method?
+        // Keeping it here now to implement the trait fully
+        self.indexer
+            .process_routing_decision_for_request(tokens, worker)
+            .await
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ShardedMatchRequest {
     sequence: Vec<LocalBlockHash>,

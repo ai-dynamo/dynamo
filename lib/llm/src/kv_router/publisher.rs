@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::env;
 use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -16,15 +17,18 @@ use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
 use dynamo_runtime::metrics::{MetricsHierarchy, prometheus_names::kvstats};
-use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
+use dynamo_runtime::traits::{
+    DistributedRuntimeProvider, events::EventPublisher, events::EventSubscriber,
+};
 use dynamo_runtime::{
     component::{Component, Namespace},
     transports::nats::{NatsQueue, QUEUE_NAME, Slug},
 };
+use futures::StreamExt;
 
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, KV_METRICS_SUBJECT,
-    indexer::{RouterEvent, compute_block_hash_for_seq},
+    KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_QUERY_SUBJECT,
+    indexer::{KvIndexerMetrics, LocalKvIndexer, RouterEvent, compute_block_hash_for_seq},
     protocols::*,
     scoring::LoadEvent,
 };
@@ -95,6 +99,11 @@ pub struct KvEventPublisher {
     cancellation_token: CancellationToken,
     /// The channel to send events to.
     tx: mpsc::UnboundedSender<KvCacheEvent>,
+    /// Optional worker-local indexer for tracking this worker's own KV cache.
+    /// When present, events are applied to this indexer before being published to NATS.
+    local_indexer: Option<Arc<LocalKvIndexer>>,
+    /// Optional runtime for router->local indexer comm (TODO might be refactored)
+    local_indexer_query_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl KvEventPublisher {
@@ -103,12 +112,41 @@ impl KvEventPublisher {
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
+        let enable_local_indexer = env::var("DYN_ENABLE_LOCAL_KVINDEXERS")
+            .map(|value| value == "1")
+            .unwrap_or(false);
+        Self::new_with_local_indexer(
+            component,
+            kv_block_size,
+            source_config,
+            enable_local_indexer,
+        )
+    }
+
+    pub fn new_with_local_indexer(
+        component: Component,
+        kv_block_size: u32,
+        source_config: Option<KvEventSourceConfig>,
+        enable_local_indexer: bool,
+    ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
 
         // Infer worker_id from component's connection
         let worker_id = component.drt().connection_id();
+
+        tracing::info!(
+            worker_id,
+            component = component.name(),
+            "Initializing KvEventPublisher for worker {worker_id} in component {component}"
+        );
+
+        if enable_local_indexer {
+            tracing::info!(
+                "LocalKvIndexer enabled for worker {worker_id} in component {component}"
+            );
+        }
 
         // Create our event source (if any)
         let mut source = None;
@@ -121,6 +159,35 @@ impl KvEventPublisher {
                 tx.clone(),
             )?);
         }
+
+        // Create local indexer if requested
+        let local_indexer = if enable_local_indexer {
+            let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+            Some(Arc::new(LocalKvIndexer::new(
+                cancellation_token.clone(),
+                kv_block_size,
+                metrics,
+                100, // TODO make this a parameter available for user change?
+            )))
+        } else {
+            None
+        };
+
+        // Spawn runtime for router->local indexer comm if requested
+        let local_indexer_query_handle = local_indexer.as_ref().map(|local_indexer_ref| {
+            let component = component.clone();
+            let local_indexer = local_indexer_ref.clone();
+
+            component
+                .drt()
+                .runtime()
+                .secondary()
+                .spawn(start_worker_kv_query_service(
+                    component,
+                    worker_id,
+                    local_indexer,
+                ))
+        });
 
         let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
             .to_string()
@@ -136,12 +203,20 @@ impl KvEventPublisher {
 
         // Connect the NatsQueue before passing it to the event processor
         let cancellation_token_clone = cancellation_token.clone();
+        let local_indexer_clone = local_indexer.clone();
         component.drt().runtime().secondary().spawn(async move {
             if let Err(e) = nats_queue.connect().await {
                 tracing::error!("Failed to connect NatsQueue: {}", e);
                 return;
             }
-            start_event_processor(nats_queue, worker_id, cancellation_token_clone, rx).await
+            start_event_processor(
+                nats_queue,
+                worker_id,
+                cancellation_token_clone,
+                rx,
+                local_indexer_clone,
+            )
+            .await
         });
 
         Ok(Self {
@@ -149,6 +224,8 @@ impl KvEventPublisher {
             source,
             cancellation_token,
             tx,
+            local_indexer,
+            local_indexer_query_handle,
         })
     }
 
@@ -160,6 +237,11 @@ impl KvEventPublisher {
         self.kv_block_size
     }
 
+    /// Get reference to local indexer if enabled.
+    pub fn local_indexer(&self) -> Option<Arc<LocalKvIndexer>> {
+        self.local_indexer.clone()
+    }
+
     pub fn shutdown(&mut self) {
         if !self.cancellation_token.is_cancelled() {
             self.cancellation_token.cancel();
@@ -167,6 +249,10 @@ impl KvEventPublisher {
 
         if let Some(source) = self.source.take() {
             source.shutdown();
+        }
+
+        if let Some(handle) = self.local_indexer_query_handle.take() {
+            handle.abort();
         }
     }
 }
@@ -182,6 +268,7 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
     worker_id: u64,
     cancellation_token: CancellationToken,
     mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
+    local_indexer: Option<Arc<LocalKvIndexer>>,
 ) {
     loop {
         tokio::select! {
@@ -195,13 +282,113 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
                     break;
                 };
 
-                // Encapsulate in a router event and publish.
+                // Encapsulate in a router event.
                 tracing::trace!("Event processor for worker_id {} processing event: {:?}", worker_id, event.data);
                 let router_event = RouterEvent::new(worker_id, event);
-                if let Err(e) = publisher.publish(QUEUE_NAME, &router_event).await {
-                    tracing::error!("Failed to publish event: {}", e);
+
+                // Apply to local indexer first (if present)
+                if let Some(indexer) = &local_indexer {
+                    // Adds event into local indexer, and logs it into internal buffer
+                    if let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
+                        tracing::warn!(
+                            "Failed to send event to local indexer for worker {}: {}",
+                            worker_id,
+                            e
+                        );
+                    }
                 }
+
+                // Then publish to NATS for global distribution
+                if let Err(e) = publisher.publish(QUEUE_NAME, &router_event).await {
+                    tracing::error!("Failed to publish event to NATS: {}", e);
+                }
+
             }
+        }
+    }
+}
+
+// Processor for Router -> LocalKvIndexer query service
+async fn start_worker_kv_query_service(
+    component: Component,
+    worker_id: u64,
+    local_indexer: Arc<LocalKvIndexer>,
+) {
+    // NOTE: referenced discover/worker_monitor.rs for pub/sub pattern
+    let cancellation_token = component.drt().child_token();
+
+    // Create NATS subscriber on a subject specific to worker's id
+    let subject = format!("{}.{}", WORKER_KV_INDEXER_QUERY_SUBJECT, worker_id);
+    let full_subject = format!("namespace.{}.{}", component.namespace().name(), subject); // TODO make a helper like subject()
+    let mut subscriber = match component.namespace().subscribe(&subject).await {
+        Ok(sub) => sub,
+        Err(e) => {
+            tracing::error!("Failed to subscribe to {}: {}", subject, e);
+            return; // No ? because function doesn't return Result
+        }
+    };
+    tracing::info!(
+        "Query service on worker {} listening on NATS subject: {}",
+        worker_id,
+        full_subject
+    );
+
+    // Receive query request from router, retrieve event(s) from LocalKvIndexer, return response
+    // TODO: currently just dumps all events from LocalKvIndexer; need to implement
+    // event selection logic from buffer
+    loop {
+        tokio::select! {
+            _ = cancellation_token.cancelled() => {
+                tracing::info!("Router-Worker communication channel received cancellation signal");
+                break;
+            }
+
+            msg = subscriber.next() => {
+                let Some(msg) = msg else {
+                    tracing::debug!("Router-Worker stream ended.");
+                    break;
+                };
+
+                // deserialize from msg (async_nats::Message)
+                let request: WorkerKvQueryRequest = match serde_json::from_slice(&msg.payload) {
+                    Ok(request) => request,
+                    Err(e) => {
+                        tracing::error!("Failed to deserialize WorkerKvQueryRequest: {}", e);
+                        continue;
+                    }
+                };
+
+                // TODO extract request event id range. For now, just debug print
+                tracing::debug!("Received WorkerKvQueryRequest: {:?}", request);
+
+                // Get events from local indexer (TODO for now, dump all events)
+                let events = local_indexer.get_all_buffered_events().into_iter().map(|(_worker_id, kv_event) | kv_event).collect();
+
+                // Build WorkerKvQueryResponse
+                let response = WorkerKvQueryResponse { worker_id, events };
+
+                // Send reply back (if reply subject exists)
+                if let Some(reply_subject) = msg.reply {
+                    let payload = match serde_json::to_vec(&response) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::error!("Failed to serialize response: {}", e);
+                            continue;
+                        }
+                    };
+
+                    // Publish through DRT/NATS directly instead of namespace (adds a prefix)
+                    if let Err(e) = component
+                        .drt()
+                        .kv_router_nats_publish(reply_subject.to_string(), payload.into())
+                        .await
+                    {
+                        tracing::error!("Failed to send reply: {}", e);
+                    }
+                }
+
+            }
+
         }
     }
 }
@@ -1008,7 +1195,9 @@ mod test_event_processing {
 #[cfg(test)]
 mod tests_startup_helpers {
     use super::*;
-    use crate::kv_router::protocols::ExternalSequenceBlockHash;
+    use crate::kv_router::KvIndexer;
+    use crate::kv_router::indexer::KvIndexerInterface;
+    use crate::kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
     use async_trait;
     use bytes::Bytes;
     use std::sync::{Arc, Mutex};
@@ -1089,7 +1278,7 @@ mod tests_startup_helpers {
         tx.send(event).unwrap();
         drop(tx);
 
-        let handle = tokio::spawn(start_event_processor(component, 1, token, rx));
+        let handle = tokio::spawn(start_event_processor(component, 1, token, rx, None));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
             .await
@@ -1100,6 +1289,300 @@ mod tests_startup_helpers {
         assert_eq!(published.len(), 1);
         let (subject, _) = &published[0];
         assert_eq!(subject, QUEUE_NAME);
+    }
+
+    //--------------------------------------------------------------------
+    // Test start_event_processor with local indexer
+    //--------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_start_event_processor_with_local_indexer() {
+        let (component, published) = MockComponent::new();
+
+        // Create a local indexer
+        let token = CancellationToken::new();
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
+
+        // Create BlockStored event
+        let event = KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: vec![
+                    KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(100),
+                        tokens_hash: LocalBlockHash(200),
+                    },
+                    KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(101),
+                        tokens_hash: LocalBlockHash(201),
+                    },
+                ],
+            }),
+            dp_rank: 0,
+        };
+
+        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        tx.send(event).unwrap();
+        drop(tx);
+
+        // Start event processor with local indexer
+        let handle = tokio::spawn(start_event_processor(
+            component,
+            1,
+            token.clone(),
+            rx,
+            Some(local_indexer.clone()), // arc::clone just increments atomic counters
+        ));
+
+        // Wait for processing
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Verify event was published to NATS (same as test_start_event_processor)
+        {
+            let published_events = published.lock().unwrap();
+            assert_eq!(published_events.len(), 1);
+            let (subject, _) = &published_events[0];
+            assert_eq!(subject, QUEUE_NAME);
+        } // drop lock
+
+        // Verify event was applied to local indexer
+        // We can check by querying the workers that have blocks
+        let get_workers_tx = local_indexer.get_workers_sender();
+        let mut found = false;
+        for _ in 0..20 {
+            // Try up to 20 times (200ms total)
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            get_workers_tx
+                .send(crate::kv_router::indexer::GetWorkersRequest { resp: resp_tx })
+                .await
+                .unwrap();
+            let workers: Vec<u64> = resp_rx.await.unwrap();
+
+            if workers.contains(&1) {
+                found = true;
+                break;
+            }
+
+            // Wait before retrying
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+
+        // Worker 1 should be in the set (we used worker_id=1)
+        assert!(
+            found,
+            "Worker 1 was not found in the indexer after processing"
+        );
+
+        // Cleanup
+        token.cancel();
+    }
+
+    //--------------------------------------------------------------------
+    // Test BlockRemoved event with local indexer
+    //--------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_event_processor_block_removed_with_local_indexer() {
+        let (component, published) = MockComponent::new();
+
+        let token = CancellationToken::new();
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
+
+        // First, store a block
+        let store_event = KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(100),
+                    tokens_hash: LocalBlockHash(200),
+                }],
+            }),
+            dp_rank: 0,
+        };
+
+        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        tx.send(store_event).unwrap();
+
+        // Start event processor with local indexer
+        let handle = tokio::spawn(start_event_processor(
+            component,
+            1,
+            token.clone(),
+            rx,
+            Some(local_indexer.clone()),
+        ));
+
+        // Then remove same event
+        let remove_event = KvCacheEvent {
+            event_id: 2,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(100)],
+            }),
+            dp_rank: 0,
+        };
+        tx.send(remove_event).unwrap();
+        drop(tx);
+
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Local indexer should have no block
+        let mut no_blocks = false;
+        for _ in 0..20 {
+            // Try up to 20 times (200ms total)
+            let scores = local_indexer
+                .find_matches(vec![LocalBlockHash(200)])
+                .await
+                .unwrap();
+            if scores.scores.is_empty() {
+                no_blocks = true;
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+        assert!(no_blocks, "worker should have no blocks after removal");
+
+        // Global kvindexer should have recieved two events (create/remove)
+        let published = published.lock().unwrap();
+        assert_eq!(
+            published.len(),
+            2,
+            "expected 2 published events, found {}",
+            published.len()
+        );
+
+        token.cancel();
+    }
+
+    //--------------------------------------------------------------------
+    // Test AllBlocksCleared event with local indexer
+    //--------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_event_processor_all_blocks_cleared_with_local_indexer() {
+        let (component, published) = MockComponent::new();
+
+        let token = CancellationToken::new();
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
+
+        // Store a block
+        let store_event = KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(100),
+                    tokens_hash: LocalBlockHash(200),
+                }],
+            }),
+            dp_rank: 0,
+        };
+
+        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        tx.send(store_event).unwrap();
+
+        // Clear all blocks
+        let clear_event = KvCacheEvent {
+            event_id: 2,
+            data: KvCacheEventData::Cleared,
+            dp_rank: 0,
+        };
+        tx.send(clear_event).unwrap();
+        drop(tx);
+
+        // Create event processor and wait
+        let handle = tokio::spawn(start_event_processor(
+            component,
+            1,
+            token.clone(),
+            rx,
+            Some(local_indexer.clone()),
+        ));
+
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Local indexer should have no block
+        let mut no_blocks = false;
+        for _ in 0..20 {
+            // Try up to 20 times (200ms total)
+            let scores = local_indexer
+                .find_matches(vec![LocalBlockHash(200)])
+                .await
+                .unwrap();
+            if scores.scores.is_empty() {
+                no_blocks = true;
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+        assert!(no_blocks, "worker should have no blocks after clearing");
+
+        // Global kvindexer should have recieved two events (create/remove)
+        let published = published.lock().unwrap();
+        assert_eq!(
+            published.len(),
+            2,
+            "expected 2 published events, found {}",
+            published.len()
+        );
+
+        token.cancel();
+    }
+
+    //--------------------------------------------------------------------
+    // Test that local indexer failure doesn't break NATS publishing
+    //--------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_event_processor_local_indexer_failure_continues() {
+        let (component, published) = MockComponent::new();
+
+        let token = CancellationToken::new();
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
+
+        // cancel indexer immediately to simulate failure
+        token.cancel();
+
+        let event = KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(1)],
+            }),
+            dp_rank: 0,
+        };
+
+        let new_token = CancellationToken::new();
+        let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+        tx.send(event).unwrap();
+        drop(tx);
+
+        // Despite local indexer being cancelled, event processor should continue
+        let handle = tokio::spawn(start_event_processor(
+            component,
+            1,
+            new_token,
+            rx,
+            Some(local_indexer),
+        ));
+
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Verify event was still published to NATS despite local indexer failure
+        let published_events = published.lock().unwrap();
+        assert_eq!(published_events.len(), 1);
     }
 
     //--------------------------------------------------------------------
@@ -1185,6 +1668,275 @@ mod tests_startup_helpers {
         token.cancel();
         let _ = listener_handle.await;
     }
+
+    //--------------------------------------------------------------------
+    // Test distributed recovery: Router queries worker's LocalKvIndexer after outage
+    //--------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_distributed_kvindexer_recovery_from_outage() {
+        let worker_1_id = 1u64;
+        let block_size = 4u32;
+        let token = CancellationToken::new();
+
+        // === SETUP: Worker Components ===
+        let (worker_component, worker_published) = MockComponent::new();
+        let local_indexer_1 = Arc::new(LocalKvIndexer::new(
+            token.clone(),
+            block_size,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            100, // buffer size
+        ));
+
+        let (worker_tx, worker_rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+
+        // Start worker's event processor
+        tokio::spawn(start_event_processor(
+            worker_component,
+            worker_1_id,
+            token.clone(),
+            worker_rx,
+            Some(local_indexer_1.clone()),
+        ));
+
+        // === SETUP: Router Components ===
+        let router_indexer = Arc::new(KvIndexer::new(
+            token.clone(),
+            block_size,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+        ));
+
+        // === STEP 1: Normal Operation ===
+        let event_1 = KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: vec![
+                    KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(100),
+                        tokens_hash: LocalBlockHash(200),
+                    },
+                    KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(101),
+                        tokens_hash: LocalBlockHash(201),
+                    },
+                ],
+            }),
+            dp_rank: 0,
+        };
+
+        worker_tx.send(event_1.clone()).unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Simulate JetStream: forward worker's published event to router
+        let (subject, bytes) = {
+            let published = worker_published.lock().unwrap();
+            assert_eq!(published.len(), 1, "Worker should have published 1 event");
+            (published[0].0.clone(), published[0].1.clone())
+        }; // drop worker_published before await
+        assert_eq!(subject, QUEUE_NAME);
+
+        let router_event: RouterEvent = rmp_serde::from_slice(&bytes).unwrap();
+        router_indexer
+            .event_sender()
+            .send(router_event)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // assert: Router's indexer has event
+        let get_workers_tx = router_indexer.get_workers_sender();
+        let mut router_has_worker = false;
+        for _ in 0..20 {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            get_workers_tx
+                .send(crate::kv_router::indexer::GetWorkersRequest { resp: resp_tx })
+                .await
+                .unwrap();
+            let workers: Vec<u64> = resp_rx.await.unwrap();
+            if workers.contains(&worker_1_id) {
+                router_has_worker = true;
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            router_has_worker,
+            "Router should see worker 1 after normal operation"
+        );
+
+        // assert: Worker's local indexer buffered event
+        let buffered = local_indexer_1.get_all_buffered_events();
+        assert_eq!(buffered.len(), 1, "Local indexer should buffer 1 event");
+
+        // === STEP 2 & 3: Simulate Outage - Stop forwarding to router ===
+        let event_2 = KvCacheEvent {
+            event_id: 2,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: vec![
+                    KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(100), // Shared prefix
+                        tokens_hash: LocalBlockHash(200),
+                    },
+                    KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(102), // New block
+                        tokens_hash: LocalBlockHash(202),
+                    },
+                ],
+            }),
+            dp_rank: 0,
+        };
+
+        worker_tx.send(event_2.clone()).unwrap(); // send to worker but not to router
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // assert: Worker published event_2 to "NATS" (MockComponent)
+        {
+            let published = worker_published.lock().unwrap();
+            assert_eq!(
+                published.len(),
+                2,
+                "Worker should have published 2 events total"
+            );
+        }
+
+        // assert: Worker's local indexer has both events
+        let buffered = local_indexer_1.get_all_buffered_events();
+        assert_eq!(
+            buffered.len(),
+            2,
+            "Local indexer should have both events during outage"
+        );
+
+        // assert: Router DOESN'T have event_2
+        let block_hashes_2 = vec![LocalBlockHash(200), LocalBlockHash(202)];
+        let overlap = router_indexer
+            .find_matches(block_hashes_2.clone())
+            .await
+            .unwrap();
+        let router_overlap = overlap
+            .scores
+            .get(&crate::kv_router::protocols::WorkerWithDpRank::from_worker_id(worker_1_id))
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            router_overlap, 1,
+            "Router should only see 1 shared block (not the new block from event_2)"
+        );
+
+        // === STEP 4 & 5: Recovery - Apply buffered events to router ===
+        // This simulates: router.query_worker_local_kv(worker_1_id)
+        // followed by applying the returned events
+        // TODO be able to identify which event id is the last that Router has,
+        // and query worker(s) for buffer starting after it
+        for (worker_id, event) in buffered {
+            let router_event = RouterEvent::new(worker_id, event);
+            router_indexer
+                .event_sender()
+                .send(router_event)
+                .await
+                .unwrap(); // TODO use apply_event() instead?
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // assert: Router now has complete state
+        let overlap = router_indexer.find_matches(block_hashes_2).await.unwrap();
+        let router_overlap_after = overlap
+            .scores
+            .get(&crate::kv_router::protocols::WorkerWithDpRank::from_worker_id(worker_1_id))
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            router_overlap_after, 2,
+            "Router should now see both blocks after recovery"
+        );
+
+        token.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests_local_indexer_query {
+    use super::*;
+    use crate::kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
+
+    #[tokio::test]
+    async fn test_local_indexer_buffer_and_serialization() {
+        // Tests components of the LocalKvIndexer query without using nats
+
+        let worker_id = 42u64;
+
+        // Create a local indexer
+        let token = CancellationToken::new();
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
+
+        // Add events to local indexer's buffer
+        let test_event_1 = RouterEvent::new(
+            worker_id,
+            KvCacheEvent {
+                event_id: 1,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(100),
+                        tokens_hash: LocalBlockHash(200),
+                    }],
+                }),
+                dp_rank: 0,
+            },
+        );
+
+        // Apply events with buffer
+        local_indexer
+            .apply_event_with_buffer(test_event_1)
+            .await
+            .unwrap();
+
+        // Wait for events to be processed
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Get buffered events (what the query service would return)
+        let buffered_events = local_indexer.get_all_buffered_events();
+
+        // Verify buffer contents
+        assert_eq!(buffered_events.len(), 1, "Buffer should have 1 event");
+        assert_eq!(buffered_events[0].0, worker_id);
+        assert_eq!(buffered_events[0].1.event_id, 1);
+
+        // Extract just the KvCacheEvents (what goes in response)
+        let events: Vec<KvCacheEvent> = buffered_events
+            .into_iter()
+            .map(|(_, kv_event)| kv_event)
+            .collect();
+
+        // Build the response that would be sent
+        let response = WorkerKvQueryResponse {
+            worker_id,
+            events: events.clone(),
+        };
+
+        // Test serialization/deserialization (simulating NATS round-trip)
+        let serialized = serde_json::to_vec(&response).unwrap();
+        let deserialized: WorkerKvQueryResponse = serde_json::from_slice(&serialized).unwrap();
+
+        // Verify response correctness
+        assert_eq!(deserialized.worker_id, worker_id);
+        assert_eq!(deserialized.events.len(), 1);
+        assert_eq!(deserialized.events[0].event_id, 1);
+
+        // Verify event data
+        match &deserialized.events[0].data {
+            KvCacheEventData::Stored(store_data) => {
+                assert_eq!(store_data.blocks.len(), 1);
+                assert_eq!(store_data.blocks[0].block_hash.0, 100);
+                assert_eq!(store_data.blocks[0].tokens_hash.0, 200);
+            }
+            _ => panic!("Expected Stored event"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1240,7 +1992,10 @@ mod test_exponential_backoff {
 mod test_integration_publisher {
     use super::*;
     use crate::kv_router::protocols::{ForwardPassMetrics, KvStats, WorkerStats};
-    use dynamo_runtime::distributed_test_utils::create_test_drt_async;
+    use dynamo_runtime::distributed_test_utils::{
+        create_test_drt_async, create_test_shared_drt_async,
+    };
+    use dynamo_runtime::pipeline::AsyncEngine;
     use dynamo_runtime::traits::events::EventSubscriber;
     use futures::StreamExt;
 
@@ -1428,5 +2183,210 @@ mod test_integration_publisher {
         println!(
             "✅ KvStatsPrometheusGauges constructor and publish() work correctly with real Component"
         );
+    }
+
+    /// Integration test: KvPushRouter end-to-end routing with mock engines.
+    #[tokio::test]
+    #[ignore] // Requires NATS/etcd. Run with: cargo test --package dynamo-llm --lib --features integration test_distributed_kvindexer_e2e -- --ignored --nocapture
+    async fn test_distributed_kvindexer_e2e() -> anyhow::Result<()> {
+        unsafe {
+            // Typical use case would set this env var via
+            // --enable-local-kvindexers flag in frontend or standalone router
+            env::set_var("DYN_ENABLE_LOCAL_KVINDEXERS", "1");
+        }
+
+        use crate::kv_router::scheduler::DefaultWorkerSelector;
+        use crate::kv_router::{
+            KvPushRouter, KvRouter, KvRouterConfig, worker_query::WorkerQueryClient,
+        };
+        use crate::mocker::engine::MOCKER_COMPONENT;
+        use crate::mocker::engine::MockVllmEngine;
+        use crate::mocker::protocols::{MockEngineArgs, WorkerType};
+        use crate::protocols::common::{
+            OutputOptions, SamplingOptions, StopConditions,
+            llm_backend::{LLMEngineOutput, PreprocessedRequest},
+        };
+        use dynamo_runtime::pipeline::{Context, PushRouter, RouterMode, network::Ingress};
+        use dynamo_runtime::protocols::annotated::Annotated;
+
+        const BLOCK_SIZE: u32 = 4;
+        const NUM_REQUESTS: usize = 4;
+
+        dynamo_runtime::logging::init();
+
+        // === SETUP: Distributed runtimes and namespaces ===
+        let shared_store_dir = tempfile::tempdir()?;
+        let shared_store_path = shared_store_dir.path().to_path_buf();
+
+        // Make both runtimes point at the same file-backed storage backend so worker
+        // registrations and heartbeats remain visible to every DRT instance.
+        let distributed1 = create_test_shared_drt_async(&shared_store_path).await;
+        let distributed2 = create_test_shared_drt_async(&shared_store_path).await;
+        let component1 = distributed1
+            .namespace("test_e2e_router")?
+            .component(MOCKER_COMPONENT)?;
+        let component2 = distributed2
+            .namespace("test_e2e_router")?
+            .component(MOCKER_COMPONENT)?;
+
+        // === SETUP: Start mocker workers  ===
+        let mocker_args = MockEngineArgs::builder()
+            .block_size(BLOCK_SIZE as usize)
+            .dp_size(1) // single worker per runtime
+            .worker_type(WorkerType::Aggregated)
+            .speedup_ratio(50.0)
+            .enable_prefix_caching(true)
+            .build()?;
+
+        let worker_components = vec![component1.clone(), component2.clone()];
+        let mut server_handles = Vec::new();
+        let mut worker_ids = Vec::new();
+
+        for comp in worker_components {
+            let engine = Arc::new(MockVllmEngine::new(mocker_args.clone()));
+            engine.start(comp.clone()).await?;
+            tracing::info!("MockVllmEngine started for {:?}", comp);
+
+            let ingress = Ingress::for_engine(engine.clone())?;
+            let endpoint_component = comp.clone();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = endpoint_component
+                    .endpoint("generate")
+                    .endpoint_builder()
+                    .handler(ingress)
+                    .start()
+                    .await
+                {
+                    tracing::error!("Generate endpoint failed: {e}");
+                }
+            });
+            server_handles.push(handle);
+            worker_ids.push(comp.drt().connection_id());
+        }
+        tracing::info!("Generate endpoint servers launched");
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // === SETUP: Build KvPushRouter ===
+        let router_distributed = create_test_shared_drt_async(&shared_store_path).await;
+        let router_namespace = router_distributed.namespace("test_e2e_router")?;
+        let backend_component = router_namespace.component(MOCKER_COMPONENT)?;
+        let backend_endpoint = backend_component.endpoint("generate");
+        let client = backend_endpoint.client().await?;
+        let kv_router_config = KvRouterConfig::default();
+        let selector = Box::new(DefaultWorkerSelector::new(Some(kv_router_config)));
+        let consumer_id = format!("test-router-{}", router_distributed.connection_id());
+
+        let kv_router: Arc<KvRouter> = Arc::new(
+            KvRouter::new(
+                backend_endpoint.clone(),
+                client.clone(),
+                BLOCK_SIZE,
+                Some(selector),
+                Some(kv_router_config),
+                consumer_id,
+            )
+            .await?,
+        );
+
+        let push_router =
+            PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
+                client,
+                RouterMode::KV,
+                None,
+                None,
+            )
+            .await?;
+
+        let kv_push_router = KvPushRouter::new(push_router, kv_router.clone());
+
+        // ===== TEST PART 1: ROUTE & SEND REQUESTS TO WORKERS (ROUTER -> WORKER) =====
+        let create_request = |tokens: Vec<u32>| {
+            PreprocessedRequest::builder()
+                .model("mock".to_string())
+                .token_ids(tokens)
+                .stop_conditions(StopConditions {
+                    max_tokens: Some(10),
+                    ..Default::default()
+                })
+                .sampling_options(SamplingOptions::default())
+                .output_options(OutputOptions::default())
+                .eos_token_ids(vec![])
+                .build()
+                .unwrap()
+        }; // from mocker/engine.rs
+
+        for i in 0..NUM_REQUESTS {
+            tracing::info!("Sending routed request {}", i + 1);
+            let tokens = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, i as u32];
+            let request = create_request(tokens.clone());
+
+            let response_stream = kv_push_router.generate(Context::new(request)).await?;
+            let responses: Vec<Annotated<LLMEngineOutput>> = response_stream.collect().await;
+            assert!(
+                !responses.is_empty(),
+                "Request {} should produce at least one response",
+                i + 1
+            );
+        }
+
+        tracing::info!("KvPushRouter generate() succeeded for {NUM_REQUESTS} requests");
+
+        // ===== TEST PART 2: QUERY WORKER-LOCAL KVINDEXERS DIRECTLY =====
+        // TODO: This could be refactored as router function (e.g. router.refresh_from_worker(worker_id))
+        // (which should also update the global kvIndexer with the buffer from the local kvIndexer)
+        let query_client = WorkerQueryClient::new(router_namespace.clone());
+        let mut best_worker_info: Option<(u64, usize)> = None;
+
+        // Exactly one worker should have been routed requests. Find that worker
+        for &worker_id in &worker_ids {
+            let response = query_client.query_worker(worker_id).await?;
+            assert_eq!(response.worker_id, worker_id);
+
+            if !response.events.is_empty() {
+                let event_count = response.events.len();
+                tracing::info!(
+                    worker_id,
+                    events = event_count,
+                    "Worker query on worker {worker_id} returned buffered KV events"
+                );
+                best_worker_info = Some((worker_id, event_count));
+                break;
+            }
+        }
+
+        // Verify that only one worker has KV events in buffer
+        let (best_worker_id, best_worker_event_count) =
+            best_worker_info.expect("At least one worker should have buffered KV events");
+
+        tracing::info!(
+            "Best worker is {best_worker_id} with {best_worker_event_count} buffered KV events"
+        );
+
+        for &worker_id in &worker_ids {
+            if worker_id == best_worker_id {
+                continue;
+            }
+
+            let response = query_client.query_worker(worker_id).await?;
+            assert!(
+                response.events.is_empty(),
+                "Worker {worker_id} should not report buffered KV events; best worker {best_worker_id} reported {best_worker_event_count}"
+            );
+        }
+
+        // === Cleanup ===
+        for handle in server_handles {
+            handle.abort();
+        }
+        unsafe {
+            env::remove_var("DYN_ENABLE_LOCAL_KVINDEXERS");
+        }
+
+        distributed1.shutdown();
+        distributed2.shutdown();
+        router_distributed.shutdown();
+
+        Ok(())
     }
 }

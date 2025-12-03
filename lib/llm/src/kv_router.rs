@@ -32,6 +32,7 @@ pub mod scheduler;
 pub mod scoring;
 pub mod sequence;
 pub mod subscriber;
+pub mod worker_query;
 
 pub use prefill_router::PrefillRouter;
 
@@ -43,7 +44,8 @@ use crate::{
             compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         protocols::{
-            LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult, WorkerWithDpRank,
+            LocalBlockHash, RouterRequest, RouterResponse, WorkerId, WorkerSelectionResult,
+            WorkerWithDpRank,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         sequence::SequenceError,
@@ -74,6 +76,9 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 // for radix tree snapshot storage
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
+
+// for worker-local kvindexer query
+pub const WORKER_KV_INDEXER_QUERY_SUBJECT: &str = "worker_kv_indexer_query";
 
 // for router discovery registration
 pub const KV_ROUTER_COMPONENT: &str = "kv-router";
@@ -145,6 +150,9 @@ pub struct KvRouterConfig {
 
     /// Target size ratio after pruning (only used when use_kv_events is false, default: 0.8)
     pub router_prune_target_ratio: f64,
+
+    /// Whether to use worker-local kvindexers for worker-specific event storage
+    pub enable_local_kvindexers: bool,
 }
 
 impl Default for KvRouterConfig {
@@ -160,6 +168,7 @@ impl Default for KvRouterConfig {
             router_ttl_secs: 120.0,
             router_max_tree_size: 1024,
             router_prune_target_ratio: 0.8,
+            enable_local_kvindexers: false,
         }
     }
 }
@@ -179,6 +188,7 @@ impl KvRouterConfig {
         router_ttl_secs: Option<f64>,
         router_max_tree_size: Option<usize>,
         router_prune_target_ratio: Option<f64>,
+        enable_local_kvindexers: Option<bool>,
     ) -> Self {
         let default = Self::default();
         Self {
@@ -195,6 +205,8 @@ impl KvRouterConfig {
             router_max_tree_size: router_max_tree_size.unwrap_or(default.router_max_tree_size),
             router_prune_target_ratio: router_prune_target_ratio
                 .unwrap_or(default.router_prune_target_ratio),
+            enable_local_kvindexers: enable_local_kvindexers
+                .unwrap_or(default.enable_local_kvindexers),
         }
     }
 }
@@ -268,6 +280,8 @@ pub struct KvRouter {
     cancellation_token: tokio_util::sync::CancellationToken,
 
     client: Client,
+
+    worker_query_client: Option<worker_query::WorkerQueryClient>,
 }
 
 impl KvRouter {
@@ -360,6 +374,20 @@ impl KvRouter {
             .await?;
         }
 
+        // Initialize worker query client using the namespace abstraction
+        // NATS client is managed by DRT and accessed through namespace.drt()
+        let worker_query_client = if std::env::var(
+            dynamo_runtime::config::environment_names::nats::NATS_SERVER,
+        )
+        .is_ok()
+        {
+            Some(worker_query::WorkerQueryClient::new(
+                component.namespace().clone(),
+            ))
+        } else {
+            None
+        };
+
         tracing::info!("KV Routing initialized");
         Ok(Self {
             indexer,
@@ -368,6 +396,7 @@ impl KvRouter {
             kv_router_config,
             cancellation_token,
             client,
+            worker_query_client,
         })
     }
 
@@ -499,6 +528,19 @@ impl KvRouter {
     /// Dump all events from the indexer
     pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         self.indexer.dump_events().await
+    }
+
+    /// Query a specific worker's local KV indexer for its buffered events
+    pub async fn query_worker_local_kv(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<protocols::WorkerKvQueryResponse> {
+        let query_client = self
+            .worker_query_client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Worker query client not available (NATS required)"))?;
+
+        query_client.query_worker(worker_id).await
     }
 }
 
