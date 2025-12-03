@@ -139,13 +139,14 @@ pub fn fix_json(json_string: &str, allow: AllowPartial) -> (String, String) {
     // Handle unclosed strings
     if !allow.strings && in_string {
         if let Some(last_container) = stack.back()
-            && last_container.char == '{' {
-                // Truncate before the unclosed string key
-                return (
-                    head[..=last_container.index].to_string(),
-                    join_closing_tokens(&stack),
-                );
-            }
+            && last_container.char == '{'
+        {
+            // Truncate before the unclosed string key
+            return (
+                head[..=last_container.index].to_string(),
+                join_closing_tokens(&stack),
+            );
+        }
 
         // Find last comma before the unclosed string
         if let Some(string_start) = last_string_start {
@@ -163,16 +164,18 @@ pub fn fix_json(json_string: &str, allow: AllowPartial) -> (String, String) {
     }
 
     // Simple case: just close all open containers
-    if in_string && allow.strings
-        && let Some(string_start) = last_string_start {
-            // Fix the partial string
-            let partial_str = &head[string_start..];
-            let (fixed_head, fixed_tail) = simple_fix(partial_str, allow);
-            return (
-                format!("{}{}", &head[..string_start], fixed_head),
-                format!("{}{}", fixed_tail, join_closing_tokens(&stack)),
-            );
-        }
+    if in_string
+        && allow.strings
+        && let Some(string_start) = last_string_start
+    {
+        // Fix the partial string
+        let partial_str = &head[string_start..];
+        let (fixed_head, fixed_tail) = simple_fix(partial_str, allow);
+        return (
+            format!("{}{}", &head[..string_start], fixed_head),
+            format!("{}{}", fixed_tail, join_closing_tokens(&stack)),
+        );
+    }
 
     (head.to_string(), join_closing_tokens(&stack))
 }
@@ -182,27 +185,26 @@ fn simple_fix(json_string: &str, allow: AllowPartial) -> (String, String) {
     let trimmed = json_string.trim_end();
 
     // Handle unclosed strings
-    if trimmed.starts_with('"')
-        && allow.strings {
-            // Count how many unescaped quotes we have
-            let mut escaped = false;
-            let mut quote_count = 0;
-            for ch in trimmed.chars() {
-                if ch == '\\' && !escaped {
-                    escaped = true;
-                } else {
-                    if ch == '"' && !escaped {
-                        quote_count += 1;
-                    }
-                    escaped = false;
+    if trimmed.starts_with('"') && allow.strings {
+        // Count how many unescaped quotes we have
+        let mut escaped = false;
+        let mut quote_count = 0;
+        for ch in trimmed.chars() {
+            if ch == '\\' && !escaped {
+                escaped = true;
+            } else {
+                if ch == '"' && !escaped {
+                    quote_count += 1;
                 }
-            }
-
-            if quote_count % 2 == 1 {
-                // Unclosed string
-                return (trimmed.to_string(), "\"".to_string());
+                escaped = false;
             }
         }
+
+        if quote_count % 2 == 1 {
+            // Unclosed string
+            return (trimmed.to_string(), "\"".to_string());
+        }
+    }
 
     // Already complete or can't fix
     (trimmed.to_string(), String::new())
@@ -218,7 +220,10 @@ pub fn ensure_json(json_string: &str, allow: AllowPartial) -> String {
 ///
 /// This is the main function inspired by partial-json-parser's `loads()`.
 /// It completes the partial JSON and then parses it.
-pub fn loads(json_string: &str, allow: AllowPartial) -> Result<serde_json::Value, serde_json::Error> {
+pub fn loads(
+    json_string: &str,
+    allow: AllowPartial,
+) -> Result<serde_json::Value, serde_json::Error> {
     let completed = ensure_json(json_string, allow);
     serde_json::from_str(&completed)
 }
@@ -279,7 +284,11 @@ mod tests {
         assert_eq!(result2["location"], "Paris");
 
         // Test 3: Complete object
-        let result3 = loads(r#"{"location":"Paris","unit":"celsius"}"#, AllowPartial::all()).unwrap();
+        let result3 = loads(
+            r#"{"location":"Paris","unit":"celsius"}"#,
+            AllowPartial::all(),
+        )
+        .unwrap();
         assert_eq!(result3["location"], "Paris");
         assert_eq!(result3["unit"], "celsius");
     }
@@ -287,7 +296,11 @@ mod tests {
     #[test]
     fn test_loads_array_incremental() {
         // Test 4: Array with unclosed parameter value
-        let result4 = loads(r#"[{"name":"search","parameters":{"query":""#, AllowPartial::all()).unwrap();
+        let result4 = loads(
+            r#"[{"name":"search","parameters":{"query":""#,
+            AllowPartial::all(),
+        )
+        .unwrap();
         assert!(result4.is_array());
         let arr = result4.as_array().unwrap();
         assert_eq!(arr.len(), 1);
@@ -295,7 +308,11 @@ mod tests {
         assert_eq!(arr[0]["parameters"]["query"], "");
 
         // Test 5: Complete first tool, starting second
-        let result5 = loads(r#"[{"name":"search","parameters":{"query":"rust"}},"#, AllowPartial::all()).unwrap();
+        let result5 = loads(
+            r#"[{"name":"search","parameters":{"query":"rust"}},"#,
+            AllowPartial::all(),
+        )
+        .unwrap();
         assert!(result5.is_array());
         let arr = result5.as_array().unwrap();
         assert_eq!(arr.len(), 1);
@@ -303,4 +320,3 @@ mod tests {
         assert_eq!(arr[0]["parameters"]["query"], "rust");
     }
 }
-

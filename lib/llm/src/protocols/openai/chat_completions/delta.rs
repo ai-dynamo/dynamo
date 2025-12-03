@@ -4,7 +4,10 @@
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
-    protocols::{common::{self}, openai::partial_json::{loads, AllowPartial}},
+    protocols::{
+        common::{self},
+        openai::partial_json::{AllowPartial, loads},
+    },
     types::TokenIdType,
 };
 use dynamo_async_openai::types::{
@@ -401,7 +404,10 @@ impl DeltaGenerator {
 
         for current in &current_calls {
             // Check if this is a new tool or existing one
-            let previous = self.previous_tool_calls.iter().find(|p| p.index == current.index);
+            let previous = self
+                .previous_tool_calls
+                .iter()
+                .find(|p| p.index == current.index);
 
             match previous {
                 None => {

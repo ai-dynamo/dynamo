@@ -3,16 +3,15 @@
 
 //! Tests for tool_choice finish_reason handling.
 
+use dynamo_async_openai::types::{
+    ChatCompletionNamedToolChoice, ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
+    ChatCompletionRequestUserMessageContent, ChatCompletionToolChoiceOption,
+    ChatCompletionToolType, CreateChatCompletionRequest, FunctionName,
+};
 use dynamo_llm::protocols::common;
 use dynamo_llm::protocols::common::llm_backend::BackendOutput;
-use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use dynamo_llm::protocols::openai::DeltaGeneratorExt;
-use dynamo_async_openai::types::{
-    ChatCompletionNamedToolChoice, ChatCompletionRequestMessage,
-    ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-    ChatCompletionToolChoiceOption, ChatCompletionToolType, CreateChatCompletionRequest,
-    FunctionName,
-};
+use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 
 fn create_test_request() -> NvCreateChatCompletionRequest {
     let messages = vec![ChatCompletionRequestMessage::User(
@@ -37,10 +36,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
     }
 }
 
-fn build_backend_output_with_finish(
-    text: &str,
-    finish: common::FinishReason,
-) -> BackendOutput {
+fn build_backend_output_with_finish(text: &str, finish: common::FinishReason) -> BackendOutput {
     BackendOutput {
         token_ids: vec![],
         tokens: vec![],
@@ -211,4 +207,3 @@ fn test_required_tool_choice_normal_stop_becomes_tool_calls() {
         Some(dynamo_async_openai::types::FinishReason::ToolCalls),
     );
 }
-

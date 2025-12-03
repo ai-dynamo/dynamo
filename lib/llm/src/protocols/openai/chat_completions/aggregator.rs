@@ -65,7 +65,6 @@ impl Default for DeltaAggregator {
     }
 }
 
-
 impl DeltaAggregator {
     /// Creates a new, empty [`DeltaAggregator`] instance.
     pub fn new() -> Self {
@@ -284,8 +283,7 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
                 Some(dynamo_async_openai::types::FinishReason::Stop)
                     | Some(dynamo_async_openai::types::FinishReason::Length)
                     | Some(dynamo_async_openai::types::FinishReason::ContentFilter)
-            )
-        {
+            ) {
             Some(dynamo_async_openai::types::FinishReason::ToolCalls)
         } else {
             delta.finish_reason
@@ -1015,8 +1013,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_calling_preserves_length_finish_reason() {
         // Test that Length finish reason is preserved even with tool_calls present
-        let tool_call_json =
-            r#"{"name": "get_weather", "arguments": {"location": "Paris"}}"#;
+        let tool_call_json = r#"{"name": "get_weather", "arguments": {"location": "Paris"}}"#;
 
         let annotated_delta = create_test_delta(
             0,
@@ -1057,8 +1054,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_calling_preserves_content_filter_finish_reason() {
         // Test that ContentFilter finish reason is preserved even with tool_calls present
-        let tool_call_json =
-            r#"{"name": "harmful_action", "arguments": {}}"#;
+        let tool_call_json = r#"{"name": "harmful_action", "arguments": {}}"#;
 
         let annotated_delta = create_test_delta(
             0,

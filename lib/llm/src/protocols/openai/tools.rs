@@ -94,12 +94,13 @@ fn build_required_schema(tools: &[ChatCompletionTool]) -> Result<Value, ToolChoi
     });
 
     if !defs.is_empty()
-        && let Value::Object(map) = &mut result {
-            map.insert(
-                "$defs".to_string(),
-                Value::Object(defs.into_iter().collect()),
-            );
-        }
+        && let Value::Object(map) = &mut result
+    {
+        map.insert(
+            "$defs".to_string(),
+            Value::Object(defs.into_iter().collect()),
+        );
+    }
 
     Ok(result)
 }

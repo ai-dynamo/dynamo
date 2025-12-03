@@ -1,18 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::protocols::common;
-use dynamo_llm::protocols::common::llm_backend::BackendOutput;
-use dynamo_llm::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-};
-use dynamo_llm::protocols::openai::DeltaGeneratorExt;
 use dynamo_async_openai::types::{
     ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionNamedToolChoice,
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionStreamResponseDelta,
     ChatCompletionToolChoiceOption, ChatCompletionToolType, CreateChatCompletionRequest,
     CreateChatCompletionStreamResponse, FunctionCallStream, FunctionName,
+};
+use dynamo_llm::protocols::common;
+use dynamo_llm::protocols::common::llm_backend::BackendOutput;
+use dynamo_llm::protocols::openai::DeltaGeneratorExt;
+use dynamo_llm::protocols::openai::chat_completions::{
+    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };
 
 fn create_test_request() -> NvCreateChatCompletionRequest {
@@ -81,10 +81,15 @@ fn test_named_tool_choice_parses_json() {
     let tool_calls = delta.tool_calls.as_ref().unwrap();
 
     // In streaming mode, we emit 2 chunks: first with id/name, second with arguments
-    assert!(tool_calls.len() >= 1, "Should have at least 1 tool call chunk");
+    assert!(
+        tool_calls.len() >= 1,
+        "Should have at least 1 tool call chunk"
+    );
 
     // Find the chunk with the name (first chunk)
-    let name_chunk = tool_calls.iter().find(|tc| tc.function.as_ref().and_then(|f| f.name.as_ref()).is_some());
+    let name_chunk = tool_calls
+        .iter()
+        .find(|tc| tc.function.as_ref().and_then(|f| f.name.as_ref()).is_some());
     assert!(name_chunk.is_some(), "Should have chunk with name");
     let name_chunk = name_chunk.unwrap();
 
@@ -97,7 +102,8 @@ fn test_named_tool_choice_parses_json() {
 
     // Arguments may be in the same chunk or a subsequent one
     let has_arguments = tool_calls.iter().any(|tc| {
-        tc.function.as_ref()
+        tc.function
+            .as_ref()
             .and_then(|f| f.arguments.as_ref())
             .is_some_and(|args| !args.is_empty())
     });
@@ -142,14 +148,16 @@ fn test_required_tool_choice_parses_json_array() {
     // First tool: arguments chunk
     assert_eq!(tool_calls[1].index, 0);
     assert!(tool_calls[1].function.as_ref().unwrap().name.is_none());
-    assert!(tool_calls[1]
-        .function
-        .as_ref()
-        .unwrap()
-        .arguments
-        .as_ref()
-        .unwrap()
-        .contains("rust"));
+    assert!(
+        tool_calls[1]
+            .function
+            .as_ref()
+            .unwrap()
+            .arguments
+            .as_ref()
+            .unwrap()
+            .contains("rust")
+    );
 
     // Second tool: name chunk
     assert_eq!(tool_calls[2].index, 1);
@@ -162,14 +170,16 @@ fn test_required_tool_choice_parses_json_array() {
     // Second tool: arguments chunk
     assert_eq!(tool_calls[3].index, 1);
     assert!(tool_calls[3].function.as_ref().unwrap().name.is_none());
-    assert!(tool_calls[3]
-        .function
-        .as_ref()
-        .unwrap()
-        .arguments
-        .as_ref()
-        .unwrap()
-        .contains("memory"));
+    assert!(
+        tool_calls[3]
+            .function
+            .as_ref()
+            .unwrap()
+            .arguments
+            .as_ref()
+            .unwrap()
+            .contains("memory")
+    );
 }
 
 #[test]
@@ -532,11 +542,7 @@ fn test_true_incremental_streaming_parallel() {
         }
     }
 
-    assert_eq!(
-        tool_names_seen.len(),
-        2,
-        "Should detect both tool calls"
-    );
+    assert_eq!(tool_names_seen.len(), 2, "Should detect both tool calls");
     assert!(tool_names_seen.contains("search"));
     assert!(tool_names_seen.contains("summarize"));
 
@@ -592,15 +598,20 @@ fn create_chunk(
 
 #[tokio::test]
 async fn test_aggregator_named_tool_accumulates_arguments() {
-    use dynamo_llm::protocols::openai::chat_completions::aggregator::DeltaAggregator;
-    use dynamo_llm::protocols::openai::ParsingOptions;
     use dynamo_llm::protocols::Annotated;
+    use dynamo_llm::protocols::openai::ParsingOptions;
+    use dynamo_llm::protocols::openai::chat_completions::aggregator::DeltaAggregator;
     use futures::stream;
 
     // Simulate streaming chunks for named tool choice: get_weather
     let chunks = vec![
         // Chunk 1: role
-        create_chunk(0, Some(dynamo_async_openai::types::Role::Assistant), None, None),
+        create_chunk(
+            0,
+            Some(dynamo_async_openai::types::Role::Assistant),
+            None,
+            None,
+        ),
         // Chunk 2: tool call start (id, type, name, empty arguments)
         create_chunk(
             0,
@@ -688,26 +699,30 @@ async fn test_aggregator_named_tool_accumulates_arguments() {
     assert_eq!(tool_call.function.name, "get_weather");
     // THIS IS THE KEY ASSERTION - arguments should be accumulated!
     assert_eq!(
-        tool_call.function.arguments,
-        r#"{"location":"Paris","unit":"celsius"}"#,
+        tool_call.function.arguments, r#"{"location":"Paris","unit":"celsius"}"#,
         "Arguments should be fully accumulated from all chunks"
     );
 }
 
 #[tokio::test]
 async fn test_aggregator_required_tool_parallel_calls() {
-    use dynamo_llm::protocols::openai::chat_completions::aggregator::DeltaAggregator;
-    use dynamo_llm::protocols::openai::ParsingOptions;
-    use dynamo_llm::protocols::Annotated;
     use dynamo_async_openai::types::{
         ChatCompletionMessageToolCallChunk, ChatCompletionToolType, FunctionCallStream,
     };
+    use dynamo_llm::protocols::Annotated;
+    use dynamo_llm::protocols::openai::ParsingOptions;
+    use dynamo_llm::protocols::openai::chat_completions::aggregator::DeltaAggregator;
     use futures::stream;
 
     // Simulate streaming chunks for required tool choice with parallel calls
     let chunks = vec![
         // Chunk 1: role
-        create_chunk(0, Some(dynamo_async_openai::types::Role::Assistant), None, None),
+        create_chunk(
+            0,
+            Some(dynamo_async_openai::types::Role::Assistant),
+            None,
+            None,
+        ),
         // Chunk 2: first tool call start
         create_chunk(
             0,
@@ -825,8 +840,7 @@ async fn test_aggregator_required_tool_parallel_calls() {
     assert_eq!(tool_call_1.id, "call_1");
     assert_eq!(tool_call_1.function.name, "search");
     assert_eq!(
-        tool_call_1.function.arguments,
-        r#"{"query":"rust"}"#,
+        tool_call_1.function.arguments, r#"{"query":"rust"}"#,
         "First tool arguments should be complete"
     );
 
@@ -835,8 +849,7 @@ async fn test_aggregator_required_tool_parallel_calls() {
     assert_eq!(tool_call_2.id, "call_2");
     assert_eq!(tool_call_2.function.name, "summarize");
     assert_eq!(
-        tool_call_2.function.arguments,
-        r#"{"text":"long article"}"#,
+        tool_call_2.function.arguments, r#"{"text":"long article"}"#,
         "Second tool arguments should be accumulated from multiple chunks"
     );
 
@@ -845,4 +858,3 @@ async fn test_aggregator_required_tool_parallel_calls() {
         Some(dynamo_async_openai::types::FinishReason::ToolCalls)
     );
 }
-
