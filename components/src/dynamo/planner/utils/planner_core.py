@@ -142,11 +142,6 @@ class Planner:
         ].decode_worker_k8s_name
 
         if not self.dryrun:
-            self.prefill_client = None
-            self.workers_client = None
-            self.p_endpoints = []  # type: ignore
-            self.d_endpoints = []  # type: ignore
-
             self.last_adjustment_time = time.time()
             self.last_metrics = Metrics()
 
@@ -187,67 +182,18 @@ class Planner:
         ):
             await self.connector._async_init()
 
-    async def get_workers_info(self):
-        if self.runtime is None:
-            raise RuntimeError("Runtime is not initialized")
-
-        try:
-            if self.prefill_client is None:
-                self.prefill_client = (
-                    await self.runtime.namespace(self.namespace)
-                    .component(
-                        WORKER_COMPONENT_NAMES[
-                            self.args.backend
-                        ].prefill_worker_component_name
-                    )
-                    .endpoint(
-                        WORKER_COMPONENT_NAMES[
-                            self.args.backend
-                        ].prefill_worker_endpoint
-                    )
-                    .client()
-                )
-                # TODO: remove this sleep after rust client() is blocking until watching state
-                await asyncio.sleep(0.1)
-            # TODO: use etcd events instead of pulling instance_ids
-            p_endpoints = self.prefill_client.instance_ids()  # type: ignore
-        except Exception:
-            p_endpoints = []
-            logger.warning(
-                "No prefill workers found, aggregated mode is not supported yet"
-            )
-        try:
-            if self.workers_client is None:
-                self.workers_client = (
-                    await self.runtime.namespace(self.namespace)
-                    .component(
-                        WORKER_COMPONENT_NAMES[
-                            self.args.backend
-                        ].decode_worker_component_name
-                    )
-                    .endpoint(
-                        WORKER_COMPONENT_NAMES[self.args.backend].decode_worker_endpoint
-                    )
-                    .client()
-                )
-                # TODO: remove this sleep after rust client() is blocking until watching state
-                await asyncio.sleep(0.1)
-            # TODO: use etcd events instead of pulling instance_ids
-            d_endpoints = self.workers_client.instance_ids()  # type: ignore
-        except Exception as e:
-            raise RuntimeError(f"Failed to get decode worker endpoints: {e}")
-        return p_endpoints, d_endpoints
-
     async def observe_metrics(self):
-        self.p_endpoints, self.d_endpoints = await self.get_workers_info()
+        num_p_workers, num_d_workers = await self.connector.get_number_workers(
+            self.prefill_component_name, self.decode_component_name
+        )
         logger.debug(
-            f"Number of prefill workers: {len(self.p_endpoints)}, number of decode workers: {len(self.d_endpoints)}"
+            f"Number of prefill workers: {num_p_workers}, number of decode workers: {num_d_workers}"
         )
 
         # Update Prometheus metrics if server is running
         if self.prometheus_port != 0:
-            self.num_p_workers_gauge.set(len(self.p_endpoints))
-            self.num_d_workers_gauge.set(len(self.d_endpoints))
+            self.num_p_workers_gauge.set(num_p_workers)
+            self.num_d_workers_gauge.set(num_d_workers)
 
         # Prometheus returns seconds, convert to milliseconds
         self.last_metrics.ttft = (
@@ -423,9 +369,11 @@ class Planner:
 
         if not self.no_correction:
             try:
-                self.p_endpoints, self.d_endpoints = await self.get_workers_info()
+                num_p_workers, num_d_workers = await self.connector.get_number_workers(
+                    self.prefill_component_name, self.decode_component_name
+                )
                 logger.info(
-                    f"Number of prefill workers: {len(self.p_endpoints)}, number of decode workers: {len(self.d_endpoints)}"
+                    f"Number of prefill workers: {num_p_workers}, number of decode workers: {num_d_workers}"
                 )
 
                 # first correct the prediction correction factor
@@ -437,7 +385,7 @@ class Planner:
                 # for ITL, we expect the correction factor to be close to 1
                 expect_itl = self.decode_interpolator.interpolate_itl(
                     concurrency=self.last_metrics.num_req  # type: ignore
-                    / len(self.d_endpoints)
+                    / num_d_workers
                     * self.last_metrics.request_duration  # type: ignore
                     / self.args.adjustment_interval,
                     context_length=self.last_metrics.isl + self.last_metrics.osl / 2,  # type: ignore

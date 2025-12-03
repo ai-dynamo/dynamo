@@ -58,13 +58,13 @@ def kubernetes_connector(mock_kube_api_class, monkeypatch):
         "dynamo.planner.kubernetes_connector.KubernetesAPI", mock_kube_api_class
     )
     with patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}):
-        connector = KubernetesConnector("test-dynamo-namespace")
+        connector = KubernetesConnector(k8s_namespace="test-dynamo-namespace")
         return connector
 
 
 def test_kubernetes_connector_no_env_var():
     with pytest.raises(DeploymentValidationError) as exc_info:
-        KubernetesConnector("test-dynamo-namespace")
+        KubernetesConnector(k8s_namespace="test-dynamo-namespace")
 
     exception = exc_info.value
     assert set(exception.errors) == {
@@ -681,3 +681,101 @@ def test_get_model_name_agree_returns_model_name(kubernetes_connector, mock_kube
 
     # Assert
     assert result == "agreed-model"
+
+
+@pytest.mark.asyncio
+async def test_get_number_workers(kubernetes_connector, mock_kube_api):
+    # Arrange
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "component1": {"replicas": 3, "subComponentType": "prefill"},
+                "component2": {"replicas": 5, "subComponentType": "decode"},
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    # Act
+    prefill_count, decode_count = await kubernetes_connector.get_number_workers()
+
+    # Assert
+    assert prefill_count == 3
+    assert decode_count == 5
+    mock_kube_api.get_graph_deployment.assert_called_once_with("test-graph")
+
+
+@pytest.mark.asyncio
+async def test_get_number_workers_with_component_names(
+    kubernetes_connector, mock_kube_api
+):
+    # Arrange
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "custom-prefill": {"replicas": 2, "subComponentType": "prefill"},
+                "custom-decode": {"replicas": 4, "subComponentType": "decode"},
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    # Act
+    prefill_count, decode_count = await kubernetes_connector.get_number_workers(
+        prefill_component_name="custom-prefill", decode_component_name="custom-decode"
+    )
+
+    # Assert
+    assert prefill_count == 2
+    assert decode_count == 4
+    mock_kube_api.get_graph_deployment.assert_called_once_with("test-graph")
+
+
+@pytest.mark.asyncio
+async def test_get_number_workers_with_zero_replicas(
+    kubernetes_connector, mock_kube_api
+):
+    # Arrange
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "component1": {"replicas": 0, "subComponentType": "prefill"},
+                "component2": {"replicas": 0, "subComponentType": "decode"},
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    # Act
+    prefill_count, decode_count = await kubernetes_connector.get_number_workers()
+
+    # Assert
+    assert prefill_count == 0
+    assert decode_count == 0
+
+
+@pytest.mark.asyncio
+async def test_get_number_workers_component_not_found(
+    kubernetes_connector, mock_kube_api
+):
+    # Arrange
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "component1": {"replicas": 1, "subComponentType": "prefill"},
+                # Missing decode component
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    # Act & Assert
+    with pytest.raises(SubComponentNotFoundError) as exc_info:
+        await kubernetes_connector.get_number_workers()
+
+    exception = exc_info.value
+    assert exception.sub_component_type == SubComponentType.DECODE.value

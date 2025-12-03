@@ -396,6 +396,30 @@ kubectl apply -f examples/backends/<backend>/deploy/disagg_planner.yaml -n $NAME
 >
 > **Important - Prometheus Configuration**: The planner queries Prometheus to get frontend request metrics for scaling decisions. If you see errors like "Failed to resolve prometheus service", ensure the `PROMETHEUS_ENDPOINT` environment variable in your planner configuration correctly points to your Prometheus service. See the comments in the example templates for details.
 
+### Manual Replica Scaling
+
+You can manually update prefill and decode replicas in a deployed DGD using `kubectl patch`. This allows you to override the planner's automatic scaling decisions when needed.
+
+To find the service name to patch, inspect your DGD and look for services with `subComponentType: prefill` or `subComponentType: decode`:
+
+```bash
+# View DGD services to find service names
+kubectl get dgd <dgd-name> -n $NAMESPACE -o yaml | grep -A 5 "subComponentType:"
+```
+
+The service name is the key under `spec.services` that contains the `subComponentType` field you're targeting.
+
+**Example:**
+
+```bash
+# Scale replicas for a service (replace <service-name> with the service name from your DGD)
+kubectl patch dgd <dgd-name> -n $NAMESPACE --type='json' \
+  -p='[{"op": "replace", "path": "/spec/services/<service-name>/replicas", "value": 3}]'
+```
+
+> [!NOTE]
+> Manual replica changes may be overridden by the planner's automatic scaling decisions. If you need to prevent the planner from scaling, you may need to adjust planner configuration or temporarily disable the planner component.
+
 ### Relationship to DynamoGraphDeployment (DGD)
 
 - **DGDR**: High-level "intent" - what you want deployed
