@@ -117,6 +117,21 @@ trtllm_configs = {
         delayed_start=60,
         request_payloads=[multimodal_payload_default()],
     ),
+    "completions_only": TRTLLMConfig(
+        name="completions_only",
+        directory=trtllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.trtllm],
+        model="deepseek-ai/deepseek-llm-7b-base",
+        script_args=["--dyn-endpoint-types", "completions"],
+        env={
+            "MODEL_PATH": "deepseek-ai/deepseek-llm-7b-base",
+            "SERVED_MODEL_NAME": "deepseek-ai/deepseek-llm-7b-base",
+        },
+        request_payloads=[
+            completion_payload_default(),
+        ],
+    ),
 }
 
 

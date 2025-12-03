@@ -22,7 +22,7 @@ use dynamo_llm::block_manager::{
         locality::Logical,
     },
     connector::*,
-    kv_consolidator::tracker::EventSource,
+    kv_consolidator::EventSource,
 };
 use dynamo_llm::tokens::{SaltHash, TokenBlockSequence, Tokens};
 use dynamo_runtime::config::environment_names::kvbm as env_kvbm;
@@ -144,8 +144,11 @@ impl KvConnectorLeader {
                         vllm_ep,
                         output_ep
                     );
-                    block_manager_builder =
-                        block_manager_builder.consolidator_config(vllm_ep, output_ep, EventSource::Vllm);
+                    block_manager_builder = block_manager_builder.consolidator_config(
+                        vllm_ep,
+                        Some(output_ep),
+                        EventSource::Vllm,
+                    );
                 }
 
                 let block_manager = match block_manager_builder.build().await {
