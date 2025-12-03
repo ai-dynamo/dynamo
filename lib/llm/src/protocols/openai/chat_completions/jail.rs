@@ -181,7 +181,12 @@ impl ChoiceJailState {
 
                         // Create the tool call choice
                         let tool_choice = jail_stream
-                            .create_tool_call_choice(choice.index, jailed_part, choice, self.emitted_tool_calls_count)
+                            .create_tool_call_choice(
+                                choice.index,
+                                jailed_part,
+                                choice,
+                                self.emitted_tool_calls_count,
+                            )
                             .await;
 
                         if tool_choice.delta.tool_calls.is_some() {
@@ -303,7 +308,12 @@ impl ChoiceJailState {
 
                 // Create the unjailed choice
                 let unjailed_choice = jail_stream
-                    .create_tool_call_choice(choice.index, jailed_part, choice, self.emitted_tool_calls_count)
+                    .create_tool_call_choice(
+                        choice.index,
+                        jailed_part,
+                        choice,
+                        self.emitted_tool_calls_count,
+                    )
                     .await;
 
                 // Determine emission type based on whether tool calls were parsed
@@ -358,7 +368,12 @@ impl ChoiceJailState {
             );
 
             let final_choice = jail_stream
-                .create_tool_call_choice(self.index, &self.accumulated_content, &dummy_choice, self.emitted_tool_calls_count)
+                .create_tool_call_choice(
+                    self.index,
+                    &self.accumulated_content,
+                    &dummy_choice,
+                    self.emitted_tool_calls_count,
+                )
                 .await;
 
             if let Some(ref tool_calls) = final_choice.delta.tool_calls {

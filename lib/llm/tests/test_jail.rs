@@ -2163,9 +2163,7 @@ mod parallel_jail_tests {
             assert_eq!(
                 tool_call.index, i as u32,
                 "Tool call {} should have index {}, got {}",
-                i,
-                i,
-                tool_call.index
+                i, i, tool_call.index
             );
 
             assert_eq!(
