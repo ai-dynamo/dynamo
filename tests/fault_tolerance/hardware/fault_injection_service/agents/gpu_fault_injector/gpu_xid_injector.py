@@ -156,48 +156,50 @@ class GPUXIDInjectorKernel:
     def _get_pci_address_from_proc(self, gpu_id: int) -> str:
         """
         Get PCI address for GPU by reading /host/proc/driver/nvidia/gpus/.
-        
+
         This method works without nvidia-smi by reading NVIDIA kernel driver's procfs.
         Maps GPU ID (Device Minor) to PCI address by scanning all GPU directories.
-        
+
         Directory structure:
             /host/proc/driver/nvidia/gpus/
             ├── 0001:00:00.0/information  (Device Minor: 0 → GPU 0)
             ├── 0002:00:00.0/information  (Device Minor: 1 → GPU 1)
             └── ...
-        
+
         Args:
             gpu_id: GPU device ID (0, 1, 2, ...)
-        
+
         Returns:
             PCI address (e.g., "0001:00:00.0")
-        
+
         Raises:
             FileNotFoundError: If /host/proc is not mounted
             ValueError: If GPU ID not found
         """
         proc_path = "/host/proc/driver/nvidia/gpus"
-        
+
         # Check if proc path exists
         if not os.path.exists(proc_path):
             raise FileNotFoundError(
                 f"{proc_path} not found. Ensure /host/proc is mounted in pod spec."
             )
-        
+
         # Iterate through all GPU directories
         gpu_dirs = os.listdir(proc_path)
-        logger.debug(f"Found {len(gpu_dirs)} GPU directories in {proc_path}: {gpu_dirs}")
-        
+        logger.debug(
+            f"Found {len(gpu_dirs)} GPU directories in {proc_path}: {gpu_dirs}"
+        )
+
         for pci_addr in gpu_dirs:
             info_file = f"{proc_path}/{pci_addr}/information"
-            
+
             try:
-                with open(info_file, 'r') as f:
+                with open(info_file, "r") as f:
                     for line in f:
                         if line.startswith("Device Minor:"):
                             # Parse: "Device Minor:    0" → 0
-                            device_minor = int(line.split(':')[1].strip())
-                            
+                            device_minor = int(line.split(":")[1].strip())
+
                             if device_minor == gpu_id:
                                 logger.info(
                                     f"GPU {gpu_id} mapped to PCI {pci_addr} "
@@ -207,13 +209,13 @@ class GPUXIDInjectorKernel:
             except Exception as e:
                 logger.warning(f"Could not read {info_file}: {e}")
                 continue
-        
+
         # GPU ID not found
         raise ValueError(
             f"GPU {gpu_id} not found in {proc_path}. "
             f"Available Device Minors: {gpu_dirs}"
         )
-    
+
     def _normalize_pci_address(self, pci_addr: str) -> str:
         """
         Normalize PCI address from nvidia-smi format to kernel sysfs format.
