@@ -16,18 +16,25 @@ spec:
           pip install --no-cache-dir huggingface-hub awscli
           hf download  $MODEL_NAME --local-dir /tmp/lora
           rm -rf /tmp/lora/.cache
-          aws --endpoint-url=http://minio:9000 s3 mb s3://my-loras || true
-          aws --endpoint-url=http://minio:9000 s3 sync /tmp/lora s3://my-loras/$MODEL_NAME
+          aws --endpoint-url=http://minio:9000 s3 mb s3://$LORA_ROOT_PATH || true
+          aws --endpoint-url=http://minio:9000 s3 sync /tmp/lora s3://$LORA_ROOT_PATH/$MODEL_NAME
         envFrom:
         - secretRef:
             name: hf-token-secret
+        - secretRef:
+            name: minio
         env:
         - name: AWS_ACCESS_KEY_ID
           value: minioadmin
         - name: AWS_SECRET_ACCESS_KEY
           value: minioadmin
+        # - name: AWS_REGION   # set this to your aws region
+        #   value: us-east-1
+        - name: AWS_ALLOW_HTTP # remove/disable this if you are using a S3 endpoint or secure MinIO
+          value: "true"
+        - name: LORA_ROOT_PATH
+          value: "my-loras"
         - name: MODEL_NAME
           value: codelion/Qwen3-0.6B-accuracy-recovery-lora
-          # value: Neural-Hacker/Qwen3-Math-Reasoning-LoRA
       restartPolicy: Never
   backoffLimit: 3
