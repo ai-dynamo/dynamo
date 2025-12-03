@@ -156,6 +156,21 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
                 logger.debug(
                     f"Could not add MultiProcessCollector to REGISTRY ({e}), using separate registry"
                 )
+
+                # Verify PROMETHEUS_MULTIPROC_DIR still exists as a directory
+                multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+                if not multiproc_dir or not os.path.isdir(multiproc_dir):
+                    logger.warning(
+                        "PROMETHEUS_MULTIPROC_DIR is not set or not a directory, skipping multiprocess collector"
+                    )
+                    # Fall back to single registry mode
+                    register_engine_metrics_callback(
+                        endpoint=generate_endpoint,
+                        registry=REGISTRY,
+                        metric_prefix_filters=["vllm:", "lmcache:"],
+                    )
+                    return
+
                 multiproc_registry = CollectorRegistry()
                 multiprocess.MultiProcessCollector(multiproc_registry)
 
