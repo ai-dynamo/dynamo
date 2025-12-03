@@ -126,9 +126,9 @@ runs:
           echo "📊 ${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
 
           # Create uniquely named metadata file with step context information
-          # Use framework-testtype-arch to make it unique per test run
-          METADATA_FILE="test-results/test_metadata_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}.json"
-          JUNIT_NAME="pytest_test_report_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}.xml"
+          # Use framework-testtype-arch-runid-jobid to make it unique per test run
+          METADATA_FILE="test-results/test_metadata_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.json"
+          JUNIT_NAME="pytest_test_report_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
 
           # Rename XML file to unique name
           mv "$JUNIT_FILE" "test-results/$JUNIT_NAME"
@@ -157,8 +157,8 @@ runs:
       uses: actions/upload-artifact@v4
       if: always() && inputs.dry_run != 'true'  # Skip upload in dry-run mode
       with:
-        name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}
+        name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: |
-          test-results/pytest_test_report_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}.xml
-          test-results/test_metadata_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}.json
+          test-results/pytest_test_report_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+          test-results/test_metadata_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.json
         retention-days: 7
