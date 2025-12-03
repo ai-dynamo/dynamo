@@ -24,12 +24,8 @@ spec:
         - secretRef:
             name: hf-token-secret
         - secretRef:
-            name: minio
+            name: minio-secret
         env:
-        - name: AWS_ACCESS_KEY_ID
-          value: minioadmin
-        - name: AWS_SECRET_ACCESS_KEY
-          value: minioadmin
         # - name: AWS_REGION   # set this to your aws region
         #   value: us-east-1
         - name: AWS_ALLOW_HTTP # remove/disable this if you are using a S3 endpoint or secure MinIO
