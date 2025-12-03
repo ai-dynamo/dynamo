@@ -285,16 +285,24 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
         );
 
         if !is_flipped {
-            assert!(
-                nixl_agent.name() == src.nixl_metadata().agent_name(),
-                "the source must be local for non-flipped NIXL operations"
-            );
+            if nixl_agent.name() != src.nixl_metadata().agent_name() {
+                return Err(anyhow!(
+                    "Source must be local for non-flipped NIXL operations. \
+                     Expected agent '{}', but source uses agent '{}'",
+                    nixl_agent.name(),
+                    src.nixl_metadata().agent_name()
+                ));
+            }
         } else {
             // For flipped ops, destination is actually the local side (gets swapped)
-            assert!(
-                nixl_agent.name() == dst.nixl_metadata().agent_name(),
-                "the destination must be local for flipped NIXL operations"
-            );
+            if nixl_agent.name() != dst.nixl_metadata().agent_name() {
+                return Err(anyhow!(
+                    "Destination must be local for flipped NIXL operations. \
+                     Expected agent '{}', but destination uses agent '{}'",
+                    nixl_agent.name(),
+                    dst.nixl_metadata().agent_name()
+                ));
+            }
         }
 
         // Capture NIXL metadata for both layouts

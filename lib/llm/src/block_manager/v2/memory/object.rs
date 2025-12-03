@@ -18,7 +18,10 @@ pub struct ObjectStorage {
     addr: usize,
     /// Size of the object storage region in bytes
     size: usize,
-    /// Object key
+    /// Object key (u64 identifier used by NIXL for object identification)
+    ///
+    /// This is a numeric identifier that uniquely identifies the object within the bucket.
+    /// NIXL's OBJ backend uses this as the device_id for transfer descriptors.
     key: u64,
     /// Object bucket name
     bucket: String,
@@ -29,7 +32,7 @@ impl ObjectStorage {
     ///
     /// # Arguments
     /// * `bucket` - Object Bucket Name
-    /// * `key` - Object Key
+    /// * `key` - Object Key (u64 numeric identifier for the object)
     /// * `size` - Size of the region in bytes
     ///
     /// # Returns
@@ -39,7 +42,7 @@ impl ObjectStorage {
     /// ```ignore
     /// use dynamo_memory::ObjectStorage;
     ///
-    /// let storage = ObjectStorage::new("my-bucket", "1234567890", 4096 * 128)?;
+    /// let storage = ObjectStorage::new("my-bucket", 1234567890u64, 4096 * 128)?;
     /// ```
     pub fn new(bucket: impl Into<String>, key: u64, size: usize) -> Result<Self> {
 

@@ -34,6 +34,35 @@ pub struct NixlAgent {
 }
 
 impl NixlAgent {
+    /// Sanitize sensitive parameters for logging.
+    ///
+    /// Replaces the values of sensitive parameters (credentials, secrets, tokens)
+    /// with a redacted placeholder to prevent credential leakage in logs.
+    fn sanitize_params_for_logging(params: &[(String, String)]) -> Vec<(String, String)> {
+        const SENSITIVE_KEYS: &[&str] = &[
+            "access_key",
+            "secret_key",
+            "password",
+            "token",
+            "api_key",
+            "secret",
+            "credential",
+        ];
+
+        params
+            .iter()
+            .map(|(key, value)| {
+                let key_lower = key.to_lowercase();
+                let sanitized_value = if SENSITIVE_KEYS.iter().any(|&s| key_lower.contains(s)) {
+                    "[REDACTED]".to_string()
+                } else {
+                    value.clone()
+                };
+                (key.clone(), sanitized_value)
+            })
+            .collect()
+    }
+
     /// Generic helper function to create backend parameters from environment variables.
     ///
     /// Parses environment variables with the pattern:
@@ -64,10 +93,12 @@ impl NixlAgent {
             return Ok(None);
         }
 
+        // Sanitize sensitive parameters before logging
+        let sanitized_params = Self::sanitize_params_for_logging(&param_pairs);
         tracing::debug!(
             "{} backend parameters configured from environment: {:?}",
             backend_name,
-            param_pairs
+            sanitized_params
         );
 
         // Create Params object from the collected key-value pairs
