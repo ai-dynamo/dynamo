@@ -252,7 +252,7 @@ data:
         as: "dynamo_ttft_p95_seconds"
       metricsQuery: |
         histogram_quantile(0.95,
-          sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{<<.LabelMatchers>>}[5m])) 
+          sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{<<.LabelMatchers>>}[5m]))
           by (le, namespace, dynamo_namespace)
         )
 ```
