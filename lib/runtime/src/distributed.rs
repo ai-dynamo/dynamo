@@ -410,6 +410,66 @@ impl DistributedRuntime {
         };
         Ok(nats_client.client().subscribe(subject).await?)
     }
+
+    /// DEPRECATED: This method exists only for NATS request plane support.
+    /// Once everything uses the TCP request plane, this can be removed along with
+    /// the NATS service registration infrastructure.
+    pub fn register_nats_service(&self, component: Component) {
+        let drt = self.clone();
+        self.runtime().secondary().spawn(async move {
+            let service_name = component.service_name();
+
+            // Pre-check to save cost of creating the service, but don't hold the lock
+            if drt
+                .component_registry()
+                .inner
+                .lock()
+                .await
+                .services
+                .contains_key(&service_name)
+            {
+                // The NATS service is per component, but it is called from `serve_endpoint`, and there
+                // are often multiple endpoints for a component (e.g. `clear_kv_blocks` and `generate`).
+                tracing::trace!("Service {service_name} already exists");
+                return;
+            }
+
+            let Some(nats_client) = drt.nats_client.as_ref() else {
+                tracing::error!("Cannot create NATS service without NATS.");
+                return;
+            };
+            let description = None;
+            let nats_service = match crate::component::service::build_nats_service(
+                nats_client,
+                &component,
+                description,
+            )
+            .await
+            {
+                Ok(service) => service,
+                Err(err) => {
+                    tracing::error!(error = %err, component = service_name, "Failed to build NATS service");
+                    return;
+                }
+            };
+
+            let mut guard = drt.component_registry().inner.lock().await;
+            if !guard.services.contains_key(&service_name) {
+                // Normal case
+                guard.services.insert(service_name.clone(), nats_service);
+
+                tracing::info!("Added NATS service {service_name}");
+
+                drop(guard);
+            } else {
+                drop(guard);
+                let _ = nats_service.stop().await;
+                // The NATS service is per component, but it is called from `serve_endpoint`, and there
+                // are often multiple endpoints for a component (e.g. `clear_kv_blocks` and `generate`).
+                // TODO: Is this still true?
+            }
+        });
+    }
 }
 
 #[derive(Dissolve)]

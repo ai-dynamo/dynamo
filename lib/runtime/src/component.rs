@@ -60,6 +60,7 @@ mod component;
 mod endpoint;
 mod namespace;
 mod registry;
+pub mod service;
 
 pub use client::Client;
 pub use endpoint::build_transport_type;
@@ -274,6 +275,11 @@ impl ComponentBuilder {
 
     pub fn build(self) -> Result<Component, anyhow::Error> {
         let component = self.build_internal()?;
+        // If this component is using NATS, register the NATS service in background
+        let drt = component.drt();
+        if drt.request_plane().is_nats() {
+            drt.register_nats_service(component.clone());
+        }
         Ok(component)
     }
 }
