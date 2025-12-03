@@ -17,12 +17,11 @@ ARG CUDA_VERSION="12.9"
 # Make sure to update the dependency version in pyproject.toml when updating this
 ARG VLLM_REF="v0.12.0"
 # FlashInfer Ref used to install flashinfer-cubin and flashinfer-jit-cache
-ARG FLASHINF_REF="v0.5.2"
+ARG FLASHINF_REF="v0.5.3"
 
 # If left blank, then we will fallback to vLLM defaults
 ARG DEEPGEMM_REF=""
-# LMCache version - 0.3.9+ required for vLLM 0.11.2 compatibility
-ARG LMCACHE_REF="0.3.9.post2"
+ARG LMCACHE_REF="0.3.10"
 
 # sccache configuration - inherit from base build
 ARG USE_SCCACHE
