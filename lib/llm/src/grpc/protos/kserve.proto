@@ -83,7 +83,7 @@ message ServerLiveResponse
   //@@
   //@@  .. cpp:var:: bool live
   //@@
-  //@@     True if the inference server is live, false it not live.
+  //@@     True if the inference server is live, false if not live.
   //@@
   bool live = 1;
 }
@@ -105,7 +105,7 @@ message ServerReadyResponse
   //@@
   //@@  .. cpp:var:: bool ready
   //@@
-  //@@     True if the inference server is ready, false it not ready.
+  //@@     True if the inference server is ready, false if not ready. The inference server is considered ready if it has any registered models, since models can freely be registered and unregistered at runtime.
   //@@
   bool ready = 1;
 }
@@ -142,7 +142,7 @@ message ModelReadyResponse
   //@@
   //@@  .. cpp:var:: bool ready
   //@@
-  //@@     True if the model is ready, false it not ready.
+  //@@     True if the model is ready, false if not ready.
   //@@
   bool ready = 1;
 }
