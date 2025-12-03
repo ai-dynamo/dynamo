@@ -521,43 +521,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        #TODO : revert this to use the below before merging.
-          # - { framework: vllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
-          # - { framework: vllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
-          # - { framework: vllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and kvbm and not slow" }
-          # - { framework: vllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
-          # - { framework: vllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
-          # - { framework: vllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
-          # - { framework: trtllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
-          # - { framework: trtllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
-          # - { framework: trtllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and kvbm" }
-          # - { framework: trtllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
-          # - { framework: trtllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
-          # - { framework: trtllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
-          # - { framework: sglang, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
-          # - { framework: sglang, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
-          # - { framework: sglang, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and kvbm" }
-          # - { framework: sglang, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
-          # - { framework: sglang, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
-          # - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
-          - { framework: vllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "router and not slow" }
-          - { framework: vllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "planner and not slow" }
-          - { framework: vllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: " (kvbm or kvbm_v2) " }
-          - { framework: vllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "router and not slow" }
-          - { framework: vllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "planner and not slow" }
-          - { framework: vllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "kvbm and not slow" }
-          - { framework: trtllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "router and not slow" }
-          - { framework: trtllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "planner and not slow" }
-          - { framework: trtllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: " (kvbm or kvbm_v2) " }
-          - { framework: trtllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "router and not slow" }
-          - { framework: trtllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "planner and not slow" }
-          - { framework: trtllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: " (kvbm or kvbm_v2) " }
-          - { framework: sglang, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "router and not slow" }
-          - { framework: sglang, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "planner and not slow" }
-          - { framework: sglang, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: " (kvbm or kvbm_v2) " }
-          - { framework: sglang, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "router and not slow" }
-          - { framework: sglang, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "planner and not slow" }
-          - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: " (kvbm or kvbm_v2) " }
+          - { framework: vllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
+          - { framework: vllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
+          - { framework: vllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 150, marks: "nightly and (kvbm or kvbm_v2)" }
+          - { framework: vllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
+          - { framework: vllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
+          - { framework: vllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 150, marks: "nightly and (kvbm or kvbm_v2)" }
+          - { framework: trtllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
+          - { framework: trtllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
+          - { framework: trtllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 150, marks: "nightly and (kvbm or kvbm_v2)" }
+          - { framework: trtllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
+          - { framework: trtllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
+          - { framework: trtllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 150, marks: "nightly and (kvbm or kvbm_v2)" }
+          - { framework: sglang, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
+          - { framework: sglang, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
+          - { framework: sglang, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 150, marks: "nightly and (kvbm or kvbm_v2)" }
+          - { framework: sglang, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
+          - { framework: sglang, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
+          - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 150, marks: "nightly and (kvbm or kvbm_v2)" }
 
     steps:
       - uses: actions/checkout@v4
@@ -679,7 +660,7 @@ jobs:
   notify-slack:
     name: Notify Slack
     runs-on: cpu-amd-m5-4xlarge
-    if: always() && github.event_name == 'schedule' && !github.event.repository.fork #TODO: Add this back befpre merge && github.event_name == 'schedule'
+    if: always() && github.event_name == 'schedule' && !github.event.repository.fork
     needs: results-summary
     permissions:
       contents: read
