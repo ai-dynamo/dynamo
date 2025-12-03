@@ -377,6 +377,7 @@ COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
 
 # Install maturin, for maturin develop
 # Editable install of dynamo
+COPY pyproject.toml README.md hatch_build.py /workspace/
 RUN uv pip install maturin[patchelf] && \
     uv pip install --no-deps -e .
 
