@@ -249,40 +249,11 @@ impl PrefillRouter {
         ))
     }
 
-    /// Spawn prefill as a background task
-    fn spawn_prefill_task(&self, prefill_request: SingleIn<PreprocessedRequest>) {
-        let Some(router) = self.prefill_router.get().cloned() else {
-            return;
-        };
-
-        tokio::spawn(async move {
-            match router.generate(prefill_request).await {
-                Ok(mut stream) => {
-                    // Consume the stream to completion
-                    while let Some(output) = stream.next().await {
-                        if let Some(err) = output.err() {
-                            tracing::warn!("Prefill background task error: {:?}", err);
-                        }
-                    }
-                    tracing::debug!("Prefill background task completed");
-                }
-                Err(e) => {
-                    tracing::error!("Prefill background task failed: {}", e);
-                }
-            }
-        });
-    }
-
-    /// Original call_prefill: Call the prefill router and extract structured prefill result and worker ID
-    async fn call_prefill(
-        &self,
+    /// Execute prefill with the given router and extract structured result
+    async fn execute_prefill_with_router(
+        router: InnerPrefillRouter,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
-        // Get the prefill router, error if not activated
-        let Some(router) = self.prefill_router.get() else {
-            return Err(PrefillError::NotActivated);
-        };
-
         let mut prefill_response = router
             .generate(request)
             .await
@@ -344,6 +315,35 @@ impl PrefillRouter {
             },
             prefill_worker_id,
         ))
+    }
+
+    /// Spawn prefill as a background task
+    fn spawn_prefill_task(&self, prefill_request: SingleIn<PreprocessedRequest>) {
+        let Some(router) = self.prefill_router.get().cloned() else {
+            return;
+        };
+
+        tokio::spawn(async move {
+            match Self::execute_prefill_with_router(router, prefill_request).await {
+                Ok(_) => {
+                    tracing::debug!("Prefill background task completed");
+                }
+                Err(e) => {
+                    tracing::warn!("Prefill background task error: {e:?}");
+                }
+            }
+        });
+    }
+
+    /// Call the prefill router and extract structured prefill result and worker ID
+    async fn call_prefill(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
+        let Some(router) = self.prefill_router.get().cloned() else {
+            return Err(PrefillError::NotActivated);
+        };
+        Self::execute_prefill_with_router(router, request).await
     }
 }
 
