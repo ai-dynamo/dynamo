@@ -403,7 +403,7 @@ jobs:
       - name: Publish dev (main branch)
         # Publish main branch to 'dev' directory for development docs
         # Skip if commit message contains '/skip-dev' anywhere
-        if: ${{ github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '/skip-dev') }}
+        if: ${{ github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message || '', '/skip-dev') }}
         working-directory: ${{ env.DOCS_DIR }}
         id: publish_dev
         env:
