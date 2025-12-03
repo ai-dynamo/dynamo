@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 import pytest
 
 from tests.router.common import (  # utilities
+    _test_busy_threshold_endpoint,
     _test_python_router_bindings,
     _test_router_basic,
     _test_router_decisions,
@@ -21,13 +22,17 @@ from tests.router.common import (  # utilities
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 
-pytestmark = pytest.mark.pre_merge
-
-
 logger = logging.getLogger(__name__)
 
-
 MODEL_NAME = ROUTER_MODEL_NAME
+
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.integration,
+    pytest.mark.parallel,
+    pytest.mark.model(MODEL_NAME),
+]
 NUM_MOCKERS = 2
 SPEEDUP_RATIO = 10.0
 BASE_PORT = 9100  # Base port for all tests (high port to avoid conflicts)
@@ -63,6 +68,7 @@ def get_unique_ports(
         "test_mocker_kv_router_overload_503": 200,
         "test_query_instance_id_returns_worker_and_tokens": 300,
         "test_router_disagg_decisions": 400,
+        "test_busy_threshold_endpoint": 500,
     }
 
     base_offset = test_offsets.get(test_name, 0)
@@ -281,9 +287,6 @@ class DisaggMockerProcess:
         self._process.__exit__(exc_type, exc_val, exc_tb)
 
 
-@pytest.mark.pre_merge
-@pytest.mark.parallel
-@pytest.mark.model(MODEL_NAME)
 def test_mocker_kv_router(request, runtime_services_session, predownload_tokenizers):
     """
     Test KV router with multiple mocker engine instances.
@@ -323,9 +326,6 @@ def test_mocker_kv_router(request, runtime_services_session, predownload_tokeniz
             mockers.__exit__(None, None, None)
 
 
-@pytest.mark.pre_merge
-@pytest.mark.parallel
-@pytest.mark.model(MODEL_NAME)
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
 def test_mocker_two_kv_router(
     request,
@@ -381,9 +381,6 @@ def test_mocker_two_kv_router(
             mockers.__exit__(None, None, None)
 
 
-@pytest.mark.pre_merge
-@pytest.mark.parallel
-@pytest.mark.model(MODEL_NAME)
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
 def test_mocker_kv_router_overload_503(
     request, runtime_services_session, predownload_tokenizers
@@ -422,9 +419,6 @@ def test_mocker_kv_router_overload_503(
             mockers.__exit__(None, None, None)
 
 
-@pytest.mark.pre_merge
-@pytest.mark.parallel
-@pytest.mark.model(MODEL_NAME)
 def test_kv_push_router_bindings(
     request, runtime_services_session, predownload_tokenizers
 ):
@@ -461,9 +455,6 @@ def test_kv_push_router_bindings(
             mockers.__exit__(None, None, None)
 
 
-@pytest.mark.pre_merge
-@pytest.mark.parallel
-@pytest.mark.model(MODEL_NAME)
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
 def test_indexers_sync(
     request,
@@ -513,9 +504,6 @@ def test_indexers_sync(
             mockers.__exit__(None, None, None)
 
 
-@pytest.mark.pre_merge
-@pytest.mark.parallel
-@pytest.mark.model(MODEL_NAME)
 def test_query_instance_id_returns_worker_and_tokens(
     request, runtime_services_session, predownload_tokenizers
 ):
@@ -550,9 +538,6 @@ def test_query_instance_id_returns_worker_and_tokens(
             mockers.__exit__(None, None, None)
 
 
-@pytest.mark.pre_merge
-@pytest.mark.parallel
-@pytest.mark.model(MODEL_NAME)
 def test_router_decisions(request, runtime_services_session, predownload_tokenizers):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes."""
 
@@ -592,9 +577,6 @@ def test_router_decisions(request, runtime_services_session, predownload_tokeniz
             mockers.__exit__(None, None, None)
 
 
-@pytest.mark.pre_merge
-@pytest.mark.parallel
-@pytest.mark.model(MODEL_NAME)
 def test_router_disagg_decisions(
     request, runtime_services_session, predownload_tokenizers
 ):
@@ -658,3 +640,42 @@ def test_router_disagg_decisions(
             decode_workers.__exit__(None, None, None)
         if prefill_workers is not None:
             prefill_workers.__exit__(None, None, None)
+
+
+def test_busy_threshold_endpoint(
+    request, runtime_services_session, predownload_tokenizers
+):
+    """Test that the /busy_threshold endpoint can be hit and responds correctly.
+
+    TODO: This doesn't actually test any e2e rejection for now. A proper test would:
+    1. Set a very low threshold
+    2. Send enough requests to exceed the threshold
+    3. Verify that subsequent requests are rejected with 503
+
+    For now, this test only verifies the endpoint is accessible and returns valid responses.
+    """
+    logger.info("Starting busy_threshold endpoint test")
+
+    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+
+    try:
+        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
+        mockers = MockerProcess(
+            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+        )
+        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+        mockers.__enter__()
+
+        frontend_port = get_unique_ports(request, num_ports=1)[0]
+
+        _test_busy_threshold_endpoint(
+            engine_workers=mockers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=frontend_port,
+            test_payload=TEST_PAYLOAD,
+        )
+
+    finally:
+        if "mockers" in locals():
+            mockers.__exit__(None, None, None)

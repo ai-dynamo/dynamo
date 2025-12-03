@@ -211,7 +211,7 @@ pub struct KvBlockManagerConfig {
     /// If provided, KVBM will create a KV Event Consolidator that deduplicates
     /// KV cache events from vLLM (G1) and KVBM (G2/G3) before sending to the router.
     /// This is used when `--connector kvbm` is enabled with prefix caching.
-    #[builder(default, setter(strip_option))]
+    #[builder(default, setter(custom))]
     pub consolidator_config:
         Option<crate::block_manager::kv_consolidator::KvEventConsolidatorConfig>,
 }
@@ -220,6 +220,50 @@ impl KvBlockManagerConfig {
     /// Create a new builder for the KvBlockManagerConfig
     pub fn builder() -> KvBlockManagerConfigBuilder {
         KvBlockManagerConfigBuilder::default()
+    }
+}
+
+impl KvBlockManagerConfigBuilder {
+    /// Set the consolidator config using individual parameters
+    pub fn consolidator_config(
+        mut self,
+        engine_endpoint: String,
+        output_endpoint: Option<String>,
+        engine_source: crate::block_manager::kv_consolidator::EventSource,
+    ) -> Self {
+        let config = match engine_source {
+            crate::block_manager::kv_consolidator::EventSource::Vllm => {
+                let output_ep = output_endpoint.expect("output_endpoint is required for vLLM");
+                crate::block_manager::kv_consolidator::KvEventConsolidatorConfig::new_vllm(
+                    engine_endpoint,
+                    output_ep,
+                )
+            }
+            crate::block_manager::kv_consolidator::EventSource::Trtllm => {
+                // output_endpoint is the ZMQ endpoint where consolidator publishes
+                // Worker-side publishers subscribe to this and forward to NATS
+                let output_ep = output_endpoint.expect(
+                    "output_endpoint (consolidated_event_endpoint) is required for TensorRT-LLM",
+                );
+                crate::block_manager::kv_consolidator::KvEventConsolidatorConfig::new_trtllm(
+                    engine_endpoint,
+                    output_ep,
+                )
+            }
+            crate::block_manager::kv_consolidator::EventSource::Kvbm => {
+                // This case should never be reached - consolidator_config() is only called with
+                // EventSource::Vllm or EventSource::Trtllm. EventSource::Kvbm is used when KVBM
+                // sends events TO the consolidator (via DynamoEventManager), but KVBM is never
+                // the engine_source that publishes events via ZMQ that the consolidator subscribes to.
+                unreachable!(
+                    "consolidator_config() should never be called with EventSource::Kvbm. \
+                     KVBM events are sent directly to the consolidator handle, not via ZMQ."
+                )
+            }
+        };
+        // With setter(custom), the builder field is Option<Option<T>>, so we need Some(Some(...))
+        self.consolidator_config = Some(Some(config));
+        self
     }
 }
 

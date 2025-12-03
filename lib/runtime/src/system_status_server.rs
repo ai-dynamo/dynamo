@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+// TODO: (DEP-635) this file should be renamed to system_http_server.rs
+//  it is being used not just for status, health, but others like loras management.
+
 use crate::config::HealthStatus;
 use crate::config::environment_names::logging as env_logging;
 use crate::config::environment_names::runtime::canary as env_canary;
@@ -9,7 +12,15 @@ use crate::logging::make_request_span;
 use crate::metrics::MetricsHierarchy;
 use crate::metrics::prometheus_names::{nats_client, nats_service};
 use crate::traits::DistributedRuntimeProvider;
-use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Router,
+    extract::{Json, Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{delete, get, post},
+};
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -88,6 +99,35 @@ impl SystemStatusState {
     }
 }
 
+/// Request body for POST /v1/loras
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LoadLoraRequest {
+    pub lora_name: String,
+    pub source: LoraSource,
+}
+
+/// Source information for loading a LoRA
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LoraSource {
+    pub uri: String,
+}
+
+/// Response body for LoRA operations
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LoraResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lora_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lora_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loras: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
+}
+
 /// Start system status server with metrics support
 pub async fn spawn_system_status_server(
     host: &str,
@@ -111,7 +151,12 @@ pub async fn spawn_system_status_server(
         .live_path()
         .to_string();
 
-    let app = Router::new()
+    // Check if LoRA feature is enabled
+    let lora_enabled = std::env::var(crate::config::environment_names::llm::DYN_LORA_ENABLED)
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    let mut app = Router::new()
         .route(
             &health_path,
             get({
@@ -139,7 +184,32 @@ pub async fn spawn_system_status_server(
                 let state = Arc::clone(&server_state);
                 move || metadata_handler(state)
             }),
-        )
+        );
+
+    // Add LoRA routes only if DYN_LORA_ENABLED is set to true
+    if lora_enabled {
+        app = app
+            .route(
+                "/v1/loras",
+                get({
+                    let state = Arc::clone(&server_state);
+                    move || list_loras_handler(State(state))
+                })
+                .post({
+                    let state = Arc::clone(&server_state);
+                    move |body| load_lora_handler(State(state), body)
+                }),
+            )
+            .route(
+                "/v1/loras/{*lora_name}",
+                delete({
+                    let state = Arc::clone(&server_state);
+                    move |path| unload_lora_handler(State(state), path)
+                }),
+            );
+    }
+
+    let app = app
         .fallback(|| async {
             tracing::info!("[fallback handler] called");
             (StatusCode::NOT_FOUND, "Route not found").into_response()
@@ -266,6 +336,192 @@ async fn metadata_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
             )
                 .into_response()
         }
+    }
+}
+
+/// Handler for POST /v1/loras - Load a LoRA adapter
+#[tracing::instrument(skip_all, level = "debug")]
+async fn load_lora_handler(
+    State(state): State<Arc<SystemStatusState>>,
+    Json(request): Json<LoadLoraRequest>,
+) -> impl IntoResponse {
+    tracing::info!("Loading LoRA: {}", request.lora_name);
+
+    // Call the load_lora endpoint for each available backend
+    match call_lora_endpoint(
+        state.drt(),
+        "load_lora",
+        json!({
+            "lora_name": request.lora_name,
+            "source": {
+                "uri": request.source.uri
+            },
+        }),
+    )
+    .await
+    {
+        Ok(response) => {
+            tracing::info!("LoRA loaded successfully: {}", request.lora_name);
+            (StatusCode::OK, Json(response))
+        }
+        Err(e) => {
+            tracing::error!("Failed to load LoRA {}: {}", request.lora_name, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(LoraResponse {
+                    status: "error".to_string(),
+                    message: Some(e.to_string()),
+                    lora_name: Some(request.lora_name),
+                    lora_id: None,
+                    loras: None,
+                    count: None,
+                }),
+            )
+        }
+    }
+}
+
+/// Handler for DELETE /v1/loras/*lora_name - Unload a LoRA adapter
+#[tracing::instrument(skip_all, level = "debug")]
+async fn unload_lora_handler(
+    State(state): State<Arc<SystemStatusState>>,
+    Path(lora_name): Path<String>,
+) -> impl IntoResponse {
+    // Strip the leading slash from the wildcard capture
+    let lora_name = lora_name
+        .strip_prefix('/')
+        .unwrap_or(&lora_name)
+        .to_string();
+    tracing::info!("Unloading LoRA: {}", lora_name);
+
+    // Call the unload_lora endpoint for each available backend
+    match call_lora_endpoint(
+        state.drt(),
+        "unload_lora",
+        json!({
+            "lora_name": lora_name.clone(),
+        }),
+    )
+    .await
+    {
+        Ok(response) => {
+            tracing::info!("LoRA unloaded successfully: {}", lora_name);
+            (StatusCode::OK, Json(response))
+        }
+        Err(e) => {
+            tracing::error!("Failed to unload LoRA {}: {}", lora_name, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(LoraResponse {
+                    status: "error".to_string(),
+                    message: Some(e.to_string()),
+                    lora_name: Some(lora_name),
+                    lora_id: None,
+                    loras: None,
+                    count: None,
+                }),
+            )
+        }
+    }
+}
+
+/// Handler for GET /v1/loras - List all LoRA adapters
+#[tracing::instrument(skip_all, level = "debug")]
+async fn list_loras_handler(State(state): State<Arc<SystemStatusState>>) -> impl IntoResponse {
+    tracing::info!("Listing all LoRAs");
+
+    // Call the list_loras endpoint for each available backend
+    match call_lora_endpoint(state.drt(), "list_loras", json!({})).await {
+        Ok(response) => {
+            tracing::info!("Successfully retrieved LoRA list");
+            (StatusCode::OK, Json(response))
+        }
+        Err(e) => {
+            tracing::error!("Failed to list LoRAs: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(LoraResponse {
+                    status: "error".to_string(),
+                    message: Some(e.to_string()),
+                    lora_name: None,
+                    lora_id: None,
+                    loras: None,
+                    count: None,
+                }),
+            )
+        }
+    }
+}
+
+/// Helper function to call a LoRA management endpoint locally via in-process registry
+///
+/// This function ONLY uses the local endpoint registry for direct in-process calls.
+/// It does NOT fall back to network discovery if the endpoint is not found.
+async fn call_lora_endpoint(
+    drt: &crate::DistributedRuntime,
+    endpoint_name: &str,
+    request_body: serde_json::Value,
+) -> anyhow::Result<LoraResponse> {
+    use crate::engine::AsyncEngine;
+
+    tracing::debug!("Calling local endpoint: '{}'", endpoint_name);
+
+    // Get the endpoint from the local registry (in-process call only)
+    let local_registry = drt.local_endpoint_registry();
+    let engine = local_registry
+        .get(endpoint_name)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Endpoint '{}' not found in local registry. Make sure it's registered with .register_local_engine()",
+                endpoint_name
+            )
+        })?;
+
+    tracing::debug!(
+        "Found endpoint '{}' in local registry, calling directly",
+        endpoint_name
+    );
+
+    // Call the engine directly without going through the network stack
+    let request = crate::pipeline::SingleIn::new(request_body);
+    let mut stream = engine.generate(request).await?;
+
+    // Get the first response
+    if let Some(response) = stream.next().await {
+        let response_data = response.data.unwrap_or_default();
+
+        // Try structured deserialization first, fall back to manual field extraction
+        let lora_response = serde_json::from_value::<LoraResponse>(response_data.clone())
+            .unwrap_or_else(|_| parse_lora_response(&response_data));
+
+        return Ok(lora_response);
+    }
+
+    anyhow::bail!("No response received from endpoint '{}'", endpoint_name)
+}
+
+/// Helper to parse response data into LoraResponse
+fn parse_lora_response(response_data: &serde_json::Value) -> LoraResponse {
+    LoraResponse {
+        status: response_data
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("success")
+            .to_string(),
+        message: response_data
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(|s| s.to_string()),
+        lora_name: response_data
+            .get("lora_name")
+            .and_then(|n| n.as_str())
+            .map(|s| s.to_string()),
+        lora_id: response_data.get("lora_id").and_then(|id| id.as_u64()),
+        loras: response_data.get("loras").cloned(),
+        count: response_data
+            .get("count")
+            .and_then(|c| c.as_u64())
+            .map(|c| c as usize),
     }
 }
 
@@ -636,7 +892,7 @@ mod integration_tests {
 
                 // Now create a namespace, component, and endpoint to make the system healthy
                 let namespace = drt.namespace("ns1234").unwrap();
-                let component = namespace.component("comp1234").unwrap();
+                let mut component = namespace.component("comp1234").unwrap();
 
                 // Create a simple test handler
                 use crate::pipeline::{async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, SingleIn};
@@ -662,6 +918,7 @@ mod integration_tests {
                 // Start the service and endpoint with a health check payload
                 // This will automatically register the endpoint for health monitoring
                 tokio::spawn(async move {
+                    component.add_stats_service().await.unwrap();
                     let _ = component.endpoint(ENDPOINT_NAME)
                         .endpoint_builder()
                         .handler(ingress)
