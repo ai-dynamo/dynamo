@@ -66,11 +66,11 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: framework-${{ matrix.framework }}-amd64-${{ github.run_id }}
+          image_tag: framework-${{ matrix.framework }}-amd64:${{ github.run_id }}
       - name: Tag and Push Framework Images
         uses: ./.github/actions/docker-tag-push
         with:
-          local_image: ${{ steps.build_framework.outputs.image_tag }}
+          local_image: framework-${{ matrix.framework }}-amd64:${{ github.run_id }}
           push_tags: |
             ${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-amd64
             ${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-amd64-run-${{ github.run_id }}
@@ -96,11 +96,11 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: runtime-${{ matrix.framework }}-amd64-${{ github.run_id }}
+          image_tag: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
       - name: Tag and Push Runtime Images
         uses: ./.github/actions/docker-tag-push
         with:
-          local_image: ${{ steps.build_runtime.outputs.image_tag }}
+          local_image: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
           push_tags: |
             ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
             ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64-run-${{ github.run_id }}
@@ -171,11 +171,11 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: framework-${{ matrix.framework }}-arm64-${{ github.run_id }}
+          image_tag: framework-${{ matrix.framework }}-arm64:${{ github.run_id }}
       - name: Tag and Push Framework Images
         uses: ./.github/actions/docker-tag-push
         with:
-          local_image: ${{ steps.build_framework.outputs.image_tag }}
+          local_image: framework-${{ matrix.framework }}-arm64:${{ github.run_id }}
           push_tags: |
             ${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-arm64
             ${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-arm64-run-${{ github.run_id }}
@@ -201,11 +201,11 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: runtime-${{ matrix.framework }}-arm64-${{ github.run_id }}
+          image_tag: runtime-${{ matrix.framework }}-arm64:${{ github.run_id }}
       - name: Tag and Push Runtime Images
         uses: ./.github/actions/docker-tag-push
         with:
-          local_image: ${{ steps.build_runtime.outputs.image_tag }}
+          local_image: runtime-${{ matrix.framework }}-arm64:${{ github.run_id }}
           push_tags: |
             ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-arm64
             ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-arm64-run-${{ github.run_id }}
