@@ -9,6 +9,9 @@ mod local_transfers;
 #[cfg(all(feature = "testing-cuda", feature = "testing-nixl"))]
 mod object_transfers;
 
+#[cfg(feature = "testing-nixl")]
+mod descriptor_tests;
+
 use super::{NixlAgent, PhysicalLayout};
 use crate::block_manager::v2::physical::layout::{
     LayoutConfig,
