@@ -106,7 +106,7 @@ pub struct PreprocessedRequest {
     /// Used for timing metrics to track end-to-end latency
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_received_seconds: Option<f64>,
+    pub request_received_seconds: Option<f32>,
 }
 
 impl PreprocessedRequest {

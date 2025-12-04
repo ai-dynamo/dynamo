@@ -305,6 +305,9 @@ async fn handler_completions(
     Json(mut request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
     // Capture received timestamp immediately when request arrives at the frontend
+    // NOTE: If frontend, prefill workers, and decode workers are running on different machines,
+    // there may be slight clock drifts between them. As a result, timing values recorded on
+    // different machines may not be perfectly synchronized and could show minor inconsistencies.
     let request_received_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f32())
@@ -739,6 +742,9 @@ async fn handler_chat_completions(
     Json(mut request): Json<NvCreateChatCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
     // Capture received timestamp immediately when request arrives at the frontend
+    // NOTE: If frontend, prefill workers, and decode workers are running on different machines,
+    // there may be slight clock drifts between them. As a result, timing values recorded on
+    // different machines may not be perfectly synchronized and could show minor inconsistencies.
     let request_received_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f32())

@@ -74,7 +74,7 @@ def build_sampling_params(
     return sampling_params
 
 
-def _should_include_timing_metrics(request: Dict[str, Any]) -> bool:
+def _request_contains_timing_metrics(request: Dict[str, Any]) -> bool:
     """Check if timing_metrics is requested in extra_fields."""
     extra_fields: Optional[List[str]] = request.get("extra_fields")
     if extra_fields is None:
@@ -259,10 +259,10 @@ class BaseWorkerHandler(ABC):
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res,
+                        out["completion_usage"] = (
+                            BaseWorkerHandler._build_completion_usage(
+                                request_output=res,
+                            )
                         )
                     if output.stop_reason:
                         out["stop_reason"] = output.stop_reason
@@ -306,12 +306,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         logger.debug(f"Decode Request ID: {request_id}")
 
         # Check if timing metrics are requested
-        include_timing = _should_include_timing_metrics(request)
+        include_timing = _request_contains_timing_metrics(request)
 
         # Initialize timing metrics using request_received_seconds from frontend (passed via PreprocessedRequest)
-        timing_metrics: Optional[Dict[str, float]] = None
+        # NOTE: If frontend, prefill workers, and decode workers are running on different machines,
+        # there may be slight clock drifts between them. As a result, timing values recorded on
+        # different machines may not be perfectly synchronized and could show minor inconsistencies.
+        timing_metrics: Dict[str, float] = {}
         if include_timing:
-            timing_metrics = {}
             # Use request_received_seconds from the request (set by frontend) if available
             frontend_received = request.get("request_received_seconds")
             if frontend_received is not None:
@@ -394,9 +396,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     # On finish, record decode_end_seconds and inject timing_metrics
                     # Note: request_finish_seconds is set in the Rust HTTP layer when the response actually leaves the server
                     if tok.get("finish_reason") is not None and include_timing:
-                        timing_metrics[
-                            "decode_end_seconds"
-                        ] = time.time()
+                        timing_metrics["decode_end_seconds"] = time.time()
 
                         # Inject timing_metrics into disaggregated_params
                         if (
@@ -439,12 +439,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         logger.debug(f"Prefill Request ID: {request_id}")
 
         # Check if timing metrics are requested
-        include_timing = _should_include_timing_metrics(request)
+        include_timing = _request_contains_timing_metrics(request)
 
         # Initialize timing metrics using request_received_seconds from frontend (passed via PreprocessedRequest)
-        timing_metrics: Optional[Dict[str, float]] = None
+        # NOTE: If frontend, prefill workers, and decode workers are running on different machines,
+        # there may be slight clock drifts between them. As a result, timing values recorded on
+        # different machines may not be perfectly synchronized and could show minor inconsistencies.
+        timing_metrics: Dict[str, float] = {}
         if include_timing:
-            timing_metrics = {}
             # Use request_received_seconds from the request (set by frontend) if available
             frontend_received = request.get("request_received_seconds")
             if frontend_received is not None:
@@ -509,14 +511,12 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     disaggregated_params: Optional[Dict[str, Any]] = {}
 
                     if res.kv_transfer_params:
-                        disaggregated_params[
-                            "kv_transfer_params"
-                        ] = res.kv_transfer_params
+                        disaggregated_params["kv_transfer_params"] = (
+                            res.kv_transfer_params
+                        )
 
                     if include_timing and timing_metrics:
-                        timing_metrics[
-                            "prefill_end_seconds"
-                        ] = time.time()
+                        timing_metrics["prefill_end_seconds"] = time.time()
                         disaggregated_params["timing_metrics"] = timing_metrics
 
                     output: Dict[str, Any] = {

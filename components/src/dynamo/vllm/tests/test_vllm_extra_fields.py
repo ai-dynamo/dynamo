@@ -19,7 +19,7 @@ warnings.filterwarnings(
 from dynamo.vllm.handlers import (  # noqa: E402
     DecodeWorkerHandler,
     PrefillWorkerHandler,
-    _should_include_timing_metrics,
+    _request_contains_timing_metrics,
 )
 
 
@@ -32,22 +32,22 @@ pytestmark = [
 
 
 class TestShouldIncludeTimingMetrics:
-    """Tests for _should_include_timing_metrics helper function."""
+    """Tests for _request_contains_timing_metrics helper function."""
 
     def test_returns_true_with_multiple_extra_fields(self):
         """Timing metrics should be included when explicitly requested."""
         request = {"extra_fields": ["worker_id", "timing_metrics", "other_field"]}
-        assert _should_include_timing_metrics(request) is True
+        assert _request_contains_timing_metrics(request) is True
 
     def test_returns_false_when_extra_fields_is_none(self):
         """Timing metrics should not be included when extra_fields is None."""
         request = {"extra_fields": None}
-        assert _should_include_timing_metrics(request) is False
+        assert _request_contains_timing_metrics(request) is False
 
     def test_returns_false_when_extra_fields_missing(self):
         """Timing metrics should not be included when extra_fields key is absent."""
         request: dict[str, list[str]] = {}
-        assert _should_include_timing_metrics(request) is False
+        assert _request_contains_timing_metrics(request) is False
 
 
 def make_mock_request_output(
