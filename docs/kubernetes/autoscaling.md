@@ -185,7 +185,7 @@ Dynamo metrics include these labels for filtering:
 
 #### Example: Scale Decode Service Based on TTFT
 
-Using HPA with Prometheus Adapter requires configuring external metrics. 
+Using HPA with Prometheus Adapter requires configuring external metrics.
 
 **Step 1: Configure Prometheus Adapter**
 
@@ -208,7 +208,7 @@ rules:
       as: "dynamo_ttft_p95_seconds"
     metricsQuery: |
       histogram_quantile(0.95,
-        sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{<<.LabelMatchers>>}[5m])) 
+        sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{<<.LabelMatchers>>}[5m]))
         by (le, namespace, dynamo_namespace)
       )
 ```
@@ -383,7 +383,7 @@ spec:
       metricName: dynamo_ttft_p95
       query: |
         histogram_quantile(0.95,
-          sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{dynamo_namespace="default-sglang-agg"}[5m])) 
+          sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{dynamo_namespace="default-sglang-agg"}[5m]))
           by (le)
         )
       threshold: "0.5"              # Scale up when TTFT p95 > 500ms (0.5 seconds)
@@ -519,7 +519,7 @@ spec:
       serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
       query: |
         histogram_quantile(0.95,
-          sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{dynamo_namespace="default-sglang-agg"}[5m])) 
+          sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{dynamo_namespace="default-sglang-agg"}[5m]))
           by (le)
         )
       threshold: "0.5"
