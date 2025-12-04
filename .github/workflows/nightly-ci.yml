@@ -130,7 +130,7 @@ jobs:
             torch_backend: 'cu129'
           - framework: trtllm
             base_image_tag: '25.06-py3'
-            runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
+            runtime_image_tag: ''
             cuda_version: '129'
             torch_backend: 'cu129'
           - framework: sglang
