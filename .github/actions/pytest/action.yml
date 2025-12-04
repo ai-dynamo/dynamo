@@ -63,8 +63,9 @@ runs:
           echo "No GPU detected, running in CPU-only mode"
         fi
 
-        # Get absolute path for test-results directory
+        # Get absolute path for test-results directory and ensure it has proper permissions
         TEST_RESULTS_DIR="$(pwd)/test-results"
+        chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
         docker run ${GPU_FLAGS} --rm -w /workspace \
