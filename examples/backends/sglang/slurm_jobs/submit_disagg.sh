@@ -61,7 +61,7 @@ ISL=$6
 OSL=$7
 CONCURRENCIES=$8
 REQUEST_RATE=$9
-GPU_TYPE=$10
+GPU_TYPE=${10}
 SCRIPT_VARIANT=${11}
 
 RETRIES=1 # defaults to retry the job 1 time to avoid transient errors
