@@ -37,7 +37,7 @@ class TestProfileSlaAiconfigurator:
     """Test class for profile_sla aiconfigurator functionality."""
 
     @pytest.fixture
-    def trtllm_args(self, request):
+    def llm_args(self, request):
         class Args:
             def __init__(self):
                 self.model = ""
@@ -82,12 +82,12 @@ class TestProfileSlaAiconfigurator:
     @pytest.mark.parallel
     @pytest.mark.asyncio
     @pytest.mark.parametrize("missing_arg", ["aic_system", "aic_hf_id"])
-    async def test_aiconfigurator_missing_args(self, trtllm_args, missing_arg):
+    async def test_aiconfigurator_missing_args(self, llm_args, missing_arg):
         # Check that validation error happens when a required arg is missing.
         # Note: aic_backend_version is optional - when None, auto-detects latest version
-        setattr(trtllm_args, missing_arg, None)
+        setattr(llm_args, missing_arg, None)
         with pytest.raises(ValueError):
-            await run_profile(trtllm_args)
+            await run_profile(llm_args)
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -102,21 +102,21 @@ class TestProfileSlaAiconfigurator:
             ("aic_backend_version", "0.1.0"),
         ],
     )
-    async def test_aiconfiguator_no_data(self, trtllm_args, arg_name, bad_value):
+    async def test_aiconfigurator_no_data(self, llm_args, arg_name, bad_value):
         # Check that an appropriate error is raised when the system/model/backend
         # is not found in the aiconfigurator database.
-        setattr(trtllm_args, arg_name, bad_value)
+        setattr(llm_args, arg_name, bad_value)
         with pytest.raises(ValueError, match="Database not found"):
-            await run_profile(trtllm_args)
+            await run_profile(llm_args)
 
     @pytest.mark.pre_merge
     @pytest.mark.parallel
     @pytest.mark.asyncio
     @pytest.mark.gpu_1
     @pytest.mark.performance
-    async def test_trtllm_aiconfigurator_single_model(self, trtllm_args):
-        # Test that profile_sla works with the model & backend in the trtllm_args fixture.
-        await run_profile(trtllm_args)
+    async def test_trtllm_aiconfigurator_single_model(self, llm_args):
+        # Test that profile_sla works with the model & backend in the llm_args fixture.
+        await run_profile(llm_args)
 
     @pytest.mark.parallel
     @pytest.mark.asyncio
@@ -129,6 +129,10 @@ class TestProfileSlaAiconfigurator:
             ("trtllm", None),
             ("trtllm", "0.20.0"),
             ("trtllm", "1.0.0rc3"),
+            ("vllm", None),
+            ("vllm", "0.11.0"),
+            ("sglang", None),
+            ("sglang", "0.5.1.post1"),
         ],
     )
     @pytest.mark.parametrize(
@@ -138,11 +142,11 @@ class TestProfileSlaAiconfigurator:
             "meta-llama/Llama-3.1-405B",
         ],
     )
-    async def test_trtllm_aiconfigurator_many(
-        self, trtllm_args, hf_model_id, backend, aic_backend_version
+    async def test_aiconfigurator_dense_models(
+        self, llm_args, hf_model_id, backend, aic_backend_version
     ):
         # Test that profile_sla works with a variety of backend versions and model names.
-        trtllm_args.aic_hf_id = hf_model_id
-        trtllm_args.backend = backend
-        trtllm_args.aic_backend_version = aic_backend_version
-        await run_profile(trtllm_args)
+        llm_args.aic_hf_id = hf_model_id
+        llm_args.backend = backend
+        llm_args.aic_backend_version = aic_backend_version
+        await run_profile(llm_args)

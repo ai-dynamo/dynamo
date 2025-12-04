@@ -1,19 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 
 import numpy as np
 import tritonclient.grpc as grpcclient
 
+SERVER_URL = "localhost:8000"
+
+
+def check_health():
+    triton_client = grpcclient.InferenceServerClient(url=SERVER_URL)
+    assert triton_client.is_server_live()
+    assert triton_client.is_server_ready()
+    assert triton_client.is_model_ready("echo")
+
 
 def run_infer():
-    server_url = "localhost:8000"
-    try:
-        triton_client = grpcclient.InferenceServerClient(url=server_url)
-    except Exception as e:
-        print("channel creation failed: " + str(e))
-        sys.exit()
+    triton_client = grpcclient.InferenceServerClient(url=SERVER_URL)
 
     model_name = "echo"
 
@@ -46,12 +49,7 @@ def run_infer():
 
 
 def get_config():
-    server_url = "localhost:8000"
-    try:
-        triton_client = grpcclient.InferenceServerClient(url=server_url)
-    except Exception as e:
-        print("channel creation failed: " + str(e))
-        sys.exit()
+    triton_client = grpcclient.InferenceServerClient(url=SERVER_URL)
 
     model_name = "echo"
     response = triton_client.get_model_config(model_name=model_name)
