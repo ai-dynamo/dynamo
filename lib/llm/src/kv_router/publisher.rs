@@ -818,8 +818,8 @@ impl WorkerMetricsPublisher {
 
         tokio::spawn(async move {
             let mut rx = nats_rx;
-            let mut last_kv_active_blocks: Option<u64> = None;
-            let mut last_num_requests_waiting: Option<u64> = None;
+            let mut last_kv_active_blocks: Option<u64> = Some(0);
+            let mut last_num_requests_waiting: Option<u64> = Some(0);
             let mut pending_publish: Option<Arc<ForwardPassMetrics>> = None;
             let mut publish_timer =
                 Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(0)));

@@ -34,7 +34,7 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--namespace",
         default=SLAPlannerDefaults.namespace,
-        help="Namespace",
+        help="Dynamo namespace",
     )
     parser.add_argument(
         "--backend",
@@ -110,10 +110,16 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         help="Load prediction window size",
     )
     parser.add_argument(
-        "--prometheus-port",
+        "--metric-pulling-prometheus-endpoint",
+        type=str,
+        default=SLAPlannerDefaults.metric_pulling_prometheus_endpoint,
+        help="Prometheus endpoint URL for pulling dynamo deployment metrics",
+    )
+    parser.add_argument(
+        "--metric-reporting-prometheus-port",
         type=int,
-        default=SLAPlannerDefaults.prometheus_port,
-        help="Prometheus port",
+        default=SLAPlannerDefaults.metric_reporting_prometheus_port,
+        help="Port for exposing planner's own metrics to Prometheus",
     )
     parser.add_argument(
         "--no-correction",

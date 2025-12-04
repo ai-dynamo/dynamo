@@ -333,10 +333,6 @@ ${NIXL_PLUGIN_DIR}:\
 /usr/local/nvidia/lib64:\
 ${LD_LIBRARY_PATH}
 
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
-
-
 # Copy NATS and ETCD from dynamo_base, and UCX/NIXL
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
@@ -387,6 +383,9 @@ COPY --chown=dynamo: deploy /workspace/deploy
 COPY --chown=dynamo: components/ /workspace/components/
 COPY --chown=dynamo: recipes/ /workspace/recipes/
 
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 
@@ -407,9 +406,6 @@ FROM runtime AS dev
 
 ARG WORKSPACE_DIR=/sgl-workspace/dynamo
 ARG PYTHON_VERSION
-
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 # NOTE: SGLang uses system Python (not a virtualenv in framework/runtime stages) to align with
 # upstream SGLang Dockerfile: https://github.com/sgl-project/sglang/blob/main/docker/Dockerfile
