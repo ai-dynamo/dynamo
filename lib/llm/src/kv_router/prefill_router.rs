@@ -391,29 +391,16 @@ impl
         match prefill_result {
             Ok(PrefillCallResult::Full(prefill_result, prefill_worker_id)) => {
                 tracing::debug!("Prefill succeeded, using disaggregated params for decode");
-
-                let mut decode_req = req;
-                // Update request with prefill result
-                decode_req.prefill_result = Some(prefill_result.clone());
-                // Restore original max_tokens for decode
-                decode_req.stop_conditions.max_tokens = original_max_tokens;
-
-                // Set router_config_override for decode: overlap_score_weight = 0
-                let existing_override = decode_req.router_config_override.take();
-                decode_req.router_config_override = Some(RouterConfigOverride {
-                    overlap_score_weight: Some(0.0),
-                    ..existing_override.unwrap_or_default()
-                });
-
-                // Store prefill worker ID in context if available
-                let mut decode_context = context;
-                if let Some(worker_id) = prefill_worker_id {
-                    decode_context.insert("prefill_worker_id", worker_id);
-                }
-
-                // Map the modified request through with preserved context
-                let decode_request = decode_context.map(|_| decode_req);
-                next.generate(decode_request).await
+                Self::route_to_decode(
+                    req,
+                    context,
+                    next,
+                    prefill_result,
+                    prefill_worker_id,
+                    original_max_tokens,
+                    None, // No target decode worker - let router decide
+                )
+                .await
             }
             Ok(PrefillCallResult::WorkerIdOnly(_)) => {
                 // This shouldn't happen in normal flow (query_only=false)
@@ -449,6 +436,45 @@ impl
 }
 
 impl PrefillRouter {
+    /// Route to decode worker after prefill completes
+    /// Common logic for both normal flow and Stage 2 execute flow
+    async fn route_to_decode(
+        req: PreprocessedRequest,
+        mut context: Context<()>,
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        prefill_result: PrefillResult,
+        prefill_worker_id: Option<u64>,
+        original_max_tokens: Option<u32>,
+        target_decode_worker_id: Option<u64>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        let mut decode_req = req;
+
+        // Update request with prefill result
+        decode_req.prefill_result = Some(prefill_result);
+        decode_req.stop_conditions.max_tokens = original_max_tokens;
+
+        // If target decode worker is specified, route directly to it
+        if let Some(decode_worker_id) = target_decode_worker_id {
+            decode_req.backend_instance_id = Some(decode_worker_id);
+        }
+
+        // Set router_config_override for decode: overlap_score_weight = 0
+        let existing_override = decode_req.router_config_override.take();
+        decode_req.router_config_override = Some(RouterConfigOverride {
+            overlap_score_weight: Some(0.0),
+            ..existing_override.unwrap_or_default()
+        });
+
+        // Store prefill worker ID in context if available
+        if let Some(worker_id) = prefill_worker_id {
+            context.insert("prefill_worker_id", worker_id);
+        }
+
+        // Route to decode
+        let decode_request = context.map(|_| decode_req);
+        next.generate(decode_request).await
+    }
+
     /// Stage 1: Query worker selection without executing prefill/decode
     /// Returns prefill_worker_id and decode_worker_id in the response
     async fn handle_query_stage(
@@ -578,24 +604,16 @@ impl PrefillRouter {
                     decode_worker_id
                 );
 
-                let mut decode_req = req;
-                decode_req.prefill_result = Some(prefill_result);
-                decode_req.stop_conditions.max_tokens = original_max_tokens;
-                // Route to the specified decode worker
-                decode_req.backend_instance_id = Some(decode_worker_id);
-
-                // Set router_config_override for decode: overlap_score_weight = 0
-                let existing_override = decode_req.router_config_override.take();
-                decode_req.router_config_override = Some(RouterConfigOverride {
-                    overlap_score_weight: Some(0.0),
-                    ..existing_override.unwrap_or_default()
-                });
-
-                let mut decode_context = context;
-                decode_context.insert("prefill_worker_id", prefill_worker_id);
-
-                let decode_request = decode_context.map(|_| decode_req);
-                next.generate(decode_request).await
+                Self::route_to_decode(
+                    req,
+                    context,
+                    next,
+                    prefill_result,
+                    Some(prefill_worker_id),
+                    original_max_tokens,
+                    Some(decode_worker_id), // Route to specified decode worker
+                )
+                .await
             }
             Ok(PrefillCallResult::WorkerIdOnly(_)) => {
                 // Shouldn't happen with query_only=false
