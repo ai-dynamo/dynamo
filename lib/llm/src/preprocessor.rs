@@ -237,10 +237,23 @@ impl OpenAIPreprocessor {
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
         builder.estimated_prefix_hit_num_blocks(None);
-        // Extract backend_instance_id and extra_fields from nvext if present
+        // Extract backend_instance_id, extra_fields, and disaggregated serving fields from nvext if present
         if let Some(nvext) = request.nvext() {
             builder.backend_instance_id(nvext.backend_instance_id);
             builder.extra_fields(nvext.extra_fields.clone());
+            builder.target_prefill_worker_id(nvext.prefill_worker_id);
+            builder.target_decode_worker_id(nvext.decode_worker_id);
+
+            // If prefill_result is provided in nvext, convert to PrefillResult
+            if let Some(prefill_result_json) = &nvext.prefill_result {
+                use crate::protocols::common::preprocessor::PrefillResult;
+                // The prefill_result from nvext contains disaggregated_params directly
+                let prefill_result = PrefillResult {
+                    disaggregated_params: prefill_result_json.clone(),
+                    prompt_tokens_details: None,
+                };
+                builder.prefill_result(Some(prefill_result));
+            }
         }
 
         Ok(builder)

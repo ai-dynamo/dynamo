@@ -265,38 +265,54 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         let index = delta.index.unwrap_or(0);
         let mut response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
 
-        // Extract worker_id from disaggregated_params and inject into nvext if present
-        if let Some(worker_id_json) = delta
-            .disaggregated_params
-            .as_ref()
-            .and_then(|params| params.get("worker_id"))
-        {
-            use crate::protocols::openai::nvext::{NvExtResponse, WorkerIdInfo};
+        // Extract worker_id and query_stage from disaggregated_params and inject into nvext if present
+        if let Some(params) = delta.disaggregated_params.as_ref() {
+            use crate::protocols::openai::nvext::{NvExtResponse, QueryStageResponse, WorkerIdInfo};
 
-            let prefill_worker_id = worker_id_json
-                .get("prefill_worker_id")
-                .and_then(|v| v.as_u64());
-            let decode_worker_id = worker_id_json
-                .get("decode_worker_id")
-                .and_then(|v| v.as_u64());
+            let mut nvext_response = NvExtResponse::default();
 
-            let worker_id_info = WorkerIdInfo {
-                prefill_worker_id,
-                decode_worker_id,
-            };
+            // Extract worker_id if present
+            if let Some(worker_id_json) = params.get("worker_id") {
+                let prefill_worker_id = worker_id_json
+                    .get("prefill_worker_id")
+                    .and_then(|v| v.as_u64());
+                let decode_worker_id = worker_id_json
+                    .get("decode_worker_id")
+                    .and_then(|v| v.as_u64());
 
-            let nvext_response = NvExtResponse {
-                worker_id: Some(worker_id_info),
-            };
-
-            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
-                response.inner.nvext = Some(nvext_json);
-                tracing::debug!(
-                    "Injected worker_id into completions nvext: prefill={:?}, decode={:?}",
+                nvext_response.worker_id = Some(WorkerIdInfo {
                     prefill_worker_id,
-                    decode_worker_id
-                );
+                    decode_worker_id,
+                });
             }
+
+            // Extract query_stage if present (Stage 1 response)
+            if let Some(query_stage_json) = params.get("query_stage") {
+                let query_stage = QueryStageResponse {
+                    query_complete: query_stage_json
+                        .get("query_complete")
+                        .and_then(|v| v.as_bool()),
+                    prefill_worker_id: query_stage_json
+                        .get("prefill_worker_id")
+                        .and_then(|v| v.as_u64()),
+                    decode_worker_id: query_stage_json
+                        .get("decode_worker_id")
+                        .and_then(|v| v.as_u64()),
+                };
+
+                nvext_response.query_stage = Some(query_stage);
+            }
+
+            // Only inject nvext if we have data
+            if (nvext_response.worker_id.is_some() || nvext_response.query_stage.is_some())
+                && let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
+                    response.inner.nvext = Some(nvext_json);
+                    tracing::debug!(
+                        "Injected nvext into completions: worker_id={:?}, query_stage={:?}",
+                        nvext_response.worker_id,
+                        nvext_response.query_stage
+                    );
+                }
         }
 
         Ok(response)

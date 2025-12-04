@@ -87,6 +87,18 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_result: Option<PrefillResult>,
 
+    /// Target prefill worker ID for disaggregated serving (Stage 2)
+    /// When set along with target_decode_worker_id, routes to these specific workers
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_prefill_worker_id: Option<u64>,
+
+    /// Target decode worker ID for disaggregated serving (Stage 2)
+    /// When set along with target_prefill_worker_id, routes to these specific workers
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_decode_worker_id: Option<u64>,
+
     /// Data parallel rank for the request (used with data parallelism)
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]

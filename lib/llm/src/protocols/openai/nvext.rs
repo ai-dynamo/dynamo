@@ -22,12 +22,33 @@ pub struct WorkerIdInfo {
     pub decode_worker_id: Option<u64>,
 }
 
+/// Query stage response for disaggregated serving (Stage 1)
+/// Returns selected worker IDs without executing prefill/decode
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct QueryStageResponse {
+    /// Whether the query stage completed successfully
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_complete: Option<bool>,
+
+    /// The selected prefill worker ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_id: Option<u64>,
+
+    /// The selected decode worker ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_worker_id: Option<u64>,
+}
+
 /// NVIDIA LLM response extensions
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct NvExtResponse {
     /// Worker ID information (prefill and decode worker IDs)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<WorkerIdInfo>,
+
+    /// Query stage response data for disaggregated serving (Stage 1)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_stage: Option<QueryStageResponse>,
 }
 
 /// NVIDIA LLM extensions to the OpenAI API
@@ -80,6 +101,24 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub extra_fields: Option<Vec<String>>,
+
+    /// Target prefill worker ID for disaggregated serving (Stage 2)
+    /// When provided along with decode_worker_id, routes to these specific workers
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub prefill_worker_id: Option<u64>,
+
+    /// Target decode worker ID for disaggregated serving (Stage 2)
+    /// When provided along with prefill_worker_id, routes to these specific workers
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub decode_worker_id: Option<u64>,
+
+    /// Prefill result from Stage 1 (used in Stage 2 to skip prefill worker selection)
+    /// Contains disaggregated_params needed for KV cache transfer
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub prefill_result: Option<serde_json::Value>,
 }
 
 impl Default for NvExt {
@@ -126,6 +165,9 @@ mod tests {
         assert_eq!(nv_ext.token_data, None);
         assert_eq!(nv_ext.max_thinking_tokens, None);
         assert_eq!(nv_ext.extra_fields, None);
+        assert_eq!(nv_ext.prefill_worker_id, None);
+        assert_eq!(nv_ext.decode_worker_id, None);
+        assert_eq!(nv_ext.prefill_result, None);
     }
 
     // Test valid builder configurations
