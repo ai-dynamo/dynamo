@@ -153,6 +153,7 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
+@pytest.mark.timeout(160)  # 3x average
 @pytest.mark.gpu_1
 @pytest.mark.xfail(strict=False)
 def test_request_cancellation_sglang_aggregated(
@@ -239,6 +240,7 @@ def test_request_cancellation_sglang_aggregated(
                 logger.info(f"{description} detected successfully")
 
 
+@pytest.mark.timeout(185)  # 3x average
 @pytest.mark.gpu_2
 def test_request_cancellation_sglang_decode_cancel(
     request, runtime_services, predownload_models
