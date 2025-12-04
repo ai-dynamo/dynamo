@@ -99,6 +99,14 @@ impl MediaDecoder {
         self.inner.image_decoder = image_decoder;
         Ok(())
     }
+
+    fn video_decoder(&mut self, video_decoder: &Bound<'_, PyDict>) -> PyResult<()> {
+        let video_decoder = pythonize::depythonize(video_decoder).map_err(|err| {
+            PyErr::new::<PyException, _>(format!("Failed to parse video_decoder: {}", err))
+        })?;
+        self.inner.video_decoder = video_decoder;
+        Ok(())
+    }
 }
 
 #[pyclass]
