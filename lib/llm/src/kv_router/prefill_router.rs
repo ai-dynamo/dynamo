@@ -331,11 +331,11 @@ impl
         let engine_ctx = context.context();
 
         // ===== Stage 1: Query Workers Only =====
-        // If query_workers annotation is present, only return worker IDs without execution
-        if req.has_annotation("query_workers") {
+        // If query_instance_id annotation is present, only return worker IDs without execution
+        if req.has_annotation("query_instance_id") {
             tracing::debug!(
                 request_id = %request_id,
-                "Stage 1 (query_workers): Querying prefill and decode worker selection"
+                "Stage 1 (query_instance_id): Querying prefill and decode worker selection"
             );
             return self
                 .handle_query_stage(req, context, next, &request_id, &engine_ctx)

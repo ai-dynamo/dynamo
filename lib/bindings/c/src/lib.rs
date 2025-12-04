@@ -1007,15 +1007,18 @@ fn set_kv_annotation(
     request
 }
 
-/// Utility function to add the "query_workers" annotation for Stage 1 (query only)
+/// Utility function to add the "query_instance_id" annotation for Stage 1 (query only)
 ///
 /// This annotation signals the PrefillRouter to perform KV-aware worker selection
 /// without actually executing prefill. The response will contain prefill_worker_id
 /// and decode_worker_id in the nvext.query_stage field.
-pub fn add_query_workers(
+///
+/// Note: This is the same annotation used by KvPushRouter for decode worker selection.
+/// When used with PrefillRouter active, it triggers the full query stage flow.
+pub fn add_query_instance_id_for_disagg(
     request: &mut NvCreateChatCompletionRequest,
 ) -> &mut NvCreateChatCompletionRequest {
-    add_annotation_unique(request, "query_workers")
+    add_annotation_unique(request, "query_instance_id")
 }
 
 /// Wrapper function that queries worker selection and annotates the original request
@@ -1054,7 +1057,7 @@ pub async fn query_worker_selection_and_annotate(
 
 /// Query worker selection for disaggregated serving Stage 1
 ///
-/// This function uses the "query_workers" annotation to get prefill and decode
+/// This function uses the "query_instance_id" annotation to get prefill and decode
 /// worker IDs without executing any actual work. This is for the split pipeline
 /// where Stage 1 only queries workers and Stage 2 does the actual execution.
 ///
@@ -1071,7 +1074,7 @@ pub async fn query_workers_for_disagg(
     >,
     mut request: NvCreateChatCompletionRequest,
 ) -> anyhow::Result<WorkerSelectionResult> {
-    add_query_workers(&mut request);
+    add_query_instance_id_for_disagg(&mut request);
     let single_in = SingleIn::new(request);
     let response_stream = engine.generate(single_in).await?;
     extract_worker_selection_from_stream(response_stream).await
