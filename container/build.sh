@@ -106,7 +106,7 @@ VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
-VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+VLLM_BASE_IMAGE_TAG="25.04-cuda12.9-devel-ubuntu24.04"
 
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
@@ -124,9 +124,6 @@ NIXL_UCX_REF=v1.19.0
 NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
 NO_CACHE=""
-
-# Dynamo base image (pre-built to avoid rebuilding common components)
-DYNAMO_BASE_IMAGE_INPUT=""
 
 # sccache configuration for S3
 USE_SCCACHE=""
@@ -208,14 +205,6 @@ get_options() {
         --base-image-tag)
             if [ "$2" ]; then
                 BASE_IMAGE_TAG=$2
-                shift
-            else
-                missing_requirement "$1"
-            fi
-            ;;
-        --dynamo-base-image)
-            if [ "$2" ]; then
-                DYNAMO_BASE_IMAGE_INPUT=$2
                 shift
             else
                 missing_requirement "$1"
@@ -873,48 +862,86 @@ fi
 if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
     # Follow 2-step build process for all frameworks
     if [[ $FRAMEWORK != "NONE" ]]; then
-        # Check if a pre-built base image was provided for use
-        if [[ -n "${DYNAMO_BASE_IMAGE_INPUT:-}" ]]; then
-            # Use the pre-built base image provided via DYNAMO_BASE_IMAGE_INPUT, skipping base build
-            DYNAMO_BASE_IMAGE="${DYNAMO_BASE_IMAGE_INPUT}"
-            echo "======================================"
-            echo "Using Pre-built Base Image: ${DYNAMO_BASE_IMAGE}"
-            echo "======================================"
-        else
-            # Define base image tag with framework suffix to prevent clobbering
-            # Different frameworks require different base configurations:
-            # - VLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=cuda-dl-base
-            # - SGLANG: Python 3.10, BASE_IMAGE=cuda-dl-base
-            # - TRTLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=pytorch
-            # Without unique tags, building different frameworks would overwrite each other's names
-            DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}-${FRAMEWORK,,}"
-            # Start base image build
-            echo "======================================"
-            echo "Starting Build 1: Base Image"
-            echo "======================================"
+        # Define base image tag with framework suffix to prevent clobbering
+        # Different frameworks require different base configurations:
+        # - VLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=cuda-dl-base
+        # - SGLANG: Python 3.10, BASE_IMAGE=cuda-dl-base
+        # - TRTLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=pytorch
+        # Without unique tags, building different frameworks would overwrite each other's names
+        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}-${FRAMEWORK,,}"
+        # Start base image build
+        echo "======================================"
+        echo "Starting Build 1: Base Image"
+        echo "======================================"
 
-            # Create build log directory for BuildKit reports
-            BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
-            mkdir -p "${BUILD_LOG_DIR}"
-            BASE_BUILD_LOG="${BUILD_LOG_DIR}/base-image-build.log"
+        # Create build log directory for BuildKit reports
+        BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
+        mkdir -p "${BUILD_LOG_DIR}"
+        BASE_BUILD_LOG="${BUILD_LOG_DIR}/base-image-build.log"
 
-            # Use BuildKit for enhanced metadata; fallback to legacy docker if buildx absent
-            if [ -z "$RUN_PREFIX" ]; then
-                if docker buildx version &>/dev/null; then
-                    # Build with BuildKit and explicit 'runtime' target
-                    docker buildx build --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
-                    BUILD_EXIT_CODE=${PIPESTATUS[0]}
-                else
-                    DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
-                    BUILD_EXIT_CODE=${PIPESTATUS[0]}
-                fi
-
-                if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
-                    exit ${BUILD_EXIT_CODE}
-                fi
+        # Use BuildKit for enhanced metadata
+        if [ -z "$RUN_PREFIX" ]; then
+            if docker buildx version &>/dev/null; then
+                docker buildx build --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
             else
-                $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+                DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
             fi
+
+            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+                exit ${BUILD_EXIT_CODE}
+            fi
+        else
+            $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        fi
+
+        # Start framework build
+        echo "======================================"
+        echo "Starting Build 2: Framework Image"
+        echo "======================================"
+
+        FRAMEWORK_BUILD_LOG="${BUILD_LOG_DIR}/framework-${FRAMEWORK,,}-build.log"
+
+        BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
+
+        # Use BuildKit for enhanced metadata
+        if [ -z "$RUN_PREFIX" ]; then
+            if docker buildx version &>/dev/null; then
+                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            else
+                DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            fi
+
+            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+                exit ${BUILD_EXIT_CODE}
+            fi
+        else
+            $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        fi
+    else
+        # Create build log directory for BuildKit reports
+        BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
+        mkdir -p "${BUILD_LOG_DIR}"
+        SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
+
+        # Use BuildKit for enhanced metadata
+        if [ -z "$RUN_PREFIX" ]; then
+            if docker buildx version &>/dev/null; then
+                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            else
+                DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            fi
+
+            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+                exit ${BUILD_EXIT_CODE}
+            fi
+        else
+            $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
         fi
     fi
 fi
