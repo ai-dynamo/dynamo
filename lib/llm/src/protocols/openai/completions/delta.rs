@@ -288,6 +288,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
             // Extract query_stage if present (Stage 1 response)
             if let Some(query_stage_json) = params.get("query_stage") {
+                // Extract token_ids as Vec<u32>
+                let token_ids = query_stage_json
+                    .get("token_ids")
+                    .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok());
+
                 let query_stage = QueryStageResponse {
                     query_complete: query_stage_json
                         .get("query_complete")
@@ -298,6 +303,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
                     decode_worker_id: query_stage_json
                         .get("decode_worker_id")
                         .and_then(|v| v.as_u64()),
+                    token_ids,
                 };
 
                 nvext_response.query_stage = Some(query_stage);

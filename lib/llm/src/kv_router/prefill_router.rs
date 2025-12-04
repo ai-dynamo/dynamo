@@ -488,7 +488,7 @@ impl PrefillRouter {
             }
         }
 
-        // Build query stage response
+        // Build query stage response with token_ids for Stage 2 optimization
         let query_stage_response = LLMEngineOutput {
             token_ids: vec![],
             tokens: None,
@@ -503,6 +503,7 @@ impl PrefillRouter {
                     "query_complete": true,
                     "prefill_worker_id": prefill_worker_id,
                     "decode_worker_id": decode_worker_id,
+                    "token_ids": req.token_ids,  // Include tokens for Stage 2 to skip re-tokenization
                 }
             })),
             extra_args: None,
@@ -534,33 +535,6 @@ impl PrefillRouter {
         let prefill_worker_id = req.target_prefill_worker_id.unwrap();
         let decode_worker_id = req.target_decode_worker_id.unwrap();
         let original_max_tokens = req.stop_conditions.max_tokens;
-
-        // Check if prefill_result is already provided (from Stage 1 with full prefill)
-        // If so, skip prefill execution and go directly to decode
-        if req.prefill_result.is_some() {
-            tracing::debug!(
-                request_id = %request_id,
-                "Stage 2: prefill_result provided, skipping prefill and going to decode"
-            );
-
-            let mut decode_req = req;
-            // Set backend_instance_id to route to the decode worker
-            decode_req.backend_instance_id = Some(decode_worker_id);
-            decode_req.stop_conditions.max_tokens = original_max_tokens;
-
-            // Set router_config_override for decode: overlap_score_weight = 0
-            let existing_override = decode_req.router_config_override.take();
-            decode_req.router_config_override = Some(RouterConfigOverride {
-                overlap_score_weight: Some(0.0),
-                ..existing_override.unwrap_or_default()
-            });
-
-            let mut decode_context = context;
-            decode_context.insert("prefill_worker_id", prefill_worker_id);
-
-            let decode_request = decode_context.map(|_| decode_req);
-            return next.generate(decode_request).await;
-        }
 
         // Execute prefill on the specified prefill worker
         let mut prefill_req = req.clone();

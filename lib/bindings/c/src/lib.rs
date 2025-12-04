@@ -841,11 +841,20 @@ pub async fn extract_worker_selection_from_stream(
                         result.query_stage_complete = query_stage.query_complete;
                         result.prefill_worker_id = query_stage.prefill_worker_id.map(|id| id as i64);
                         result.decode_worker_id = query_stage.decode_worker_id.map(|id| id as i64);
+                        // Extract token_ids from query_stage for Stage 2 optimization
+                        if let Some(tokens) = query_stage.token_ids {
+                            result.tokens = tokens;
+                            tracing::debug!(
+                                "Extracted {} tokens from query_stage for Stage 2",
+                                result.tokens.len()
+                            );
+                        }
                         tracing::debug!(
-                            "Extracted query_stage from nvext: complete={:?}, prefill_worker={:?}, decode_worker={:?}",
+                            "Extracted query_stage from nvext: complete={:?}, prefill_worker={:?}, decode_worker={:?}, tokens={}",
                             result.query_stage_complete,
                             result.prefill_worker_id,
-                            result.decode_worker_id
+                            result.decode_worker_id,
+                            result.tokens.len()
                         );
                     }
                     // Also extract worker_id from nvext if present

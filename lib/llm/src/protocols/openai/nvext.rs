@@ -37,6 +37,10 @@ pub struct QueryStageResponse {
     /// The selected decode worker ID
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decode_worker_id: Option<u64>,
+
+    /// Token IDs from preprocessing (for Stage 2 to skip re-tokenization)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_ids: Option<Vec<u32>>,
 }
 
 /// NVIDIA LLM response extensions
@@ -113,12 +117,6 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub decode_worker_id: Option<u64>,
-
-    /// Prefill result from Stage 1 (used in Stage 2 to skip prefill worker selection)
-    /// Contains disaggregated_params needed for KV cache transfer
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
-    pub prefill_result: Option<serde_json::Value>,
 }
 
 impl Default for NvExt {
@@ -167,7 +165,6 @@ mod tests {
         assert_eq!(nv_ext.extra_fields, None);
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
-        assert_eq!(nv_ext.prefill_result, None);
     }
 
     // Test valid builder configurations
