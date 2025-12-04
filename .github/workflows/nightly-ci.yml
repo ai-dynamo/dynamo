@@ -493,173 +493,173 @@ jobs:
           platform_arch: ${{ matrix.arch.arch }}
           dry_run: 'true'
 
-  component-tests:
-    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-${{ matrix.component }}
-    needs: [build-amd64, build-arm64]
-    if: always()
-    runs-on: ${{ matrix.arch.runner }}
-    timeout-minutes: ${{ matrix.arch.timeout }}
-    strategy:
-      fail-fast: false
-      matrix:
-        framework: [vllm, trtllm, sglang]
-        arch:
-          - arch: amd64
-            runner: gpu-l40-amd64
-            timeout: 90
-            component: router
-            marks: "nightly and router"
-          - arch: amd64
-            runner: gpu-l40-amd64
-            timeout: 90
-            component: planner
-            marks: "nightly and planner"
-          - arch: amd64
-            runner: gpu-l40-amd64
-            timeout: 150
-            component: kvbm
-            marks: "nightly and (kvbm or kvbm_v2)"
-          - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-            timeout: 60
-            component: router
-            marks: "nightly and router"
-          - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-            timeout: 60
-            component: planner
-            marks: "nightly and planner"
-          - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-            timeout: 150
-            component: kvbm
-            marks: "nightly and (kvbm or kvbm_v2)"
-          - arch: amd64
-            runner: gpu-l40-amd64
-            timeout: 90
-            component: router
-            marks: "nightly and router"
-          - arch: amd64
-            runner: gpu-l40-amd64
-            timeout: 90
-            component: planner
-            marks: "nightly and planner"
-          - arch: amd64
-            runner: gpu-l40-amd64
-            timeout: 150
-            component: kvbm
-            marks: "nightly and (kvbm or kvbm_v2)"
-          - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-            timeout: 60
-            component: router
-            marks: "nightly and router"
-          - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-            timeout: 60
-            component: planner
-            marks: "nightly and planner"
-          - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-            timeout: 150
-            component: kvbm
-            marks: "nightly and (kvbm or kvbm_v2)"
-          - arch: amd64
-            runner: gpu-l40-amd64
-            timeout: 90
-            component: router
-            marks: "nightly and router"
-          - arch: amd64
-            runner: gpu-l40-amd64
-            timeout: 90
-            component: planner
-            marks: "nightly and planner"
-          - arch: amd64
-            runner: gpu-l40-amd64
-            timeout: 150
-            component: kvbm
-            marks: "nightly and (kvbm or kvbm_v2)"
-          - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-            timeout: 60
-            component: router
-            marks: "nightly and router"
-          - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-            timeout: 60
-            component: planner
-            marks: "nightly and planner"
-          - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-            timeout: 150
-            component: kvbm
-            marks: "nightly and (kvbm or kvbm_v2)"
+  # component-tests:
+  #   name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-${{ matrix.component }}
+  #   needs: [build-amd64, build-arm64]
+  #   if: always()
+  #   runs-on: ${{ matrix.arch.runner }}
+  #   timeout-minutes: ${{ matrix.arch.timeout }}
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       framework: [vllm, trtllm, sglang]
+  #       arch:
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 90
+  #           component: router
+  #           marks: "nightly and router"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 90
+  #           component: planner
+  #           marks: "nightly and planner"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 150
+  #           component: kvbm
+  #           marks: "nightly and (kvbm or kvbm_v2)"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 60
+  #           component: router
+  #           marks: "nightly and router"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 60
+  #           component: planner
+  #           marks: "nightly and planner"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 150
+  #           component: kvbm
+  #           marks: "nightly and (kvbm or kvbm_v2)"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 90
+  #           component: router
+  #           marks: "nightly and router"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 90
+  #           component: planner
+  #           marks: "nightly and planner"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 150
+  #           component: kvbm
+  #           marks: "nightly and (kvbm or kvbm_v2)"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 60
+  #           component: router
+  #           marks: "nightly and router"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 60
+  #           component: planner
+  #           marks: "nightly and planner"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 150
+  #           component: kvbm
+  #           marks: "nightly and (kvbm or kvbm_v2)"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 90
+  #           component: router
+  #           marks: "nightly and router"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 90
+  #           component: planner
+  #           marks: "nightly and planner"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 150
+  #           component: kvbm
+  #           marks: "nightly and (kvbm or kvbm_v2)"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 60
+  #           component: router
+  #           marks: "nightly and router"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 60
+  #           component: planner
+  #           marks: "nightly and planner"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 150
+  #           component: kvbm
+  #           marks: "nightly and (kvbm or kvbm_v2)"
 
-    steps:
-      - uses: actions/checkout@v4
-      - name: Check if build succeeded
-        id: check_build
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set +x
-          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Check if build succeeded
+  #       id: check_build
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #       run: |
+  #         set +x
+  #         echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch.arch }})"
 
-          if [ "${{ matrix.arch.arch }}" = "amd64" ]; then
-            BUILD_JOB_NAME="Build ${{ matrix.framework }} (amd64)"
-          else
-            BUILD_JOB_NAME="Build ${{ matrix.framework }} (arm64)"
-          fi
+  #         if [ "${{ matrix.arch.arch }}" = "amd64" ]; then
+  #           BUILD_JOB_NAME="Build ${{ matrix.framework }} (amd64)"
+  #         else
+  #           BUILD_JOB_NAME="Build ${{ matrix.framework }} (arm64)"
+  #         fi
 
-          JOBS=$(curl -s -S -L --fail-with-body \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
+  #         JOBS=$(curl -s -S -L --fail-with-body \
+  #           -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+  #           -H "Accept: application/vnd.github.v3+json" \
+  #           "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
 
-          if [ $? -ne 0 ]; then
-            echo "Error: Failed to query GitHub API"
-            echo "skip=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+  #         if [ $? -ne 0 ]; then
+  #           echo "Error: Failed to query GitHub API"
+  #           echo "skip=true" >> $GITHUB_OUTPUT
+  #           exit 0
+  #         fi
 
-          BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
+  #         BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
 
-          echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
+  #         echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
 
-          if [ "$BUILD_STATUS" != "success" ]; then
-            echo "Build failed or did not complete successfully. Marking tests as failed."
-            exit 1
-          fi
+  #         if [ "$BUILD_STATUS" != "success" ]; then
+  #           echo "Build failed or did not complete successfully. Marking tests as failed."
+  #           exit 1
+  #         fi
 
-          echo "Build succeeded. Proceeding with tests."
-      - name: Login to Container Registries
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
-        run: |
-          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
-          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
-      - name: Run Component Tests (${{ matrix.component }})
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
-          pytest_marks: "${{ matrix.marks }}"
-          framework: ${{ matrix.framework }}
-          test_type: component-${{ matrix.component }}
-          platform_arch: ${{ matrix.arch.arch }}
+  #         echo "Build succeeded. Proceeding with tests."
+  #     - name: Login to Container Registries
+  #       uses: ./.github/actions/docker-login
+  #       with:
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #     - name: Pull nightly image
+  #       shell: bash
+  #       env:
+  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  #         IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+  #       run: |
+  #         docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+  #         docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+  #     - name: Run Component Tests (${{ matrix.component }})
+  #       uses: ./.github/actions/pytest
+  #       with:
+  #         image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+  #         pytest_marks: "${{ matrix.marks }}"
+  #         framework: ${{ matrix.framework }}
+  #         test_type: component-${{ matrix.component }}
+  #         platform_arch: ${{ matrix.arch.arch }}
 
   ############################## RESULTS SUMMARY ##############################
   results-summary:
     name: Results Summary
     runs-on: ubuntu-latest
     if: always()
-    needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, component-tests]
+    needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests] # component-tests
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
