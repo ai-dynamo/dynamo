@@ -67,8 +67,10 @@ export_stats_json() {
     local build_name="${2:-unknown}"
 
     if ! command -v sccache >/dev/null 2>&1; then
-        echo '{"error": "sccache is not available"}' > "$output_file"
-        return 1
+        # Create empty stats file so COPY commands don't fail
+        echo '{"build_name": "'"$build_name"'", "sccache_available": false}' > "$output_file"
+        echo "ℹ️  sccache not available, created placeholder: $output_file"
+        return 0  # Don't fail the build
     fi
 
     # Get raw stats output
