@@ -2314,11 +2314,11 @@ dependencies = [
 
 [[package]]
 name = "derive_more"
-version = "2.0.1"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "093242cf7570c207c83073cf82f79706fe7b8317e98620a47d5be7c3d8497678"
+checksum = "10b768e943bed7bf2cab53df09f4bc34bfd217cdb57d971e769874c9a6710618"
 dependencies = [
- "derive_more-impl 2.0.1",
+ "derive_more-impl 2.1.0",
 ]
 
 [[package]]
@@ -2335,12 +2335,13 @@ dependencies = [
 
 [[package]]
 name = "derive_more-impl"
-version = "2.0.1"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bda628edc44c4bb645fbe0f758797143e4e07926f7ebf4e9bdfbd3d2ce621df3"
+checksum = "6d286bfdaf75e988b4a78e013ecd79c581e06399ab53fbacd2d916c2f904f30b"
 dependencies = [
  "proc-macro2",
  "quote",
+ "rustc_version",
  "syn 2.0.111",
 ]
 
@@ -2521,7 +2522,7 @@ checksum = "e1d926b4d407d372f141f93bb444696142c29d32962ccbd3531117cf3aa0bfa9"
 
 [[package]]
 name = "dynamo-async-openai"
-version = "0.7.0"
+version = "0.7.0+post1"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -2544,7 +2545,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
- "uuid 1.18.1",
+ "uuid 1.19.0",
 ]
 
 [[package]]
@@ -2559,14 +2560,14 @@ dependencies = [
 
 [[package]]
 name = "dynamo-config"
-version = "0.7.0"
+version = "0.7.0+post1"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-discovery"
-version = "0.7.0"
+version = "0.7.0+post1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2601,14 +2602,14 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "uuid 1.18.1",
+ "uuid 1.19.0",
  "validator",
  "xxhash-rust",
 ]
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.7.0"
+version = "0.7.0+post1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2626,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.7.0"
+version = "0.7.0+post1"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -2724,7 +2725,7 @@ dependencies = [
  "url",
  "utoipa",
  "utoipa-swagger-ui",
- "uuid 1.18.1",
+ "uuid 1.19.0",
  "validator",
  "xxhash-rust",
  "zeromq",
@@ -2732,7 +2733,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "0.7.0"
+version = "0.7.0+post1"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2749,7 +2750,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "0.7.0"
+version = "0.7.0+post1"
 dependencies = [
  "anyhow",
  "dynamo-async-openai",
@@ -2763,12 +2764,12 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "uuid 1.18.1",
+ "uuid 1.19.0",
 ]
 
 [[package]]
 name = "dynamo-run"
-version = "0.7.0"
+version = "0.7.0+post1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2790,13 +2791,13 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "uuid 1.18.1",
+ "uuid 1.19.0",
  "vergen-gitcl",
 ]
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.7.0"
+version = "0.7.0+post1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2866,14 +2867,14 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "url",
- "uuid 1.18.1",
+ "uuid 1.19.0",
  "validator",
  "xxhash-rust",
 ]
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.7.0"
+version = "0.7.0+post1"
 dependencies = [
  "bytemuck",
  "dashmap 6.1.0",
@@ -3851,9 +3852,9 @@ dependencies = [
 
 [[package]]
 name = "gif"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f954a9e9159ec994f73a30a12b96a702dde78f5547bcb561174597924f7d4162"
+checksum = "f5df2ba84018d80c213569363bdcd0c64e6933c67fe4c1d60ecf822971a3c35e"
 dependencies = [
  "color_quant",
  "weezl",
@@ -4377,9 +4378,9 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.1.18"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52e9a2a24dc5c6821e71a7030e1e14b7b632acac55c40e9d2e082c621261bb56"
+checksum = "727805d60e7938b76b826a6ef209eb70eaa1812794f9424d4a4e2d740662df5f"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -5039,7 +5040,7 @@ dependencies = [
  "serde_json",
  "time",
  "url",
- "uuid 1.18.1",
+ "uuid 1.19.0",
 ]
 
 [[package]]
@@ -5159,7 +5160,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "914bbb770e7bb721a06e3538c0edd2babed46447d128f7c21caa68747060ee73"
 dependencies = [
  "chrono",
- "derive_more 2.0.1",
+ "derive_more 2.1.0",
  "form_urlencoded",
  "http 1.4.0",
  "json-patch",
@@ -5232,13 +5233,13 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "libc"
-version = "0.2.177"
+version = "0.2.178"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2874a2af47a2325c2001a6e6fad9b16a53b802102b528163885171cf92b15976"
+checksum = "37c93d8daa9d8a012fd8ab92f088405fb202ea0b6ab73ee2482ae66af4f42091"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.7.0"
+version = "0.7.0+post1"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -5254,7 +5255,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
- "uuid 1.18.1",
+ "uuid 1.19.0",
 ]
 
 [[package]]
@@ -5610,9 +5611,9 @@ dependencies = [
 
 [[package]]
 name = "libz-rs-sys"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "840db8cf39d9ec4dd794376f38acc40d0fc65eec2a8f484f7fd375b84602becd"
+checksum = "8b484ba8d4f775eeca644c452a56650e544bf7e617f1d170fe7298122ead5222"
 dependencies = [
  "zlib-rs",
 ]
@@ -5666,9 +5667,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.28"
+version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
+checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "loop9"
@@ -6042,9 +6043,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69d83b0086dc8ecf3ce9ae2874b2d1290252e2a30720bea58a5c6639b0092873"
+checksum = "a69bcab0ad47271a0234d9422b131806bf3968021e5dc9328caf2d4cd58557fc"
 dependencies = [
  "libc",
  "wasi",
@@ -6121,7 +6122,7 @@ dependencies = [
  "clap 4.5.53",
  "csv",
  "derive-new",
- "derive_more 2.0.1",
+ "derive_more 2.1.0",
  "dirs",
  "either",
  "float8",
@@ -6188,7 +6189,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "urlencoding",
- "uuid 1.18.1",
+ "uuid 1.19.0",
  "variantly",
  "vob",
 ]
@@ -6210,7 +6211,7 @@ dependencies = [
  "tokio-tungstenite 0.24.0",
  "tracing",
  "utoipa",
- "uuid 1.18.1",
+ "uuid 1.19.0",
 ]
 
 [[package]]
@@ -6308,7 +6309,7 @@ dependencies = [
  "tonic 0.13.1",
  "tracing",
  "tracing-subscriber",
- "uuid 1.18.1",
+ "uuid 1.19.0",
 ]
 
 [[package]]
@@ -6350,7 +6351,7 @@ dependencies = [
  "rustc_version",
  "smallvec",
  "tagptr",
- "uuid 1.18.1",
+ "uuid 1.19.0",
 ]
 
 [[package]]
@@ -10636,7 +10637,7 @@ checksum = "ff360e02eab121e0bc37a2d3b4d4dc622e6eda3a8e5253d5435ecf5bd4c68408"
 dependencies = [
  "bytes",
  "libc",
- "mio 1.1.0",
+ "mio 1.1.1",
  "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
@@ -11722,13 +11723,13 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.18.1"
+version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f87b8aa10b915a06587d0dec516c282ff295b475d94abf425d62b57710070a2"
+checksum = "e2e054861b4bd027cd373e18e8d8d8e6548085000e41290d95ce0c373a654b4a"
 dependencies = [
  "getrandom 0.3.4",
  "js-sys",
- "serde",
+ "serde_core",
  "wasm-bindgen",
 ]
 
@@ -12738,7 +12739,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
- "uuid 1.18.1",
+ "uuid 1.19.0",
 ]
 
 [[package]]
@@ -12832,9 +12833,9 @@ dependencies = [
 
 [[package]]
 name = "zlib-rs"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f06ae92f42f5e5c42443fd094f245eb656abf56dd7cce9b8b263236565e00f2"
+checksum = "36134c44663532e6519d7a6dfdbbe06f6f8192bde8ae9ed076e9b213f0e31df7"
 
 [[package]]
 name = "zmq"
