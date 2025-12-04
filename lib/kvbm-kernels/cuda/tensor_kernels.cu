@@ -12,17 +12,19 @@
 
 // Compile-time CUDA version detection and diagnostics
 #if defined(CUDART_VERSION)
-  #define STRINGIFY(x) #x
-  #define TOSTRING(x) STRINGIFY(x)
-  #if CUDART_VERSION >= 13000
-    #pragma message("Building with CUDA 13.0+ (CUDART_VERSION=" TOSTRING(CUDART_VERSION) ") - cudaMemcpyBatchAsync available (8-param API, no failIdx)")
-  #elif CUDART_VERSION >= 12090
-    #pragma message("Building with CUDA 12.9 (CUDART_VERSION=" TOSTRING(CUDART_VERSION) ") - cudaMemcpyBatchAsync available (9-param API with failIdx)")
-  #else
-    #pragma message("Building with CUDA " TOSTRING(CUDART_VERSION) " - cudaMemcpyBatchAsync NOT available (requires 12.9+)")
-  #endif
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+#if CUDART_VERSION >= 13000
+#pragma message("Building with CUDA 13.0+ (CUDART_VERSION=" TOSTRING( \
+        CUDART_VERSION) ") - cudaMemcpyBatchAsync available (8-param API, no failIdx)")
+#elif CUDART_VERSION >= 12090
+#pragma message("Building with CUDA 12.9 (CUDART_VERSION=" TOSTRING( \
+        CUDART_VERSION) ") - cudaMemcpyBatchAsync available (9-param API with failIdx)")
 #else
-  #pragma message("Warning: CUDART_VERSION not defined - cannot detect CUDA version")
+#pragma message("Building with CUDA " TOSTRING(CUDART_VERSION) " - cudaMemcpyBatchAsync NOT available (requires 12.9+)")
+#endif
+#else
+#pragma message("Warning: CUDART_VERSION not defined - cannot detect CUDA version")
 #endif
 
 #ifndef CUDA_CALLABLE_MEMBER
@@ -525,12 +527,12 @@ launch_operational_copy(
   };
 
   auto launch_memcpy_batch = [&]() -> cudaError_t {
-    // cudaMemcpyBatchAsync API changed between CUDA 12.9 and 13.0:
-    // - CUDA 12.9: Has failIdx parameter (9 params total)
-    // - CUDA 13.0: Removed failIdx, uses rich error reporting (8 params)
-    // - Earlier versions (< 12.9): Function doesn't exist
+  // cudaMemcpyBatchAsync API changed between CUDA 12.9 and 13.0:
+  // - CUDA 12.9: Has failIdx parameter (9 params total)
+  // - CUDA 13.0: Removed failIdx, uses rich error reporting (8 params)
+  // - Earlier versions (< 12.9): Function doesn't exist
 #if defined(CUDART_VERSION)
-  #if CUDART_VERSION >= 13000
+#if CUDART_VERSION >= 13000
     // CUDA 13.0+: Use 8-parameter API (no failIdx)
     // Signature: cudaError_t cudaMemcpyBatchAsync(void *const *dsts, const void *const *srcs,
     //     const size_t *sizes, size_t count, cudaMemcpyAttributes *attrs,
@@ -541,10 +543,8 @@ launch_operational_copy(
     }
 
     cudaError_t result = cudaMemcpyBatchAsync(
-        const_cast<void**>(dst_ptrs.data()),
-        const_cast<const void**>(src_mut.data()),
-        const_cast<size_t*>(sizes.data()),
-        total_chunks,
+        const_cast<void**>(dst_ptrs.data()), const_cast<const void**>(src_mut.data()),
+        const_cast<size_t*>(sizes.data()), total_chunks,
         nullptr,  // attrs - no attributes needed
         nullptr,  // attrsIdxs - no attribute indices
         0,        // numAttrs - zero attributes
@@ -552,7 +552,7 @@ launch_operational_copy(
 
     return result;
 
-  #elif CUDART_VERSION >= 12090
+#elif CUDART_VERSION >= 12090
     // CUDA 12.9: Use 9-parameter API (with failIdx)
     // Signature: cudaError_t cudaMemcpyBatchAsync(void *const *dsts, const void *const *srcs,
     //     const size_t *sizes, size_t count, cudaMemcpyAttributes *attrs,
@@ -564,10 +564,8 @@ launch_operational_copy(
     size_t fail_idx = 0;
 
     cudaError_t result = cudaMemcpyBatchAsync(
-        const_cast<void**>(dst_ptrs.data()),
-        const_cast<const void**>(src_mut.data()),
-        const_cast<size_t*>(sizes.data()),
-        total_chunks,
+        const_cast<void**>(dst_ptrs.data()), const_cast<const void**>(src_mut.data()),
+        const_cast<size_t*>(sizes.data()), total_chunks,
         nullptr,    // attrs
         nullptr,    // attrsIdxs
         0,          // numAttrs
@@ -578,10 +576,10 @@ launch_operational_copy(
     // if result != cudaSuccess
     return result;
 
-  #else
+#else
     // CUDA version < 12.9 - cudaMemcpyBatchAsync not available
     return cudaErrorNotSupported;
-  #endif
+#endif
 #else
     // CUDART_VERSION not defined
     return cudaErrorNotSupported;
