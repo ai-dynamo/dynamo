@@ -77,7 +77,8 @@ runs:
           fi
         fi
 
-        docker run ${GPU_FLAGS} --rm -w /workspace \
+        # Run without --rm so we can copy results even if container crashes (example SIGSEGV exit 139)
+        docker run ${GPU_FLAGS} -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \
