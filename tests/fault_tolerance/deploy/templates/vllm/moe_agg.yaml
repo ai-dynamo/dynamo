@@ -27,6 +27,8 @@ spec:
           memory: "100Gi"
           gpu: "2"
       envs:
+        - name: DYN_SYSTEM_ENABLED
+          value: "true"
         # MoE-specific environment variables
         - name: VLLM_ALL2ALL_BACKEND
           value: "pplx"
@@ -58,7 +60,6 @@ spec:
             - --model
             - deepseek-ai/DeepSeek-V2-Lite
             - --trust-remote-code
-            - --disable-log-requests
             - --tensor-parallel-size
             - "1"
             - --data-parallel-size

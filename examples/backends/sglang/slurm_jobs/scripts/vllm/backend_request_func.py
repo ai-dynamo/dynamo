@@ -380,7 +380,13 @@ async def async_request_dynamo_completions(
                         if not chunk_bytes:
                             continue
 
-                        chunk = chunk_bytes.decode("utf-8").removeprefix("data: ")
+                        chunk = chunk_bytes.decode("utf-8")
+
+                        # Skip SSE event/comment lines (not data)
+                        if chunk.startswith("event:") or chunk.startswith(":"):
+                            continue
+
+                        chunk = chunk.removeprefix("data: ")
                         if chunk != "[DONE]":
                             data = json.loads(chunk)
 

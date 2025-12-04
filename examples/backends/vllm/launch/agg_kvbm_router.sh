@@ -11,9 +11,9 @@ export PYTHONHASHSEED=0
 MODEL="Qwen/Qwen3-0.6B"
 
 # run frontend + KV router
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend \
     --router-mode kv \
-    --http-port 8000 \
     --router-reset-states &
 
 # run workers with KVBM enabled
@@ -27,15 +27,15 @@ CUDA_VISIBLE_DEVICES=0 DYN_KVBM_CPU_CACHE_GB=2 \
     --enforce-eager \
     --connector kvbm \
     --gpu-memory-utilization 0.4 \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5556"}' &
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' &
 
 DYN_KVBM_LEADER_ZMQ_PUB_PORT=56003 \
 DYN_KVBM_LEADER_ZMQ_ACK_PORT=56004 \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
-CUDA_VISIBLE_DEVICES=0 DYN_KVBM_CPU_CACHE_GB=2 \
+CUDA_VISIBLE_DEVICES=1 DYN_KVBM_CPU_CACHE_GB=2 \
     python3 -m dynamo.vllm \
     --model $MODEL \
     --enforce-eager \
     --connector kvbm \
     --gpu-memory-utilization 0.4 \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'

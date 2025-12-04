@@ -21,42 +21,18 @@ limitations under the License.
 
 In disaggregated serving architectures, KV cache must be transferred between prefill and decode workers. TensorRT-LLM supports two methods for this transfer:
 
-## Default Method: UCX
-By default, TensorRT-LLM uses UCX (Unified Communication X) for KV cache transfer between prefill and decode workers. UCX provides high-performance communication optimized for GPU-to-GPU transfers.
+## Default Method: NIXL
+By default, TensorRT-LLM uses **NIXL** (NVIDIA Inference Xfer Library) with UCX (Unified Communication X) as backend for KV cache transfer between prefill and decode workers. [NIXL](https://github.com/ai-dynamo/nixl) is NVIDIA's high-performance communication library designed for efficient data transfer in distributed GPU environments.
 
-## Beta Method: NIXL
-TensorRT-LLM also supports using **NIXL** (NVIDIA Inference Xfer Library) for KV cache transfer. [NIXL](https://github.com/ai-dynamo/nixl) is NVIDIA's high-performance communication library designed for efficient data transfer in distributed GPU environments.
+### Specify Backends for NIXL
 
-**Note:** NIXL support in TensorRT-LLM is currently beta and may have some sharp edges.
+TODO: Add instructions for how to specify different backends for NIXL.
 
-## Using NIXL for KV Cache Transfer
+## Alternative Method: UCX
 
-**Note:** NIXL backend for TensorRT-LLM is currently only supported on AMD64 (x86_64) architecture. If you're running on ARM64, you'll need to use the default UCX method for KV cache transfer.
+TensorRT-LLM can also leverage **UCX** (Unified Communication X) directly for KV cache transfer between prefill and decode workers. There are two ways to enable UCX as the KV cache transfer backend:
 
-To enable NIXL for KV cache transfer in disaggregated serving:
+1. **Recommended:** Set `cache_transceiver_config.backend: UCX` in your engine configuration YAML file.
+2. Alternatively, set the environment variable `TRTLLM_USE_UCX_KV_CACHE=1` and configure `cache_transceiver_config.backend: DEFAULT` in the engine configuration YAML.
 
-1. **Build the container with NIXL support:**
-   The TensorRT-LLM wheel must be built from source with NIXL support. The `./container/build.sh` script caches previously built TensorRT-LLM wheels to reduce build time. If you have previously built a TensorRT-LLM wheel without NIXL support, you must delete the cached wheel to force a rebuild with NIXL support.
-
-   **Remove cached TensorRT-LLM wheel (only if previously built without NIXL support):**
-   ```bash
-   rm -rf /tmp/trtllm_wheel
-   ```
-
-   **Build the container with NIXL support:**
-   ```bash
-   ./container/build.sh --framework trtllm \
-     --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM.git \
-     --tensorrtllm-commit main
-   ```
-
-2. **Run the containerized environment:**
-   See [run container](./README.md#run-container) section to learn how to start the container image built in previous step.
-
-3. **Start the disaggregated service:**
-   See [disaggregated serving](./README.md#disaggregated-serving) to see how to start the deployment.
-
-4. **Send the request:**
-   See [client](./README.md#client) section to learn how to send the request to deployment.
-
-**Important:** Ensure that ETCD and NATS services are running before starting the service.
+This flexibility allows users to choose the most suitable method for their deployment and compatibility requirements.

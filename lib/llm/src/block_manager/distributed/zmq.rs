@@ -220,7 +220,7 @@ impl ZmqActiveMessageLeader {
                     "Timed out waiting for ping readiness after handshake."
                 ));
             }
-            tracing::info!("Handshake: final readiness ping...");
+            tracing::debug!("Handshake: final readiness ping...");
             let ping = this.broadcast(ZMQ_PING_MESSAGE, vec![]).await?;
             tokio::select! {
                 _ = ping => break,

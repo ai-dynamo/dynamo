@@ -3,7 +3,7 @@
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
-use dynamo_runtime::component::{Component, Instance};
+use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::traits::events::EventPublisher;
 use rand::Rng;
@@ -19,7 +19,7 @@ use super::RouterConfigOverride;
 use super::WorkerSelector;
 use super::indexer::OverlapScores;
 use super::protocols::{DpRank, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
-use super::sequence::ActiveSequencesMultiWorker;
+use super::sequence::{ActiveSequencesMultiWorker, SequenceError};
 
 use crate::tokens::SequenceHash;
 
@@ -96,27 +96,26 @@ impl KvScheduler {
     pub async fn start(
         component: Component,
         block_size: u32,
-        instances_rx: watch::Receiver<Vec<Instance>>,
+        instance_ids_rx: watch::Receiver<Vec<u64>>,
         runtime_configs_rx: watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
         router_uuid: String,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
-        let instances: Vec<Instance> = instances_rx.borrow().clone();
+        let instance_ids: Vec<u64> = instance_ids_rx.borrow().clone();
         let runtime_configs: HashMap<WorkerId, ModelRuntimeConfig> =
             runtime_configs_rx.borrow().clone();
 
         // Create shared workers_with_configs wrapped in Arc<RwLock>
         let workers_with_configs: Arc<RwLock<HashMap<WorkerId, Option<ModelRuntimeConfig>>>> = {
             let mut initial_map = HashMap::new();
-            for instance in &instances {
-                let worker_id = instance.instance_id;
-                let config = runtime_configs.get(&worker_id).cloned();
+            for worker_id in &instance_ids {
+                let config = runtime_configs.get(worker_id).cloned();
                 if config.is_some() {
                     tracing::info!("Runtime config found for worker_id: {}", worker_id);
                 }
-                initial_map.insert(worker_id, config);
+                initial_map.insert(*worker_id, config);
             }
             Arc::new(RwLock::new(initial_map))
         };
@@ -132,7 +131,7 @@ impl KvScheduler {
         // Spawn background task to monitor and update workers_with_configs
         let workers_monitor = workers_with_configs.clone();
         let slots_monitor = slots.clone();
-        let mut instances_monitor_rx = instances_rx.clone();
+        let mut instance_ids_monitor_rx = instance_ids_rx.clone();
         let mut configs_monitor_rx = runtime_configs_rx.clone();
         let monitor_cancel_token = component.drt().primary_token();
         tokio::spawn(async move {
@@ -144,9 +143,9 @@ impl KvScheduler {
                         tracing::trace!("workers monitoring task shutting down");
                         break;
                     }
-                    result = instances_monitor_rx.changed() => {
+                    result = instance_ids_monitor_rx.changed() => {
                         if result.is_err() {
-                            tracing::warn!("endpoint watch sender shutdown in monitor");
+                            tracing::warn!("instance IDs watch sender shutdown in monitor");
                             break;
                         }
                     }
@@ -159,18 +158,17 @@ impl KvScheduler {
                 }
 
                 // Get the latest values from both channels
-                let new_instances = instances_monitor_rx.borrow_and_update().clone();
+                let new_instance_ids = instance_ids_monitor_rx.borrow_and_update().clone();
                 let new_configs = configs_monitor_rx.borrow_and_update().clone();
 
                 // Build the new workers_with_configs map
                 let mut new_workers_with_configs = HashMap::new();
-                for instance in &new_instances {
-                    let worker_id = instance.instance_id;
-                    let config = new_configs.get(&worker_id).cloned();
+                for worker_id in &new_instance_ids {
+                    let config = new_configs.get(worker_id).cloned();
                     if config.is_some() {
                         tracing::info!("Runtime config found for worker_id: {}", worker_id);
                     }
-                    new_workers_with_configs.insert(worker_id, config);
+                    new_workers_with_configs.insert(*worker_id, config);
                 }
 
                 // Update workers when instances change
@@ -265,9 +263,7 @@ impl KvScheduler {
                             )
                             .await
                         {
-                            tracing::warn!(
-                                "Failed to add request {request_id} to local slot tracker: {e:?}"
-                            );
+                            tracing::warn!("Failed to add request {request_id}: {e}");
                         }
                     }
                     Err(KvSchedulerError::NoEndpoints) => {
@@ -334,20 +330,19 @@ impl KvScheduler {
         isl: usize,
         overlap: u32,
         worker: WorkerWithDpRank,
-    ) {
-        let _ = self
-            .slots
+    ) -> Result<(), SequenceError> {
+        self.slots
             .add_request(request_id, token_sequence, isl, overlap, worker)
-            .await;
+            .await
     }
 
-    pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<()> {
+    pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots
             .mark_prefill_completed(&request_id.to_string())
             .await
     }
 
-    pub async fn free(&self, request_id: &str) -> Result<()> {
+    pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots.free(&request_id.to_string()).await
     }
 
@@ -386,12 +381,16 @@ impl KvScheduler {
 }
 
 // Helper function for softmax sampling
-fn softmax_sample(logits: &HashMap<WorkerWithDpRank, f64>, temperature: f64) -> WorkerWithDpRank {
+// Returns a vec of workers: multiple if tied, single if sampled
+fn softmax_sample(
+    logits: &HashMap<WorkerWithDpRank, f64>,
+    temperature: f64,
+) -> Vec<WorkerWithDpRank> {
     if logits.is_empty() {
         panic!("Empty logits for softmax sampling");
     }
 
-    // Guard: if temperature is 0, return the key with the smallest logit value
+    // Guard: if temperature is 0, return all keys with the smallest logit value (ties)
     if temperature == 0.0 {
         // Find the minimum logit value
         let min_logit = logits.values().fold(f64::INFINITY, |a, &b| a.min(b));
@@ -403,10 +402,7 @@ fn softmax_sample(logits: &HashMap<WorkerWithDpRank, f64>, temperature: f64) -> 
             .map(|(k, _)| *k)
             .collect();
 
-        // Randomly select from the minimum keys (handles single key case naturally)
-        let mut rng = rand::rng();
-        let index = rng.random_range(0..min_keys.len());
-        return min_keys[index];
+        return min_keys;
     }
 
     let keys: Vec<_> = logits.keys().copied().collect();
@@ -449,12 +445,12 @@ fn softmax_sample(logits: &HashMap<WorkerWithDpRank, f64>, temperature: f64) -> 
     for (i, &prob) in probabilities.iter().enumerate() {
         cumsum += prob;
         if sample <= cumsum {
-            return keys[i];
+            return vec![keys[i]];
         }
     }
 
     // Fallback to last key (shouldn't normally reach here)
-    keys[keys.len() - 1]
+    vec![keys[keys.len() - 1]]
 }
 
 // Default implementation matching the Python _cost_function
@@ -542,14 +538,34 @@ impl WorkerSelector for DefaultWorkerSelector {
             }
         }
 
-        // Use softmax sampling to select worker
+        // Use softmax sampling to select worker(s)
         // Use override if provided, otherwise use default config
         let temperature = request
             .router_config_override
             .as_ref()
             .and_then(|cfg| cfg.router_temperature)
             .unwrap_or(self.kv_router_config.router_temperature);
-        let best_worker = softmax_sample(&worker_logits, temperature);
+        let candidates = softmax_sample(&worker_logits, temperature);
+
+        // If multiple candidates (tied), use tree size as tie-breaker
+        // If tree sizes are also equal, min_by_key uses HashMap iteration order (pseudo-random)
+        let best_worker = if candidates.len() > 1 {
+            tracing::info!("Multiple workers tied with same logit, using tree size as tie-breaker");
+            *candidates
+                .iter()
+                .min_by_key(|worker| {
+                    request
+                        .overlaps
+                        .tree_sizes
+                        .get(worker)
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .expect("candidates should not be empty")
+        } else {
+            candidates[0]
+        };
+
         let best_logit = worker_logits[&best_worker];
 
         let best_overlap = *overlaps.get(&best_worker).unwrap_or(&0);
@@ -562,12 +578,20 @@ impl WorkerSelector for DefaultWorkerSelector {
             .map(|blocks| format!(", total blocks: {}", blocks))
             .unwrap_or_default();
 
+        let tree_size = request
+            .overlaps
+            .tree_sizes
+            .get(&best_worker)
+            .copied()
+            .unwrap_or(0);
+
         tracing::info!(
-            "Selected worker: worker_id={} dp_rank={:?}, logit: {:.3}, cached blocks: {}{}",
+            "Selected worker: worker_id={} dp_rank={:?}, logit: {:.3}, cached blocks: {}, tree size: {}{}",
             best_worker.worker_id,
             best_worker.dp_rank,
             best_logit,
             best_overlap,
+            tree_size,
             total_blocks_info
         );
 
@@ -593,26 +617,33 @@ mod tests {
         // Test with different temperatures
         for temperature in &[0.1, 1.0, 10.0] {
             let result = softmax_sample(&logits, *temperature);
-            assert_eq!(result, worker, "Should return the only available worker");
+            assert_eq!(result.len(), 1, "Should return exactly one worker");
+            assert_eq!(result[0], worker, "Should return the only available worker");
         }
 
         // Test with different logit values
         logits.clear();
         logits.insert(worker, -100.0); // Very negative value
-        assert_eq!(softmax_sample(&logits, 1.0), worker);
+        let result = softmax_sample(&logits, 1.0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], worker);
 
         logits.clear();
         logits.insert(worker, 100.0); // Very positive value
-        assert_eq!(softmax_sample(&logits, 1.0), worker);
+        let result = softmax_sample(&logits, 1.0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], worker);
 
         logits.clear();
         logits.insert(worker, 0.0); // Zero value
-        assert_eq!(softmax_sample(&logits, 1.0), worker);
+        let result = softmax_sample(&logits, 1.0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], worker);
     }
 
     #[test]
     fn test_softmax_sample_zero_temperature() {
-        // Test that with temperature 0, softmax_sample returns the key with smallest logit
+        // Test that with temperature 0, softmax_sample returns all keys with smallest logit
         let mut logits = HashMap::new();
         let worker1 = WorkerWithDpRank::from_worker_id(1);
         let worker2 = WorkerWithDpRank::from_worker_id(2);
@@ -623,14 +654,37 @@ mod tests {
         logits.insert(worker3, 7.0);
         logits.insert(worker4, 3.5);
 
-        // With temperature 0, should always return worker 2 (smallest logit)
-        for _ in 0..10 {
-            let result = softmax_sample(&logits, 0.0);
-            assert_eq!(
-                result, worker2,
-                "Should return worker with smallest logit when temperature is 0"
-            );
-        }
+        // With temperature 0, should always return only worker2 (smallest logit)
+        let result = softmax_sample(&logits, 0.0);
+        assert_eq!(
+            result.len(),
+            1,
+            "Should return one worker when there's no tie"
+        );
+        assert_eq!(
+            result[0], worker2,
+            "Should return worker with smallest logit when temperature is 0"
+        );
+
+        // Test with tied minimum logits
+        logits.clear();
+        let worker5 = WorkerWithDpRank::from_worker_id(5);
+        let worker6 = WorkerWithDpRank::from_worker_id(6);
+        logits.insert(worker1, 5.0);
+        logits.insert(worker2, 3.0); // Tied for smallest
+        logits.insert(worker5, 3.0); // Tied for smallest
+        logits.insert(worker6, 7.0);
+
+        let result = softmax_sample(&logits, 0.0);
+        assert_eq!(
+            result.len(),
+            2,
+            "Should return all workers with smallest logit when tied"
+        );
+        assert!(
+            result.contains(&worker2) && result.contains(&worker5),
+            "Should contain both tied workers"
+        );
 
         // Test with negative values
         logits.clear();
@@ -642,6 +696,10 @@ mod tests {
         logits.insert(worker30, 0.0);
 
         let result = softmax_sample(&logits, 0.0);
-        assert_eq!(result, worker20, "Should handle negative logits correctly");
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0], worker20,
+            "Should handle negative logits correctly"
+        );
     }
 }

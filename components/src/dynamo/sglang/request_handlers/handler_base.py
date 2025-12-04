@@ -124,7 +124,9 @@ class BaseWorkerHandler(ABC):
     def _propagate_trace_context_to_sglang(
         self, context: Context, bootstrap_room: int = 0
     ):
-        """Propagate Dynamo's trace context to SGLang for distributed tracing.
+        """Propagate Dynamo's trace context to SGLang for distributed tracing. SGLang expects a certain
+        format derived by loooking at https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/tracing/trace.py
+        in the to_dict() method.
 
         Args:
             context: Dynamo Context object containing trace information.

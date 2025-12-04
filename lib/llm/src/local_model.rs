@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use dynamo_runtime::component::Endpoint;
+use dynamo_runtime::discovery::DiscoveryInstance;
 use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
@@ -423,26 +424,87 @@ impl LocalModel {
         self.card
     }
 
-    /// Attach this model the endpoint. This registers it on the network
+    /// Attach this model to the endpoint. This registers it on the network
     /// allowing ingress to discover it.
+    ///
+    /// For base models, pass `lora_name = None`.
+    /// For LoRA adapters, pass `lora_name = Some("adapter-name")`.
     pub async fn attach(
         &mut self,
         endpoint: &Endpoint,
         model_type: ModelType,
         model_input: ModelInput,
+        lora_name: Option<&str>,
     ) -> anyhow::Result<()> {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
 
+        // Compute model_suffix from lora_name if present
+        let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
+
+        let suffix_for_log = model_suffix
+            .as_ref()
+            .map(|s| format!("/{}", s))
+            .unwrap_or_default();
+        tracing::debug!(
+            "Registering MDC at path: {}/{}/{}/{:x}{}",
+            endpoint.component().namespace().name(),
+            endpoint.component().name(),
+            endpoint.name(),
+            endpoint.drt().connection_id(),
+            suffix_for_log
+        );
+
         // Register the Model Deployment Card via discovery interface
+        // The model_suffix (for LoRA) will be appended AFTER the instance_id
         let discovery = endpoint.drt().discovery();
-        let spec = DiscoverySpec::from_model(
+        let spec = DiscoverySpec::from_model_with_suffix(
             endpoint.component().namespace().name().to_string(),
             endpoint.component().name().to_string(),
             endpoint.name().to_string(),
             &self.card,
+            model_suffix,
         )?;
         let _instance = discovery.register(spec).await?;
+
+        Ok(())
+    }
+
+    /// Helper associated function to detach a model from an endpoint
+    ///
+    /// For base models, pass `lora_name = None`.
+    /// For LoRA adapters, pass `lora_name = Some("adapter-name")`.
+    pub async fn detach_from_endpoint(
+        endpoint: &Endpoint,
+        lora_name: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let drt = endpoint.drt();
+        let instance_id = drt.connection_id();
+        let endpoint_id = endpoint.id();
+
+        // Compute model_suffix from lora_name if present
+        let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
+
+        let instance = DiscoveryInstance::Model {
+            namespace: endpoint_id.namespace,
+            component: endpoint_id.component,
+            endpoint: endpoint_id.name,
+            instance_id,
+            card_json: serde_json::Value::Null,
+            model_suffix,
+        };
+
+        let discovery = drt.discovery();
+        discovery.unregister(instance).await?;
+
+        if let Some(lora_name) = lora_name {
+            tracing::info!(
+                "Successfully unregistered LoRA '{}' from discovery",
+                lora_name
+            );
+        } else {
+            tracing::info!("Successfully unregistered model from discovery");
+        }
 
         Ok(())
     }

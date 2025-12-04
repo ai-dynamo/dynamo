@@ -6,10 +6,12 @@ use libc::c_char;
 use once_cell::sync::OnceCell;
 use std::borrow::Cow;
 use std::ffi::CStr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use dynamo_llm::kv_router::{
-    indexer::compute_block_hash_for_seq, protocols::*, publisher::KvEventPublisher,
+use dynamo_llm::{
+    discovery::{KvWorkerMonitor, ModelWatcher},
+    kv_router::{indexer::compute_block_hash_for_seq, protocols::*, publisher::KvEventPublisher},
 };
 use dynamo_runtime::{DistributedRuntime, Worker};
 static WK: OnceCell<Worker> = OnceCell::new();
@@ -452,9 +454,12 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
                 (router_temperature >= 0.0).then_some(router_temperature),
                 Some(use_kv_events),
                 Some(router_replica_sync),
-                None,
-                None,
-                None,
+                None, // track_active_blocks
+                None, // router_snapshot_threshold
+                None, // router_reset_states
+                None, // router_ttl_secs
+                None, // router_max_tree_size
+                None, // router_prune_target_ratio
             ))
         } else {
             None
@@ -950,20 +955,24 @@ pub async fn create_worker_selection_pipeline_chat(
     let component = distributed_runtime
         .namespace(namespace)?
         .component(component_name)?;
-    let client = component.endpoint(GENERATE_ENDPOINT).client().await?;
+    let endpoint = component.endpoint(GENERATE_ENDPOINT);
+    let client = endpoint.client().await?;
 
     // Discover the model card by searching all instances with this model name
     tracing::debug!("Looking for model: {}", model_name);
     tracing::debug!("Namespace: {}", namespace);
 
-    use dynamo_llm::discovery::ModelWatcher;
-    let model_manager = std::sync::Arc::new(ModelManager::new());
+    let model_manager = Arc::new(ModelManager::new());
+    let router_config = dynamo_llm::entrypoint::RouterConfig {
+        router_mode,
+        kv_router_config: kv_router_config.unwrap_or_default(),
+        busy_threshold,
+        enforce_disagg: false,
+    };
     let watcher = ModelWatcher::new(
         component.drt().clone(),
         model_manager.clone(),
-        router_mode,
-        kv_router_config,
-        busy_threshold,
+        router_config,
     );
     let cards = watcher
         .cards_for_model(model_name, Some(namespace), false)
@@ -980,7 +989,7 @@ pub async fn create_worker_selection_pipeline_chat(
     let chooser = if router_mode == RouterMode::KV {
         Some(
             model_manager
-                .kv_chooser_for(&component, card.kv_cache_block_size, kv_router_config)
+                .kv_chooser_for(&endpoint, card.kv_cache_block_size, kv_router_config)
                 .await?,
         )
     } else {
@@ -1020,6 +1029,10 @@ pub async fn create_worker_selection_pipeline_chat(
         .tokenizer_hf()
         .with_context(|| format!("Failed to load tokenizer for: {}", card.display_name))?;
 
+    // Create worker monitor if busy_threshold is set
+    // Note: C bindings don't register with ModelManager, so HTTP endpoint won't see this
+    let worker_monitor = busy_threshold.map(|t| KvWorkerMonitor::new(client.clone(), t));
+
     let engine = build_routed_pipeline::<
         NvCreateChatCompletionRequest,
         NvCreateChatCompletionStreamResponse,
@@ -1027,10 +1040,11 @@ pub async fn create_worker_selection_pipeline_chat(
         &card_with_local_files,
         &client,
         router_mode,
-        busy_threshold,
+        worker_monitor,
         chooser,
         hf_tokenizer,
-        None,
+        None,  // prefill_chooser
+        false, // enforce_disagg
     )
     .await?;
 

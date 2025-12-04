@@ -89,13 +89,17 @@ impl RouterMode {
 }
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
-    let Some(nats_client) = endpoint.drt().nats_client() else {
-        anyhow::bail!("Missing NATS. Please ensure it is running and accessible.");
-    };
-    AddressedPushRouter::new(
-        nats_client.client().clone(),
-        endpoint.drt().tcp_server().await?,
-    )
+    // Get network manager and create client (no mode checks!)
+    let manager = endpoint.drt().network_manager();
+    let req_client = manager.create_client()?;
+    let resp_transport = endpoint.drt().tcp_server().await?;
+
+    tracing::debug!(
+        transport = req_client.transport_name(),
+        "Creating AddressedPushRouter with request plane client"
+    );
+
+    AddressedPushRouter::new(req_client, resp_transport)
 }
 
 impl<T, U> PushRouter<T, U>
@@ -143,8 +147,8 @@ where
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
                 ));
             }
             instance_ids[counter % count]
@@ -162,8 +166,8 @@ where
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
                 ));
             }
             let counter = rand::rng().random::<u64>() as usize;
@@ -185,8 +189,8 @@ where
 
         if !found {
             return Err(anyhow::anyhow!(
-                "instance_id={instance_id} not found for endpoint {:?}",
-                self.client.endpoint.etcd_root()
+                "instance_id={instance_id} not found for endpoint {}",
+                self.client.endpoint.id()
             ));
         }
 
@@ -224,8 +228,48 @@ where
             }
         }
 
-        let subject = self.client.endpoint.subject_to(instance_id);
-        let request = request.map(|req| AddressedRequest::new(req, subject));
+        // Get the address based on discovered transport type
+        let address = {
+            use crate::component::TransportType;
+
+            // Get the instance and use its actual transport type
+            let instances = self.client.instances();
+            let instance = instances
+                .iter()
+                .find(|i| i.instance_id == instance_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Instance {} not found in available instances", instance_id)
+                })?;
+
+            match &instance.transport {
+                TransportType::Http(http_endpoint) => {
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        http_endpoint = %http_endpoint,
+                        "Using HTTP transport for instance"
+                    );
+                    http_endpoint.clone()
+                }
+                TransportType::Tcp(tcp_endpoint) => {
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        tcp_endpoint = %tcp_endpoint,
+                        "Using TCP transport for instance"
+                    );
+                    tcp_endpoint.clone()
+                }
+                TransportType::Nats(subject) => {
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        subject = %subject,
+                        "Using NATS transport for instance"
+                    );
+                    subject.clone()
+                }
+            }
+        };
+
+        let request = request.map(|req| AddressedRequest::new(req, address));
 
         let stream: anyhow::Result<ManyOut<U>> = self.addressed.generate(request).await;
         match stream {

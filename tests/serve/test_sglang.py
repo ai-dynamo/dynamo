@@ -44,7 +44,7 @@ sglang_configs = {
         name="aggregated",
         directory=sglang_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
@@ -58,11 +58,14 @@ sglang_configs = {
         name="disaggregated",
         directory=sglang_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
-        request_payloads=[chat_payload_default(), completion_payload_default()],
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
     ),
     "disaggregated_same_gpu": SGLangConfig(
         # Uses disagg_same_gpu.sh for single-GPU disaggregated testing
@@ -70,7 +73,11 @@ sglang_configs = {
         name="disaggregated_same_gpu",
         directory=sglang_dir,
         script_name="disagg_same_gpu.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.skip(reason="unstable")],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.skip(reason="unstable"),
+        ],
         model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
@@ -113,7 +120,7 @@ sglang_configs = {
         name="template_verification",
         directory=SERVE_TEST_DIR,  # special directory for test-specific scripts
         script_name="template_verifier.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge, pytest.mark.nightly],
         model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
@@ -127,7 +134,7 @@ sglang_configs = {
         name="multimodal_agg_qwen",
         directory=sglang_dir,
         script_name="multimodal_agg.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,
         timeout=360,
@@ -156,7 +163,7 @@ sglang_configs = {
         name="embedding_agg",
         directory=sglang_dir,
         script_name="agg_embed.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge, pytest.mark.nightly],
         model="Qwen/Qwen3-Embedding-4B",
         delayed_start=0,
         timeout=180,
@@ -185,6 +192,22 @@ sglang_configs = {
             ),
         ],
     ),
+    "completions_only": SGLangConfig(
+        name="completions_only",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1],
+        model="deepseek-ai/deepseek-llm-7b-base",
+        script_args=[
+            "--model-path",
+            "deepseek-ai/deepseek-llm-7b-base",
+            "--dyn-endpoint-types",
+            "completions",
+        ],
+        request_payloads=[
+            completion_payload_default(),
+        ],
+    ),
 }
 
 
@@ -204,6 +227,10 @@ def test_sglang_deployment(
     run_serve_deployment(config, request)
 
 
+@pytest.mark.e2e
+@pytest.mark.sglang
+@pytest.mark.gpu_1
+@pytest.mark.nightly
 @pytest.mark.skip(
     reason="Requires 4 GPUs - enable when hardware is consistently available"
 )

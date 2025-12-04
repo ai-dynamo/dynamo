@@ -4,6 +4,7 @@
 use std::env;
 
 use clap::{CommandFactory as _, Parser};
+use dynamo_runtime::config::environment_names::logging as env_logging;
 
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_run::Output;
@@ -44,7 +45,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     if log_level != "info" {
-        unsafe { std::env::set_var("DYN_LOG", log_level) };
+        unsafe { std::env::set_var(env_logging::DYN_LOG, log_level) };
     }
 
     logging::init();
@@ -126,17 +127,9 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
             .chain(env::args().skip(non_flag_params)),
     )?;
 
-    if is_in_dynamic(&in_opt) && is_out_dynamic(&out_opt) {
+    if dynamo_run::is_in_dynamic(&in_opt) && dynamo_run::is_out_dynamic(&out_opt) {
         anyhow::bail!("Cannot use endpoint for both in and out");
     }
 
     dynamo_run::run(runtime, in_opt, out_opt, flags).await
-}
-
-fn is_in_dynamic(in_opt: &Input) -> bool {
-    matches!(in_opt, Input::Endpoint(_))
-}
-
-fn is_out_dynamic(out_opt: &Option<Output>) -> bool {
-    matches!(out_opt, Some(Output::Auto))
 }
