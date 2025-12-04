@@ -6,7 +6,9 @@ from typing import Any, Dict, List, Optional, Union
 from tests.utils.client import send_request
 from tests.utils.payloads import (
     ChatPayload,
+    ChatPayloadWithLogprobs,
     CompletionPayload,
+    CompletionPayloadWithLogprobs,
     EmbeddingPayload,
     MetricsPayload,
 )
@@ -134,6 +136,8 @@ def chat_payload(
     max_tokens: int = 300,
     temperature: Optional[float] = None,
     stream: bool = False,
+    logprobs: bool = False,
+    top_logprobs: Optional[int] = None,
     extra_body: Optional[Dict[str, Any]] = None,
 ) -> ChatPayload:
     body: Dict[str, Any] = {
@@ -145,19 +149,31 @@ def chat_payload(
         ],
         "max_tokens": max_tokens,
         "stream": stream,
+        "logprobs": logprobs,
     }
     if temperature is not None:
         body["temperature"] = temperature
 
+    if top_logprobs is not None:
+        body["top_logprobs"] = top_logprobs
+
     if extra_body:
         body.update(extra_body)
 
-    return ChatPayload(
-        body=body,
-        repeat_count=repeat_count,
-        expected_log=expected_log or [],
-        expected_response=expected_response or [],
-    )
+    if logprobs:
+        return ChatPayloadWithLogprobs(
+            body=body,
+            repeat_count=repeat_count,
+            expected_log=expected_log or [],
+            expected_response=expected_response or [],
+        )
+    else:
+        return ChatPayload(
+            body=body,
+            repeat_count=repeat_count,
+            expected_log=expected_log or [],
+            expected_response=expected_response or [],
+        )
 
 
 def completion_payload(
@@ -168,18 +184,29 @@ def completion_payload(
     max_tokens: int = 150,
     temperature: float = 0.1,
     stream: bool = False,
+    logprobs: Optional[int] = None,
 ) -> CompletionPayload:
-    return CompletionPayload(
-        body={
-            "prompt": prompt,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": stream,
-        },
-        repeat_count=repeat_count,
-        expected_log=expected_log or [],
-        expected_response=expected_response or [],
-    )
+    body: Dict[str, Any] = {
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": stream,
+    }
+    if logprobs is not None:
+        body["logprobs"] = logprobs
+        return CompletionPayloadWithLogprobs(
+            body=body,
+            repeat_count=repeat_count,
+            expected_log=expected_log or [],
+            expected_response=expected_response or [],
+        )
+    else:
+        return CompletionPayload(
+            body=body,
+            repeat_count=repeat_count,
+            expected_log=expected_log or [],
+            expected_response=expected_response or [],
+        )
 
 
 def embedding_payload_default(
