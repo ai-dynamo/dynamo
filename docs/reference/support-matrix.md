@@ -52,8 +52,8 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Python Package** | **Version** | glibc version                         | CUDA Version |
 | :----------------- | :---------- | :------------------------------------ | :----------- |
-| ai-dynamo          | 0.7.0       | >=2.28                                |              |
-| ai-dynamo-runtime  | 0.7.0       | >=2.28 (Python 3.12 has known issues) |              |
+| ai-dynamo          | 0.7.0.post1       | >=2.28                                |              |
+| ai-dynamo-runtime  | 0.7.0.post1       | >=2.28 (Python 3.12 has known issues) |              |
 | NIXL               | 0.7.1       | >=2.27                                | >=11.8       |
 
 ### Build Dependency
@@ -61,7 +61,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Build Dependency** | **Version as of Dynamo v0.7.0**                                                   |
 | :------------------- | :------------------------------------------------------------------------------- |
 | **SGLang**           | 0.5.3.post4                                                                      |
-| **TensorRT-LLM**     | 1.2.0rc2                                                                         |
+| **TensorRT-LLM**     | 1.2.0rc3                                                                         |
 | **vLLM**             | 0.11.0                                                                           |
 | **NIXL**             | 0.7.1                                                                            |
 
@@ -72,7 +72,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 ### CUDA Support by Framework
 | **Dynamo Version**   | **SGLang**              | **TensorRT-LLM**        | **vLLM**                |
 | :------------------- | :-----------------------| :-----------------------| :-----------------------|
-| **Dynamo 0.7.0**     | CUDA 12.8               | CUDA 13.0               | CUDA 12.8               |
+| **Dynamo 0.7.0.post1**     | CUDA 12.8               | CUDA 13.0               | CUDA 12.8               |
 
 ## Cloud Service Provider Compatibility
 
