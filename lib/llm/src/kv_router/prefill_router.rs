@@ -293,6 +293,7 @@ impl PrefillRouter {
     /// Handle the prefill stage of disaggregated serving: do prefill and return routing info.
     /// Returns prefill_result (with kv_transfer_params) and decode_worker_id.
     /// The frontend uses this to construct the decode stage request.
+    /// This is used for Gateway Api Inference Integration (GAIE) in the EPP.
     async fn handle_prefill_stage_request(
         &self,
         req: PreprocessedRequest,
@@ -310,10 +311,9 @@ impl PrefillRouter {
                 tracing::debug!("Prefill stage: Prefill succeeded, returning routing info");
 
                 // Query the decode router to get the best decode worker
-                // We add query_instance_id annotation to get worker info without actually routing
-                let mut query_req = req;
-                query_req.annotations.push("query_instance_id".to_string());
-                let query_context = Context::with_id(query_req, request_id.clone());
+                // The request already has query_instance_id annotation (added by client)
+                // which tells KvPushRouter to return worker info without actually routing
+                let query_context = Context::with_id(req, request_id.clone());
                 engine_ctx.link_child(query_context.context());
 
                 // Call next to get decode worker selection
@@ -419,10 +419,11 @@ impl
             return next.generate(context.map(|_| req)).await;
         }
 
-        // Prefill Stage Detection
-        // If the request has the "disagg_prefill_stage" annotation, perform prefill and return
-        // routing info + preprocessed request without proceeding to decode.
-        if req.has_annotation("disagg_prefill_stage") {
+        // Prefill Stage Detection (for GAIE EPP integration)
+        // If the request has the "query_instance_id" annotation, perform prefill and return
+        // routing info (prefill_result + decode_worker_id) without proceeding to decode.
+        // The client adds this annotation to indicate it wants split pipeline behavior.
+        if req.has_annotation("query_instance_id") {
             tracing::debug!(
                 request_id = %request_id,
                 "Disaggregated prefill stage: performing prefill and returning routing info"
