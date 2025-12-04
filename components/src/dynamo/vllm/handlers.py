@@ -490,6 +490,55 @@ class BaseWorkerHandler(ABC):
             except Exception as e:
                 logger.warning(f"Failed to clean up temp directory: {e}")
 
+    def _decode_prompt_embeds(self, prompt_embeds_base64: str):
+        """
+        Decode base64-encoded prompt embeddings in PyTorch format.
+
+        Format: PyTorch tensor serialized with torch.save() and base64-encoded.
+        This matches NIM-LLM's implementation for compatibility.
+
+        Args:
+            prompt_embeds_base64: Base64-encoded PyTorch tensor
+
+        Returns:
+            torch.Tensor: Decoded prompt embeddings with preserved shape and dtype
+
+        Raises:
+            ValueError: If decoding fails or format is invalid
+        """
+        import base64
+        import io
+
+        import torch
+
+        try:
+            # Step 1: Decode base64 to bytes
+            embeds_bytes = base64.b64decode(prompt_embeds_base64)
+
+            # Step 2: Load PyTorch tensor from bytes
+            buffer = io.BytesIO(embeds_bytes)
+            embeddings_tensor = torch.load(buffer, weights_only=True)
+
+            # Step 3: Validate it's a tensor
+            if not isinstance(embeddings_tensor, torch.Tensor):
+                raise ValueError(
+                    f"prompt_embeds must be a torch.Tensor, got {type(embeddings_tensor)}"
+                )
+
+            logger.debug(
+                f"Decoded PyTorch format embeddings: shape={embeddings_tensor.shape}, "
+                f"dtype={embeddings_tensor.dtype}, size={len(embeds_bytes)} bytes"
+            )
+
+            return embeddings_tensor
+
+        except base64.binascii.Error as e:
+            logger.error(f"Invalid base64 encoding in prompt_embeds: {e}")
+            raise ValueError(f"Invalid base64 encoding in prompt_embeds: {e}")
+        except Exception as e:
+            logger.error(f"Failed to decode prompt_embeds: {e}")
+            raise ValueError(f"Failed to decode prompt_embeds as PyTorch tensor: {e}")
+
     async def _extract_multimodal_data(
         self, request: Dict[str, Any]
     ) -> Dict[str, Any] | None:
@@ -542,19 +591,38 @@ class BaseWorkerHandler(ABC):
         return vllm_mm_data if vllm_mm_data else None
 
     @staticmethod
-    def _build_completion_usage(request_output: RequestOutput) -> Dict[str, Any]:
+    def _build_completion_usage(
+        request_output: RequestOutput,
+        embedding_sequence_length: int | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Build completion usage statistics.
+
+        Args:
+            request_output: vLLM RequestOutput object
+            embedding_sequence_length: If using prompt embeddings, the sequence length
+                                     extracted from the embeddings tensor shape
+
+        Returns:
+            Dict with prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details
+        """
+        # Determine prompt token count:
+        # - For embeddings: use embedding_sequence_length from tensor shape
+        # - For normal text: use len(prompt_token_ids)
+        if embedding_sequence_length is not None:
+            prompt_tokens = embedding_sequence_length
+        elif request_output.prompt_token_ids:
+            prompt_tokens = len(request_output.prompt_token_ids)
+        else:
+            prompt_tokens = None
+
+        completion_tokens = len(request_output.outputs[0].token_ids)
+
         return {
-            "prompt_tokens": (
-                len(request_output.prompt_token_ids)
-                if request_output.prompt_token_ids
-                else None
-            ),
-            "completion_tokens": len(request_output.outputs[0].token_ids),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
             "total_tokens": (
-                len(request_output.prompt_token_ids)
-                + len(request_output.outputs[0].token_ids)
-                if request_output.prompt_token_ids
-                else None
+                prompt_tokens + completion_tokens if prompt_tokens is not None else None
             ),
             "prompt_tokens_details": (
                 {"cached_tokens": request_output.num_cached_tokens}
@@ -570,6 +638,7 @@ class BaseWorkerHandler(ABC):
         request_id,
         data_parallel_rank=None,
         lora_request=None,
+        embedding_sequence_length=None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -602,7 +671,12 @@ class BaseWorkerHandler(ABC):
                                 f"Request {request_id} with LoRA {lora_request.lora_name} "
                                 "returned no outputs"
                             )
-                        yield {"finish_reason": "error", "token_ids": []}
+                        # Use string format "error: message" for consistency with vLLM's string-based finish_reason
+                        # Rust will parse this into FinishReason::Error(message)
+                        yield {
+                            "finish_reason": "error: No outputs from vLLM engine",
+                            "token_ids": [],
+                        }
                         break
 
                     output = res.outputs[0]
@@ -613,7 +687,8 @@ class BaseWorkerHandler(ABC):
                         out[
                             "completion_usage"
                         ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res
+                            request_output=res,
+                            embedding_sequence_length=embedding_sequence_length,
                         )
                         # Log completion with LoRA info (debug level to avoid log spam)
                         if lora_request:
@@ -675,9 +750,52 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(request)
 
-        prompt = TokensPrompt(
-            prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
-        )
+        # Check if prompt_embeds is provided (takes precedence over token_ids)
+        # Track embedding sequence length for usage statistics
+        embedding_sequence_length = None
+
+        if "prompt_embeds" in request and request["prompt_embeds"]:
+            try:
+                # Decode embeddings
+                embeddings_tensor = self._decode_prompt_embeds(request["prompt_embeds"])
+
+                # Extract sequence length from tensor shape for usage reporting
+                # Shape is typically (sequence_length, hidden_dim) or (batch, sequence_length, hidden_dim)
+                if embeddings_tensor.dim() == 2:
+                    embedding_sequence_length = embeddings_tensor.shape[0]
+                elif embeddings_tensor.dim() == 3:
+                    embedding_sequence_length = embeddings_tensor.shape[1]
+                else:
+                    # Fallback for unexpected shapes
+                    embedding_sequence_length = embeddings_tensor.shape[0]
+
+                # Use EmbedsPrompt to create the correct input dict for vLLM 0.11.0
+                # EmbedsInputs TypedDict has: {type: 'embeds', prompt_embeds: Tensor, cache_salt?: str}
+                # It does NOT support prompt_token_ids
+                from vllm.inputs import EmbedsPrompt
+
+                prompt = EmbedsPrompt(prompt_embeds=embeddings_tensor)
+                logger.info(
+                    f"Using prompt embeddings: shape={embeddings_tensor.shape}, "
+                    f"dtype={embeddings_tensor.dtype}, sequence_length={embedding_sequence_length}, "
+                    f"request_id={request_id}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to process prompt_embeds for request {request_id}: {e}"
+                )
+                # Use string format "error: message" for consistency with vLLM's string-based finish_reason
+                # Rust will parse this into FinishReason::Error(message)
+                yield {
+                    "finish_reason": f"error: Invalid prompt_embeds: {e}",
+                    "token_ids": [],
+                }
+                return
+        else:
+            # Normal path: use token IDs
+            prompt = TokensPrompt(
+                prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
+            )
 
         # Build sampling params from request
         sampling_params = build_sampling_params(
@@ -733,6 +851,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request_id,
                     data_parallel_rank=dp_rank,
                     lora_request=lora_request,
+                    embedding_sequence_length=embedding_sequence_length,
                 ):
                     if prefill_result is not None and "completion_usage" in tok:
                         tok["completion_usage"][
@@ -777,10 +896,54 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(request)
 
-        token_ids = request["token_ids"]
-        prompt = TokensPrompt(
-            prompt_token_ids=token_ids, multi_modal_data=multi_modal_data
-        )
+        # Check if prompt_embeds is provided (takes precedence over token_ids)
+        # Track embedding sequence length for usage statistics
+        embedding_sequence_length = None
+
+        if "prompt_embeds" in request and request["prompt_embeds"]:
+            try:
+                # Decode embeddings
+                embeddings_tensor = self._decode_prompt_embeds(request["prompt_embeds"])
+
+                # Extract sequence length from tensor shape for usage reporting
+                # Shape is typically (sequence_length, hidden_dim) or (batch, sequence_length, hidden_dim)
+                if embeddings_tensor.dim() == 2:
+                    embedding_sequence_length = embeddings_tensor.shape[0]
+                elif embeddings_tensor.dim() == 3:
+                    embedding_sequence_length = embeddings_tensor.shape[1]
+                else:
+                    # Fallback for unexpected shapes
+                    embedding_sequence_length = embeddings_tensor.shape[0]
+
+                # Use EmbedsPrompt to create the correct input dict for vLLM 0.11.0
+                # EmbedsInputs TypedDict has: {type: 'embeds', prompt_embeds: Tensor, cache_salt?: str}
+                # It does NOT support prompt_token_ids
+                from vllm.inputs import EmbedsPrompt
+
+                prompt = EmbedsPrompt(prompt_embeds=embeddings_tensor)
+                logger.info(
+                    f"Prefill using prompt embeddings: shape={embeddings_tensor.shape}, "
+                    f"dtype={embeddings_tensor.dtype}, sequence_length={embedding_sequence_length}, "
+                    f"request_id={request_id}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to process prompt_embeds for prefill request {request_id}: {e}"
+                )
+                # Use string format "error: message" for consistency with vLLM's string-based finish_reason
+                # Rust will parse this into FinishReason::Error(message)
+                yield {
+                    "finish_reason": f"error: Invalid prompt_embeds: {e}",
+                    "token_ids": [],
+                    "disaggregated_params": None,
+                }
+                return
+        else:
+            # Normal path: use token IDs
+            token_ids = request["token_ids"]
+            prompt = TokensPrompt(
+                prompt_token_ids=token_ids, multi_modal_data=multi_modal_data
+            )
 
         # Build sampling params from request using shared utility
         sampling_params = build_sampling_params(
@@ -859,7 +1022,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                             else None
                         ),
                         "completion_usage": BaseWorkerHandler._build_completion_usage(
-                            request_output=res
+                            request_output=res,
+                            embedding_sequence_length=embedding_sequence_length,
                         ),
                     }
 

@@ -900,8 +900,14 @@ impl
 
         let mut response_generator = Box::new(response_generator);
 
-        // update isl
-        response_generator.update_isl(common_request.token_ids.len() as u32);
+        // Update ISL only for text prompts
+        // For embeddings, the worker extracts sequence length from tensor shape
+        // and includes it in completion_usage, so we skip update_isl() to avoid
+        // overwriting the worker's correct prompt_tokens value
+        if common_request.prompt_embeds.is_none() {
+            let isl = common_request.token_ids.len() as u32;
+            response_generator.update_isl(isl);
+        }
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);
@@ -1030,13 +1036,35 @@ impl
         let mut response_generator = Box::new(response_generator);
         // convert the chat completion request to a common completion request
         let mut builder = self.builder(&request)?;
-        let annotations = self.gather_tokens(&request, &mut builder, None)?;
-        self.gather_multi_modal_data(&request, &mut builder).await?;
+
+        // Check if embeddings are provided - skip tokenization path
+        let annotations = if let Some(ref prompt_embeds) = request.inner.prompt_embeds {
+            // Skip tokenization for embeddings
+            builder.token_ids(vec![]); // Empty token IDs
+            builder.prompt_embeds(Some(prompt_embeds.clone()));
+
+            // Still gather multimodal data (embeddings can have images/video)
+            self.gather_multi_modal_data(&request, &mut builder).await?;
+
+            // No token annotations
+            HashMap::new()
+        } else {
+            // Normal path: tokenize the prompt
+            let annotations = self.gather_tokens(&request, &mut builder, None)?;
+            self.gather_multi_modal_data(&request, &mut builder).await?;
+            annotations
+        };
 
         let common_request = builder.build()?;
 
-        // update isl
-        response_generator.update_isl(common_request.token_ids.len() as u32);
+        // Update ISL only for text prompts
+        // For embeddings, the worker extracts sequence length from tensor shape
+        // and includes it in completion_usage, so we skip update_isl() to avoid
+        // overwriting the worker's correct prompt_tokens value
+        if request.inner.prompt_embeds.is_none() {
+            let isl = common_request.token_ids.len() as u32;
+            response_generator.update_isl(isl);
+        }
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);
