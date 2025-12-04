@@ -507,6 +507,7 @@ class BaseWorkerHandler(ABC):
             ValueError: If decoding fails or format is invalid
         """
         import base64
+        import binascii
         import io
 
         import torch
@@ -532,7 +533,7 @@ class BaseWorkerHandler(ABC):
 
             return embeddings_tensor
 
-        except base64.binascii.Error as e:
+        except binascii.Error as e:
             logger.error(f"Invalid base64 encoding in prompt_embeds: {e}")
             raise ValueError(f"Invalid base64 encoding in prompt_embeds: {e}")
         except Exception as e:
