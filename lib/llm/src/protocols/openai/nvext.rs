@@ -22,12 +22,37 @@ pub struct WorkerIdInfo {
     pub decode_worker_id: Option<u64>,
 }
 
+/// Prefill stage response data for disaggregated serving (GAIE EPP integration)
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct PrefillStageResponse {
+    /// Flag indicating prefill stage is complete
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_stage_complete: Option<bool>,
+
+    /// The prefill worker ID that processed the prefill
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_id: Option<u64>,
+
+    /// The decode worker ID selected for decode stage
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_worker_id: Option<u64>,
+
+    /// The prefill result containing kv_transfer_params for decode worker
+    /// This is serialized JSON that the client passes to the decode stage request
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_result: Option<serde_json::Value>,
+}
+
 /// NVIDIA LLM response extensions
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct NvExtResponse {
     /// Worker ID information (prefill and decode worker IDs)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<WorkerIdInfo>,
+
+    /// Prefill stage response data (only present when query_instance_id annotation was used)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_stage: Option<PrefillStageResponse>,
 }
 
 /// NVIDIA LLM extensions to the OpenAI API

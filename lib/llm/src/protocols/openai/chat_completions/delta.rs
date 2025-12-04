@@ -362,37 +362,61 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         let index = 0;
         let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
 
-        // Extract worker_id from disaggregated_params and inject into nvext if present
-        if let Some(worker_id_json) = delta
-            .disaggregated_params
-            .as_ref()
-            .and_then(|params| params.get("worker_id"))
-        {
-            use crate::protocols::openai::nvext::{NvExtResponse, WorkerIdInfo};
-
-            let prefill_worker_id = worker_id_json
-                .get("prefill_worker_id")
-                .and_then(|v| v.as_u64());
-            let decode_worker_id = worker_id_json
-                .get("decode_worker_id")
-                .and_then(|v| v.as_u64());
-
-            let worker_id_info = WorkerIdInfo {
-                prefill_worker_id,
-                decode_worker_id,
+        // Extract disaggregated_params and inject into nvext if present
+        if let Some(params) = delta.disaggregated_params.as_ref() {
+            use crate::protocols::openai::nvext::{
+                NvExtResponse, PrefillStageResponse, WorkerIdInfo,
             };
 
-            let nvext_response = NvExtResponse {
-                worker_id: Some(worker_id_info),
-            };
+            let mut nvext_response = NvExtResponse::default();
 
-            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
-                stream_response.nvext = Some(nvext_json);
+            // Extract worker_id if present
+            if let Some(worker_id_json) = params.get("worker_id") {
+                let prefill_worker_id = worker_id_json
+                    .get("prefill_worker_id")
+                    .and_then(|v| v.as_u64());
+                let decode_worker_id = worker_id_json
+                    .get("decode_worker_id")
+                    .and_then(|v| v.as_u64());
+
+                nvext_response.worker_id = Some(WorkerIdInfo {
+                    prefill_worker_id,
+                    decode_worker_id,
+                });
+
                 tracing::debug!(
                     "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
                     prefill_worker_id,
                     decode_worker_id
                 );
+            }
+
+            // Extract prefill stage data if present (for GAIE EPP integration)
+            if params.get("prefill_stage_complete").is_some() {
+                let prefill_stage = PrefillStageResponse {
+                    prefill_stage_complete: params
+                        .get("prefill_stage_complete")
+                        .and_then(|v| v.as_bool()),
+                    prefill_worker_id: params.get("prefill_worker_id").and_then(|v| v.as_u64()),
+                    decode_worker_id: params.get("decode_worker_id").and_then(|v| v.as_u64()),
+                    prefill_result: params.get("prefill_result").cloned(),
+                };
+
+                nvext_response.prefill_stage = Some(prefill_stage);
+
+                tracing::debug!(
+                    "Injected prefill_stage into chat completion nvext: complete={:?}, prefill_worker={:?}, decode_worker={:?}",
+                    params.get("prefill_stage_complete"),
+                    params.get("prefill_worker_id"),
+                    params.get("decode_worker_id")
+                );
+            }
+
+            // Only set nvext if we have data to inject
+            if (nvext_response.worker_id.is_some() || nvext_response.prefill_stage.is_some())
+                && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
+            {
+                stream_response.nvext = Some(nvext_json);
             }
         }
 

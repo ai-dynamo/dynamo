@@ -287,6 +287,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
             let nvext_response = NvExtResponse {
                 worker_id: Some(worker_id_info),
+                prefill_stage: None,
             };
 
             if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
