@@ -40,6 +40,9 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Pull existing images for cache
         shell: bash
         continue-on-error: true
@@ -145,6 +148,9 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Pull existing images for cache
         shell: bash
         continue-on-error: true
