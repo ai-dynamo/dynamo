@@ -22,7 +22,6 @@ from dynamo.vllm.handlers import (  # noqa: E402
     _request_contains_timing_metrics,
 )
 
-
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,

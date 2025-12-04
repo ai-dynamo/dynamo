@@ -259,10 +259,10 @@ class BaseWorkerHandler(ABC):
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
-                        out["completion_usage"] = (
-                            BaseWorkerHandler._build_completion_usage(
-                                request_output=res,
-                            )
+                        out[
+                            "completion_usage"
+                        ] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res,
                         )
                     if output.stop_reason:
                         out["stop_reason"] = output.stop_reason
@@ -511,9 +511,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     disaggregated_params: Optional[Dict[str, Any]] = {}
 
                     if res.kv_transfer_params:
-                        disaggregated_params["kv_transfer_params"] = (
-                            res.kv_transfer_params
-                        )
+                        disaggregated_params[
+                            "kv_transfer_params"
+                        ] = res.kv_transfer_params
 
                     if include_timing and timing_metrics:
                         timing_metrics["prefill_end_seconds"] = time.time()
