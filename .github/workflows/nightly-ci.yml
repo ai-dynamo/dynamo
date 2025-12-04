@@ -262,9 +262,8 @@ jobs:
           BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
           echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
           if [ "$BUILD_STATUS" != "success" ]; then
-            echo "Build failed or did not complete successfully. Skipping tests."
-            echo "skip=true" >> $GITHUB_OUTPUT
-            exit 0
+            echo "Build failed or did not complete successfully. Failing tests."
+            exit 1
           fi
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
@@ -395,9 +394,8 @@ jobs:
           BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
           echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
           if [ "$BUILD_STATUS" != "success" ]; then
-            echo "Build failed or did not complete successfully. Skipping tests."
-            echo "skip=true" >> $GITHUB_OUTPUT
-            exit 0
+            echo "Build failed or did not complete successfully. Failing tests."
+            exit 1
           fi
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
