@@ -78,7 +78,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         input_param = self._get_input_param(request["request"])
 
         # Propagate trace context to SGLang
-        self._propagate_trace_context_to_sglang(context, bootstrap_room)
+        if self.enable_trace:
+            self._propagate_trace_context_to_sglang(context, bootstrap_room)
 
         results = await self.engine.async_generate(
             **input_param,
