@@ -1,6 +1,39 @@
 # Autoscaling
 
-This guide explains how to configure autoscaling for DynamoGraphDeployment (DGD) services. Dynamo supports multiple autoscaling strategies to meet different use cases, from simple CPU-based scaling to sophisticated LLM-aware optimization.
+This guide explains how to configure autoscaling for DynamoGraphDeployment (DGD) services using the `sglang-agg` example from `examples/backends/sglang/deploy/agg.yaml`.
+
+## Example DGD
+
+All examples in this guide use the following DGD:
+
+```yaml
+# examples/backends/sglang/deploy/agg.yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-agg
+  namespace: default
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: sglang-agg
+      componentType: frontend
+      replicas: 1
+
+    decode:
+      dynamoNamespace: sglang-agg
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+```
+
+**Key identifiers:**
+- **DGD name**: `sglang-agg`
+- **Namespace**: `default`
+- **Services**: `Frontend`, `decode`
+- **dynamo_namespace label**: `default-sglang-agg` (used for metric filtering)
 
 ## Overview
 
@@ -8,9 +41,9 @@ Dynamo provides flexible autoscaling through the `DynamoGraphDeploymentScalingAd
 
 | Autoscaler | Description | Best For |
 |------------|-------------|----------|
-| **Dynamo Planner** | LLM-aware autoscaling with SLA optimization | Production LLM workloads |
+| **KEDA** | Event-driven autoscaling (recommended) | Most use cases |
 | **Kubernetes HPA** | Native horizontal pod autoscaling | Simple CPU/memory-based scaling |
-| **KEDA** | Event-driven autoscaling | Queue-based or external metrics |
+| **Dynamo Planner** | LLM-aware autoscaling with SLA optimization | Production LLM workloads |
 | **Custom Controllers** | Any scale-subresource-compatible controller | Custom requirements |
 
 ## Architecture
@@ -18,46 +51,41 @@ Dynamo provides flexible autoscaling through the `DynamoGraphDeploymentScalingAd
 ```
 ┌──────────────────────────────────┐          ┌─────────────────────────────────────┐
 │   DynamoGraphDeployment          │          │   Scaling Adapters (auto-created)   │
-│   "my-llm-deployment"            │          │   (one per service)                 │
+│   "sglang-agg"                   │          │   (one per service)                 │
 ├──────────────────────────────────┤          ├─────────────────────────────────────┤
 │                                  │          │                                     │
 │  spec.services:                  │          │  ┌─────────────────────────────┐    │      ┌──────────────────┐
-│                                  │          │  │ my-llm-deployment-frontend  │◄───┼──────│   Autoscalers    │
-│    ┌────────────────────────┐◄───┼──────────┼──│ spec.replicas: 2            │    │      │                  │
-│    │ frontend:  2 replicas  │    │          │  └─────────────────────────────┘    │      │  • Planner       │
+│                                  │          │  │ sglang-agg-frontend         │◄───┼──────│   Autoscalers    │
+│    ┌────────────────────────┐◄───┼──────────┼──│ spec.replicas: 1            │    │      │                  │
+│    │ Frontend: 1 replica    │    │          │  └─────────────────────────────┘    │      │  • KEDA          │
 │    └────────────────────────┘    │          │                                     │      │  • HPA           │
-│                                  │          │  ┌─────────────────────────────┐    │      │  • KEDA          │
-│    ┌────────────────────────┐◄───┼──────────┼──│ my-llm-deployment-prefill   │◄───┼──────│  • Custom        │
-│    │ prefill:   4 replicas  │    │          │  │ spec.replicas: 4            │    │      │                  │
+│                                  │          │  ┌─────────────────────────────┐    │      │  • Planner       │
+│    ┌────────────────────────┐◄───┼──────────┼──│ sglang-agg-decode           │◄───┼──────│  • Custom        │
+│    │ decode:   1 replica    │    │          │  │ spec.replicas: 1            │    │      │                  │
 │    └────────────────────────┘    │          │  └─────────────────────────────┘    │      └──────────────────┘
 │                                  │          │                                     │
-│    ┌────────────────────────┐◄───┼──────────┼──┌─────────────────────────────┐    │
-│    │ decode:    8 replicas  │    │          │  │ my-llm-deployment-decode    │◄───┼──────
-│    └────────────────────────┘    │          │  │ spec.replicas: 8            │    │
-│                                  │          │  └─────────────────────────────┘    │
 └──────────────────────────────────┘          └─────────────────────────────────────┘
 ```
 
 **How it works:**
 
-1. You deploy a DGD with services (frontend, prefill, decode, etc.)
+1. You deploy a DGD with services (Frontend, decode)
 2. The operator auto-creates one DGDSA per service
-3. Autoscalers (HPA, KEDA, Planner) target the adapters via `/scale` subresource
+3. Autoscalers (KEDA, HPA, Planner) target the adapters via `/scale` subresource
 4. Adapter controller syncs replica changes to the DGD
 5. DGD controller reconciles the underlying pods
 
 ## Viewing Scaling Adapters
 
-After deploying a DGD, verify the auto-created adapters:
+After deploying the `sglang-agg` DGD, verify the auto-created adapters:
 
 ```bash
-kubectl get dgdsa -n <namespace>
+kubectl get dgdsa -n default
 
 # Example output:
-# NAME                          DGD               SERVICE    REPLICAS   AGE
-# my-llm-deployment-frontend    my-llm-deployment frontend   2          5m
-# my-llm-deployment-prefill     my-llm-deployment prefill    4          5m
-# my-llm-deployment-decode      my-llm-deployment decode     8          5m
+# NAME                  DGD         SERVICE    REPLICAS   AGE
+# sglang-agg-frontend   sglang-agg  Frontend   1          5m
+# sglang-agg-decode     sglang-agg  decode     1          5m
 ```
 
 ## Autoscaling with Dynamo Planner
@@ -78,47 +106,12 @@ Planner is deployed as a service component within your DGD. It:
 
 **Deployment:**
 
-The recommended way to deploy Planner is via `DynamoGraphDeploymentRequest` (DGDR), which automatically:
-1. Profiles your model to find optimal configurations
-2. Generates a DGD with Planner included
-3. Deploys the optimized configuration
+The recommended way to deploy Planner is via `DynamoGraphDeploymentRequest` (DGDR). See the [SLA Planner Quick Start](../planner/sla_planner_quickstart.md) for complete instructions.
 
-See the [SLA Planner Quick Start](../planner/sla_planner_quickstart.md) for complete instructions.
-
-**Manual Planner deployment:**
-
-You can also manually add Planner to your DGD. Example configurations are available in:
+Example configurations with Planner:
 - `examples/backends/vllm/deploy/disagg_planner.yaml`
 - `examples/backends/sglang/deploy/disagg_planner.yaml`
 - `examples/backends/trtllm/deploy/disagg_planner.yaml`
-
-```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeployment
-metadata:
-  name: my-llm-deployment
-  namespace: llm-serving
-spec:
-  backendFramework: vllm
-  services:
-    frontend:
-      replicas: 2
-      componentType: frontend
-    prefill:
-      replicas: 4
-      componentType: worker
-      subComponentType: prefill
-    decode:
-      replicas: 8
-      componentType: worker
-      subComponentType: decode
-    # Planner service
-    planner:
-      replicas: 1
-      componentType: planner
-      # Planner requires profiling data and Prometheus access
-      # See examples/backends/*/deploy/disagg_planner.yaml for full configuration
-```
 
 For more details, see the [SLA Planner documentation](../planner/sla_planner.md).
 
@@ -131,19 +124,21 @@ The Horizontal Pod Autoscaler (HPA) is Kubernetes' native autoscaling solution.
 - You want to use standard Kubernetes tooling
 - You need CPU or memory-based scaling
 
+> **Note**: For custom metrics (like TTFT or queue depth), consider using [KEDA](#autoscaling-with-keda-recommended) instead - it's simpler to configure.
+
 ### Basic HPA (CPU-based)
 
 ```yaml
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: frontend-hpa
-  namespace: llm-serving
+  name: sglang-agg-frontend-hpa
+  namespace: default
 spec:
   scaleTargetRef:
     apiVersion: nvidia.com/v1alpha1
     kind: DynamoGraphDeploymentScalingAdapter
-    name: my-llm-deployment-frontend
+    name: sglang-agg-frontend
   minReplicas: 1
   maxReplicas: 10
   metrics:
@@ -160,45 +155,6 @@ spec:
       stabilizationWindowSeconds: 0
 ```
 
-### HPA with Custom Metrics
-
-To use LLM-specific metrics, you need [Prometheus Adapter](https://github.com/kubernetes-sigs/prometheus-adapter) or similar:
-
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: decode-hpa
-  namespace: llm-serving
-spec:
-  scaleTargetRef:
-    apiVersion: nvidia.com/v1alpha1
-    kind: DynamoGraphDeploymentScalingAdapter
-    name: my-llm-deployment-decode
-  minReplicas: 2
-  maxReplicas: 20
-  metrics:
-  # Scale based on KV cache utilization
-  - type: Pods
-    pods:
-      metric:
-        name: vllm_gpu_cache_usage_perc
-      target:
-        type: AverageValue
-        averageValue: "70"
-  # Also consider queue depth
-  - type: External
-    external:
-      metric:
-        name: vllm_num_requests_waiting
-        selector:
-          matchLabels:
-            service: decode
-      target:
-        type: AverageValue
-        averageValue: "5"
-```
-
 ### HPA with Dynamo Metrics
 
 Dynamo exports several metrics useful for autoscaling. These are available at the `/metrics` endpoint on each frontend pod.
@@ -209,9 +165,9 @@ Dynamo exports several metrics useful for autoscaling. These are available at th
 
 | Metric | Type | Description | Good for scaling |
 |--------|------|-------------|------------------|
-| `dynamo_frontend_queued_requests` | Gauge | Requests waiting in HTTP queue | ✅ Prefill |
+| `dynamo_frontend_queued_requests` | Gauge | Requests waiting in HTTP queue | ✅ Workers |
 | `dynamo_frontend_inflight_requests` | Gauge | Concurrent requests to engine | ✅ All services |
-| `dynamo_frontend_time_to_first_token_seconds` | Histogram | TTFT latency | ✅ Prefill |
+| `dynamo_frontend_time_to_first_token_seconds` | Histogram | TTFT latency | ✅ Workers |
 | `dynamo_frontend_inter_token_latency_seconds` | Histogram | ITL latency | ✅ Decode |
 | `dynamo_frontend_request_duration_seconds` | Histogram | Total request duration | ⚠️ General |
 | `kvstats_gpu_cache_usage_percent` | Gauge | GPU KV cache usage (0-1) | ✅ Decode |
@@ -223,38 +179,13 @@ Dynamo metrics include these labels for filtering:
 | Label | Description | Example |
 |-------|-------------|---------|
 | `dynamo_namespace` | Unique DGD identifier (`{k8s-namespace}-{dynamoNamespace}`) | `default-sglang-agg` |
-| `model` | Model being served | `meta-llama/Llama-3-70B` |
+| `model` | Model being served | `Qwen/Qwen3-0.6B` |
 
 > **Note**: When you have multiple DGDs in the same namespace, use `dynamo_namespace` to filter metrics for a specific DGD.
 
 #### Example: Scale Decode Service Based on TTFT
 
-This example uses the `sglang-agg` DGD from `examples/backends/sglang/deploy/agg.yaml`:
-
-```yaml
-# examples/backends/sglang/deploy/agg.yaml
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeployment
-metadata:
-  name: sglang-agg
-spec:
-  services:
-    Frontend:
-      dynamoNamespace: sglang-agg
-      componentType: frontend
-      replicas: 1
-      # ...
-    decode:
-      dynamoNamespace: sglang-agg
-      componentType: worker
-      replicas: 1
-      resources:
-        limits:
-          gpu: "1"
-      # ...
-```
-
-When deployed in namespace `default`, the `dynamo_namespace` label will be `default-sglang-agg`.
+Using HPA with Prometheus Adapter requires configuring external metrics. 
 
 **Step 1: Configure Prometheus Adapter**
 
@@ -543,38 +474,23 @@ KEDA creates and manages an HPA under the hood:
 
 ## Mixed Autoscaling
 
-You can use different autoscaling strategies for different services:
+For disaggregated deployments (prefill + decode), you can use different autoscaling strategies for different services:
 
 ```yaml
-# DGD with three services
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeployment
-metadata:
-  name: my-llm-deployment
-  namespace: llm-serving
-spec:
-  services:
-    frontend:
-      replicas: 2        # Managed by HPA (CPU-based)
-    prefill:
-      replicas: 3        # Managed by KEDA (queue-based)
-    decode:
-      replicas: 6        # Managed by Planner (LLM-optimized)
-
 ---
-# HPA for Frontend
+# HPA for Frontend (CPU-based)
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: frontend-hpa
-  namespace: llm-serving
+  name: sglang-agg-frontend-hpa
+  namespace: default
 spec:
   scaleTargetRef:
     apiVersion: nvidia.com/v1alpha1
     kind: DynamoGraphDeploymentScalingAdapter
-    name: my-llm-deployment-frontend
+    name: sglang-agg-frontend
   minReplicas: 1
-  maxReplicas: 10
+  maxReplicas: 5
   metrics:
   - type: Resource
     resource:
@@ -584,27 +500,29 @@ spec:
         averageUtilization: 70
 
 ---
-# KEDA for Prefill
+# KEDA for Decode (TTFT-based)
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: prefill-scaledobject
-  namespace: llm-serving
+  name: sglang-agg-decode-scaler
+  namespace: default
 spec:
   scaleTargetRef:
     apiVersion: nvidia.com/v1alpha1
     kind: DynamoGraphDeploymentScalingAdapter
-    name: my-llm-deployment-prefill
+    name: sglang-agg-decode
   minReplicaCount: 1
-  maxReplicaCount: 12
+  maxReplicaCount: 10
   triggers:
   - type: prometheus
     metadata:
-      serverAddress: http://prometheus-server.monitoring.svc.cluster.local:9090
-      query: sum(vllm_num_requests_waiting{service="prefill"})
-      threshold: "10"
-
-# Decode is managed by Planner (no additional config needed)
+      serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+      query: |
+        histogram_quantile(0.95,
+          sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{dynamo_namespace="default-sglang-agg"}[5m])) 
+          by (le)
+        )
+      threshold: "0.5"
 ```
 
 ## Manual Scaling
@@ -612,8 +530,8 @@ spec:
 You can manually scale a service by patching the adapter:
 
 ```bash
-kubectl patch dgdsa my-llm-deployment-decode -n llm-serving \
-  --type='json' -p='[{"op": "replace", "path": "/spec/replicas", "value": 10}]'
+kubectl patch dgdsa sglang-agg-decode -n default \
+  --type='json' -p='[{"op": "replace", "path": "/spec/replicas", "value": 3}]'
 ```
 
 > **Note**: If an autoscaler is managing the adapter, your change will be overwritten on the next evaluation cycle.
@@ -668,7 +586,7 @@ Always configure minimum and maximum replicas in your HPA/KEDA to prevent:
 
 ```bash
 # Check DGD status
-kubectl describe dgd my-llm-deployment -n llm-serving
+kubectl describe dgd sglang-agg -n default
 
 # Check operator logs
 kubectl logs -n dynamo-system deployment/dynamo-operator
@@ -678,35 +596,35 @@ kubectl logs -n dynamo-system deployment/dynamo-operator
 
 ```bash
 # Check adapter status
-kubectl describe dgdsa my-llm-deployment-decode -n llm-serving
+kubectl describe dgdsa sglang-agg-decode -n default
 
-# Check HPA status
-kubectl describe hpa decode-hpa -n llm-serving
+# Check HPA/KEDA status
+kubectl describe hpa sglang-agg-decode-hpa -n default
+kubectl describe scaledobject sglang-agg-decode-scaler -n default
 
 # Verify metrics are available in Kubernetes metrics API
-kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1
 kubectl get --raw /apis/external.metrics.k8s.io/v1beta1
 ```
 
 ### Metrics Not Available
 
-If HPA shows `<unknown>` for metrics:
+If HPA/KEDA shows `<unknown>` for metrics:
 
 ```bash
 # Check if Dynamo metrics are being scraped
-kubectl port-forward -n llm-serving pod/<frontend-pod> 8000:8000
+kubectl port-forward -n default svc/sglang-agg-frontend 8000:8000
 curl http://localhost:8000/metrics | grep dynamo_frontend
 
 # Example output:
-# dynamo_frontend_queued_requests{model="meta-llama/Llama-3-70B"} 2
-# dynamo_frontend_inflight_requests{model="meta-llama/Llama-3-70B"} 5
+# dynamo_frontend_queued_requests{model="Qwen/Qwen3-0.6B"} 2
+# dynamo_frontend_inflight_requests{model="Qwen/Qwen3-0.6B"} 5
 
 # Verify Prometheus is scraping the metrics
-kubectl port-forward -n monitoring svc/prometheus-server 9090:9090
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090
 # Then query: dynamo_frontend_time_to_first_token_seconds_bucket
 
-# Check Prometheus Adapter logs
-kubectl logs -n monitoring deployment/prometheus-adapter
+# Check KEDA operator logs
+kubectl logs -n keda deployment/keda-operator
 ```
 
 ### Rapid Scaling Up and Down
@@ -714,8 +632,8 @@ kubectl logs -n monitoring deployment/prometheus-adapter
 If you see unstable scaling:
 
 1. Check if multiple autoscalers are targeting the same adapter
-2. Increase stabilization window in HPA behavior
-3. Increase cooldown period in KEDA ScaledObject
+2. Increase `cooldownPeriod` in KEDA ScaledObject
+3. Increase `stabilizationWindowSeconds` in HPA behavior
 
 ## References
 
