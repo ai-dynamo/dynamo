@@ -106,7 +106,7 @@ VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
-VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+VLLM_BASE_IMAGE_TAG="25.04-cuda12.9-devel-ubuntu24.04"
 
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
@@ -882,10 +882,10 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         # Use BuildKit for enhanced metadata
         if [ -z "$RUN_PREFIX" ]; then
             if docker buildx version &>/dev/null; then
-                docker buildx build --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                docker buildx build --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
                 BUILD_EXIT_CODE=${PIPESTATUS[0]}
             else
-                DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
                 BUILD_EXIT_CODE=${PIPESTATUS[0]}
             fi
 
@@ -893,7 +893,7 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
                 exit ${BUILD_EXIT_CODE}
             fi
         else
-            $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+            $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
         fi
 
         # Start framework build
