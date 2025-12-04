@@ -222,16 +222,43 @@ Dynamo metrics include these labels for filtering:
 
 | Label | Description | Example |
 |-------|-------------|---------|
-| `dynamo_namespace` | Unique DGD identifier (`{k8s-namespace}-{dgd-name}`) | `llm-serving-my-deployment` |
+| `dynamo_namespace` | Unique DGD identifier (`{k8s-namespace}-{dynamoNamespace}`) | `default-sglang-agg` |
 | `model` | Model being served | `meta-llama/Llama-3-70B` |
 
 > **Note**: When you have multiple DGDs in the same namespace, use `dynamo_namespace` to filter metrics for a specific DGD.
 
-#### Example: Scale Prefill Based on TTFT
+#### Example: Scale Decode Service Based on TTFT
 
-This example scales **Prefill workers** when Time To First Token (TTFT) exceeds 500ms. Note that TTFT is measured at the Frontend, but reflects Prefill performance.
+This example uses the `sglang-agg` DGD from `examples/backends/sglang/deploy/agg.yaml`:
 
-First, configure Prometheus Adapter to expose the TTFT metric. Add this to your Helm values file (e.g., `prometheus-adapter-values.yaml`):
+```yaml
+# examples/backends/sglang/deploy/agg.yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-agg
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: sglang-agg
+      componentType: frontend
+      replicas: 1
+      # ...
+    decode:
+      dynamoNamespace: sglang-agg
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      # ...
+```
+
+When deployed in namespace `default`, the `dynamo_namespace` label will be `default-sglang-agg`.
+
+**Step 1: Configure Prometheus Adapter**
+
+Add this to your Helm values file (e.g., `prometheus-adapter-values.yaml`):
 
 ```yaml
 # prometheus-adapter-values.yaml
@@ -241,7 +268,7 @@ prometheus:
 
 rules:
   external:
-  # TTFT p95 from frontend - used to scale prefill
+  # TTFT p95 from frontend - used to scale decode
   - seriesQuery: 'dynamo_frontend_time_to_first_token_seconds_bucket{namespace!=""}'
     resources:
       overrides:
@@ -255,7 +282,7 @@ rules:
       )
 ```
 
-Then install or upgrade the Helm release:
+**Step 2: Install Prometheus Adapter**
 
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
@@ -266,25 +293,24 @@ helm upgrade --install prometheus-adapter prometheus-community/prometheus-adapte
   -f prometheus-adapter-values.yaml
 ```
 
-Verify the metric is available:
+**Step 3: Verify the metric is available**
 
 ```bash
 kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/<your-namespace>/dynamo_ttft_p95_seconds" | jq
 ```
 
-Then create the HPA targeting the Prefill adapter:
+**Step 4: Create the HPA**
 
 ```yaml
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: prefill-ttft-hpa
-  namespace: llm-serving
+  name: sglang-agg-decode-hpa
 spec:
   scaleTargetRef:
     apiVersion: nvidia.com/v1alpha1
     kind: DynamoGraphDeploymentScalingAdapter
-    name: my-llm-deployment-prefill      # ← Target: PREFILL adapter
+    name: sglang-agg-decode              # ← DGD name + service name (lowercase)
   minReplicas: 1
   maxReplicas: 10
   metrics:
@@ -294,8 +320,7 @@ spec:
         name: dynamo_ttft_p95_seconds
         selector:
           matchLabels:
-            # Filter by DGD using dynamo_namespace label
-            dynamo_namespace: "llm-serving-my-llm-deployment"
+            dynamo_namespace: "default-sglang-agg"  # ← {namespace}-{dynamoNamespace}
       target:
         type: Value
         value: "500m"  # Scale up when TTFT p95 > 500ms
@@ -317,12 +342,12 @@ spec:
 **How it works:**
 1. Frontend pods export `dynamo_frontend_time_to_first_token_seconds` histogram
 2. Prometheus Adapter calculates p95 TTFT per `dynamo_namespace`
-3. HPA monitors this metric for your specific DGD
-4. When TTFT p95 > 500ms, HPA scales up the Prefill adapter
-5. Adapter controller syncs the replica count to the DGD
-6. More Prefill workers are created, reducing TTFT
+3. HPA monitors this metric filtered by `dynamo_namespace: "default-sglang-agg"`
+4. When TTFT p95 > 500ms, HPA scales up the `sglang-agg-decode` adapter
+5. Adapter controller syncs the replica count to the DGD's `decode` service
+6. More decode workers are created, reducing TTFT
 
-#### Example: Scale Decode Based on Queue Depth
+#### Example: Scale Based on Queue Depth
 
 Add this rule to your `prometheus-adapter-values.yaml` (alongside the TTFT rule):
 
@@ -344,15 +369,15 @@ Then create the HPA:
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: decode-queue-hpa
-  namespace: llm-serving
+  name: sglang-agg-decode-queue-hpa
+  namespace: default
 spec:
   scaleTargetRef:
     apiVersion: nvidia.com/v1alpha1
     kind: DynamoGraphDeploymentScalingAdapter
-    name: my-llm-deployment-decode
-  minReplicas: 2
-  maxReplicas: 20
+    name: sglang-agg-decode
+  minReplicas: 1
+  maxReplicas: 10
   metrics:
   - type: External
     external:
@@ -360,7 +385,7 @@ spec:
         name: dynamo_queued_requests
         selector:
           matchLabels:
-            dynamo_namespace: "llm-serving-my-llm-deployment"
+            dynamo_namespace: "default-sglang-agg"
       target:
         type: Value
         value: "10"  # Scale up when queue > 10 requests
