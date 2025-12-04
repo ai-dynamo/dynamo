@@ -10,6 +10,7 @@ import pytest
 from tests.router.common import (  # utilities
     _test_router_basic,
     _test_router_decisions,
+    _test_router_indexers_sync,
     generate_random_suffix,
     get_runtime,
 )
@@ -44,6 +45,14 @@ TEST_PAYLOAD: Dict[str, Any] = {
     ],
     "stream": True,
     "max_tokens": 10,
+}
+
+# Shared vLLM configuration for all tests
+VLLM_ARGS: Dict[str, Any] = {
+    "block_size": BLOCK_SIZE,
+    "model": MODEL_NAME,
+    "gpu_memory_utilization": 0.35,
+    "max_model_len": 1024,  # Limit context length to reduce KV cache size
 }
 
 
@@ -277,8 +286,7 @@ class VLLMProcess:
 
 
 @pytest.mark.gpu_1
-@pytest.mark.skip(reason="All vLLM tests disabled for now")
-def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers):
+def test_vllm_kv_router_basic(request, runtime_services, predownload_models):
     """
     Quick e2e sanity test for KV router with vLLM engine instances.
     """
@@ -287,19 +295,12 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
     N_VLLM_WORKERS = 2
     logger.info(f"Starting vLLM KV router test with {N_VLLM_WORKERS} workers")
 
-    vllm_args = {
-        "block_size": BLOCK_SIZE,
-        "model": MODEL_NAME,
-        "gpu_memory_utilization": 0.35,
-        "max_model_len": 1024,  # Limit context length to reduce KV cache size
-    }
-
     try:
         # Start vLLM workers
         logger.info(f"Starting {N_VLLM_WORKERS} vLLM workers")
         vllm_workers = VLLMProcess(
             request,
-            vllm_args=vllm_args,
+            vllm_args=VLLM_ARGS,
             num_workers=N_VLLM_WORKERS,
             single_gpu=True,  # fit workers into one GPU
         )
@@ -324,31 +325,22 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
 
 
 @pytest.mark.gpu_1
-@pytest.mark.skip(reason="All vLLM tests disabled for now")
 def test_router_decisions_vllm_multiple_workers(
-    request, runtime_services, predownload_tokenizers
+    request, runtime_services, predownload_models
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting vLLM router prefix reuse test with two workers")
-
-    # Create vLLM args - one worker with dp_size=2, sharing GPU 0
-    vllm_args = {
-        "block_size": BLOCK_SIZE,
-        "model": MODEL_NAME,
-        "gpu_memory_utilization": 0.35,
-        "max_model_len": 1024,  # Limit context length to reduce KV cache size
-    }
     N_WORKERS = 2
 
     try:
-        # Start 2 worker processes (dp_rank 0 and dp_rank 1) on the same GPU
+        # Start 2 worker processes on the same GPU
         logger.info(
-            "Starting 2 vLLM worker processes with dp_size=2 on single GPU (gpu_memory_utilization=0.35, max_model_len=1024)"
+            "Starting 2 vLLM worker processes on single GPU (gpu_memory_utilization=0.35, max_model_len=1024)"
         )
         vllm_workers = VLLMProcess(
             request,
-            vllm_args=vllm_args,
-            num_workers=N_WORKERS,  # One worker process with dp_size=2
+            vllm_args=VLLM_ARGS,
+            num_workers=N_WORKERS,
             single_gpu=True,  # Worker uses GPU 0
         )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
@@ -373,8 +365,7 @@ def test_router_decisions_vllm_multiple_workers(
 
 
 @pytest.mark.gpu_2
-@pytest.mark.skip(reason="All vLLM tests disabled for now")
-def test_router_decisions_vllm_dp(request, runtime_services, predownload_tokenizers):
+def test_router_decisions_vllm_dp(request, runtime_services, predownload_models):
     """Validate KV cache prefix reuse with vLLM by sending progressive requests with overlapping prefixes.
     Same flow as test_router_decisions_vllm_multiple_workers; force first request to (worker_id, dp_rank=1).
     Dump events from router and verify:
@@ -382,23 +373,16 @@ def test_router_decisions_vllm_dp(request, runtime_services, predownload_tokeniz
         * The (worker_id, dp_rank) with events should have exactly 4 events (one per request)
         * All events should be on the forced (worker_id, dp_rank=1) (verifying forced routing and prefix reuse)
     """
-    # Create vLLM args - one worker with dp_size=2, sharing GPU 0
-    vllm_args = {
-        "block_size": BLOCK_SIZE,
-        "model": MODEL_NAME,
-        "gpu_memory_utilization": 0.35,
-        "max_model_len": 1024,  # Limit context length to reduce KV cache size
-    }
     N_WORKERS = 1
     DP_SIZE = 2
 
     try:
         logger.info(
-            "Starting 2 vLLM DP ranks (dp_size=2) on single GPU (gpu_memory_utilization=0.35, max_model_len=1024)"
+            "Starting 2 vLLM DP ranks (dp_size=2) (gpu_memory_utilization=0.35, max_model_len=1024)"
         )
         vllm_workers = VLLMProcess(
             request,
-            vllm_args=vllm_args,
+            vllm_args=VLLM_ARGS,
             num_workers=N_WORKERS,  # Ignored when data_parallel_size is set
             single_gpu=False,
             data_parallel_size=DP_SIZE,  # Creates DP_SIZE processes (one per rank)
@@ -419,5 +403,43 @@ def test_router_decisions_vllm_dp(request, runtime_services, predownload_tokeniz
 
     finally:
         # Clean up vLLM workers
+        if "vllm_workers" in locals():
+            vllm_workers.__exit__(None, None, None)
+
+
+@pytest.mark.gpu_1
+def test_vllm_indexers_sync(request, runtime_services, predownload_models):
+    """
+    Test that two KV routers have synchronized indexer states after processing requests
+    with vLLM workers. This test verifies that both routers converge to the same internal state.
+    """
+    logger.info("Starting vLLM indexers sync test")
+    N_VLLM_WORKERS = 2
+
+    try:
+        # Start vLLM workers
+        logger.info(f"Starting {N_VLLM_WORKERS} vLLM workers")
+        vllm_workers = VLLMProcess(
+            request,
+            vllm_args=VLLM_ARGS,
+            num_workers=N_VLLM_WORKERS,
+            single_gpu=True,  # fit workers into one GPU
+        )
+        logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
+        vllm_workers.__enter__()
+
+        # Use the common test implementation (creates its own runtimes for each router)
+        # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
+        _test_router_indexers_sync(
+            engine_workers=vllm_workers,
+            block_size=BLOCK_SIZE,
+            model_name=MODEL_NAME,
+            num_workers=N_VLLM_WORKERS,
+            store_backend="etcd",
+        )
+
+        logger.info("vLLM indexers sync test completed successfully")
+
+    finally:
         if "vllm_workers" in locals():
             vllm_workers.__exit__(None, None, None)
