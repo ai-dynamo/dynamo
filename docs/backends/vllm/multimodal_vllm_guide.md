@@ -33,15 +33,15 @@ This document provides a comprehensive guide for multimodal inference using vLLM
 vLLM multimodal supports three deployment patterns:
 
 ```
-SIMPLE AGGREGATED (agg_multimodal.sh):
-  Client → Frontend (Rust) → Worker [image load, encode, P+D] → Response
+SIMPLE AGGREGATED ([examples/backends/vllm/launch/agg_multimodal.sh](../../../examples/backends/vllm/launch/agg_multimodal.sh)):
+  Client → Frontend (Rust processor) → Worker [image load, encode, P+D] → Response
   • 2 components • --connector none • Easiest setup
 
-EPD AGGREGATED (agg_multimodal_epd.sh):
+EPD AGGREGATED ([examples/backends/vllm/launch/agg_multimodal_epd.sh](../../../examples/backends/vllm/launch/agg_multimodal_epd.sh)):
   Client → Frontend → Processor → Encoder [NIXL] → PD Worker → Response
   • 4 components • --multimodal-processor • Custom templates, NIXL
 
-DISAGGREGATED (disagg_multimodal_qwen.sh):
+DISAGGREGATED ([examples/backends/vllm/launch/disagg_multimodal_epd.sh](../../../examples/backends/vllm/launch/disagg_multimodal_epd.sh)):
   Client → Frontend → Processor → Encoder [NIXL] → Prefill [NIXL] → Decode → Response
   • 5 components • Separate P/D workers • Multi-node, max optimization
 ```
@@ -55,10 +55,23 @@ DISAGGREGATED (disagg_multimodal_qwen.sh):
 | **HTTP/HTTPS** | `http://example.com/image.jpg` | Remote media files | ✅ |
 | **Data URL** | `data:image/jpeg;base64,/9j/4AAQ...` | Base64-encoded inline data | ✅ |
 
+## Simple Aggregated Mode (PD)
 
-## Aggregated Mode (PD)
+In simple aggregated mode, encoding, prefill, and decode happen within the same worker.
 
-In aggregated mode, encoding, prefill, and decode happen within the same pipeline.
+### Architecture
+
+```
+HTTP Frontend with Rust processor
+    ↓
+Worker (Python - ModelInput.Tokens)
+    ↓ encode + prefill + decode
+Response
+```
+
+## EPD Aggregated Mode (PD)
+
+In EPD aggregated mode, encoding happens in a separate worker and prefill and decode happen within the same pipeline.
 
 ### Architecture
 
@@ -82,9 +95,9 @@ Response
 | Encode Worker | `--multimodal-encode-worker` | N/A | No | Media encoding |
 | PD Worker | `--multimodal-worker` | Tokens | Yes | Prefill + Decode |
 
-## Disaggregated Mode (E->P->D)
+## EPD Disaggregated Mode (E->P->D)
 
-In disaggregated mode, encoding, prefill, and decode are handled by separate workers.
+In EPD disaggregated mode, encoding, prefill, and decode are handled by separate workers.
 
 ### Architecture
 
@@ -139,7 +152,7 @@ Response
 
 ### Launch Script
 
-Example: `examples/backends/vllm/launch/disagg_multimodal_llama.sh`
+Example: `[examples/backends/vllm/launch/disagg_multimodal_llama.sh](../../../examples/backends/vllm/launch/disagg_multimodal_llama.sh)`
 
 ## ModelInput Types and Registration
 
@@ -178,10 +191,10 @@ await register_llm(
 
 | Use Case | Script | NIXL Used? | Data Transfer |
 |----------|--------|------------|---------------|
-| Simple Aggregated | `examples/backends/vllm/launch/agg_multimodal.sh` | ❌ No | All in one worker |
-| E->PD Aggregated | `examples/backends/vllm/launch/agg_multimodal_epd.sh` | ✅ Yes | Encoder → PD (embeddings) |
-| E->P->D Disaggregated | `examples/backends/vllm/launch/disagg_multimodal_epd.sh` | ✅ Yes | Encoder → Prefill (embeddings)<br>Prefill → Decode (KV cache) |
-| EP->D Disaggregated (Llama 4) | `examples/backends/vllm/launch/disagg_multimodal_llama.sh` | ✅ Yes | Prefill → Decode (KV cache) |
+| Simple Aggregated | `[examples/backends/vllm/launch/agg_multimodal.sh](../../../examples/backends/vllm/launch/agg_multimodal.sh)` | ❌ No | All in one worker |
+| E->PD Aggregated | `[examples/backends/vllm/launch/agg_multimodal_epd.sh](../../../examples/backends/vllm/launch/agg_multimodal_epd.sh)` | ✅ Yes | Encoder → PD (embeddings) |
+| E->P->D Disaggregated | `[examples/backends/vllm/launch/disagg_multimodal_epd.sh](../../../examples/backends/vllm/launch/disagg_multimodal_epd.sh)` | ✅ Yes | Encoder → Prefill (embeddings)<br>Prefill → Decode (KV cache) |
+| EP->D Disaggregated (Llama 4) | `[examples/backends/vllm/launch/disagg_multimodal_llama.sh](../../../examples/backends/vllm/launch/disagg_multimodal_llama.sh)` | ✅ Yes | Prefill → Decode (KV cache) |
 
 
 ## **GAPS and Known Limitations**
