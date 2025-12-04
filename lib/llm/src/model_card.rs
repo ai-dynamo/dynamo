@@ -670,44 +670,18 @@ impl HFConfig {
         text_config.final_bos_token_id = final_bos_token_id;
 
         // TODO: refactor this when we switch to per-architecture tokenization
-        let final_eos_token_ids: Vec<TokenIdType> = config
-            .eos_token_id
-            .as_ref()
-            .or(text_config.eos_token_id.as_ref())
-            .and_then(|v| {
-                if v.is_number() {
-                    v.as_number()
-                        .and_then(|n| n.as_u64())
-                        .map(|n| vec![n as TokenIdType])
-                } else if v.is_array() {
-                    let arr = v.as_array().unwrap(); // Safety: We just checked
-                    Some(
-                        arr.iter()
-                            .filter_map(|inner_v| {
-                                inner_v
-                                    .as_number()
-                                    .and_then(|n| n.as_u64())
-                                    .map(|n| n as TokenIdType)
-                            })
-                            .collect(),
-                    )
-                } else {
-                    tracing::error!(
-                        ?v,
-                        path = %file_path.display(),
-                        "eos_token_id is not a number or an array, cannot use"
-                    );
-                    None
-                }
-            })
-            .or_else(|| {
-                // Maybe it's in generation_config.json
+        // eos_token_id can appear in multiple places, and as suggested by HuggingFace
+        // community that the priority should be:
+        // 1. generation_config.json;
+        // 2. config.json, or text_config field in config.json.
+        // https://github.com/huggingface/transformers/issues/25395#issuecomment-1671863257
+        let final_eos_token_ids: Vec<TokenIdType> = {
+                // Firstly check the generation_config.json
                 crate::file_json_field::<serde_json::Value>(&gencfg_path, "eos_token_id")
                 .inspect_err(
                     |err| tracing::warn!(%err, "Missing eos_token_id in generation_config.json"),
                 )
-                .ok()
-                .and_then(|v| {
+                .ok().and_then(|v| {
                     if v.is_number() {
                         v.as_number()
                             .and_then(|n| n.as_u64())
@@ -726,6 +700,30 @@ impl HFConfig {
                         )
                     } else {
                         None
+                    }
+                })
+            }.or_else(|| {
+                // Check config.json and text_config
+                config
+                .eos_token_id
+                .as_ref()
+                .or(text_config.eos_token_id.as_ref())
+                .and_then(|v| {
+                    if v.is_number() {
+                        v.as_number()
+                            .and_then(|n| n.as_u64())
+                            .map(|n| vec![n as TokenIdType])
+                    } else {
+                        serde_json::from_value(v.clone())
+                            .map(Some)
+                            .unwrap_or_else(|err| {
+                                tracing::error!(
+                                    ?v,
+                                    path = %file_path.display(),
+                                    "eos_token_id is not a number or an array, cannot deserialize: {err}",
+                                );
+                                None
+                            })
                     }
                 })
             })
@@ -850,6 +848,7 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::HFConfig;
+    use std::collections::HashSet;
     use std::path::Path;
 
     #[test]
@@ -858,6 +857,9 @@ mod tests {
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct/config.json");
         let config = HFConfig::from_json_file(&config_file)?;
         assert_eq!(config.bos_token_id(), 128000);
+        // eos_token_ids can be in any order as long as the set is correct
+        let eos_token_id_set: HashSet<_> = config.eos_token_ids().iter().cloned().collect();
+        assert_eq!(eos_token_id_set, vec![128001, 128009].into_iter().collect());
         Ok(())
     }
 

@@ -5,25 +5,21 @@
 // https://github.com/sgl-project/sglang/blob/44da737770e4bcd9bfa27751f0a0751c9b5c06e1/python/sglang/srt/function_call/qwen3_coder_detector.py
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
 use regex::Regex;
 use uuid::Uuid;
 
+use super::super::config::XmlParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
 /// Check if a chunk contains the start of a xml-style tool call.
 /// Format: <tool_call><function=name><parameter=foo>...</parameter></function></tool_call>
-// TODO(2ez4bz): Add a parser config struct that allows parameterizing:
-// * the tool call start / end tokens
-// * the function start / end tokens
-// * the parameter start / end tokens
-pub fn detect_tool_call_start_xml(chunk: &str) -> bool {
+pub fn detect_tool_call_start_xml(chunk: &str, config: &XmlParserConfig) -> bool {
     // Check for complete or partial start token.
-    let start_token = "<tool_call>";
+    let start_token = &config.tool_call_start_token;
 
     // Check if we have the complete start token.
-    if chunk.contains(start_token) {
+    if chunk.contains(start_token.as_str()) {
         return true;
     }
 
@@ -39,10 +35,10 @@ pub fn detect_tool_call_start_xml(chunk: &str) -> bool {
 
 /// Find the end position of a Qwen3Coder tool call.
 /// Returns the position after </tool_call> or the length of the chunk if not found.
-pub fn find_tool_call_end_position_xml(chunk: &str) -> usize {
-    let end_token = "</tool_call>";
+pub fn find_tool_call_end_position_xml(chunk: &str, config: &XmlParserConfig) -> usize {
+    let end_token = &config.tool_call_end_token;
 
-    if let Some(pos) = chunk.find(end_token) {
+    if let Some(pos) = chunk.find(end_token.as_str()) {
         pos + end_token.len()
     } else {
         chunk.len()
@@ -54,8 +50,9 @@ pub fn find_tool_call_end_position_xml(chunk: &str) -> usize {
 /// Returns (parsed_tool_calls, normal_text_content)
 pub fn try_tool_call_parse_xml(
     message: &str,
+    config: &XmlParserConfig,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
-    let (normal_text, tool_calls) = extract_tool_calls(message)?;
+    let (normal_text, tool_calls) = extract_tool_calls(message, config)?;
 
     let normal_content = if normal_text.is_empty() {
         Some("".to_string())
@@ -67,29 +64,32 @@ pub fn try_tool_call_parse_xml(
 }
 
 /// Extract tool calls and normal text from message.
-fn extract_tool_calls(text: &str) -> anyhow::Result<(String, Vec<ToolCallResponse>)> {
+fn extract_tool_calls(
+    text: &str,
+    config: &XmlParserConfig,
+) -> anyhow::Result<(String, Vec<ToolCallResponse>)> {
     let mut normal_parts = Vec::new();
     let mut calls = Vec::new();
     let mut cursor = 0;
 
-    let start_token = "<tool_call>";
-    let end_token = "</tool_call>";
+    let start_token = &config.tool_call_start_token;
+    let end_token = &config.tool_call_end_token;
 
     while cursor < text.len() {
         // Find next tool call start.
-        if let Some(start_pos) = text[cursor..].find(start_token) {
+        if let Some(start_pos) = text[cursor..].find(start_token.as_str()) {
             let abs_start = cursor + start_pos;
 
             // Add text before tool call to normal parts.
             normal_parts.push(&text[cursor..abs_start]);
 
             // Find the corresponding end token.
-            if let Some(end_pos) = text[abs_start..].find(end_token) {
+            if let Some(end_pos) = text[abs_start..].find(end_token.as_str()) {
                 let abs_end = abs_start + end_pos + end_token.len();
                 let block = &text[abs_start..abs_end];
 
                 // Parse this tool call block.
-                if let Ok(mut parsed_calls) = parse_tool_call_block(block) {
+                if let Ok(mut parsed_calls) = parse_tool_call_block(block, config) {
                     calls.append(&mut parsed_calls);
                 }
 
@@ -112,21 +112,24 @@ fn extract_tool_calls(text: &str) -> anyhow::Result<(String, Vec<ToolCallRespons
 
 /// Parse a single tool call block
 /// Format: <tool_call><function=name><parameter=key>value</parameter>...</function></tool_call>
-fn parse_tool_call_block(block: &str) -> anyhow::Result<Vec<ToolCallResponse>> {
-    static FUNCTION_REGEX: OnceLock<Regex> = OnceLock::new();
-    static PARAMETER_REGEX: OnceLock<Regex> = OnceLock::new();
+fn parse_tool_call_block(
+    block: &str,
+    config: &XmlParserConfig,
+) -> anyhow::Result<Vec<ToolCallResponse>> {
+    // Build regex patterns based on config
+    let function_start = regex::escape(&config.function_start_token);
+    let function_end = regex::escape(&config.function_end_token);
+    let parameter_start = regex::escape(&config.parameter_start_token);
+    let parameter_end = regex::escape(&config.parameter_end_token);
 
-    let function_regex = FUNCTION_REGEX.get_or_init(|| {
-        // Match <function=name>content</function> or partial <function=name>content
-        // (?s) makes . match newlines
-        Regex::new(r"(?s)<function=([^>]+)>(.*?)(?:</function>|$)").unwrap()
-    });
+    let function_pattern = format!(r"(?s){}([^>]+)>(.*?)(?:{}|$)", function_start, function_end);
+    let parameter_pattern = format!(
+        r"(?s){}([^>]+)>(.*?)(?:{}|$)",
+        parameter_start, parameter_end
+    );
 
-    let parameter_regex = PARAMETER_REGEX.get_or_init(|| {
-        // Match <parameter=key>value</parameter> or partial <parameter=key>value
-        // (?s) makes . match newlines
-        Regex::new(r"(?s)<parameter=([^>]+)>(.*?)(?:</parameter>|$)").unwrap()
-    });
+    let function_regex = Regex::new(&function_pattern)?;
+    let parameter_regex = Regex::new(&parameter_pattern)?;
 
     let mut results = Vec::new();
 
@@ -218,23 +221,25 @@ mod tests {
 
     #[test]
     fn test_detect_tool_call_start() {
-        assert!(detect_tool_call_start_xml("<tool_call>"));
-        assert!(detect_tool_call_start_xml("text <tool_call>"));
-        assert!(detect_tool_call_start_xml("<tool_c")); // Partial match
-        assert!(detect_tool_call_start_xml("<")); // Partial match
-        assert!(!detect_tool_call_start_xml("no tool call here"));
-        assert!(!detect_tool_call_start_xml("toolcall"));
+        let config = XmlParserConfig::default();
+        assert!(detect_tool_call_start_xml("<tool_call>", &config));
+        assert!(detect_tool_call_start_xml("text <tool_call>", &config));
+        assert!(detect_tool_call_start_xml("<tool_c", &config)); // Partial match
+        assert!(detect_tool_call_start_xml("<", &config)); // Partial match
+        assert!(!detect_tool_call_start_xml("no tool call here", &config));
+        assert!(!detect_tool_call_start_xml("toolcall", &config));
     }
 
     #[test]
     fn test_find_tool_call_end_position() {
+        let config = XmlParserConfig::default();
         let text = "<tool_call><function=test></function></tool_call>more text";
-        let pos = find_tool_call_end_position_xml(text);
+        let pos = find_tool_call_end_position_xml(text, &config);
         assert_eq!(pos, 49); // Position after </tool_call>
         assert_eq!(&text[pos..], "more text");
 
         let text_no_end = "<tool_call><function=test>";
-        let pos = find_tool_call_end_position_xml(text_no_end);
+        let pos = find_tool_call_end_position_xml(text_no_end, &config);
         assert_eq!(pos, text_no_end.len());
     }
 
@@ -274,7 +279,7 @@ pwd && ls
 </function>
 </tool_call>"#;
 
-        let (calls, normal) = try_tool_call_parse_xml(input).unwrap();
+        let (calls, normal) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "execute_bash");
         assert_eq!(normal, Some("".to_string()));
@@ -299,7 +304,7 @@ fahrenheit
 </function>
 </tool_call>"#;
 
-        let (calls, _) = try_tool_call_parse_xml(input).unwrap();
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
 
@@ -319,7 +324,7 @@ Dallas
 </function>
 </tool_call> Let me check that for you."#;
 
-        let (calls, normal) = try_tool_call_parse_xml(input).unwrap();
+        let (calls, normal) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(
@@ -345,7 +350,7 @@ Orlando
 </function>
 </tool_call>"#;
 
-        let (calls, _) = try_tool_call_parse_xml(input).unwrap();
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(calls[1].function.name, "get_weather");
@@ -366,7 +371,7 @@ Orlando
 </function>
 </tool_call>"#;
 
-        let (calls, _) = try_tool_call_parse_xml(input).unwrap();
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
         assert_eq!(calls.len(), 1);
 
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
@@ -378,7 +383,7 @@ Orlando
     #[test]
     fn test_parse_no_tool_calls() {
         let input = "This is just normal text without any tool calls.";
-        let (calls, normal) = try_tool_call_parse_xml(input).unwrap();
+        let (calls, normal) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
         assert_eq!(calls.len(), 0);
         assert_eq!(normal, Some(input.to_string()));
     }
@@ -392,7 +397,7 @@ value
 </tool_call>"#;
 
         // Should handle gracefully - might parse or return empty
-        let result = try_tool_call_parse_xml(input);
+        let result = try_tool_call_parse_xml(input, &XmlParserConfig::default());
         assert!(result.is_ok());
     }
 
@@ -405,7 +410,7 @@ ls -la
 </function>
 </tool_call>"#;
 
-        let (calls, _) = try_tool_call_parse_xml(input).unwrap();
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "execute_bash");
 
@@ -422,7 +427,7 @@ Boston
 </parameter>
 </tool_call>"#;
 
-        let (calls, _) = try_tool_call_parse_xml(input).unwrap();
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
 
@@ -438,7 +443,7 @@ Boston
 SELECT * FROM users
 </tool_call>"#;
 
-        let (calls, _) = try_tool_call_parse_xml(input).unwrap();
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "run_query");
 
@@ -458,7 +463,7 @@ rust programming
 </function>
 </tool_call>"#;
 
-        let (calls, _) = try_tool_call_parse_xml(input).unwrap();
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "search");
 
