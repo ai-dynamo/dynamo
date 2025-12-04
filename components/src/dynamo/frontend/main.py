@@ -152,12 +152,6 @@ def parse_args():
         help="KV Router: Target size ratio after pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_PRUNE_TARGET_RATIO env var (default: 0.8).",
     )
     parser.add_argument(
-        "--enable-local-kvindexers",  # TODO (karen-sy) eventually will be equivalent to a "bypass Jetstream" option
-        action="store_true",
-        default=False,
-        help="KV Router: Enable worker-local kvindexers for worker-specific event storage (default disabled).",
-    )
-    parser.add_argument(
         "--namespace",
         type=str,
         default=os.environ.get(DYN_NAMESPACE_ENV_VAR),
@@ -298,13 +292,6 @@ async def async_main():
 
     if flags.router_mode == "kv":
         router_mode = RouterMode.KV
-
-        if flags.enable_local_kvindexers:
-            # set env var which propagates to worker-side publisher
-            os.environ["DYN_ENABLE_LOCAL_KVINDEXERS"] = "1"
-        else:
-            os.environ.pop("DYN_ENABLE_LOCAL_KVINDEXERS", None)
-
         kv_router_config = KvRouterConfig(
             overlap_score_weight=flags.kv_overlap_score_weight,
             router_temperature=flags.router_temperature,
@@ -316,7 +303,6 @@ async def async_main():
             router_ttl_secs=flags.router_ttl,
             router_max_tree_size=flags.router_max_tree_size,
             router_prune_target_ratio=flags.router_prune_target_ratio,
-            enable_local_kvindexers=flags.enable_local_kvindexers,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random

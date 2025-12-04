@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::env;
 use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -112,15 +111,7 @@ impl KvEventPublisher {
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
-        let enable_local_indexer = env::var("DYN_ENABLE_LOCAL_KVINDEXERS")
-            .map(|value| value == "1")
-            .unwrap_or(false);
-        Self::new_with_local_indexer(
-            component,
-            kv_block_size,
-            source_config,
-            enable_local_indexer,
-        )
+        Self::new_with_local_indexer(component, kv_block_size, source_config, true)
     }
 
     pub fn new_with_local_indexer(
@@ -2189,12 +2180,6 @@ mod test_integration_publisher {
     #[tokio::test]
     #[ignore] // Requires NATS/etcd. Run with: cargo test --package dynamo-llm --lib --features integration test_distributed_kvindexer_e2e -- --ignored --nocapture
     async fn test_distributed_kvindexer_e2e() -> anyhow::Result<()> {
-        unsafe {
-            // Typical use case would set this env var via
-            // --enable-local-kvindexers flag in frontend or standalone router
-            env::set_var("DYN_ENABLE_LOCAL_KVINDEXERS", "1");
-        }
-
         use crate::kv_router::scheduler::DefaultWorkerSelector;
         use crate::kv_router::{
             KvPushRouter, KvRouter, KvRouterConfig, worker_query::WorkerQueryClient,
@@ -2379,10 +2364,6 @@ mod test_integration_publisher {
         for handle in server_handles {
             handle.abort();
         }
-        unsafe {
-            env::remove_var("DYN_ENABLE_LOCAL_KVINDEXERS");
-        }
-
         distributed1.shutdown();
         distributed2.shutdown();
         router_distributed.shutdown();
