@@ -156,6 +156,49 @@ class ChatPayload(BasePayload):
 
 
 @dataclass
+class ToolCallingChatPayload(ChatPayload):
+    """ChatPayload that validates tool calls in the response."""
+
+    def __init__(self, *args, expected_tool_name: Optional[str] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.expected_tool_name = expected_tool_name
+
+    def validate(self, response, content: str) -> None:
+        """Validate that tool calls exist in the response."""
+        # First run the standard validation
+        super().validate(response, content)
+
+        # Then validate tool calls specifically
+        response_data = response.json()
+        choices = response_data.get("choices", [])
+        assert choices, "Response missing choices"
+
+        message = choices[0].get("message", {})
+        tool_calls = message.get("tool_calls", [])
+
+        assert tool_calls, "Expected model to generate tool calls but none found"
+        logger.info(f"Tool calls detected: {len(tool_calls)} call(s)")
+
+        # Validate tool call structure
+        for i, tc in enumerate(tool_calls):
+            assert "function" in tc, f"Tool call {i} missing 'function' field"
+            function = tc.get("function", {})
+            assert "name" in function, f"Tool call {i} missing function name"
+            assert "arguments" in function, f"Tool call {i} missing function arguments"
+            logger.info(
+                f"  [{i}] Function: {function.get('name')}, Args: {function.get('arguments')[:100]}..."
+            )
+
+        # If expected tool name is provided, validate it
+        if self.expected_tool_name:
+            tool_names = [tc.get("function", {}).get("name") for tc in tool_calls]
+            assert (
+                self.expected_tool_name in tool_names
+            ), f"Expected tool '{self.expected_tool_name}' not found. Available tools: {tool_names}"
+            logger.info(f"Expected tool '{self.expected_tool_name}' was called")
+
+
+@dataclass
 class CompletionPayload(BasePayload):
     """Payload for completions endpoint."""
 
@@ -274,9 +317,9 @@ class MetricsPayload(BasePayload):
                 name=f"{prefix}_*",
                 pattern=lambda name: rf"^{prefix}_\w+",
                 validator=lambda value: len(set(value))
-                >= 23,  # 80% of typical ~29 metrics (excluding _bucket) as of 2025-10-22 (but will grow)
-                error_msg=lambda name, value: f"Expected at least 23 unique {prefix}_* metrics, but found only {len(set(value))}",
-                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 23)",
+                >= 11,  # 80% of typical ~17 metrics (excluding _bucket) as of 2025-12-02
+                error_msg=lambda name, value: f"Expected at least 11 unique {prefix}_* metrics, but found only {len(set(value))}",
+                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 11)",
                 multiline=True,
             ),
             MetricCheck(

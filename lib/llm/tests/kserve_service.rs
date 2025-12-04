@@ -1,7 +1,26 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "common/ports.rs"]
+mod ports;
+
 pub mod kserve_test {
+    // [gluo NOTE] Tests may run in parallel, use this enum to keep track of
+    // port used for different test cases
+    enum TestPort {
+        InferFailure = 8988,
+        InferSuccess = 8989,
+        StreamInferFailure = 8990,
+        StreamInferSuccess = 8991,
+        InferCancellation = 8992,
+        StreamInferCancellation = 8993,
+        ModelInfo = 8994,
+        TensorModel = 8995,
+        TensorModelTypes = 8996,
+        TritonModelConfig = 8997,
+        LiveReady = 8998,
+    }
+
     // For using gRPC client for test
     pub mod inference {
         tonic::include_proto!("inference");
@@ -13,6 +32,7 @@ pub mod kserve_test {
     use inference::grpc_inference_service_client::GrpcInferenceServiceClient;
     use inference::{
         DataType, ModelConfigRequest, ModelInferRequest, ModelInferResponse, ModelMetadataRequest,
+        ModelReadyRequest, ServerLiveRequest, ServerReadyRequest,
     };
 
     use anyhow::Error;
@@ -41,6 +61,7 @@ pub mod kserve_test {
     use tokio::time::timeout;
     use tonic::{Request, Response, transport::Channel};
 
+    use crate::ports::get_random_port;
     use dynamo_async_openai::types::Prompt;
     use prost::Message;
 
@@ -348,21 +369,6 @@ pub mod kserve_test {
         fn drop(&mut self) {
             self.token.cancel();
         }
-    }
-
-    // Tests may run in parallel, use this enum to keep track of port used for different
-    // test cases
-    enum TestPort {
-        InferFailure = 8988,
-        InferSuccess = 8989,
-        StreamInferFailure = 8990,
-        StreamInferSuccess = 8991,
-        InferCancellation = 8992,
-        StreamInferCancellation = 8993,
-        ModelInfo = 8994,
-        TensorModel = 8995,
-        TensorModelTypes = 8996,
-        TritonModelConfig = 8997,
     }
 
     #[rstest]
@@ -1793,5 +1799,260 @@ pub mod kserve_test {
             result.unwrap_err().message().contains("has no value"),
             "Expected error message about missing value"
         );
+    }
+
+    async fn wait_for_http_ready(port: u16, timeout_secs: u64) {
+        let client = reqwest::Client::new();
+        let start = tokio::time::Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+        let url = format!("http://localhost:{}/metrics", port);
+
+        loop {
+            match client.get(&url).send().await {
+                Ok(_) => return,
+                Err(_) if start.elapsed() < timeout => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("HTTP service failed to start within timeout: {}", e),
+            }
+        }
+    }
+
+    fn assert_metric_value(metrics: &str, model_name: &str, endpoint: &str, expected_count: u32) {
+        // Find the metric line that contains both the model and endpoint labels
+        let metric_line = metrics
+            .lines()
+            .find(|line| {
+                line.starts_with("dynamo_frontend_requests_total{")
+                    && line.contains(&format!("model=\"{}\"", model_name))
+                    && line.contains(&format!("endpoint=\"{}\"", endpoint))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "Could not find metric for model='{}' endpoint='{}' in metrics:\n{}",
+                    model_name, endpoint, metrics
+                )
+            });
+
+        let value_str = metric_line.split_whitespace().last().unwrap_or("0");
+        let actual_count: u32 = value_str.parse().unwrap_or(0);
+
+        assert_eq!(
+            actual_count, expected_count,
+            "Expected {} requests for model='{}' endpoint='{}', but found {}",
+            expected_count, model_name, endpoint, actual_count
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kserve_grpc_metrics_endpoint() {
+        let grpc_port = get_random_port().await;
+        let http_metrics_port = get_random_port().await;
+
+        let service = KserveService::builder()
+            .port(grpc_port)
+            .http_metrics_port(http_metrics_port)
+            .build()
+            .unwrap();
+
+        let state = service.state_clone();
+        let manager = state.manager();
+
+        // Register completion model
+        let mut card = ModelDeploymentCard::with_name_only("test_model");
+        card.model_type = ModelType::Completions;
+        card.model_input = ModelInput::Text;
+        manager
+            .add_completions_model("test_model", card.mdcsum(), Arc::new(SplitEngine {}))
+            .unwrap();
+        manager.save_model_card("test_model", card).unwrap();
+
+        // Register tensor model
+        let mut tensor_card = ModelDeploymentCard::with_name_only("test_tensor_model");
+        tensor_card.model_type = ModelType::TensorBased;
+        tensor_card.model_input = ModelInput::Tensor;
+        tensor_card.runtime_config = ModelRuntimeConfig {
+            tensor_model_config: Some(tensor::TensorModelConfig {
+                name: "test_tensor_model".to_string(),
+                inputs: vec![tensor::TensorMetadata {
+                    name: "input".to_string(),
+                    data_type: tensor::DataType::Int32,
+                    shape: vec![1],
+                    parameters: Default::default(),
+                }],
+                outputs: vec![tensor::TensorMetadata {
+                    name: "output".to_string(),
+                    data_type: tensor::DataType::Int32,
+                    shape: vec![1],
+                    parameters: Default::default(),
+                }],
+                triton_model_config: None,
+            }),
+            ..Default::default()
+        };
+        manager
+            .add_tensor_model(
+                "test_tensor_model",
+                tensor_card.mdcsum(),
+                Arc::new(TensorEngine {}),
+            )
+            .unwrap();
+        manager
+            .save_model_card("test_tensor_model", tensor_card)
+            .unwrap();
+
+        // Start services
+        let cancel_token = CancellationToken::new();
+        let grpc_task = service.spawn(cancel_token.clone()).await;
+        let http_task = service.http_service().spawn(cancel_token.clone()).await;
+
+        // Wait for services to be ready
+        let mut grpc_client = get_ready_client(grpc_port, 10).await;
+        wait_for_http_ready(http_metrics_port, 10).await;
+
+        // Test completion model
+        grpc_client
+            .model_infer(Request::new(ModelInferRequest {
+                model_name: "test_model".into(),
+                model_version: "1".into(),
+                id: "test-metrics".into(),
+                inputs: vec![inference::model_infer_request::InferInputTensor {
+                    name: "text_input".into(),
+                    datatype: "BYTES".into(),
+                    shape: vec![1],
+                    contents: Some(inference::InferTensorContents {
+                        bytes_contents: vec!["test input".into()],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }))
+            .await
+            .expect("Inference request failed");
+
+        // Test tensor model
+        grpc_client
+            .model_infer(Request::new(ModelInferRequest {
+                model_name: "test_tensor_model".into(),
+                model_version: "1".into(),
+                id: "test-tensor-metrics".into(),
+                inputs: vec![inference::model_infer_request::InferInputTensor {
+                    name: "input".into(),
+                    datatype: "INT32".into(),
+                    shape: vec![1],
+                    contents: Some(inference::InferTensorContents {
+                        int_contents: vec![42],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }))
+            .await
+            .expect("Tensor inference request failed");
+
+        // Verify metrics are exposed via HTTP endpoint
+        let metrics_url = format!("http://localhost:{}/metrics", http_metrics_port);
+        let metrics_body = reqwest::get(&metrics_url)
+            .await
+            .expect("Failed to fetch metrics")
+            .text()
+            .await
+            .unwrap();
+
+        // Verify metrics are present and have correct values
+        assert!(
+            metrics_body.contains("dynamo_frontend_inflight_requests"),
+            "Metrics should contain inflight gauge"
+        );
+        assert_metric_value(&metrics_body, "test_model", "completions", 1);
+        assert_metric_value(&metrics_body, "test_tensor_model", "tensor", 1);
+
+        // Clean up
+        cancel_token.cancel();
+        let _ = tokio::join!(grpc_task, http_task);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_live_ready() {
+        let grpc_port = TestPort::LiveReady as u16;
+        let service = KserveService::builder().port(grpc_port).build().unwrap();
+
+        // start server
+        let _running = RunningService::spawn(service.clone());
+
+        let mut client = get_ready_client(grpc_port, 5).await;
+
+        // Check server liveness
+        let server_live_request = tonic::Request::new(ServerLiveRequest {});
+        let server_live_response = client.server_live(server_live_request).await.unwrap();
+        let server_live = server_live_response.get_ref().live;
+        assert!(server_live, "Server should be live");
+
+        // Check server readiness
+        let server_ready_request = tonic::Request::new(ServerReadyRequest {});
+        let server_ready_response = client.server_ready(server_ready_request).await.unwrap();
+        let server_ready = server_ready_response.get_ref().ready;
+        assert!(
+            !server_ready,
+            "Server should not be ready without model registered"
+        );
+
+        // Check model readiness for unregistered model
+        let model_ready_request = tonic::Request::new(ModelReadyRequest {
+            name: "tensor".into(),
+            version: "".into(),
+        });
+        let model_ready_response = client.model_ready(model_ready_request).await.unwrap();
+        let model_ready = model_ready_response.get_ref().ready;
+        assert!(!model_ready, "Unregistered model should not be ready");
+
+        // Register a tensor model
+        let mut card = ModelDeploymentCard::with_name_only("tensor");
+        card.model_type = ModelType::TensorBased;
+        card.model_input = ModelInput::Tensor;
+        card.runtime_config = ModelRuntimeConfig {
+            tensor_model_config: Some(tensor::TensorModelConfig {
+                name: "tensor".to_string(),
+                inputs: vec![tensor::TensorMetadata {
+                    name: "input".to_string(),
+                    data_type: tensor::DataType::Int32,
+                    shape: vec![1],
+                    parameters: Default::default(),
+                }],
+                outputs: vec![tensor::TensorMetadata {
+                    name: "output".to_string(),
+                    data_type: tensor::DataType::Bool,
+                    shape: vec![-1],
+                    parameters: Default::default(),
+                }],
+                triton_model_config: None,
+            }),
+            ..Default::default()
+        };
+        let tensor = Arc::new(TensorEngine {});
+        service
+            .model_manager()
+            .add_tensor_model("tensor", card.mdcsum(), tensor.clone())
+            .unwrap();
+        let _ = service.model_manager().save_model_card("key", card);
+
+        // Re-check readiness
+        // Check server readiness
+        let server_ready_request = tonic::Request::new(ServerReadyRequest {});
+        let server_ready_response = client.server_ready(server_ready_request).await.unwrap();
+        let server_ready = server_ready_response.get_ref().ready;
+        assert!(server_ready, "Server should be ready with model registered");
+
+        // Check model readiness for unregistered model
+        let model_ready_request = tonic::Request::new(ModelReadyRequest {
+            name: "tensor".into(),
+            version: "".into(),
+        });
+        let model_ready_response = client.model_ready(model_ready_request).await.unwrap();
+        let model_ready = model_ready_response.get_ref().ready;
+        assert!(model_ready, "Registered model should be ready");
     }
 }

@@ -11,6 +11,7 @@ import sglang as sgl
 import uvloop
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -102,8 +103,11 @@ async def init(runtime: DistributedRuntime, config: Config):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     # Prevent SGLang from blocking on non-leader nodes
+    # We can switch this to 0 and leverage our own metrics
+    # after https://github.com/sgl-project/sglang/pull/13686
+    # is merged in
     if server_args.node_rank >= 1:
-        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
+        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
 
     engine = sgl.Engine(server_args=server_args)
 
@@ -153,6 +157,18 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     health_check_payload = SglangHealthCheckPayload(engine).to_dict()
 
+    logging.info(
+        f"Registering model with endpoint types: {dynamo_args.dyn_endpoint_types}"
+    )
+    if (
+        dynamo_args.custom_jinja_template
+        and "chat" not in dynamo_args.dyn_endpoint_types
+    ):
+        logging.warning(
+            "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
+            "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
+        )
+
     try:
         # Start endpoint immediately and register model concurrently
         # Requests queue until ready_event is set (TODO: Part of new PR)
@@ -168,6 +184,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 generate_endpoint,
                 server_args,
                 dynamo_args,
+                output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
                 readiness_gate=ready_event,
             ),
         )
@@ -188,8 +205,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     # Prevent SGLang from blocking on non-leader nodes
+    # We can switch this to 0 and leverage our own metrics
+    # after https://github.com/sgl-project/sglang/pull/13686
+    # is merged in
     if server_args.node_rank >= 1:
-        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
+        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
 
     engine = sgl.Engine(server_args=server_args)
 

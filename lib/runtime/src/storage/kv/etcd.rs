@@ -5,15 +5,12 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::Duration;
 
-use crate::{
-    storage::key_value_store::{Key, KeyValue, WatchEvent},
-    transports::etcd,
-};
+use crate::transports::etcd;
 use async_stream::stream;
 use async_trait::async_trait;
 use etcd_client::{Compare, CompareOp, EventType, PutOptions, Txn, TxnOp, WatchOptions};
 
-use super::{KeyValueBucket, KeyValueStore, StoreError, StoreOutcome};
+use super::{Bucket, Key, KeyValue, Store, StoreError, StoreOutcome, WatchEvent};
 
 #[derive(Clone)]
 pub struct EtcdStore {
@@ -27,7 +24,7 @@ impl EtcdStore {
 }
 
 #[async_trait]
-impl KeyValueStore for EtcdStore {
+impl Store for EtcdStore {
     type Bucket = EtcdBucket;
 
     /// A "bucket" in etcd is a path prefix
@@ -66,7 +63,7 @@ pub struct EtcdBucket {
 }
 
 #[async_trait]
-impl KeyValueBucket for EtcdBucket {
+impl Bucket for EtcdBucket {
     async fn insert(
         &self,
         key: &Key,
@@ -126,7 +123,7 @@ impl KeyValueBucket for EtcdBucket {
                     etcd::WatchEvent::Put(kv) => {
                         let (k, v) = kv.into_key_value();
                         let key = match String::from_utf8(k) {
-                            Ok(k) => k,
+                            Ok(k) => Key::new(k),
                             Err(err) => {
                                 tracing::error!(%err, prefix, "Invalid UTF8 in etcd key");
                                 continue;
@@ -138,13 +135,13 @@ impl KeyValueBucket for EtcdBucket {
                     etcd::WatchEvent::Delete(kv) => {
                         let (k, _) = kv.into_key_value();
                         let key = match String::from_utf8(k) {
-                            Ok(k) => k,
+                            Ok(k) => Key::new(k),
                             Err(err) => {
                                 tracing::error!(%err, prefix, "Invalid UTF8 in etcd key");
                                 continue;
                             }
                         };
-                        yield WatchEvent::Delete(Key::from_raw(key));
+                        yield WatchEvent::Delete(key);
                     }
                 }
             }
@@ -152,7 +149,7 @@ impl KeyValueBucket for EtcdBucket {
         Ok(Box::pin(output))
     }
 
-    async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError> {
+    async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
         let k = make_key(&self.bucket_name, &"".into());
         tracing::trace!("etcd entries: {k}");
 
@@ -161,11 +158,11 @@ impl KeyValueBucket for EtcdBucket {
             .kv_get_prefix(k)
             .await
             .map_err(|e| StoreError::EtcdError(e.to_string()))?;
-        let out: HashMap<String, bytes::Bytes> = resp
+        let out: HashMap<Key, bytes::Bytes> = resp
             .into_iter()
             .map(|kv| {
                 let (k, v) = kv.into_key_value();
-                (String::from_utf8_lossy(&k).to_string(), v.into())
+                (Key::new(String::from_utf8_lossy(&k).to_string()), v.into())
             })
             .collect();
 
@@ -273,8 +270,7 @@ mod concurrent_create_tests {
     }
 
     async fn test_concurrent_create(drt: DistributedRuntime) -> Result<(), StoreError> {
-        let etcd_client = drt.etcd_client().expect("etcd client should be available");
-        let storage = EtcdStore::new(etcd_client);
+        let storage = drt.store();
 
         // Create a bucket for testing
         let bucket = Arc::new(tokio::sync::Mutex::new(
@@ -288,7 +284,7 @@ mod concurrent_create_tests {
         let barrier = Arc::new(Barrier::new(num_workers));
 
         // Shared test data
-        let test_key: Key = Key::new(&format!("concurrent_test_key_{}", uuid::Uuid::new_v4()));
+        let test_key: Key = Key::new(format!("concurrent_test_key_{}", uuid::Uuid::new_v4()));
         let test_value = "test_value";
 
         // Spawn multiple tasks that will all try to create the same key simultaneously

@@ -15,11 +15,11 @@ use crate::types::Annotated;
 use super::kserve;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
+use crate::http::service::metrics::InflightGuard;
 use crate::http::service::{
     disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{Endpoint, ResponseMetricCollector},
+    metrics::{Endpoint, process_response_and_observe_metrics},
 };
-use crate::{http::service::metrics::InflightGuard, preprocessor::LLMMetricAnnotation};
 
 use crate::protocols::tensor;
 use crate::protocols::tensor::{
@@ -76,6 +76,8 @@ pub async fn tensor_response_stream(
         .get_tensor_engine(model)
         .map_err(|_| Status::not_found("model not found"))?;
 
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
+
     let inflight_guard =
         state
             .metrics_clone()
@@ -115,9 +117,15 @@ pub async fn tensor_response_stream(
     // apply any annotations to the front of the stream
     let stream = stream::iter(annotations).chain(stream);
 
-    // Tap on the stream to collect response metrics
+    // Tap on the stream to collect response metrics and handle http_queue_guard
+    let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
-        process_metrics_only(response, &mut response_collector);
+        // Calls observe_response() on each token - drops http_queue_guard on first token
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
     });
 
     let stream = grpc_monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
@@ -167,17 +175,6 @@ pub fn grpc_monitor_for_disconnects<T>(
                 }
             }
         }
-    }
-}
-
-fn process_metrics_only<T>(
-    annotated: &Annotated<T>,
-    response_collector: &mut ResponseMetricCollector,
-) {
-    // update metrics
-    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
-        response_collector.observe_current_osl(metrics.output_tokens);
-        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
     }
 }
 
