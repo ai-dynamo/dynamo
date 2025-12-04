@@ -47,12 +47,13 @@ TEST_PAYLOAD: Dict[str, Any] = {
 }
 
 # Shared vLLM configuration for all tests
-# Use num_gpu_blocks_override instead of gpu_memory_utilization to avoid
-# memory fragmentation issues when running multiple workers on same GPU
+# gpu_memory_utilization limits actual VRAM allocation (required for multi-worker on same GPU)
+# num_gpu_blocks_override caps block count for predictable KV cache behavior
 VLLM_ARGS: Dict[str, Any] = {
     "block_size": BLOCK_SIZE,
     "model": MODEL_NAME,
-    "num_gpu_blocks_override": 5000,  # Fixed block count per worker
+    "gpu_memory_utilization": 0.4,  # Limit VRAM allocation per worker
+    "num_gpu_blocks_override": 5000,  # Cap block count for predictability
     "max_model_len": 1024,  # Limit context length to reduce KV cache size
     "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
 }
@@ -83,7 +84,8 @@ class VLLMProcess:
             vllm_args: Configuration dict with keys:
                 - block_size: KV cache block size (default: 16)
                 - model: Model name/path (default: TinyLlama-1.1B)
-                - num_gpu_blocks_override: Fixed number of GPU blocks per worker (optional)
+                - gpu_memory_utilization: Fraction of GPU memory to allocate (optional)
+                - num_gpu_blocks_override: Cap on number of KV cache blocks (optional)
                 - max_model_len: Maximum sequence length (optional)
                 - enforce_eager: Disable CUDA graphs (default: False)
             num_workers: Number of vLLM worker processes
@@ -103,6 +105,7 @@ class VLLMProcess:
 
         block_size = vllm_args.get("block_size", BLOCK_SIZE)
         model = vllm_args.get("model", MODEL_NAME)
+        gpu_memory_utilization = vllm_args.get("gpu_memory_utilization")
         num_gpu_blocks_override = vllm_args.get("num_gpu_blocks_override")
         max_model_len = vllm_args.get("max_model_len")
         enforce_eager = vllm_args.get("enforce_eager", False)
@@ -148,11 +151,17 @@ class VLLMProcess:
             if enforce_eager:
                 command.append("--enforce-eager")
 
+            # Limit VRAM allocation (required for multi-worker on same GPU)
+            if gpu_memory_utilization is not None:
+                command.extend(
+                    ["--gpu-memory-utilization", str(gpu_memory_utilization)]
+                )
+
             # Add optional max_model_len if specified
             if max_model_len is not None:
                 command.extend(["--max-model-len", str(max_model_len)])
 
-            # Use num_gpu_blocks_override for predictable memory usage on shared GPU
+            # Cap block count for predictable KV cache behavior
             if num_gpu_blocks_override is not None:
                 command.extend(
                     ["--num-gpu-blocks-override", str(num_gpu_blocks_override)]
@@ -196,13 +205,13 @@ class VLLMProcess:
             if data_parallel_size is not None:
                 logger.info(
                     f"Created {data_parallel_size} DP ranks per worker on GPU(s) {gpu_device} "
-                    f"(num_gpu_blocks_override={num_gpu_blocks_override}) "
+                    f"(gpu_mem={gpu_memory_utilization}, blocks={num_gpu_blocks_override}) "
                     f"with endpoint: {self.endpoint}"
                 )
             else:
                 logger.info(
                     f"Created vLLM worker {worker_idx} on GPU {gpu_device} "
-                    f"(num_gpu_blocks_override={num_gpu_blocks_override}) "
+                    f"(gpu_mem={gpu_memory_utilization}, blocks={num_gpu_blocks_override}) "
                     f"with endpoint: {self.endpoint}"
                 )
 
@@ -348,7 +357,7 @@ def test_router_decisions_vllm_multiple_workers(
     try:
         # Start 2 worker processes on the same GPU
         logger.info(
-            "Starting 2 vLLM worker processes on single GPU (num_gpu_blocks_override=5000, max_model_len=1024)"
+            "Starting 2 vLLM worker processes on single GPU (gpu_mem=0.4, blocks=5000)"
         )
         vllm_workers = VLLMProcess(
             request,
@@ -390,9 +399,7 @@ def test_router_decisions_vllm_dp(request, runtime_services, predownload_models)
     DP_SIZE = 2
 
     try:
-        logger.info(
-            "Starting 2 vLLM DP ranks (dp_size=2) (num_gpu_blocks_override=5000, max_model_len=1024)"
-        )
+        logger.info("Starting 2 vLLM DP ranks (dp_size=2) (gpu_mem=0.4, blocks=5000)")
         vllm_workers = VLLMProcess(
             request,
             vllm_args=VLLM_ARGS,
