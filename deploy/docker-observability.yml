@@ -83,7 +83,7 @@ services:
       - dcgm-exporter
       - nats-prometheus-exporter
 
-  # Tempo - Distributed tracing backend (for Grafana)
+  # Tempo - Distributed tracing backend
   tempo:
     image: grafana/tempo:2.8.2
     command: [ "-config.file=/etc/tempo.yaml" ]
@@ -93,37 +93,10 @@ services:
       - tempo-data:/tmp/tempo
     ports:
       - "3200:3200"   # Tempo HTTP
+      - "4317:4317"   # OTLP gRPC receiver (accessible from host)
+      - "4318:4318"   # OTLP HTTP receiver (accessible from host)
     networks:
       - server
-
-  # Jaeger - Distributed tracing UI (better trace viewing)
-  jaeger:
-    image: jaegertracing/all-in-one:latest
-    container_name: jaeger
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
-    ports:
-      - "16686:16686"  # Jaeger UI
-    networks:
-      - server
-    restart: unless-stopped
-
-  # OTEL Collector - Receives traces and sends to BOTH Tempo and Jaeger
-  otel-collector:
-    image: otel/opentelemetry-collector:0.115.1
-    container_name: otel-collector
-    command: ["--config=/etc/otel-collector-config.yaml"]
-    volumes:
-      - ./observability/opentelemetry.yaml:/etc/otel-collector-config.yaml
-    ports:
-      - "4317:4317"   # OTLP gRPC receiver (Dynamo/SGLang send here)
-      - "4318:4318"   # OTLP HTTP receiver
-    networks:
-      - server
-    depends_on:
-      - tempo
-      - jaeger
-    restart: unless-stopped
 
   # Grafana - Visualization and dashboards
   # Supports both Prometheus (metrics) and Tempo (tracing) datasources
@@ -161,5 +134,4 @@ services:
     depends_on:
       - prometheus
       - tempo
-      - jaeger
 
