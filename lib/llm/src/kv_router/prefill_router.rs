@@ -4,7 +4,7 @@
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use serde_json::json;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 use dynamo_runtime::{
     component::Endpoint,
     pipeline::{
-        AsyncEngine, AsyncEngineContextProvider, Context, ManyOut, Operator, PushRouter,
-        ResponseStream, RouterMode, ServerStreamingEngine, SingleIn, async_trait,
+        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator,
+        PushRouter, ResponseStream, RouterMode, ServerStreamingEngine, SingleIn, async_trait,
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -257,6 +257,39 @@ impl PrefillRouter {
         ))
     }
 
+    /// Execute prefill with max_tokens=1 and return the result.
+    /// This is the common prefill execution logic shared by both:
+    /// - handle_prefill_stage_request (split pipeline)
+    /// - normal disaggregated flow (single-pass pipeline)
+    async fn execute_prefill(
+        &self,
+        req: &PreprocessedRequest,
+        request_id: &str,
+        engine_ctx: &Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>,
+    ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
+        // Prepare prefill request with max_tokens = 1
+        let mut prefill_req = req.clone();
+        prefill_req.stop_conditions.max_tokens = Some(1);
+        let prefill_context = Context::with_id(prefill_req, request_id.to_string());
+
+        // Link the prefill context as a child so that kill signals propagate
+        engine_ctx.link_child(prefill_context.context());
+
+        // Attempt prefill to get disaggregated_params
+        let prefill_result = self.call_prefill(prefill_context).await;
+
+        // Abort if cancelled during prefill
+        if engine_ctx.is_stopped() || engine_ctx.is_killed() {
+            tracing::debug!("Abort after prefill - context is stopped or killed");
+            return Err(PrefillError::PrefillError(format!(
+                "Context id {} is stopped or killed",
+                engine_ctx.id()
+            )));
+        }
+
+        prefill_result
+    }
+
     /// Handle the prefill stage of disaggregated serving: do prefill and return routing info.
     /// Returns prefill_result (with kv_transfer_params) and decode_worker_id.
     /// The frontend uses this to construct the decode stage request.
@@ -269,25 +302,8 @@ impl PrefillRouter {
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
 
-        // Prepare prefill request with max_tokens = 1
-        let mut prefill_req = req.clone();
-        prefill_req.stop_conditions.max_tokens = Some(1);
-        let prefill_context = Context::with_id(prefill_req, request_id.clone());
-
-        // Link the prefill context as a child so that kill signals propagate
-        engine_ctx.link_child(prefill_context.context());
-
-        // Attempt prefill to get disaggregated_params
-        let prefill_result = self.call_prefill(prefill_context).await;
-
-        // Abort if cancelled during prefill
-        if engine_ctx.is_stopped() || engine_ctx.is_killed() {
-            tracing::debug!("Abort prefill stage after context is stopped or killed");
-            return Err(anyhow::anyhow!(
-                "Context id {} is stopped or killed",
-                engine_ctx.id()
-            ));
-        }
+        // Execute prefill
+        let prefill_result = self.execute_prefill(&req, &request_id, &engine_ctx).await;
 
         match prefill_result {
             Ok((prefill_result, prefill_worker_id)) => {
@@ -353,7 +369,8 @@ impl PrefillRouter {
                     }),
                 };
 
-                let response_stream = stream::once(async { Annotated::from_data(prefill_stage_response) });
+                let response_stream =
+                    stream::once(async { Annotated::from_data(prefill_stage_response) });
                 Ok(ResponseStream::new(Box::pin(response_stream), engine_ctx))
             }
             Err(e) => {
@@ -388,9 +405,9 @@ impl
         // Extract request data while preserving context
         let (req, context) = request.into_parts();
         let request_id = context.id().to_string();
-        let engine_ctx = context.context();
+        let engine_ctx: Arc<dyn AsyncEngineContext> = context.context();
 
-        // ===== Decode Stage Detection =====
+        // Decode Stage Detection
         // If prefill_result and backend_instance_id are already set, this is a decode stage request.
         // Skip prefill entirely and route directly to the specified decode worker.
         if req.prefill_result.is_some() && req.backend_instance_id.is_some() {
@@ -402,7 +419,7 @@ impl
             return next.generate(context.map(|_| req)).await;
         }
 
-        // ===== Prefill Stage Detection =====
+        // Prefill Stage Detection
         // If the request has the "disagg_prefill_stage" annotation, perform prefill and return
         // routing info + preprocessed request without proceeding to decode.
         if req.has_annotation("disagg_prefill_stage") {
@@ -413,31 +430,12 @@ impl
             return self.handle_prefill_stage_request(req, context, next).await;
         }
 
-        // ===== Normal disaggregated flow (prefill + decode in one pass) =====
+        // Normal disaggregated flow (prefill + decode in one pass)
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
-        // Prepare prefill request with max_tokens = 1
-        let mut prefill_req = req.clone();
-        prefill_req.stop_conditions.max_tokens = Some(1);
-        let prefill_context = Context::with_id(prefill_req, request_id.clone());
-
-        // Link the prefill context as a child so that kill signals propagate
-        engine_ctx.link_child(prefill_context.context());
-
-        let prefill_request = prefill_context;
-
-        // Attempt prefill
-        let prefill_result = self.call_prefill(prefill_request).await;
-
-        // Abort if cancelled during prefill
-        if engine_ctx.is_stopped() || engine_ctx.is_killed() {
-            tracing::debug!("Abort entering decode after context is stopped or killed");
-            return Err(anyhow::anyhow!(
-                "Context id {} is stopped or killed",
-                engine_ctx.id()
-            ));
-        }
+        // Execute prefill using common function
+        let prefill_result = self.execute_prefill(&req, &request_id, &engine_ctx).await;
 
         // Handle prefill result
         match prefill_result {
