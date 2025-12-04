@@ -1,0 +1,6 @@
+model-path: Qwen/Qwen3-0.6B
+served-model-name: Qwen/Qwen3-0.6B
+page-size: 16
+tp: 1
+trust-remote-code: true
+enable-metrics: true
