@@ -1077,6 +1077,10 @@ async def register_llm(
         Providing only one of these parameters will raise a ValueError.
         - `lora_name`: The served model name for the LoRA model
         - `base_model_path`: Path to the base model that the LoRA extends
+
+    For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
+    and a minimal model card is registered directly. Use model_path as the display name
+    for these models.
     """
     ...
 
