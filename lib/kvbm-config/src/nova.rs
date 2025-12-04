@@ -30,6 +30,7 @@ impl NovaConfig {
     /// 2. A discovery backend based on the configured type (if any)
     /// 3. A Nova instance combining both
     pub async fn build_nova(&self) -> Result<std::sync::Arc<dynamo_nova::Nova>> {
+        use std::net::TcpListener;
         use std::sync::Arc;
         use std::time::Duration;
 
@@ -37,14 +38,24 @@ impl NovaConfig {
         use dynamo_nova_backend::tcp::TcpTransportBuilder;
 
         // 1. Build TCP transport
+        // Pre-bind listener to get OS-assigned port (if port is 0)
         let bind_addr = self.backend.resolve_bind_addr()?;
+        let listener = TcpListener::bind(bind_addr)
+            .with_context(|| format!("Failed to bind TCP listener to {}", bind_addr))?;
+
+        // Extract actual bound address (with real port if OS-assigned)
+        let actual_addr = listener
+            .local_addr()
+            .context("Failed to get local address from listener")?;
+
+        tracing::info!("Built TCP transport bound to {}", actual_addr);
+
+        // Build transport using from_listener to use the actual port
         let tcp_transport = TcpTransportBuilder::new()
-            .bind_addr(bind_addr)
+            .from_listener(listener)?
             .build()
             .context("Failed to build TCP transport")?;
         let tcp_transport = Arc::new(tcp_transport);
-
-        tracing::info!("Built TCP transport bound to {}", bind_addr);
 
         // 2. Build discovery backend based on configuration
         let mut builder = Nova::builder().add_transport(tcp_transport);

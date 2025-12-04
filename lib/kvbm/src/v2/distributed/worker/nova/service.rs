@@ -4,8 +4,9 @@
 use crate::physical::manager::SerializedLayout;
 
 use super::{
-    Arc, DirectWorker, LocalTransferMessage, RemoteOffloadMessage, RemoteOnboardMessage, Result,
-    TransferOptions, WorkerTransfers,
+    Arc, ConnectRemoteMessage, DirectWorker, ExecuteRemoteOnboardForInstanceMessage,
+    LocalTransferMessage, RemoteOffloadMessage, RemoteOnboardMessage, Result, TransferOptions,
+    WorkerTransfers,
 };
 
 use bytes::Bytes;
@@ -51,6 +52,8 @@ impl NovaWorkerService {
         self.register_remote_offload_handler()?;
         self.register_import_metadata_handler()?;
         self.register_export_metadata_handler()?;
+        self.register_connect_remote_handler()?;
+        self.register_execute_remote_onboard_for_instance_handler()?;
         Ok(())
     }
 
@@ -182,6 +185,72 @@ impl NovaWorkerService {
             let response = worker.export_metadata()?;
             Ok(Some(response.as_bytes().clone()))
         })
+        .build();
+
+        self.nova.register_handler(handler)?;
+        Ok(())
+    }
+
+    /// Register handler for connect_remote - stores remote instance metadata in local worker
+    fn register_connect_remote_handler(&self) -> Result<()> {
+        let worker = self.worker.clone();
+
+        let handler = NovaHandler::unary_handler("kvbm.worker.connect_remote", move |ctx| {
+            let message: ConnectRemoteMessage = serde_json::from_slice(&ctx.payload)?;
+
+            // Deserialize metadata (SerializedLayout stored as raw bytes)
+            let metadata: Vec<SerializedLayout> = message
+                .metadata
+                .into_iter()
+                .map(|bytes| SerializedLayout::from_bytes(Bytes::from(bytes)))
+                .collect();
+
+            // Call DirectWorker.connect_remote()
+            worker.connect_remote(message.instance_id, metadata)?;
+
+            // Return empty response to signal success
+            Ok(Some(Bytes::new()))
+        })
+        .build();
+
+        self.nova.register_handler(handler)?;
+        Ok(())
+    }
+
+    /// Register handler for execute_remote_onboard_for_instance - pulls from remote using instance ID
+    fn register_execute_remote_onboard_for_instance_handler(&self) -> Result<()> {
+        let worker = self.worker.clone();
+
+        let handler = NovaHandler::unary_handler_async(
+            "kvbm.worker.remote_onboard_for_instance",
+            move |ctx| {
+                let worker = worker.clone();
+                async move {
+                    let message: ExecuteRemoteOnboardForInstanceMessage =
+                        serde_json::from_slice(&ctx.payload)?;
+
+                    // Convert options and resolve bounce buffer if present
+                    let bounce_buffer_parts = message.options.bounce_buffer_parts();
+                    let mut options: TransferOptions = message.options.into();
+                    if let Some((handle, block_ids)) = bounce_buffer_parts {
+                        options.bounce_buffer =
+                            Some(worker.create_bounce_buffer(handle, block_ids)?);
+                    }
+
+                    let notification = worker.execute_remote_onboard_for_instance(
+                        message.instance_id,
+                        message.remote_logical_type,
+                        message.src_block_ids,
+                        message.dst,
+                        Arc::from(message.dst_block_ids),
+                        options,
+                    )?;
+
+                    notification.await?;
+                    Ok(Some(Bytes::new()))
+                }
+            },
+        )
         .build();
 
         self.nova.register_handler(handler)?;

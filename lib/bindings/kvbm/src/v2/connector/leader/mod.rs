@@ -6,16 +6,19 @@
 //! Provides a PyO3 wrapper around the Rust ConnectorLeader, enabling Python code
 //! to send Nova RPCs to workers for leader-driven initialization.
 
+use pyo3::Bound;
 use pyo3::prelude::*;
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use dynamo_kvbm::InstanceId;
 use dynamo_kvbm::integrations::connector::leader::{ConnectorLeader, FinishedStatus, Request};
+use dynamo_kvbm::{BlockId, InstanceId};
 
-use dynamo_nova_backend::{PeerInfo, WorkerAddress};
+use dynamo_nova_backend::WorkerAddress;
 use uuid::Uuid;
 
 use crate::to_pyerr;
+use crate::v2::runtime::PyKvbmRuntime;
 
 mod request;
 pub use request::PyRequest;
@@ -74,6 +77,17 @@ impl PyConnectorLeader {
             .map_err(to_pyerr)
     }
 
+    pub fn update_state_after_alloc(
+        &self,
+        request_id: &str,
+        block_ids: Vec<BlockId>,
+        num_external_tokens: usize,
+    ) -> PyResult<()> {
+        self.inner
+            .update_state_after_alloc(request_id, block_ids, num_external_tokens)
+            .map_err(to_pyerr)
+    }
+
     /// See [`ConnectorLeader::request_finished`] for more details.
     pub fn request_finished(&self, request_id: &str) -> bool {
         match self.inner.request_finished(request_id) {
@@ -86,8 +100,8 @@ impl PyConnectorLeader {
     /// See [`ConnectorLeader::update_connector_output`] for more details.
     pub fn update_connector_output(
         &self,
-        finished_sending: &PyAny,
-        finished_recving: &PyAny,
+        finished_sending: &Bound<'_, PyAny>,
+        finished_recving: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let finished_sending: HashSet<String> = finished_sending.extract()?;
         let finished_recving: HashSet<String> = finished_recving.extract()?;
@@ -141,7 +155,7 @@ impl PyConnectorLeader {
 
     /// After all workers have been registered, initialize them all.
     pub fn initialize_workers(&self) -> PyResult<()> {
-        self.inner.initialize_workers().map_err(to_pyerr)?;
+        self.inner.initialize().map_err(to_pyerr)?;
         Ok(())
     }
 }

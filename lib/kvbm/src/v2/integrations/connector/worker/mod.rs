@@ -110,7 +110,7 @@ impl GpuInfo {
 
 /// Shared state for the connector worker, wrapped in Arc for handler sharing.
 struct SharedWorkerState {
-    runtime: KvbmRuntime,
+    runtime: Arc<KvbmRuntime>,
     pending_state: Mutex<Option<PendingWorkerState>>,
     service: OnceLock<NovaWorkerService>,
     gpu_info: OnceLock<GpuInfo>,
@@ -132,7 +132,7 @@ impl ConnectorWorker {
     ///
     /// Registers the `kvbm.connector.configure_layouts` handler immediately
     /// so the leader can trigger initialization via RPC.
-    pub fn new(runtime: KvbmRuntime) -> Self {
+    pub fn new(runtime: Arc<KvbmRuntime>) -> Self {
         let state = Arc::new(SharedWorkerState {
             runtime,
             pending_state: Mutex::new(None),
@@ -156,9 +156,19 @@ impl ConnectorWorker {
         self.state.service.get().map(|s| s.worker())
     }
 
+    /// Get serialized handshake metadata for sending to leader.
+    /// Returns the layout_config JSON bytes.
+    pub fn handshake_metadata(&self) -> Result<Vec<u8>> {
+        let guard = self.state.pending_state.lock().unwrap();
+        match guard.as_ref() {
+            Some(pending) => Ok(serde_json::to_vec(&pending.layout_config)?),
+            None => bail!("No pending state - call register_kv_caches first"),
+        }
+    }
+
     #[cfg(test)]
     #[expect(dead_code)]
-    pub(crate) fn runtime(&self) -> &KvbmRuntime {
+    pub(crate) fn runtime(&self) -> &Arc<KvbmRuntime> {
         &self.state.runtime
     }
 

@@ -3,8 +3,10 @@
 
 mod spmd;
 
+use std::sync::Arc;
+
 use super::worker::{
-    ImportMetadataResponse, SerializedLayout, SerializedLayoutResponse, WorkerTransfers, *,
+    ImportMetadataResponse, SerializedLayout, SerializedLayoutResponse, Worker, WorkerTransfers, *,
 };
 use anyhow::Result;
 
@@ -32,4 +34,13 @@ pub trait ParallelWorker: WorkerTransfers + Send + Sync {
         &self,
         metadata: Vec<SerializedLayout>,
     ) -> Result<Vec<ImportMetadataResponse>>;
+
+    /// Get the number of workers.
+    fn worker_count(&self) -> usize;
+
+    /// Get access to the underlying workers for metadata/handle queries.
+    ///
+    /// This is useful for operations that need to query individual workers
+    /// (e.g., collecting layout handles) without executing transfers.
+    fn workers(&self) -> &[Arc<dyn Worker>];
 }

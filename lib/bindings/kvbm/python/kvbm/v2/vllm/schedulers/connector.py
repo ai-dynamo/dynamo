@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
+from kvbm.v2.vllm.config import extract_vllm_config_for_kvbm
+
 # Import our minimal scheduler connector implementations
 from .leader import SchedulerConnectorLeader
 from .worker import SchedulerConnectorWorker
@@ -82,10 +84,13 @@ class DynamoConnector(KVConnectorBase_V1):
         # Serialize to JSON and pass to Rust (empty dict = use defaults)
         kvbm_override_config = json.dumps(extra_config) if extra_config else None
 
+        kvbm_config = extract_vllm_config_for_kvbm(vllm_config)
+
         if role == KVConnectorRole.SCHEDULER:
             self._scheduler = SchedulerConnectorLeader(
                 vllm_config=vllm_config,
                 kv_cache_config=kv_cache_config,
+                kvbm_config=kvbm_config,
                 kvbm_override_config=kvbm_override_config,
             )
             self._worker = None
@@ -93,6 +98,7 @@ class DynamoConnector(KVConnectorBase_V1):
             self._worker = SchedulerConnectorWorker(
                 vllm_config=vllm_config,
                 kv_cache_config=kv_cache_config,
+                kvbm_config=kvbm_config,
                 kvbm_override_config=kvbm_override_config,
             )
             self._scheduler = None

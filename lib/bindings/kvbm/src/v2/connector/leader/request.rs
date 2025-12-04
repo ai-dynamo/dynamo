@@ -3,6 +3,7 @@
 
 use super::*;
 
+#[derive(Clone)]
 #[pyclass(name = "KvbmRequest")]
 pub struct PyRequest {
     pub(crate) inner: Request,

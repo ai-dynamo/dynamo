@@ -285,4 +285,12 @@ impl ParallelWorker for ReplicatedWorker {
 
         Ok(results)
     }
+
+    fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
+    fn workers(&self) -> &[Arc<dyn Worker>] {
+        &self.workers
+    }
 }

@@ -30,12 +30,7 @@ pub struct PyKvbmRuntime {
 }
 
 impl PyKvbmRuntime {
-    /// Get the Nova instance for internal use by other bindings.
-    pub(crate) fn nova(&self) -> anyhow::Result<Arc<dynamo_nova::Nova>> {
-        Ok(self.inner.nova().clone())
-    }
-
-    pub fn inner(&self) -> KvbmRuntime {
+    pub fn inner(&self) -> Arc<KvbmRuntime> {
         self.inner.clone()
     }
 }

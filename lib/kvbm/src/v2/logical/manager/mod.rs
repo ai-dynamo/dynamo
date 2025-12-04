@@ -187,6 +187,32 @@ impl<T: BlockMetadata> BlockManager<T> {
         ImmutableBlock::new(registered_block, self.upgrade_fn.clone())
     }
 
+    /// Register a mutable block with an explicit sequence hash.
+    ///
+    /// This is used when the block content comes from a remote source (e.g., RDMA pull)
+    /// and we know the sequence hash but don't have an existing local block to copy from.
+    ///
+    /// # Arguments
+    /// * `block` - The mutable block to register
+    /// * `seq_hash` - The sequence hash for this block (from remote)
+    pub(crate) fn register_mutable_block_with_hash(
+        &self,
+        block: MutableBlock<T>,
+        seq_hash: SequenceHash,
+    ) -> ImmutableBlock<T> {
+        // Register the sequence hash to get a handle
+        let handle = self.block_registry.register_sequence_hash(seq_hash);
+
+        // Register the block using the handle
+        let registered_block = handle.register_mutable_block(
+            block,
+            self.duplication_policy,
+            self.inactive_pool.return_fn(),
+        );
+
+        ImmutableBlock::new(registered_block, self.upgrade_fn.clone())
+    }
+
     /// Match blocks does a linear search through the [SequenceHash] array, stopping on the first miss.
     pub fn match_blocks(&self, seq_hash: &[SequenceHash]) -> Vec<ImmutableBlock<T>> {
         // First try to match against active blocks

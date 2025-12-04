@@ -1,0 +1,389 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Main offload engine coordinating pipelines.
+//!
+//! The `OffloadEngine` is a standalone component that manages block offloading
+//! between storage tiers (G1→G2, G2→G3, G2→G4).
+//!
+//! # Example
+//! ```ignore
+//! let engine = OffloadEngine::builder(leader.clone())
+//!     .with_registry(registry.clone())
+//!     .with_g1_to_g2_pipeline(
+//!         PipelineBuilder::<G1, G2>::new()
+//!             .policy(Arc::new(PresenceFilter::new(registry.clone())))
+//!             .batch_size(32)
+//!             .auto_chain(true)
+//!             .build()
+//!     )
+//!     .with_g2_to_g3_pipeline(
+//!         PipelineBuilder::<G2, G3>::new()
+//!             .policy(Arc::new(PresenceAndLFUFilter::with_default_threshold(registry.clone())))
+//!             .batch_size(64)
+//!             .build()
+//!     )
+//!     .build()?;
+//!
+//! let handle = engine.enqueue_g2_to_g3(blocks);
+//! handle.wait().await?;
+//! ```
+
+use std::sync::Arc;
+
+use anyhow::Result;
+use dashmap::DashMap;
+
+use crate::v2::distributed::leader::InstanceLeader;
+use crate::v2::logical::LogicalLayoutHandle;
+use crate::v2::logical::blocks::{BlockMetadata, BlockRegistry, ImmutableBlock};
+use crate::v2::logical::manager::BlockManager;
+use crate::v2::{BlockId, G1, G2, G3, G4};
+
+use super::handle::{TransferHandle, TransferId, TransferState};
+use super::pipeline::{Pipeline, PipelineConfig};
+use super::source::SourceBlocks;
+
+/// Central coordinator for offload pipelines.
+///
+/// The engine manages multiple pipelines (G1→G2, G2→G3, G2→G4) and provides
+/// a unified interface for enqueueing blocks for offload.
+pub struct OffloadEngine {
+    /// Reference to the instance leader for transfers
+    leader: Arc<InstanceLeader>,
+    /// Block registry for policy evaluation
+    registry: Arc<BlockRegistry>,
+    /// G1→G2 pipeline
+    g1_to_g2: Option<Pipeline<G1, G2>>,
+    /// G2→G3 pipeline
+    g2_to_g3: Option<Pipeline<G2, G3>>,
+    /// G2→G4 pipeline
+    g2_to_g4: Option<Pipeline<G2, G4>>,
+    /// Active transfer tracking
+    transfers: Arc<DashMap<TransferId, Arc<std::sync::Mutex<TransferState>>>>,
+}
+
+impl OffloadEngine {
+    /// Create a new builder for the offload engine.
+    pub fn builder(leader: Arc<InstanceLeader>) -> OffloadEngineBuilder {
+        OffloadEngineBuilder::new(leader)
+    }
+
+    /// Enqueue blocks for G1→G2 offload.
+    ///
+    /// Returns a `TransferHandle` for tracking progress and cancellation.
+    pub fn enqueue_g1_to_g2(&self, blocks: impl Into<SourceBlocks<G1>>) -> Result<TransferHandle> {
+        let pipeline = self
+            .g1_to_g2
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("G1→G2 pipeline not configured"))?;
+
+        self.enqueue_to_pipeline(pipeline, blocks.into())
+    }
+
+    /// Enqueue blocks for G2→G3 offload.
+    ///
+    /// Returns a `TransferHandle` for tracking progress and cancellation.
+    pub fn enqueue_g2_to_g3(&self, blocks: impl Into<SourceBlocks<G2>>) -> Result<TransferHandle> {
+        let pipeline = self
+            .g2_to_g3
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("G2→G3 pipeline not configured"))?;
+
+        self.enqueue_to_pipeline(pipeline, blocks.into())
+    }
+
+    /// Enqueue blocks for G2→G4 offload.
+    ///
+    /// Returns a `TransferHandle` for tracking progress and cancellation.
+    pub fn enqueue_g2_to_g4(&self, blocks: impl Into<SourceBlocks<G2>>) -> Result<TransferHandle> {
+        let pipeline = self
+            .g2_to_g4
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("G2→G4 pipeline not configured"))?;
+
+        self.enqueue_to_pipeline(pipeline, blocks.into())
+    }
+
+    /// Internal: enqueue to a specific pipeline.
+    fn enqueue_to_pipeline<Src: BlockMetadata, Dst: BlockMetadata>(
+        &self,
+        pipeline: &Pipeline<Src, Dst>,
+        source: SourceBlocks<Src>,
+    ) -> Result<TransferHandle> {
+        // Extract block IDs for state tracking
+        let input_block_ids = self.extract_block_ids(&source);
+
+        // Create transfer state and handle
+        let transfer_id = TransferId::new();
+        let (state, handle) = TransferState::new(transfer_id, input_block_ids);
+        let state = Arc::new(std::sync::Mutex::new(state));
+
+        // Store transfer state
+        self.transfers.insert(transfer_id, state.clone());
+
+        // Convert source to ImmutableBlocks
+        let blocks = self.resolve_source_blocks(source)?;
+
+        // Enqueue to pipeline
+        let pipeline_clone = pipeline.input_tx.clone();
+        let input = super::pipeline::PipelineInput {
+            transfer_id,
+            blocks,
+            state,
+        };
+
+        // Spawn the send to avoid blocking
+        tokio::spawn(async move {
+            if let Err(e) = pipeline_clone.send(input).await {
+                tracing::error!("Failed to enqueue to pipeline: {}", e);
+            }
+        });
+
+        Ok(handle)
+    }
+
+    /// Extract block IDs from source blocks.
+    fn extract_block_ids<T: BlockMetadata>(&self, source: &SourceBlocks<T>) -> Vec<BlockId> {
+        match source {
+            SourceBlocks::External(ids) => ids.clone(),
+            SourceBlocks::Strong(blocks) => blocks.iter().map(|b| b.block_id()).collect(),
+            SourceBlocks::Weak(_) => Vec::new(), // IDs not available without upgrade
+        }
+    }
+
+    /// Resolve source blocks to ImmutableBlocks.
+    fn resolve_source_blocks<T: BlockMetadata>(
+        &self,
+        source: SourceBlocks<T>,
+    ) -> Result<Vec<ImmutableBlock<T>>> {
+        match source {
+            SourceBlocks::External(_ids) => {
+                // For external blocks, caller is responsible for holding them
+                // We can't create ImmutableBlocks from just IDs
+                // This would need a BlockManager lookup
+                anyhow::bail!("External block IDs not yet supported - use Strong or Weak")
+            }
+            SourceBlocks::Strong(blocks) => Ok(blocks),
+            SourceBlocks::Weak(weak_blocks) => {
+                // Try to upgrade weak blocks
+                let mut blocks = Vec::with_capacity(weak_blocks.len());
+                for weak in weak_blocks {
+                    match weak.upgrade() {
+                        Some(block) => blocks.push(block),
+                        None => {
+                            // Block was evicted, skip it
+                            tracing::debug!("Weak block evicted, skipping");
+                        }
+                    }
+                }
+                Ok(blocks)
+            }
+        }
+    }
+
+    /// Release a completed transfer's resources.
+    ///
+    /// This is optional - transfers are automatically cleaned up,
+    /// but call this to release resources earlier.
+    pub fn release_transfer(&self, transfer_id: TransferId) {
+        self.transfers.remove(&transfer_id);
+    }
+
+    /// Get the number of active transfers.
+    pub fn active_transfer_count(&self) -> usize {
+        self.transfers.len()
+    }
+
+    /// Check if G1→G2 pipeline is configured.
+    pub fn has_g1_to_g2(&self) -> bool {
+        self.g1_to_g2.is_some()
+    }
+
+    /// Check if G2→G3 pipeline is configured.
+    pub fn has_g2_to_g3(&self) -> bool {
+        self.g2_to_g3.is_some()
+    }
+
+    /// Check if G2→G4 pipeline is configured.
+    pub fn has_g2_to_g4(&self) -> bool {
+        self.g2_to_g4.is_some()
+    }
+}
+
+/// Builder for OffloadEngine.
+pub struct OffloadEngineBuilder {
+    leader: Arc<InstanceLeader>,
+    registry: Option<Arc<BlockRegistry>>,
+    g1_manager: Option<Arc<BlockManager<G1>>>,
+    g2_manager: Option<Arc<BlockManager<G2>>>,
+    g3_manager: Option<Arc<BlockManager<G3>>>,
+    g4_manager: Option<Arc<BlockManager<G4>>>,
+    g1_to_g2_config: Option<PipelineConfig<G1, G2>>,
+    g2_to_g3_config: Option<PipelineConfig<G2, G3>>,
+    g2_to_g4_config: Option<PipelineConfig<G2, G4>>,
+}
+
+impl OffloadEngineBuilder {
+    /// Create a new builder with the given instance leader.
+    pub fn new(leader: Arc<InstanceLeader>) -> Self {
+        Self {
+            leader,
+            registry: None,
+            g1_manager: None,
+            g2_manager: None,
+            g3_manager: None,
+            g4_manager: None,
+            g1_to_g2_config: None,
+            g2_to_g3_config: None,
+            g2_to_g4_config: None,
+        }
+    }
+
+    /// Set the block registry.
+    pub fn with_registry(mut self, registry: Arc<BlockRegistry>) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
+    /// Set the G1 block manager.
+    pub fn with_g1_manager(mut self, manager: Arc<BlockManager<G1>>) -> Self {
+        self.g1_manager = Some(manager);
+        self
+    }
+
+    /// Set the G2 block manager.
+    pub fn with_g2_manager(mut self, manager: Arc<BlockManager<G2>>) -> Self {
+        self.g2_manager = Some(manager);
+        self
+    }
+
+    /// Set the G3 block manager.
+    pub fn with_g3_manager(mut self, manager: Arc<BlockManager<G3>>) -> Self {
+        self.g3_manager = Some(manager);
+        self
+    }
+
+    /// Set the G4 block manager.
+    pub fn with_g4_manager(mut self, manager: Arc<BlockManager<G4>>) -> Self {
+        self.g4_manager = Some(manager);
+        self
+    }
+
+    /// Configure G1→G2 pipeline.
+    pub fn with_g1_to_g2_pipeline(mut self, config: PipelineConfig<G1, G2>) -> Self {
+        self.g1_to_g2_config = Some(config);
+        self
+    }
+
+    /// Configure G2→G3 pipeline.
+    pub fn with_g2_to_g3_pipeline(mut self, config: PipelineConfig<G2, G3>) -> Self {
+        self.g2_to_g3_config = Some(config);
+        self
+    }
+
+    /// Configure G2→G4 pipeline.
+    pub fn with_g2_to_g4_pipeline(mut self, config: PipelineConfig<G2, G4>) -> Self {
+        self.g2_to_g4_config = Some(config);
+        self
+    }
+
+    /// Build the offload engine.
+    pub fn build(self) -> Result<OffloadEngine> {
+        let registry = self
+            .registry
+            .ok_or_else(|| anyhow::anyhow!("Block registry required"))?;
+
+        // Build G1→G2 pipeline if configured
+        let g1_to_g2 = if let Some(config) = self.g1_to_g2_config {
+            let g1_manager = self
+                .g1_manager
+                .ok_or_else(|| anyhow::anyhow!("G1 manager required for G1→G2 pipeline"))?;
+            let g2_manager = self
+                .g2_manager
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("G2 manager required for G1→G2 pipeline"))?;
+
+            Some(Pipeline::new(
+                config,
+                registry.clone(),
+                g1_manager,
+                g2_manager,
+                self.leader.clone(),
+                LogicalLayoutHandle::G1,
+                LogicalLayoutHandle::G2,
+            ))
+        } else {
+            None
+        };
+
+        // Build G2→G3 pipeline if configured
+        let g2_to_g3 = if let Some(config) = self.g2_to_g3_config {
+            let g2_manager = self
+                .g2_manager
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("G2 manager required for G2→G3 pipeline"))?;
+            let g3_manager = self
+                .g3_manager
+                .ok_or_else(|| anyhow::anyhow!("G3 manager required for G2→G3 pipeline"))?;
+
+            Some(Pipeline::new(
+                config,
+                registry.clone(),
+                g2_manager,
+                g3_manager,
+                self.leader.clone(),
+                LogicalLayoutHandle::G2,
+                LogicalLayoutHandle::G3,
+            ))
+        } else {
+            None
+        };
+
+        // Build G2→G4 pipeline if configured
+        let g2_to_g4 = if let Some(config) = self.g2_to_g4_config {
+            let g2_manager = self
+                .g2_manager
+                .ok_or_else(|| anyhow::anyhow!("G2 manager required for G2→G4 pipeline"))?;
+            let g4_manager = self
+                .g4_manager
+                .ok_or_else(|| anyhow::anyhow!("G4 manager required for G2→G4 pipeline"))?;
+
+            Some(Pipeline::new(
+                config,
+                registry.clone(),
+                g2_manager,
+                g4_manager,
+                self.leader.clone(),
+                LogicalLayoutHandle::G2,
+                LogicalLayoutHandle::G4,
+            ))
+        } else {
+            None
+        };
+
+        Ok(OffloadEngine {
+            leader: self.leader,
+            registry,
+            g1_to_g2,
+            g2_to_g3,
+            g2_to_g4,
+            transfers: Arc::new(DashMap::new()),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Note: Full tests require complex infrastructure setup (InstanceLeader, BlockManagers, etc.)
+    // Basic API tests here.
+
+    #[test]
+    fn test_transfer_id_generation() {
+        let id1 = TransferId::new();
+        let id2 = TransferId::new();
+        assert_ne!(id1, id2);
+    }
+}

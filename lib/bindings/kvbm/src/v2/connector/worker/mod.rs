@@ -36,8 +36,8 @@ impl PyConnectorWorker {
     ///     ConnectorWorker: The worker instance ready for KV cache registration.
     #[new]
     pub fn new(runtime: &crate::v2::runtime::PyKvbmRuntime) -> PyResult<Self> {
-        let nova = runtime.nova().map_err(to_pyerr)?;
-        let inner = ConnectorWorker::new(nova);
+        let runtime = runtime.inner();
+        let inner = ConnectorWorker::new(runtime);
         Ok(Self { inner })
     }
 
@@ -120,6 +120,7 @@ impl PyConnectorWorker {
     ///     tuple: (Optional[set[str]], Optional[set[str]]) for (offload_ids, onboard_ids)
     ///            Returns None for each set if there are no completed requests of that type.
     #[pyo3(name = "get_finished")]
+    #[allow(clippy::type_complexity)]
     pub fn py_get_finished(
         &self,
     ) -> PyResult<(

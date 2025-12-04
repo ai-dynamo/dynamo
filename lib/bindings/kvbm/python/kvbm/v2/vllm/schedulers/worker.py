@@ -21,6 +21,8 @@ import torch
 
 # Import KvbmRuntime and ConnectorWorker from Rust bindings
 from kvbm._core import v2 as _v2
+from kvbm.v2.vllm import KvbmVllmConfig
+
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
@@ -66,10 +68,11 @@ class SchedulerConnectorWorker:
     """
 
     def __init__(
-        self, vllm_config: "VllmConfig", kv_cache_config: KVCacheConfig, **kwargs
+        self, vllm_config: "VllmConfig", kvbm_config: KvbmVllmConfig, kv_cache_config: KVCacheConfig, **kwargs
     ):
         """Initialize the scheduler connector worker."""
         self.vllm_config = vllm_config
+        self.kvbm_config = kvbm_config
         self.vllm_kv_cache_config = kv_cache_config
         self.kvbm_override_config = kwargs.get("kvbm_override_config", None)
 
@@ -101,10 +104,6 @@ class SchedulerConnectorWorker:
         This registers the KV cache tensors with NIXL via the UCX backend,
         enabling remote GPU-to-GPU transfers.
         """
-        # Extract vLLM config now that num_gpu_blocks is populated
-        if self.kvbm_config is None:
-            self.kvbm_config = extract_vllm_config_for_kvbm(self.vllm_config)
-
         if not kv_caches:
             print("Warning: register_kv_caches called with empty kv_caches")
             return

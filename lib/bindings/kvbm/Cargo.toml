@@ -20,12 +20,12 @@ name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["block-manager"]
+default = []
 block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc", "dep:kvbm_kernels"]
 
 [dependencies]
 dynamo-llm = { path = "../../llm" }
-dynamo-kvbm = { path = "../../kvbm", features = ["etcd"] }
+dynamo-kvbm = { path = "../../kvbm" }
 dynamo-kvbm-config = { path = "../../kvbm-config" }
 dynamo-memory = { path = "../../memory" }
 dynamo-nova = { path = "../../nova" }

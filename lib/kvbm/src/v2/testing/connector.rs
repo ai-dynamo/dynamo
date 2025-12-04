@@ -1214,7 +1214,7 @@ impl TestConnectorInstanceBuilder {
                     .build()?,
             );
 
-            let connector_worker = ConnectorWorker::new(worker_runtime);
+            let connector_worker = ConnectorWorker::new(Arc::new(worker_runtime));
 
             // Create mock tensors that hold references to the layout to keep memory alive
             let element_size = self.layout_config.dtype_width_bytes;
@@ -1263,7 +1263,7 @@ impl TestConnectorInstanceBuilder {
             builder.build_leader().await?
         };
 
-        let leader = Arc::new(ConnectorLeader::new(leader_runtime, block_size));
+        let leader = Arc::new(ConnectorLeader::new(Arc::new(leader_runtime), block_size));
 
         Ok(TestConnectorInstance {
             leader,

@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Optional
 
 from kvbm._core import v2 as _v2
+from kvbm.v2.vllm import KvbmVllmConfig
 
 KvbmRuntime = _v2.KvbmRuntime
 ConnectorLeader = _v2.ConnectorLeader
@@ -57,24 +58,23 @@ class SchedulerConnectorLeader:
     """
 
     def __init__(
-        self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, **kwargs
+        self, vllm_config: VllmConfig, kvbm_config: KvbmVllmConfig, kv_cache_config: KVCacheConfig, **kwargs
     ):
         """Initialize the scheduler connector leader."""
         print("[KVBM DEBUG] SchedulerConnectorLeader.__init__ START", flush=True)
 
         self.vllm_config = vllm_config
+        self.kvbm_config = kvbm_config
         self.vllm_kv_cache_config = kv_cache_config
         self.kvbm_override_config = kwargs.get("kvbm_override_config", None)
+
+        self.block_size = vllm_config.cache_config.block_size
 
         # JSON config has highest priority (overrides env vars and TOML files)
         self.runtime = KvbmRuntime.build_leader(self.kvbm_override_config)
 
         # Create leader service for coordination (separate from runtime)
-        self.leader = ConnectorLeader(self.runtime)
-
-        # Track active slots (request_id -> True)
-        # TODO: SlotManager
-        self._slots: dict[str, bool] = {}
+        self.leader = ConnectorLeader(self.runtime, self.block_size)
 
         instance_id = self.runtime.instance_id()
         print(
@@ -90,22 +90,6 @@ class SchedulerConnectorLeader:
         self._create_slot(request.request_id)
         return self.leader.get_num_new_matched_tokens(request.request_id, num_computed_tokens)
 
-        # # No external tokens available - return (0, False)
-        # matched_tokens = 0
-        # print(
-        #     f"[KVBM] get_num_new_matched_tokens: request={request.request_id}, "
-        #     f"computed={num_computed_tokens}, matched={matched_tokens} (cache_hits=0)"
-        # )
-        # return (matched_tokens, False)
-
-        # TODO: Re-enable when v2 connector bindings are updated
-        # total_tokens = getattr(request, "num_tokens", 0)
-        # return self._connector.get_num_new_matched_tokens(
-        #     request.request_id,
-        #     total_tokens,
-        #     num_computed_tokens,
-        # )
-
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ) -> None:
@@ -114,16 +98,8 @@ class SchedulerConnectorLeader:
 
         This should never be called with num_external_tokens > 0.
         """
-        self._ensure_slot(request.request_id)
-        # No-op for Phase 1
-
-        # TODO: Re-enable when v2 connector bindings are updated
-        # block_ids = [int(block_id) for block_id in blocks.get_block_ids()[0]]
-        # self._connector.update_state_after_alloc(
-        #     request.request_id,
-        #     block_ids,
-        #     num_external_tokens,
-        # )
+        block_ids = [int(block_id) for block_id in blocks.get_block_ids()[0]]
+        self.leader.update_state_after_alloc(request.request_id, block_ids, num_external_tokens)
 
     def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> bytes:
         """

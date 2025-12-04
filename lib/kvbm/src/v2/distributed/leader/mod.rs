@@ -18,6 +18,7 @@ pub use session::{
 pub use state::{LeaderState, RemoteLeaderInfo, route_local_to_remote};
 
 use anyhow::Result;
+use futures::future::{BoxFuture, Either, Ready, ready};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc, watch};
 
@@ -182,22 +183,25 @@ impl AsyncSessionResult {
     /// For StagingMode::Full, waits for Complete status.
     /// For Hold/Prepare modes, waits for terminal state (Holding/Prepared/Complete).
     ///
-    /// This method is tokio::select! compatible.
-    pub async fn wait_for_completion(&mut self) -> Result<()> {
-        // Wait for terminal status
-        self.status_rx
-            .wait_for(|status| {
-                matches!(
-                    status,
-                    OnboardingStatus::Complete { .. }
-                        | OnboardingStatus::Holding { .. }
-                        | OnboardingStatus::Prepared { .. }
-                )
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to wait for completion: {e}"))?;
+    /// This method returns a future that can be used with tokio::select!.
+    pub fn wait_for_completion(&self) -> BoxFuture<'static, Result<()>> {
+        let mut status_rx = self.status_rx.clone();
+        Box::pin(async move {
+            // Wait for terminal status
+            status_rx
+                .wait_for(|status| {
+                    matches!(
+                        status,
+                        OnboardingStatus::Complete { .. }
+                            | OnboardingStatus::Holding { .. }
+                            | OnboardingStatus::Prepared { .. }
+                    )
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to wait for completion: {e}"))?;
 
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -265,6 +269,28 @@ impl FindMatchesResult {
             FindMatchesResult::AsyncSession(a) => a.blocks.try_lock().ok()?.take(),
         }
     }
+
+    pub fn session_id(&self) -> Option<SessionId> {
+        match self {
+            FindMatchesResult::Ready(_) => None,
+            FindMatchesResult::AsyncSession(a) => Some(a.session_id()),
+        }
+    }
+
+    /// Wait for the operation to complete.
+    ///
+    /// For Ready variant: returns immediately with Ok(()).
+    /// For AsyncSession variant: waits for terminal status (Complete/Holding/Prepared).
+    ///
+    /// Returns an Either future that can be used with tokio::select!.
+    pub fn wait_for_completion(&self) -> Either<Ready<Result<()>>, BoxFuture<'static, Result<()>>> {
+        match self {
+            FindMatchesResult::Ready(_) => Either::Left(ready(Ok(()))),
+            FindMatchesResult::AsyncSession(async_session) => {
+                Either::Right(async_session.wait_for_completion())
+            }
+        }
+    }
 }
 
 /// Status of an onboarding operation.
@@ -316,7 +342,7 @@ pub enum OnboardingStatus {
     /// Operation complete - all blocks are in initiator's G2 (StagingMode::Full).
     /// Or terminal state for Hold/Prepare modes.
     /// - `matched`: total number of blocks in local G2
-    Complete { matched: usize },
+    Complete { matched_blocks: usize },
 }
 
 /// Control commands for managing live sessions.
