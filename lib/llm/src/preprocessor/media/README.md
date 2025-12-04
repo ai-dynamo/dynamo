@@ -42,6 +42,8 @@ register_llm(
 
 > [!WARNING]
 > **Incompatible with `Dockerfile.frontend`**: Frontend media decoding (built with `--features media-nixl`) is not supported when using `Dockerfile.frontend`. The frontend image built from `Dockerfile.frontend` does not include the required NIXL/UCX libraries.
+
+> [!WARNING]
 > **Requires GPU node**: The frontend must run on a node with GPU access. During media processing, decoded tensors are written to GPU memory via NIXL, which requires `libcuda.so.1` to be available. Running the frontend on a CPU-only node will fail with something like: `Failed to initialize required backends: [UCX: No UCX plugin found]`.
 
 ## TODOs
