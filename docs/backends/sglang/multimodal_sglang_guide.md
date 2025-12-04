@@ -359,8 +359,8 @@ if not request.multimodal_input.image_url:
 - Use **vLLM backend** for video/audio support (has full implementation)
 
 **Workaround:**
-- For video models: Use vLLM (`[examples/multimodal/launch/video_agg.sh](../../../examples/multimodal/launch/video_agg.sh)`)
-- For audio models: Use vLLM (`[examples/multimodal/launch/audio_agg.sh](../../../examples/multimodal/launch/audio_agg.sh)`)
+- For video models: Use vLLM ([`examples/multimodal/launch/video_agg.sh`](../../../examples/multimodal/launch/video_agg.sh))
+- For audio models: Use vLLM ([`examples/multimodal/launch/audio_agg.sh`](../../../examples/multimodal/launch/audio_agg.sh))
 - Or implement custom video/audio encode worker for SGLang
 
 ### 6. Bootstrap Coordination and Routing Complexity

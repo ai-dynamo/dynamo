@@ -152,7 +152,7 @@ Response
 
 ### Launch Script
 
-Example: `[examples/backends/vllm/launch/disagg_multimodal_llama.sh](../../../examples/backends/vllm/launch/disagg_multimodal_llama.sh)`
+Example: [`examples/backends/vllm/launch/disagg_multimodal_llama.sh`](../../../examples/backends/vllm/launch/disagg_multimodal_llama.sh)
 
 ## ModelInput Types and Registration
 
@@ -191,10 +191,10 @@ await register_llm(
 
 | Use Case | Script | NIXL Used? | Data Transfer |
 |----------|--------|------------|---------------|
-| Simple Aggregated | `[examples/backends/vllm/launch/agg_multimodal.sh](../../../examples/backends/vllm/launch/agg_multimodal.sh)` | ❌ No | All in one worker |
-| E->PD Aggregated | `[examples/backends/vllm/launch/agg_multimodal_epd.sh](../../../examples/backends/vllm/launch/agg_multimodal_epd.sh)` | ✅ Yes | Encoder → PD (embeddings) |
-| E->P->D Disaggregated | `[examples/backends/vllm/launch/disagg_multimodal_epd.sh](../../../examples/backends/vllm/launch/disagg_multimodal_epd.sh)` | ✅ Yes | Encoder → Prefill (embeddings)<br>Prefill → Decode (KV cache) |
-| EP->D Disaggregated (Llama 4) | `[examples/backends/vllm/launch/disagg_multimodal_llama.sh](../../../examples/backends/vllm/launch/disagg_multimodal_llama.sh)` | ✅ Yes | Prefill → Decode (KV cache) |
+| Simple Aggregated | [`examples/backends/vllm/launch/agg_multimodal.sh`](../../../examples/backends/vllm/launch/agg_multimodal.sh) | ❌ No | All in one worker |
+| E->PD Aggregated | [`examples/backends/vllm/launch/agg_multimodal_epd.sh`](../../../examples/backends/vllm/launch/agg_multimodal_epd.sh) | ✅ Yes | Encoder → PD (embeddings) |
+| E->P->D Disaggregated | [`examples/backends/vllm/launch/disagg_multimodal_epd.sh`](../../../examples/backends/vllm/launch/disagg_multimodal_epd.sh) | ✅ Yes | Encoder → Prefill (embeddings)<br>Prefill → Decode (KV cache) |
+| EP->D Disaggregated (Llama 4) | [`examples/backends/vllm/launch/disagg_multimodal_llama.sh`](../../../examples/backends/vllm/launch/disagg_multimodal_llama.sh) | ✅ Yes | Prefill → Decode (KV cache) |
 
 
 ## **GAPS and Known Limitations**

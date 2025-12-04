@@ -75,7 +75,7 @@ Response
 
 ### Launch Script
 
-Example: `[examples/backends/trtllm/launch/agg.sh](../../../examples/backends/trtllm/launch/agg.sh)`
+Example: [`examples/backends/trtllm/launch/agg.sh`](../../../examples/backends/trtllm/launch/agg.sh)
 
 ## Disaggregated Mode (P->D)
 
@@ -102,7 +102,7 @@ Response
 
 ### Launch Script
 
-Example: `[examples/backends/trtllm/launch/disagg_multimodal.sh](../../../examples/backends/trtllm/launch/disagg_multimodal.sh)`
+Example: [`examples/backends/trtllm/launch/disagg_multimodal.sh`](../../../examples/backends/trtllm/launch/disagg_multimodal.sh)
 
 ## EPD Disaggregated Mode (E->P->D) - WIP
 
@@ -136,7 +136,7 @@ Response
 
 ### Launch Script
 
-Example: `[examples/backends/trtllm/launch/epd_disagg.sh](../../../examples/backends/trtllm/launch/epd_disagg.sh)`
+Example: [`examples/backends/trtllm/launch/epd_disagg.sh`](../../../examples/backends/trtllm/launch/epd_disagg.sh)
 
 **Note (WIP):** The default model in the WIP PR is `llava-hf/llava-v1.6-mistral-7b-hf`.
 
@@ -181,9 +181,9 @@ TRT-LLM components communicate using NATS messaging:
 
 | Use Case | Script | NIXL Used? | Data Transfer |
 |----------|--------|------------|---------------|
-| Simple Aggregated | `[examples/backends/trtllm/launch/agg.sh](../../../examples/backends/trtllm/launch/agg.sh)` | ❌ No | All in one worker |
-| P->D Disaggregated | `[examples/backends/trtllm/launch/disagg_multimodal.sh](../../../examples/backends/trtllm/launch/disagg_multimodal.sh)` | ⚙️ Optional | Prefill → Decode (KV cache via UCX or NIXL) |
-| E->P->D Disaggregated (Precomputed Embeddings) | `[examples/backends/trtllm/launch/epd_disagg.sh](../../../examples/backends/trtllm/launch/epd_disagg.sh)` | ✅ Yes | Encoder → Prefill (pre-computed embeddings via NIXL) |
+| Simple Aggregated | [`examples/backends/trtllm/launch/agg.sh`](../../../examples/backends/trtllm/launch/agg.sh) | ❌ No | All in one worker |
+| P->D Disaggregated | [`examples/backends/trtllm/launch/disagg_multimodal.sh`](../../../examples/backends/trtllm/launch/disagg_multimodal.sh) | ⚙️ Optional | Prefill → Decode (KV cache via UCX or NIXL) |
+| E->P->D Disaggregated (Precomputed Embeddings) | [`examples/backends/trtllm/launch/epd_disagg.sh`](../../../examples/backends/trtllm/launch/epd_disagg.sh) | ✅ Yes | Encoder → Prefill (pre-computed embeddings via NIXL) |
 | E->P->D Disaggregated (WIP) | `examples/backends/trtllm/launch/url_epd_disagg.sh` | ❌ No | Encoder → Prefill (multimodal handles via disaggregated_params)<br>Prefill → Decode (KV cache via UCX/NIXL) |
 
 **Note:** NIXL for KV cache transfer is currently beta and only supported on AMD64 (x86_64) architecture.
