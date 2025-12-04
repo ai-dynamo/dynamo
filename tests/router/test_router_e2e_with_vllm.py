@@ -307,7 +307,9 @@ class VLLMProcess:
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-def test_vllm_kv_router_basic(request, runtime_services, predownload_models):
+def test_vllm_kv_router_basic(
+    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+):
     """
     Quick e2e sanity test for KV router with vLLM engine instances.
     """
@@ -348,7 +350,7 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_models):
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 def test_router_decisions_vllm_multiple_workers(
-    request, runtime_services, predownload_models
+    request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting vLLM router prefix reuse test with two workers")
@@ -387,7 +389,9 @@ def test_router_decisions_vllm_multiple_workers(
 
 
 @pytest.mark.gpu_2
-def test_router_decisions_vllm_dp(request, runtime_services, predownload_models):
+def test_router_decisions_vllm_dp(
+    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+):
     """Validate KV cache prefix reuse with vLLM by sending progressive requests with overlapping prefixes.
     Same flow as test_router_decisions_vllm_multiple_workers; force first request to (worker_id, dp_rank=1).
     Dump events from router and verify:
@@ -429,7 +433,9 @@ def test_router_decisions_vllm_dp(request, runtime_services, predownload_models)
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-def test_vllm_indexers_sync(request, runtime_services, predownload_models):
+def test_vllm_indexers_sync(
+    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+):
     """
     Test that two KV routers have synchronized indexer states after processing requests
     with vLLM workers. This test verifies that both routers converge to the same internal state.
