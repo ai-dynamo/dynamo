@@ -104,7 +104,7 @@ runs:
         EXTRA_ARGS=" --framework-cache-to type=inline"
         EXTRA_ARGS+=" --framework-cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache"
         # if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-        EXTRA_ARGS+=" --framework-cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-${PLATFORM##*/},mode=max"
+        EXTRA_ARGS+=" --framework-cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-${PLATFORM##*/},mode=max"
         # fi
 
         echo "$EXTRA_ARGS"
