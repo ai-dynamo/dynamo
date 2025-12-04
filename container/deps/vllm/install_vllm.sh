@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VLLM_REF="v0.11.2"
+VLLM_REF="v0.12.0"
 
 # Basic Configurations
 ARCH=$(uname -m)
@@ -22,9 +22,9 @@ INSTALLATION_DIR=/tmp
 TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels
 DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
-FLASHINF_REF="v0.5.2"
+FLASHINF_REF="v0.5.3"
 # LMCache version - 0.3.9+ required for vLLM 0.11.2 compatibility
-LMCACHE_REF="0.3.9.post2"
+LMCACHE_REF="0.3.10"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
