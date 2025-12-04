@@ -527,14 +527,23 @@ spec:
 
 ## Manual Scaling
 
-You can manually scale a service by patching the adapter:
+You can manually scale a service using the scale subresource:
 
 ```bash
-kubectl patch dgdsa sglang-agg-decode -n default \
-  --type='json' -p='[{"op": "replace", "path": "/spec/replicas", "value": 3}]'
+kubectl scale dgdsa sglang-agg-decode -n default --replicas=3
 ```
 
-> **Note**: If an autoscaler is managing the adapter, your change will be overwritten on the next evaluation cycle.
+Verify the scaling:
+
+```bash
+kubectl get dgdsa sglang-agg-decode -n default
+
+# Output:
+# NAME                DGD         SERVICE   REPLICAS   AGE
+# sglang-agg-decode   sglang-agg  decode    3          10m
+```
+
+> **Note**: If an autoscaler (KEDA, HPA, Planner) is managing the adapter, your change will be overwritten on the next evaluation cycle.
 
 ## Best Practices
 
