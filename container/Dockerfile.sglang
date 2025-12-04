@@ -347,9 +347,9 @@ ARG GRACE_BLACKWELL=false
 ARG ARCH
 ARG ARCH_ALT
 ARG PYTHON_VERSION
-ARG USE_SCCACHE
-ARG SCCACHE_BUCKET
-ARG SCCACHE_REGION
+# ARG USE_SCCACHE
+# ARG SCCACHE_BUCKET
+# ARG SCCACHE_REGION
 ARG CARGO_BUILD_JOBS
 ARG CUDA_VERSION
 
@@ -453,19 +453,19 @@ RUN apt-get update \
     && apt-get clean
 
 # Install sccache if requested
-COPY container/use-sccache.sh /tmp/use-sccache.sh
-RUN if [ "$USE_SCCACHE" = "true" ]; then \
-    /tmp/use-sccache.sh install; \
-fi
+# COPY container/use-sccache.sh /tmp/use-sccache.sh
+# RUN if [ "$USE_SCCACHE" = "true" ]; then \
+#     /tmp/use-sccache.sh install; \
+# fi
 
 # Set environment variables - they'll be empty strings if USE_SCCACHE=false
-ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
-    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
-    RUSTC_WRAPPER=${USE_SCCACHE:+sccache} \
-    CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
-    CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
-    CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
+# ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
+#     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
+#     SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
+#     RUSTC_WRAPPER=${USE_SCCACHE:+sccache} \
+#     CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
+#     CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
+#     CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
 
 WORKDIR /sgl-workspace
 
