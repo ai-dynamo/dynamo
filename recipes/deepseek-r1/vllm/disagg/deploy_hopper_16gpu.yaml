@@ -4,11 +4,11 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: test3-vllm-dsr1
+  name: vllm-dsr1
 spec:
   backendFramework: vllm
   pvcs:
-    - name: model-cache-pvc
+    - name: model-cache
       create: false
   services:
     Frontend:
@@ -50,6 +50,13 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 2
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/dynamo
           env:
@@ -117,6 +124,13 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 2
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/dynamo
           env:
