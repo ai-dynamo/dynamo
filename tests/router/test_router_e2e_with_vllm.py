@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 pytestmark = [
-    pytest.mark.pre_merge,
     pytest.mark.e2e,
     pytest.mark.vllm,
     pytest.mark.model(MODEL_NAME),
@@ -48,11 +47,14 @@ TEST_PAYLOAD: Dict[str, Any] = {
 }
 
 # Shared vLLM configuration for all tests
+# Use num_gpu_blocks_override instead of gpu_memory_utilization to avoid
+# memory fragmentation issues when running multiple workers on same GPU
 VLLM_ARGS: Dict[str, Any] = {
     "block_size": BLOCK_SIZE,
     "model": MODEL_NAME,
-    "gpu_memory_utilization": 0.35,
+    "num_gpu_blocks_override": 5000,  # Fixed block count per worker
     "max_model_len": 1024,  # Limit context length to reduce KV cache size
+    "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
 }
 
 
@@ -81,11 +83,11 @@ class VLLMProcess:
             vllm_args: Configuration dict with keys:
                 - block_size: KV cache block size (default: 16)
                 - model: Model name/path (default: TinyLlama-1.1B)
-                - gpu_memory_utilization: GPU memory fraction per worker (default: 0.9)
+                - num_gpu_blocks_override: Fixed number of GPU blocks per worker (optional)
                 - max_model_len: Maximum sequence length (optional)
-                - speedup_ratio: IGNORED (vLLM runs at real speed)
+                - enforce_eager: Disable CUDA graphs (default: False)
             num_workers: Number of vLLM worker processes
-            single_gpu: If True, all workers share GPU 0 (requires gpu_memory_utilization < 1.0/num_workers)
+            single_gpu: If True, all workers share GPU 0
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
         """
         # Generate unique namespace for isolation
@@ -101,8 +103,9 @@ class VLLMProcess:
 
         block_size = vllm_args.get("block_size", BLOCK_SIZE)
         model = vllm_args.get("model", MODEL_NAME)
-        gpu_memory_utilization = vllm_args.get("gpu_memory_utilization", 0.9)
+        num_gpu_blocks_override = vllm_args.get("num_gpu_blocks_override")
         max_model_len = vllm_args.get("max_model_len")
+        enforce_eager = vllm_args.get("enforce_eager", False)
 
         self.model_name = model
 
@@ -139,14 +142,21 @@ class VLLMProcess:
                 model,
                 "--block-size",
                 str(block_size),
-                "--enforce-eager",  # Disable CUDA graphs for faster startup
-                "--gpu-memory-utilization",
-                str(gpu_memory_utilization),
             ]
+
+            # Disable CUDA graphs for faster startup & lower memory
+            if enforce_eager:
+                command.append("--enforce-eager")
 
             # Add optional max_model_len if specified
             if max_model_len is not None:
                 command.extend(["--max-model-len", str(max_model_len)])
+
+            # Use num_gpu_blocks_override for predictable memory usage on shared GPU
+            if num_gpu_blocks_override is not None:
+                command.extend(
+                    ["--num-gpu-blocks-override", str(num_gpu_blocks_override)]
+                )
 
             if data_parallel_size is not None:
                 # Add DP configuration for external load balancing
@@ -186,13 +196,13 @@ class VLLMProcess:
             if data_parallel_size is not None:
                 logger.info(
                     f"Created {data_parallel_size} DP ranks per worker on GPU(s) {gpu_device} "
-                    f"(gpu_memory_utilization={gpu_memory_utilization}) "
+                    f"(num_gpu_blocks_override={num_gpu_blocks_override}) "
                     f"with endpoint: {self.endpoint}"
                 )
             else:
                 logger.info(
                     f"Created vLLM worker {worker_idx} on GPU {gpu_device} "
-                    f"(gpu_memory_utilization={gpu_memory_utilization}) "
+                    f"(num_gpu_blocks_override={num_gpu_blocks_override}) "
                     f"with endpoint: {self.endpoint}"
                 )
 
@@ -286,6 +296,7 @@ class VLLMProcess:
         time.sleep(2)
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_1
 def test_vllm_kv_router_basic(request, runtime_services, predownload_models):
     """
@@ -325,6 +336,7 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_models):
             vllm_workers.__exit__(None, None, None)
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_1
 def test_router_decisions_vllm_multiple_workers(
     request, runtime_services, predownload_models
@@ -336,7 +348,7 @@ def test_router_decisions_vllm_multiple_workers(
     try:
         # Start 2 worker processes on the same GPU
         logger.info(
-            "Starting 2 vLLM worker processes on single GPU (gpu_memory_utilization=0.35, max_model_len=1024)"
+            "Starting 2 vLLM worker processes on single GPU (num_gpu_blocks_override=5000, max_model_len=1024)"
         )
         vllm_workers = VLLMProcess(
             request,
@@ -379,7 +391,7 @@ def test_router_decisions_vllm_dp(request, runtime_services, predownload_models)
 
     try:
         logger.info(
-            "Starting 2 vLLM DP ranks (dp_size=2) (gpu_memory_utilization=0.35, max_model_len=1024)"
+            "Starting 2 vLLM DP ranks (dp_size=2) (num_gpu_blocks_override=5000, max_model_len=1024)"
         )
         vllm_workers = VLLMProcess(
             request,
@@ -408,6 +420,7 @@ def test_router_decisions_vllm_dp(request, runtime_services, predownload_models)
             vllm_workers.__exit__(None, None, None)
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_1
 def test_vllm_indexers_sync(request, runtime_services, predownload_models):
     """
