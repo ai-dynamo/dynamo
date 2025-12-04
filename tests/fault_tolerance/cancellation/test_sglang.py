@@ -25,6 +25,7 @@ pytestmark = [
     pytest.mark.sglang,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
+    pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
     pytest.mark.post_merge,  # post_merge to pinpoint failure commit
 ]
 
@@ -89,8 +90,10 @@ class DynamoWorkerProcess(ManagedProcess):
         else:  # agg (aggregated mode)
             port = "8081"
 
-        # Set debug logging environment
+        # Set environment variables
         env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
+
         env["DYN_LOG"] = "debug"
         # Disable canary health check - these tests expect full control over requests
         # sent to the workers where canary health check intermittently sends dummy
