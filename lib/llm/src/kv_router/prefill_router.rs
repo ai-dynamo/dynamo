@@ -350,32 +350,64 @@ impl
                 .await;
         }
 
-        // ===== Stage 2: Execute with Provided Worker IDs =====
-        // If both target_prefill_worker_id and target_decode_worker_id are set,
-        // execute prefill on prefill worker and decode on decode worker
-        if req.target_prefill_worker_id.is_some() && req.target_decode_worker_id.is_some() {
+        // ===== Prefill + Decode Flow =====
+        // Works for both Stage 2 (with target workers) and normal flow (router decides)
+        let target_prefill_worker = req.target_prefill_worker_id;
+        let target_decode_worker = req.target_decode_worker_id;
+        let has_target_workers = target_prefill_worker.is_some() && target_decode_worker.is_some();
+
+        if has_target_workers {
             tracing::debug!(
                 request_id = %request_id,
-                prefill_worker = ?req.target_prefill_worker_id,
-                decode_worker = ?req.target_decode_worker_id,
+                prefill_worker = ?target_prefill_worker,
+                decode_worker = ?target_decode_worker,
                 "Stage 2 (execute): Using provided worker IDs for disaggregated serving"
             );
-            return self
-                .handle_execute_stage(req, context, next, &request_id, &engine_ctx)
-                .await;
         }
 
-        // ===== Normal Flow: Prefill + Decode in One Pass =====
-        // Save original max_tokens for decode
-        let original_max_tokens = req.stop_conditions.max_tokens;
+        // Execute prefill and decode
+        self.execute_prefill_and_decode(
+            req,
+            context,
+            next,
+            &request_id,
+            &engine_ctx,
+            target_prefill_worker,
+            target_decode_worker,
+        )
+        .await
+    }
+}
 
-        // Prepare prefill request with max_tokens = 1
+impl PrefillRouter {
+    /// Execute prefill and decode with optional target worker IDs
+    /// Unified function for both Stage 2 (with target workers) and normal flow (router decides)
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_prefill_and_decode(
+        &self,
+        req: PreprocessedRequest,
+        context: Context<()>,
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        request_id: &str,
+        engine_ctx: &Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>,
+        target_prefill_worker: Option<u64>,
+        target_decode_worker: Option<u64>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        let original_max_tokens = req.stop_conditions.max_tokens;
+        let has_target_workers = target_prefill_worker.is_some();
+
+        // Prepare prefill request
         let mut prefill_req = req.clone();
         prefill_req.stop_conditions.max_tokens = Some(1);
 
-        // Attempt prefill (full mode with context linking)
+        // If target prefill worker specified, route directly to it
+        if let Some(prefill_worker_id) = target_prefill_worker {
+            prefill_req.backend_instance_id = Some(prefill_worker_id);
+        }
+
+        // Execute prefill
         let prefill_result = self
-            .call_prefill(&prefill_req, &request_id, false, Some(&engine_ctx))
+            .call_prefill(&prefill_req, request_id, false, Some(engine_ctx))
             .await;
 
         // Abort if cancelled during prefill
@@ -396,19 +428,23 @@ impl
                     context,
                     next,
                     prefill_result,
-                    prefill_worker_id,
+                    prefill_worker_id.or(target_prefill_worker),
                     original_max_tokens,
-                    None, // No target decode worker - let router decide
+                    target_decode_worker,
                 )
                 .await
             }
             Ok(PrefillCallResult::WorkerIdOnly(_)) => {
-                // This shouldn't happen in normal flow (query_only=false)
-                tracing::error!("Unexpected WorkerIdOnly result in normal prefill flow");
-                next.generate(context.map(|_| req)).await
+                // This shouldn't happen with query_only=false
+                tracing::error!("Unexpected WorkerIdOnly result in prefill flow");
+                if has_target_workers {
+                    Err(anyhow::anyhow!("Unexpected WorkerIdOnly result"))
+                } else {
+                    next.generate(context.map(|_| req)).await
+                }
             }
             Err(PrefillError::NotActivated) => {
-                if self.enforce_disagg {
+                if self.enforce_disagg || has_target_workers {
                     tracing::error!(
                         "Prefill router not activated, but disaggregated mode is enforced. Failing request."
                     );
@@ -418,7 +454,7 @@ impl
                 next.generate(context.map(|_| req)).await
             }
             Err(e) => {
-                if self.enforce_disagg {
+                if self.enforce_disagg || has_target_workers {
                     tracing::error!(
                         error = %e,
                         "Remote prefill failed, but disaggregated mode is enforced. Failing request."
@@ -433,9 +469,7 @@ impl
             }
         }
     }
-}
 
-impl PrefillRouter {
     /// Route to decode worker after prefill completes
     /// Common logic for both normal flow and Stage 2 execute flow
     async fn route_to_decode(
@@ -559,76 +593,5 @@ impl PrefillRouter {
 
         let response_stream = stream::once(async { Annotated::from_data(query_stage_response) });
         Ok(ResponseStream::new(Box::pin(response_stream), engine_ctx.clone()))
-    }
-
-    /// Stage 2: Execute with provided worker IDs
-    /// Routes prefill to target_prefill_worker_id and decode to target_decode_worker_id
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_execute_stage(
-        &self,
-        req: PreprocessedRequest,
-        context: Context<()>,
-        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        request_id: &str,
-        engine_ctx: &Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
-        let prefill_worker_id = req.target_prefill_worker_id.unwrap();
-        let decode_worker_id = req.target_decode_worker_id.unwrap();
-        let original_max_tokens = req.stop_conditions.max_tokens;
-
-        // Execute prefill on the specified prefill worker
-        let mut prefill_req = req.clone();
-        prefill_req.stop_conditions.max_tokens = Some(1);
-        prefill_req.backend_instance_id = Some(prefill_worker_id);
-
-        // Full prefill with context linking for cancellation
-        let prefill_result = self
-            .call_prefill(&prefill_req, request_id, false, Some(engine_ctx))
-            .await;
-
-        // Abort if cancelled during prefill
-        if engine_ctx.is_stopped() || engine_ctx.is_killed() {
-            tracing::debug!("Abort entering decode after context is stopped or killed");
-            return Err(anyhow::anyhow!(
-                "Context id {} is stopped or killed",
-                engine_ctx.id()
-            ));
-        }
-
-        match prefill_result {
-            Ok(PrefillCallResult::Full(prefill_result, _)) => {
-                tracing::debug!(
-                    request_id = %request_id,
-                    "Stage 2: Prefill complete on worker {}, routing decode to worker {}",
-                    prefill_worker_id,
-                    decode_worker_id
-                );
-
-                Self::route_to_decode(
-                    req,
-                    context,
-                    next,
-                    prefill_result,
-                    Some(prefill_worker_id),
-                    original_max_tokens,
-                    Some(decode_worker_id), // Route to specified decode worker
-                )
-                .await
-            }
-            Ok(PrefillCallResult::WorkerIdOnly(_)) => {
-                // Shouldn't happen with query_only=false
-                tracing::error!("Unexpected WorkerIdOnly result in execute stage");
-                Err(anyhow::anyhow!("Unexpected WorkerIdOnly result"))
-            }
-            Err(e) => {
-                tracing::error!(
-                    request_id = %request_id,
-                    error = %e,
-                    "Stage 2: Prefill failed on worker {}",
-                    prefill_worker_id
-                );
-                Err(anyhow::anyhow!(e))
-            }
-        }
     }
 }
