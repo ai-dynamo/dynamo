@@ -17,18 +17,22 @@
 # Build:
 # - Builds documentation using Docker container
 # - Creates artifact for downstream use
-# - Runs on: main, release/*, tags, PRs (docs changes only)
+# - Runs on: main, release/*, tags, PRs (docs changes only), manual dispatch
 #
 # Publish:
 # - Main branch: publish to S3 under 'dev' (development docs)
 # - Tagged commits: publish to S3 under 'archive/vX.Y[.Z][suffix]' AND update 'latest' to match the release
+# - Manual dispatch: publish specified version to archive (does NOT update 'latest')
 # - PRs: no S3 publish (only internal preview deployment if targeting release branch)
-# - Akamai: always flushes cache for the target path after publish
+# - Akamai: flushes cache for the target path after publish (when DOCS_AKAMAI_ENABLED=true)
 #
 # Required Configuration:
 # - Repository variable: DOCS_PUBLISH_S3_TARGET_PATH (prefix under S3 bucket)
-# - Secrets: AWS credentials (DOCS_AWS_ACCESS_KEY_ID, DOCS_AWS_SECRET_ACCESS_KEY, DOCS_AWS_S3_BUCKET)
+# - Secrets: AWS credentials (DOCS_AWS_ACCESS_KEY_ID, DOCS_AWS_SECRET_ACCESS_KEY, DOCS_AWS_S3_BUCKET, DOCS_AWS_REGION)
+# - Secrets: DOCS_TOKEN (GitHub PAT for PR preview deployment to external repo)
+# - Secrets (optional): DOCS_AWS_IAM_STS_ROLE (for OIDC authentication instead of IAM keys)
 # - Secrets (optional): DOCS_AKAMAI_* EdgeGrid credentials for cache flush
+# - Variable (optional): DOCS_AKAMAI_ENABLED (set to 'true' to enable Akamai cache flush)
 #
 # Commit message flags:
 # - '/skip-dev': skip publishing 'dev' on main branch
