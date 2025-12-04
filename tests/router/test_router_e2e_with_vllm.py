@@ -166,6 +166,7 @@ class VLLMProcess:
                 {
                     "CUDA_VISIBLE_DEVICES": gpu_device,
                     "DYN_NAMESPACE": self.namespace,
+                    "DYN_VLLM_KV_EVENT_PORT": str(20080 + worker_idx),
                     "PYTHONHASHSEED": "0",  # for deterministic event id's
                 }
             )
