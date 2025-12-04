@@ -391,44 +391,154 @@ spec:
         value: "10"  # Scale up when queue > 10 requests
 ```
 
-## Autoscaling with KEDA
+## Autoscaling with KEDA (Recommended)
 
-KEDA extends Kubernetes with event-driven autoscaling, supporting 50+ scalers.
+KEDA (Kubernetes Event-driven Autoscaling) extends Kubernetes with event-driven autoscaling, supporting 50+ scalers including Prometheus.
+
+**Advantages over HPA + Prometheus Adapter:**
+- No Prometheus Adapter configuration needed
+- PromQL queries are defined in the ScaledObject itself (declarative, per-deployment)
+- Easy to update - just `kubectl apply` the ScaledObject
+- Can scale to zero when idle
+- Supports multiple triggers per object
 
 **When to use KEDA:**
-- You need event-driven scaling (e.g., queue depth)
+- You want simpler configuration (no Prometheus Adapter to manage)
+- You need event-driven scaling (e.g., queue depth, Kafka, etc.)
 - You want to scale to zero when idle
-- You need complex scaling triggers
 
-### KEDA with Prometheus
+### Installing KEDA
+
+```bash
+# Add KEDA Helm repo
+helm repo add kedacore https://kedacore.github.io/charts
+helm repo update
+
+# Install KEDA
+helm install keda kedacore/keda \
+  --namespace keda \
+  --create-namespace
+
+# Verify installation
+kubectl get pods -n keda
+```
+
+> **Note**: If you have Prometheus Adapter installed, either uninstall it first (`helm uninstall prometheus-adapter -n monitoring`) or install KEDA with `--set metricsServer.enabled=false` to avoid API conflicts.
+
+### Example: Scale Decode Based on TTFT
+
+Using the `sglang-agg` DGD from `examples/backends/sglang/deploy/agg.yaml`:
 
 ```yaml
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: prefill-scaledobject
-  namespace: llm-serving
+  name: sglang-agg-decode-scaler
+  namespace: default
 spec:
   scaleTargetRef:
     apiVersion: nvidia.com/v1alpha1
     kind: DynamoGraphDeploymentScalingAdapter
-    name: my-llm-deployment-prefill
+    name: sglang-agg-decode
   minReplicaCount: 1
-  maxReplicaCount: 15
-  pollingInterval: 15
-  cooldownPeriod: 120
+  maxReplicaCount: 10
+  pollingInterval: 15      # Check metrics every 15 seconds
+  cooldownPeriod: 60       # Wait 60s before scaling down
   triggers:
   - type: prometheus
     metadata:
-      serverAddress: http://prometheus-server.monitoring.svc.cluster.local:9090
-      metricName: vllm_queue_depth
+      # Update this URL to match your Prometheus service
+      serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+      metricName: dynamo_ttft_p95
       query: |
-        sum(vllm_num_requests_waiting{
-          namespace="llm-serving",
-          dynamo_graph_deployment="my-llm-deployment",
-          service="prefill"
-        })
-      threshold: "10"
+        histogram_quantile(0.95,
+          sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{dynamo_namespace="default-sglang-agg"}[5m])) 
+          by (le)
+        )
+      threshold: "0.5"              # Scale up when TTFT p95 > 500ms (0.5 seconds)
+      activationThreshold: "0.1"    # Start scaling when TTFT > 100ms
+```
+
+Apply it:
+
+```bash
+kubectl apply -f sglang-agg-decode-scaler.yaml
+```
+
+### Verify KEDA Scaling
+
+```bash
+# Check ScaledObject status
+kubectl get scaledobject -n default
+
+# KEDA creates an HPA under the hood - you can see it
+kubectl get hpa -n default
+
+# Example output:
+# NAME                                REFERENCE                                              TARGETS      MINPODS   MAXPODS   REPLICAS
+# keda-hpa-sglang-agg-decode-scaler   DynamoGraphDeploymentScalingAdapter/sglang-agg-decode  45m/500m     1         10        1
+
+# Get detailed status
+kubectl describe scaledobject sglang-agg-decode-scaler -n default
+```
+
+### Example: Scale Based on Queue Depth
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: sglang-agg-decode-queue-scaler
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: nvidia.com/v1alpha1
+    kind: DynamoGraphDeploymentScalingAdapter
+    name: sglang-agg-decode
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  pollingInterval: 15
+  cooldownPeriod: 60
+  triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+      metricName: dynamo_queued_requests
+      query: |
+        sum(dynamo_frontend_queued_requests{dynamo_namespace="default-sglang-agg"})
+      threshold: "10"    # Scale up when queue > 10 requests
+```
+
+### How KEDA Works
+
+KEDA creates and manages an HPA under the hood:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  You create: ScaledObject                                            │
+│    - scaleTargetRef: sglang-agg-decode                               │
+│    - triggers: prometheus query                                      │
+└──────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  KEDA Operator automatically creates: HPA                            │
+│    - name: keda-hpa-sglang-agg-decode-scaler                         │
+│    - scaleTargetRef: sglang-agg-decode                               │
+│    - metrics: External (from KEDA metrics server)                    │
+└──────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  DynamoGraphDeploymentScalingAdapter: sglang-agg-decode              │
+│    - spec.replicas: updated by HPA                                   │
+└──────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  DynamoGraphDeployment: sglang-agg                                   │
+│    - spec.services.decode.replicas: synced from adapter              │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Mixed Autoscaling
