@@ -173,7 +173,8 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:main-vllm-${{ matrix.platform.arch }}
+          push_tag: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
+          # push_tag: ai-dynamo/dynamo:main-vllm-${{ matrix.platform.arch }}
           # OPS-1145: Switch aws_push to true
           aws_push: 'true'
           azure_push: 'true'
