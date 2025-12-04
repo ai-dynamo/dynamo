@@ -12,10 +12,12 @@ including mapping processes to GPUs and handling CUDA_VISIBLE_DEVICES remapping.
 import logging
 from typing import List, Optional
 
+from kr8s.objects import Pod
+
 logger = logging.getLogger(__name__)
 
 
-def get_available_gpu_ids(pod) -> List[int]:
+def get_available_gpu_ids(pod: Pod) -> List[int]:
     """
     Get list of actual GPU IDs available in the pod.
 
@@ -54,7 +56,7 @@ def get_available_gpu_ids(pod) -> List[int]:
         return []
 
 
-def get_gpu_id_for_process(pod, process_pid: int) -> int:
+def get_gpu_id_for_process(pod: Pod, process_pid: int) -> int:
     """
     Find which GPU a process is using.
 
@@ -133,7 +135,7 @@ def get_gpu_id_for_process(pod, process_pid: int) -> int:
         return 0
 
 
-def get_gpu_pci_address(pod, gpu_id: int) -> Optional[str]:
+def get_gpu_pci_address(pod: Pod, gpu_id: int) -> Optional[str]:
     """
     Get PCI bus address for a GPU.
 
@@ -179,7 +181,7 @@ def get_gpu_pci_address(pod, gpu_id: int) -> Optional[str]:
         return None
 
 
-def get_gpu_info(pod, gpu_id: int) -> Optional[dict]:
+def get_gpu_info(pod: Pod, gpu_id: int) -> Optional[dict]:
     """
     Get comprehensive information about a GPU.
 
@@ -233,7 +235,7 @@ def get_gpu_info(pod, gpu_id: int) -> Optional[dict]:
         return None
 
 
-def get_processes_on_gpu(pod, gpu_id: int) -> List[int]:
+def get_processes_on_gpu(pod: Pod, gpu_id: int) -> List[int]:
     """
     Get list of process IDs running on a specific GPU.
 
