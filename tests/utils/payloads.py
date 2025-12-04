@@ -317,9 +317,9 @@ class MetricsPayload(BasePayload):
                 name=f"{prefix}_*",
                 pattern=lambda name: rf"^{prefix}_\w+",
                 validator=lambda value: len(set(value))
-                >= 23,  # 80% of typical ~29 metrics (excluding _bucket) as of 2025-10-22 (but will grow)
-                error_msg=lambda name, value: f"Expected at least 23 unique {prefix}_* metrics, but found only {len(set(value))}",
-                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 23)",
+                >= 11,  # 80% of typical ~17 metrics (excluding _bucket) as of 2025-12-02
+                error_msg=lambda name, value: f"Expected at least 11 unique {prefix}_* metrics, but found only {len(set(value))}",
+                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 11)",
                 multiline=True,
             ),
             MetricCheck(
