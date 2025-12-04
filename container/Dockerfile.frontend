@@ -68,6 +68,10 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
 
 USER dynamo
 
+RUN uv pip show ai_dynamo_runtime
+RUN uv pip show ai_dynamo
+RUN uv pip show nixl
+
 ENTRYPOINT ["/epp"]
 CMD ["/bin/bash"]
 
