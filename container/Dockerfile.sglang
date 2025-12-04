@@ -567,9 +567,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /sgl-workspace/DeepEP && \
     NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST="9.0;10.0" pip install --no-build-isolation .
 
-# Copy rust installation from dynamo_base to avoid duplication efforts
-COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
+# Copy rust installation from dynamo_runtime to avoid duplication efforts
+COPY --from=dynamo_runtime /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_runtime /usr/local/cargo /usr/local/cargo
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
@@ -622,16 +622,16 @@ ${NIXL_PLUGIN_DIR}:\
 /usr/local/nvidia/lib64:\
 ${LD_LIBRARY_PATH}
 
-# Copy NATS and ETCD from dynamo_base, and UCX/NIXL
-COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
-COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
-COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+# Copy NATS and ETCD from dynamo_runtime, and UCX/NIXL
+COPY --from=dynamo_runtime /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_runtime /usr/local/bin/etcd/ /usr/local/bin/etcd/
+COPY --from=dynamo_runtime /usr/local/ucx /usr/local/ucx
+COPY --from=dynamo_runtime $NIXL_PREFIX $NIXL_PREFIX
 ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:${HOME}/.local/bin:$PATH
 
-# Install Dynamo wheels from dynamo_base wheelhouse
+# Install Dynamo wheels from dynamo_runtime wheelhouse
 COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
-COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+COPY --chown=dynamo: --from=dynamo_runtime /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN python3 -m pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
