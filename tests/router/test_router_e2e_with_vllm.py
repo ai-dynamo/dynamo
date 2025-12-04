@@ -48,12 +48,10 @@ TEST_PAYLOAD: Dict[str, Any] = {
 
 # Shared vLLM configuration for all tests
 # gpu_memory_utilization limits actual VRAM allocation (required for multi-worker on same GPU)
-# num_gpu_blocks_override caps block count for predictable KV cache behavior
 VLLM_ARGS: Dict[str, Any] = {
     "block_size": BLOCK_SIZE,
     "model": MODEL_NAME,
     "gpu_memory_utilization": 0.4,  # Limit VRAM allocation per worker
-    "num_gpu_blocks_override": 5000,  # Cap block count for predictability
     "max_model_len": 1024,  # Limit context length to reduce KV cache size
     "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
 }
@@ -206,13 +204,13 @@ class VLLMProcess:
             if data_parallel_size is not None:
                 logger.info(
                     f"Created {data_parallel_size} DP ranks per worker on GPU(s) {gpu_device} "
-                    f"(gpu_mem={gpu_memory_utilization}, blocks={num_gpu_blocks_override}) "
+                    f"(gpu_mem={gpu_memory_utilization}) "
                     f"with endpoint: {self.endpoint}"
                 )
             else:
                 logger.info(
                     f"Created vLLM worker {worker_idx} on GPU {gpu_device} "
-                    f"(gpu_mem={gpu_memory_utilization}, blocks={num_gpu_blocks_override}) "
+                    f"(gpu_mem={gpu_memory_utilization}) "
                     f"with endpoint: {self.endpoint}"
                 )
 
@@ -359,9 +357,7 @@ def test_router_decisions_vllm_multiple_workers(
 
     try:
         # Start 2 worker processes on the same GPU
-        logger.info(
-            "Starting 2 vLLM worker processes on single GPU (gpu_mem=0.4, blocks=5000)"
-        )
+        logger.info("Starting 2 vLLM worker processes on single GPU (gpu_mem=0.4)")
         vllm_workers = VLLMProcess(
             request,
             vllm_args=VLLM_ARGS,
@@ -404,7 +400,7 @@ def test_router_decisions_vllm_dp(
     DP_SIZE = 2
 
     try:
-        logger.info("Starting 2 vLLM DP ranks (dp_size=2) (gpu_mem=0.4, blocks=5000)")
+        logger.info("Starting 2 vLLM DP ranks (dp_size=2) (gpu_mem=0.4)")
         vllm_workers = VLLMProcess(
             request,
             vllm_args=VLLM_ARGS,
