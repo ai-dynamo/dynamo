@@ -291,7 +291,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 # Install DeepEP
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    umask 002 && export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     cd /sgl-workspace/DeepEP && \
     NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST="9.0;10.0" pip install --no-build-isolation .
 
@@ -436,7 +436,7 @@ ARG PYTHON_VERSION
 # For dev stage, we create a lightweight venv with --system-site-packages to satisfy maturin develop
 # requirements while still accessing all system-installed packages (sglang, torch, deepep, etc.)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN mkdir -p /opt/dynamo/venv && \
+RUN umask 002 && mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION --system-site-packages
 
 ENV VIRTUAL_ENV=/opt/dynamo/venv \

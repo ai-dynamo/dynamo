@@ -110,8 +110,5 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
 RUN umask 002 && mkdir -p /home/$USERNAME/.cache/ \
     && chmod -R g+w /home/$USERNAME/.cache/
 
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
-
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

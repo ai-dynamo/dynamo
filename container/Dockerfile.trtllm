@@ -129,7 +129,7 @@ ARG GITHUB_TRTLLM_COMMIT
 COPY --from=trtllm_wheel /*.whl /trtllm_wheel/
 COPY --from=trtllm_wheel /*.txt /trtllm_wheel/
 
-RUN umask 002 && uv pip install --no-cache "cuda-python==13.0.2"
+RUN uv pip install --no-cache "cuda-python==13.0.2"
 
 # Note: TensorRT needs to be uninstalled before installing the TRTLLM wheel
 # because there might be mismatched versions of TensorRT between the NGC PyTorch
@@ -149,7 +149,7 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         # Install from local wheel directory in build context
         WHEEL_FILE="$(find /trtllm_wheel -name "*.whl" | head -n 1)"; \
         if [ -n "$WHEEL_FILE" ]; then \
-            umask 002 && uv pip install --no-cache "$WHEEL_FILE" triton==3.5.0; \
+            uv pip install --no-cache "$WHEEL_FILE" triton==3.5.0; \
         else \
             echo "No wheel file found in /trtllm_wheel directory."; \
             exit 1; \
@@ -169,9 +169,9 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
             TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/tensorrt-llm==([0-9a-zA-Z.+-]+).*/\1/'); \
             PYTHON_TAG="cp$(echo ${PYTHON_VERSION} | tr -d '.')"; \
             DIRECT_URL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-${TRTLLM_VERSION}-${PYTHON_TAG}-${PYTHON_TAG}-linux_${ARCH_ALT}.whl"; \
-            umask 002 && uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${DIRECT_URL}" triton==3.5.0; \
+            uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${DIRECT_URL}" triton==3.5.0; \
         else \
-            umask 002 && uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" triton==3.5.0; \
+            uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" triton==3.5.0; \
         fi; \
     fi
 
