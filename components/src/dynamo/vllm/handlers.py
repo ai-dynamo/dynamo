@@ -92,8 +92,6 @@ def build_sampling_params(
             grammar=guided_decoding.get("grammar"),
             whitespace_pattern=guided_decoding.get("whitespace_pattern"),
         )
-        if "backend" in guided_decoding and guided_decoding["backend"] is not None:
-            sampling_params.structured_outputs._backend = guided_decoding["backend"]
 
     # Apply remaining sampling_options
     for key, value in request["sampling_options"].items():
