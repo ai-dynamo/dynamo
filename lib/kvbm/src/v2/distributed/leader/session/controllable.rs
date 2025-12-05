@@ -17,7 +17,7 @@ use crate::{
     logical::{blocks::ImmutableBlock, manager::BlockManager},
     physical::transfer::TransferOptions,
     v2::{
-        BlockId, G2, G3, InstanceId, SequenceHash, distributed::worker::Worker,
+        BlockId, G2, G3, InstanceId, SequenceHash, distributed::parallelism::ParallelWorker,
         logical::LogicalLayoutHandle, physical::manager::LayoutHandle,
     },
 };
@@ -67,8 +67,8 @@ pub struct ControllableSession {
     // Transport for sending messages to controller
     transport: Arc<MessageTransport>,
 
-    // Worker for G3->G2 staging
-    worker: Option<Arc<dyn Worker>>,
+    // Parallel worker for G3->G2 staging (fans out to all workers)
+    parallel_worker: Option<Arc<dyn ParallelWorker>>,
 
     // Managers
     g2_manager: Arc<BlockManager<G2>>,
@@ -94,7 +94,7 @@ impl ControllableSession {
         worker_g2_handles: Vec<LayoutHandle>,
         g2_manager: Arc<BlockManager<G2>>,
         g3_manager: Option<Arc<BlockManager<G3>>>,
-        worker: Option<Arc<dyn Worker>>,
+        parallel_worker: Option<Arc<dyn ParallelWorker>>,
         transport: Arc<MessageTransport>,
         rx: mpsc::Receiver<RemoteSessionMessage>,
         options: ControllableSessionOptions,
@@ -109,7 +109,7 @@ impl ControllableSession {
             worker_g2_handles,
             controller: None,
             transport,
-            worker,
+            parallel_worker,
             g2_manager,
             g3_manager,
             rx,
@@ -126,7 +126,7 @@ impl ControllableSession {
     /// 3. Processes control messages until detachment or completion
     pub async fn run(mut self) -> Result<()> {
         // If auto_stage is enabled and we have G3 blocks, start staging immediately
-        if self.options.auto_stage && !self.g3_blocks.is_empty() && self.worker.is_some() {
+        if self.options.auto_stage && !self.g3_blocks.is_empty() && self.parallel_worker.is_some() {
             self.phase = RemoteSessionPhase::Staging;
             self.staging_started = true;
 
@@ -200,12 +200,12 @@ impl ControllableSession {
             return Ok(());
         }
 
-        // Skip if no worker
-        if self.worker.is_none() {
+        // Skip if no parallel worker
+        if self.parallel_worker.is_none() {
             if let Some(controller) = self.controller {
                 let error_msg = RemoteSessionMessage::SessionError {
                     session_id: self.session_id,
-                    error: "No worker available for G3->G2 staging".to_string(),
+                    error: "No parallel worker available for G3->G2 staging".to_string(),
                 };
                 self.transport
                     .send_remote_session(controller, error_msg)
@@ -316,10 +316,10 @@ impl ControllableSession {
     ///
     /// Returns info about the newly staged blocks.
     async fn stage_g3_to_g2_internal(&mut self) -> Result<Vec<G2BlockInfo>> {
-        let worker = self
-            .worker
+        let parallel_worker = self
+            .parallel_worker
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Worker required for G3->G2 staging"))?;
+            .ok_or_else(|| anyhow::anyhow!("ParallelWorker required for G3->G2 staging"))?;
 
         if self.g3_blocks.is_empty() {
             self.staging_complete = true;
@@ -342,7 +342,7 @@ impl ControllableSession {
         let dst_block_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
 
         // Execute transfer
-        let notification = worker.execute_local_transfer(
+        let notification = parallel_worker.execute_local_transfer(
             LogicalLayoutHandle::G3,
             LogicalLayoutHandle::G2,
             Arc::from(stage_block_ids.clone()),

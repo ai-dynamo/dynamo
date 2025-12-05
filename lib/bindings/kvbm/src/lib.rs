@@ -6,12 +6,9 @@ use pyo3::{exceptions::PyException, prelude::*};
 use std::sync::OnceLock;
 use std::sync::Weak;
 use std::{fmt::Display, sync::Arc};
-use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_runtime::{self as rs, logging, traits::DistributedRuntimeProvider, RuntimeConfig};
-
-use dynamo_llm::{self as llm_rs};
+use dynamo_runtime::{self as rs, RuntimeConfig, logging};
 
 #[cfg(feature = "block-manager")]
 mod block_manager;
@@ -118,6 +115,7 @@ where
 
 #[pyclass]
 #[derive(Clone)]
+#[allow(dead_code)]
 struct Component {
     inner: rs::component::Component,
 }

@@ -153,9 +153,8 @@ impl PyTensor {
     ///     RuntimeError: If the tensor is not on a CUDA device
     #[new]
     pub fn new(tensor: Py<PyAny>) -> PyResult<Self> {
-        let inner = Tensor::new(tensor).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-        })?;
+        let inner = Tensor::new(tensor)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }
 

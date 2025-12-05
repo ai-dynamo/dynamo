@@ -252,8 +252,8 @@ pub trait WorkerTransfers: Send + Sync {
     fn execute_remote_offload(
         &self,
         src: LogicalLayoutHandle,
-        dst: RemoteDescriptor,
         src_block_ids: Arc<[BlockId]>,
+        dst: RemoteDescriptor,
         options: crate::physical::transfer::TransferOptions,
     ) -> Result<TransferCompleteNotification>;
 

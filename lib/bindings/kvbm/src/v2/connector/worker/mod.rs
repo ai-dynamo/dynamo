@@ -8,6 +8,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+use dynamo_kvbm::v2::integrations::connector::leader::scheduler::KvConnectorMetadata;
 use dynamo_kvbm::v2::integrations::connector::worker::{ConnectorWorker, ConnectorWorkerInterface};
 use dynamo_memory::TensorDescriptor;
 
@@ -36,8 +37,8 @@ impl PyConnectorWorker {
     ///     ConnectorWorker: The worker instance ready for KV cache registration.
     #[new]
     pub fn new(runtime: &crate::v2::runtime::PyKvbmRuntime) -> PyResult<Self> {
-        let nova = runtime.nova().map_err(to_pyerr)?;
-        let inner = ConnectorWorker::new(nova);
+        let runtime = runtime.inner();
+        let inner = ConnectorWorker::new(runtime);
         Ok(Self { inner })
     }
 
@@ -110,6 +111,25 @@ impl PyConnectorWorker {
         self.inner.shutdown().map_err(to_pyerr)
     }
 
+    /// Bind connector metadata from the leader.
+    ///
+    /// Args:
+    ///     data: The connector metadata bytes
+    pub fn bind_connector_metadata(&self, data: Vec<u8>) -> PyResult<()> {
+        let metadata: KvConnectorMetadata = serde_json::from_slice(&data).map_err(to_pyerr)?;
+        self.inner
+            .bind_connector_metadata(metadata)
+            .map_err(to_pyerr)
+    }
+
+    /// Clear connector metadata.
+    ///
+    /// This function should be called by the model runner every time
+    /// after the model execution.
+    pub fn clear_connector_metadata(&self) -> PyResult<()> {
+        self.inner.clear_connector_metadata().map_err(to_pyerr)
+    }
+
     /// Get completed transfer request IDs (drains the sets).
     ///
     /// Called by the worker executor (vLLM) to check which requests have
@@ -120,6 +140,7 @@ impl PyConnectorWorker {
     ///     tuple: (Optional[set[str]], Optional[set[str]]) for (offload_ids, onboard_ids)
     ///            Returns None for each set if there are no completed requests of that type.
     #[pyo3(name = "get_finished")]
+    #[allow(clippy::type_complexity)]
     pub fn py_get_finished(
         &self,
     ) -> PyResult<(

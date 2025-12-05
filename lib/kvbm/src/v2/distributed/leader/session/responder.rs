@@ -11,7 +11,7 @@ use crate::{
     logical::{blocks::ImmutableBlock, manager::BlockManager},
     physical::transfer::TransferOptions,
     v2::{
-        BlockId, G2, G3, InstanceId, SequenceHash, distributed::worker::Worker,
+        BlockId, G2, G3, InstanceId, SequenceHash, distributed::parallelism::ParallelWorker,
         logical::LogicalLayoutHandle, physical::manager::LayoutHandle,
     },
 };
@@ -38,7 +38,7 @@ pub struct ResponderSession {
     requester: InstanceId,
     g2_manager: Arc<BlockManager<G2>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
-    worker: Option<Arc<dyn Worker>>,
+    parallel_worker: Option<Arc<dyn ParallelWorker>>,
     transport: Arc<MessageTransport>,
     // Held blocks using BlockHolder for RAII semantics
     // Blocks are automatically released when the session drops
@@ -54,7 +54,7 @@ impl ResponderSession {
         requester: InstanceId,
         g2_manager: Arc<BlockManager<G2>>,
         g3_manager: Option<Arc<BlockManager<G3>>>,
-        worker: Option<Arc<dyn Worker>>,
+        parallel_worker: Option<Arc<dyn ParallelWorker>>,
         transport: Arc<MessageTransport>,
     ) -> Self {
         Self {
@@ -63,7 +63,7 @@ impl ResponderSession {
             requester,
             g2_manager,
             g3_manager,
-            worker,
+            parallel_worker,
             transport,
             held_g2_blocks: BlockHolder::empty(),
             held_g3_blocks: BlockHolder::empty(),
@@ -182,7 +182,7 @@ impl ResponderSession {
                     // BlockHolder's retain keeps only matching hashes
                     self.held_g3_blocks.retain(&stage_hashes);
 
-                    if !self.held_g3_blocks.is_empty() && self.worker.is_some() {
+                    if !self.held_g3_blocks.is_empty() && self.parallel_worker.is_some() {
                         // Execute G3->G2 transfer
                         self.stage_g3_to_g2().await?;
                     }
@@ -241,10 +241,10 @@ impl ResponderSession {
 
     /// Stage G3 blocks to G2.
     async fn stage_g3_to_g2(&mut self) -> Result<()> {
-        let worker = self
-            .worker
+        let parallel_worker = self
+            .parallel_worker
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Worker required for G3->G2 staging"))?;
+            .ok_or_else(|| anyhow::anyhow!("ParallelWorker required for G3->G2 staging"))?;
 
         let stage_block_ids: Vec<BlockId> = self
             .held_g3_blocks
@@ -262,7 +262,7 @@ impl ResponderSession {
         let dst_block_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
 
         // Execute transfer
-        let notification = worker.execute_local_transfer(
+        let notification = parallel_worker.execute_local_transfer(
             LogicalLayoutHandle::G3,
             LogicalLayoutHandle::G2,
             Arc::from(stage_block_ids.clone()),

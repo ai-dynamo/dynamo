@@ -194,6 +194,32 @@ pub fn register_with_nixl<S>(
 where
     S: MemoryDescriptor + NixlCompatible,
 {
+    // let storage_kind = storage.storage_kind();
+
+    // // Determine if registration is needed based on storage type and available backends
+    // let should_register = match storage_kind {
+    //     StorageKind::System | StorageKind::Pinned => {
+    //         // System/Pinned memory needs UCX for remote transfers
+    //         agent.has_backend("UCX") || agent.has_backend("POSIX")
+    //     }
+    //     StorageKind::Device(_) => {
+    //         // Device memory needs UCX for remote transfers OR GDS for direct disk transfers
+    //         agent.has_backend("UCX") || agent.has_backend("GDS_MT")
+    //     }
+    //     StorageKind::Disk(_) => {
+    //         // Disk storage needs POSIX for regular I/O OR GDS for GPU direct I/O
+    //         agent.has_backend("POSIX") || agent.has_backend("GDS_MT")
+    //     } // StorageKind::Object(_) => {
+    //       //     // Object storage is always registered via NIXL's OBJ plugin
+    //       //     agent.has_backend("OBJ")
+    //       // }
+    // };
+
+    // this is not true for our future object storage. so let's rethink this.
+    // for object, if there is no device_id or device_id is 0, then we need to register
+    // alternatively, the object storage holds it's own internal metadata but does not
+    // expose as a nixl descriptor, thus ObjectStorag will by default like all other storage
+    // types have a None for nixl_descriptor(), and we will use the internal 
     if storage.nixl_descriptor().is_some() {
         return Ok(NixlRegistered {
             storage,
