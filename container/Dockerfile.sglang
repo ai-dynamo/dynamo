@@ -1,29 +1,18 @@
+# syntax=docker/dockerfile:1.10.0
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 ARG SGLANG_IMAGE_TAG="v0.5.6.post1"
-# Either 12.9.1 or 13.0.1
-ARG CUDA_VERSION="12.9.1"
-# Local will build from your current repo and remote will build from github
+# Either 12 or 13
+ARG CUDA_VERSION="12"
 ARG BRANCH_TYPE
+# PyPI version to install when BRANCH_TYPE is not set 
+ARG DYNAMO_VERSION=""
 ARG CARGO_BUILD_JOBS
 
-FROM scratch AS local_src
-COPY . /src
-
-FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}-runtime
+FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}-cu${CUDA_VERSION}-runtime
 
 WORKDIR /sgl-workspace
-
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
-
-# Install jq for JSON processing
-RUN apt-get update -y \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        jq \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
 
 # Install dynamo
 # Providing --build-arg BRANCH_TYPE=local will editable install the local dynamo repo
@@ -32,36 +21,43 @@ RUN apt-get update -y \
 ARG BRANCH_TYPE
 ARG CARGO_BUILD_JOBS
 
-COPY --from=local_src /src /tmp/local_src
-RUN if [ "$BRANCH_TYPE" = "local" ]; then \
-        cp -r /tmp/local_src /sgl-workspace/dynamo; \
+# Only copies local src when BRANCH_TYPE=local
+RUN --mount=type=bind,source=.,target=/mnt/local_src \
+    if [ "$BRANCH_TYPE" = "local" ]; then \
+        cp -r /mnt/local_src /sgl-workspace/dynamo; \
     elif [ "$BRANCH_TYPE" = "remote" ]; then \
         git clone https://github.com/ai-dynamo/dynamo.git /sgl-workspace/dynamo; \
     fi
 
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
+ARG DYNAMO_VERSION
 
 # SGLang does not use a venv in their container
-RUN if [ "$BRANCH_TYPE" = "local" ]; then \
-    cd dynamo/lib/bindings/python && \
-    pip install --break-system-packages maturin && \
-    maturin build --release && \
-    pip install --break-system-packages target/wheels/*.whl && \
-    cd /sgl-workspace/dynamo && \
-    pip install --break-system-packages -e . && \
-    pip install --break-system-packages --requirement /tmp/local_src/container/deps/requirements.txt ; \
-  elif [ "$BRANCH_TYPE" = "remote" ]; then \
-    cd dynamo/lib/bindings/python && \
-    pip install --break-system-packages maturin && \
-    maturin build --release && \
-    pip install --break-system-packages target/wheels/*.whl && \
-    cd /sgl-workspace/dynamo && \
-    pip install --break-system-packages -e . && \
-    pip install --break-system-packages --requirement /sgl-workspace/dynamo/container/deps/requirements.txt ; \
-  else \
-    pip install --break-system-packages ai-dynamo ; \
-  fi \
-&& rm -rf /tmp/local_src
+# BRANCH_TYPE=local  -> build from local repo with maturin
+# BRANCH_TYPE=remote -> build from github with maturin  
+# otherwise          -> pip install ai-dynamo (with optional version)
+RUN --mount=type=bind,source=.,target=/mnt/local_src \
+    if [ "$BRANCH_TYPE" = "local" ]; then \
+        cd dynamo/lib/bindings/python && \
+        pip install --break-system-packages maturin && \
+        maturin build --release && \
+        pip install --break-system-packages target/wheels/*.whl && \
+        cd /sgl-workspace/dynamo && \
+        pip install --break-system-packages -e . && \
+        pip install --break-system-packages --requirement /mnt/local_src/container/deps/requirements.txt ; \
+    elif [ "$BRANCH_TYPE" = "remote" ]; then \
+        cd dynamo/lib/bindings/python && \
+        pip install --break-system-packages maturin && \
+        maturin build --release && \
+        pip install --break-system-packages target/wheels/*.whl && \
+        cd /sgl-workspace/dynamo && \
+        pip install --break-system-packages -e . && \
+        pip install --break-system-packages --requirement /sgl-workspace/dynamo/container/deps/requirements.txt ; \
+    elif [ -n "$DYNAMO_VERSION" ]; then \
+        pip install --break-system-packages ai-dynamo==${DYNAMO_VERSION} ; \
+    else \
+        pip install --break-system-packages ai-dynamo ; \
+    fi
 
 # Install NATS and ETCD
 RUN case "$(uname -m)" in \
