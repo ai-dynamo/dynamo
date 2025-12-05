@@ -57,7 +57,7 @@ def start_completion_request() -> tuple:
 
     def send_request():
         prompt = "Tell me a long long long story about yourself?"
-        max_tokens = 8192
+        max_tokens = 8000
         timeout = 240  # Extended timeout for long request
 
         payload = {
