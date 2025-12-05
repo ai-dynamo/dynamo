@@ -448,6 +448,7 @@ def run_aiperf(
     return success
 
 
+# TODO: use file redirection and wait() instead of pipes and communicate
 def run_aiperf_with_signal_handling(
     cmd_attempt: List[str],
     logger: logging.Logger,
