@@ -17,18 +17,22 @@
 # Build:
 # - Builds documentation using Docker container
 # - Creates artifact for downstream use
-# - Runs on: main, release/*, tags, PRs (docs changes only)
+# - Runs on: main, release/*, tags, PRs (docs changes only), manual dispatch
 #
 # Publish:
 # - Main branch: publish to S3 under 'dev' (development docs)
 # - Tagged commits: publish to S3 under 'archive/vX.Y[.Z][suffix]' AND update 'latest' to match the release
+# - Manual dispatch: publish specified version to archive (does NOT update 'latest')
 # - PRs: no S3 publish (only internal preview deployment if targeting release branch)
-# - Akamai: always flushes cache for the target path after publish
+# - Akamai: flushes cache for the target path after publish (when DOCS_AKAMAI_ENABLED=true)
 #
 # Required Configuration:
 # - Repository variable: DOCS_PUBLISH_S3_TARGET_PATH (prefix under S3 bucket)
-# - Secrets: AWS credentials (DOCS_AWS_ACCESS_KEY_ID, DOCS_AWS_SECRET_ACCESS_KEY, DOCS_AWS_S3_BUCKET)
+# - Secrets: AWS credentials (DOCS_AWS_ACCESS_KEY_ID, DOCS_AWS_SECRET_ACCESS_KEY, DOCS_AWS_S3_BUCKET, DOCS_AWS_REGION)
+# - Secrets: DOCS_TOKEN (GitHub PAT for PR preview deployment to external repo)
+# - Secrets (optional): DOCS_AWS_IAM_STS_ROLE (for OIDC authentication instead of IAM keys)
 # - Secrets (optional): DOCS_AKAMAI_* EdgeGrid credentials for cache flush
+# - Variable (optional): DOCS_AKAMAI_ENABLED (set to 'true' to enable Akamai cache flush)
 #
 # Commit message flags:
 # - '/skip-dev': skip publishing 'dev' on main branch
@@ -53,6 +57,10 @@ on:
         description: 'Optional: Version to publish (e.g., 1.2.3). If not provided, publishes as dev.'
         required: false
         type: string
+      ref:
+        description: 'Optional: Git ref to checkout (tag, branch, or SHA). Use to build docs from older tags.'
+        required: false
+        type: string
 
 jobs:
   build-docs:
@@ -61,13 +69,40 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Determine docs version
+        id: version
+        shell: bash
+        run: |
+          VERSION="dev"
+          # Option 1: Tag push (e.g., v0.3.0 -> 0.3.0)
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+            if [[ "${TAG}" =~ ^v([0-9]+(\.[0-9]+){1,2}([._-](post|rc|dev)[0-9]+)?)$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+              echo "::notice::Detected version from tag: ${VERSION}"
+            fi
+          # Option 2: Manual dispatch with version input
+          elif [[ -n "${{ inputs.version || '' }}" ]]; then
+            VERSION="${{ inputs.version }}"
+            echo "::notice::Using version from manual input: ${VERSION}"
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building docs for version: ${VERSION}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Generate documentation
+        env:
+          DOCS_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          docker build -t docs-builder -f container/Dockerfile.docs .
+          docker build -t docs-builder \
+            --build-arg DYNAMO_DOCS_VERSION="${DOCS_VERSION}" \
+            -f container/Dockerfile.docs .
 
       - name: Copy documentation out of container
         run: |
@@ -355,35 +390,35 @@ jobs:
 
           echo "published=true" >> "$GITHUB_OUTPUT"
 
-      # - name: Publish latest
-      #   if: ${{ steps.publish_version.outputs.published == 'true' && steps.vars.outputs.publish_to_latest == 'true' }}
-      #   working-directory: ${{ env.DOCS_DIR }}
-      #   id: publish_latest
-      #   env:
-      #     S3_ROOT: ${{ steps.paths.outputs.s3_root }}
-      #     S3_PATH: ${{ steps.paths.outputs.s3_path }}
-      #   shell: bash
-      #   run: |
-      #     set -euo pipefail
-      #     echo "Publishing latest to ${S3_ROOT}/${S3_PATH}/latest"
-      #     aws s3 sync . "${S3_ROOT}/${S3_PATH}/latest" --exclude .buildinfo --exclude .doctrees --delete
-      #     echo "published_latest=true" >> "$GITHUB_OUTPUT"
+      - name: Publish latest
+        if: ${{ steps.publish_version.outputs.published == 'true' && steps.vars.outputs.publish_to_latest == 'true' }}
+        working-directory: ${{ env.DOCS_DIR }}
+        id: publish_latest
+        env:
+          S3_ROOT: ${{ steps.paths.outputs.s3_root }}
+          S3_PATH: ${{ steps.paths.outputs.s3_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Publishing latest to ${S3_ROOT}/${S3_PATH}/latest"
+          aws s3 sync . "${S3_ROOT}/${S3_PATH}/latest" --exclude .buildinfo --exclude .doctrees --delete
+          echo "published_latest=true" >> "$GITHUB_OUTPUT"
 
-      # - name: Publish dev (main branch)
-      #   # Publish main branch to 'dev' directory for development docs
-      #   # Skip if commit message contains '/skip-dev' anywhere
-      #   if: ${{ github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '/skip-dev') }}
-      #   working-directory: ${{ env.DOCS_DIR }}
-      #   id: publish_dev
-      #   env:
-      #     S3_ROOT: ${{ steps.paths.outputs.s3_root }}
-      #     S3_PATH: ${{ steps.paths.outputs.s3_path }}
-      #   shell: bash
-      #   run: |
-      #     set -euo pipefail
-      #     echo "Publishing development docs to ${S3_ROOT}/${S3_PATH}/dev"
-      #     aws s3 sync . "${S3_ROOT}/${S3_PATH}/dev" --exclude .buildinfo --exclude .doctrees --delete
-      #     echo "published=true" >> "$GITHUB_OUTPUT"
+      - name: Publish dev (main branch)
+        # Publish main branch to 'dev' directory for development docs
+        # Skip if commit message contains '/skip-dev' anywhere
+        if: ${{ github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message || '', '/skip-dev') }}
+        working-directory: ${{ env.DOCS_DIR }}
+        id: publish_dev
+        env:
+          S3_ROOT: ${{ steps.paths.outputs.s3_root }}
+          S3_PATH: ${{ steps.paths.outputs.s3_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Publishing development docs to ${S3_ROOT}/${S3_PATH}/dev"
+          aws s3 sync . "${S3_ROOT}/${S3_PATH}/dev" --exclude .buildinfo --exclude .doctrees --delete
+          echo "published=true" >> "$GITHUB_OUTPUT"
 
       - name: Update versions manifest in all archive directories
         # Update versions*.json in ALL archive directories so old docs show current version list
@@ -420,26 +455,36 @@ jobs:
           S3_PATH: ${{ steps.paths.outputs.s3_path }}
           VERSION: ${{ steps.vars.outputs.version }}
           PUBLISHED_VERSION: ${{ steps.publish_version.outputs.published || 'false' }}
-          # PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
+          PUBLISHED_LATEST: ${{ steps.publish_latest.outputs.published_latest || 'false' }}
+          PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
         shell: bash
         run: |
           set -euo pipefail
           echo "s3_target_path=${S3_PATH}" >> "$GITHUB_OUTPUT"
           echo "request_name=Publish docs from ${GITHUB_REPOSITORY}@${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
+          echo "published_latest=${PUBLISHED_LATEST}" >> "$GITHUB_OUTPUT"
 
-          # Only flush cache if we actually published something
-          # if [[ "${PUBLISHED_VERSION}" == "true" ]] || [[ "${PUBLISHED_DEV}" == "true" ]]; then
+          # Determine what to flush based on what was published
+          # - Version publish: flush entire path (versions.json updated in all archive dirs)
+          # - Dev publish only: flush just the dev directory
           if [[ "${PUBLISHED_VERSION}" == "true" ]]; then
             echo "perform_flush=true" >> "$GITHUB_OUTPUT"
+            echo "flush_path=${S3_PATH}" >> "$GITHUB_OUTPUT"
+            echo "::notice::Will flush entire ${S3_PATH} (version publish updates all archives)"
+          elif [[ "${PUBLISHED_DEV}" == "true" ]]; then
+            echo "perform_flush=true" >> "$GITHUB_OUTPUT"
+            echo "flush_path=${S3_PATH}/dev" >> "$GITHUB_OUTPUT"
+            echo "::notice::Will flush ${S3_PATH}/dev only (dev publish)"
           else
             echo "perform_flush=false" >> "$GITHUB_OUTPUT"
+            echo "flush_path=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Flush Akamai cache
         # Only run if cache flush is needed AND Akamai is enabled
-        if: ${{ steps.publish.outputs.perform_flush == 'true' && vars.AKAMAI_ENABLED == 'true' }}
+        if: ${{ steps.publish.outputs.perform_flush == 'true' && vars.DOCS_AKAMAI_ENABLED == 'true' }}
         env:
-          S3_PATH: ${{ steps.publish.outputs.s3_target_path }}
+          FLUSH_PATH: ${{ steps.publish.outputs.flush_path }}
           REQUEST_NAME: ${{ steps.publish.outputs.request_name }}
           # Use repository variable or secret for notification emails
           # Format: JSON array of email addresses, e.g., '["email1@example.com", "email2@example.com"]'
@@ -457,6 +502,8 @@ jobs:
           sudo apt-get install -y -qq jq xsltproc
           pip install -q httpie httpie-edgegrid
 
+          echo "Flushing Akamai cache for path: ${FLUSH_PATH}"
+
           # Generate Akamai ECCU request XML using the XSLT template
           XSLT_TEMPLATE="${GITHUB_WORKSPACE}/.github/workflows/templates/akamai-eccu-flush.xslt"
 
@@ -466,7 +513,7 @@ jobs:
           fi
 
           # Process XSLT to generate ECCU request XML
-          xsltproc --stringparam target-path "${S3_PATH}" "${XSLT_TEMPLATE}" "${XSLT_TEMPLATE}" | \
+          xsltproc --stringparam target-path "${FLUSH_PATH}" "${XSLT_TEMPLATE}" "${XSLT_TEMPLATE}" | \
             sed 's/xmlns:match="x" //' > /tmp/flush.xml
 
           # Prepare Akamai EdgeGrid credentials
@@ -504,9 +551,10 @@ jobs:
           VERSION: ${{ steps.vars.outputs.version }}
           S3_PATH: ${{ steps.paths.outputs.s3_path }}
           PUBLISHED_VERSION: ${{ steps.publish_version.outputs.published || 'false' }}
-          # PUBLISHED_LATEST: ${{ steps.publish_latest.outputs.published || 'false' }}
-          # PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
+          PUBLISHED_LATEST: ${{ steps.publish.outputs.published_latest || 'false' }}
+          PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
           CACHE_FLUSHED: ${{ steps.publish.outputs.perform_flush }}
+          FLUSH_PATH: ${{ steps.publish.outputs.flush_path }}
         run: |
           echo "## 📚 Documentation Publishing Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -516,23 +564,22 @@ jobs:
           echo "### Published To" >> $GITHUB_STEP_SUMMARY
           if [[ "${PUBLISHED_VERSION}" == "true" ]]; then
             echo "- ✅ **Version:** \`${VERSION}\` → \`s3://.../${S3_PATH}/archive/${VERSION}\`" >> $GITHUB_STEP_SUMMARY
-            # if [[ "${PUBLISHED_LATEST}" == "true" ]]; then
-            #   echo "- ✅ **Latest:** \`${VERSION}\` → \`s3://.../${S3_PATH}/latest\` (updated to match release)" >> $GITHUB_STEP_SUMMARY
-            # else
-            #   echo "- ⏭️ **Latest:** not updated (manual dispatch or /not-latest flag)" >> $GITHUB_STEP_SUMMARY
-            # fi
+            if [[ "${PUBLISHED_LATEST}" == "true" ]]; then
+              echo "- ✅ **Latest:** \`${VERSION}\` → \`s3://.../${S3_PATH}/latest\` (updated to match release)" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⏭️ **Latest:** not updated (manual dispatch or /not-latest flag)" >> $GITHUB_STEP_SUMMARY
+            fi
           fi
-          # if [[ "${PUBLISHED_DEV}" == "true" ]]; then
-          #   echo "- ✅ **Dev:** \`s3://.../${S3_PATH}/dev\` (main branch)" >> $GITHUB_STEP_SUMMARY
-          # fi
-          # if [[ "${PUBLISHED_VERSION}" != "true" ]] && [[ "${PUBLISHED_DEV}" != "true" ]]; then
-          if [[ "${PUBLISHED_VERSION}" != "true" ]]; then
+          if [[ "${PUBLISHED_DEV}" == "true" ]]; then
+            echo "- ✅ **Dev:** \`s3://.../${S3_PATH}/dev\` (main branch)" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [[ "${PUBLISHED_VERSION}" != "true" ]] && [[ "${PUBLISHED_DEV}" != "true" ]]; then
             echo "- ⚠️ No documentation was published" >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Cache" >> $GITHUB_STEP_SUMMARY
           if [[ "${CACHE_FLUSHED}" == "true" ]]; then
-            echo "- ✅ Akamai cache flush requested" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Akamai cache flush requested for \`${FLUSH_PATH}\`" >> $GITHUB_STEP_SUMMARY
           else
             echo "- ⏭️ Cache flush skipped (nothing published or Akamai disabled)" >> $GITHUB_STEP_SUMMARY
           fi
