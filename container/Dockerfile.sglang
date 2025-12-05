@@ -372,7 +372,7 @@ USER root
 RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
-
+ENV DYN_REQUEST_PLANE=tcp
 USER dynamo
 
 # Copy tests, benchmarks, deploy and components for CI with correct ownership
