@@ -41,6 +41,9 @@ class Config:
     store_kv: str
     request_plane: str
 
+    # checkpoint support
+    checkpoint_mode: bool = False
+
     # mirror vLLM
     model: str
     served_model_name: Optional[str]
@@ -192,6 +195,11 @@ def parse_args() -> Config:
         default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
+    parser.add_argument(
+        "--checkpoint-mode",
+        action="store_true",
+        help="Enable checkpoint mode: pause after model load to allow container checkpointing before registering endpoints. Send SIGUSR1 to proceed after restore.",
+    )
     add_config_dump_args(parser)
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -275,6 +283,7 @@ def parse_args() -> Config:
     config.mm_prompt_template = args.mm_prompt_template
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
+    config.checkpoint_mode = args.checkpoint_mode
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:

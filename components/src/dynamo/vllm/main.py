@@ -41,6 +41,50 @@ from .publisher import StatLoggerFactory
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+# Global event for checkpoint proceed signal (SIGUSR1)
+_checkpoint_proceed_event: Optional[asyncio.Event] = None
+
+
+def _handle_checkpoint_proceed(signum, frame):
+    """Handle SIGUSR1 signal to proceed after checkpoint restore."""
+    logger.info("Received SIGUSR1 signal, proceeding with endpoint registration")
+    if _checkpoint_proceed_event is not None:
+        # Set the event in a thread-safe way
+        loop = asyncio.get_event_loop()
+        loop.call_soon_threadsafe(_checkpoint_proceed_event.set)
+
+
+async def wait_for_checkpoint(config):
+    """
+    Wait for checkpoint/restore cycle in checkpoint mode.
+
+    When --checkpoint-mode is enabled:
+    1. Logs CHECKPOINT_READY message (external script can grep for this)
+    2. Waits for SIGUSR1 signal before proceeding with endpoint registration
+
+    This allows container checkpointing after model load but before network
+    connections (ETCD/NATS) are established.
+    """
+    global _checkpoint_proceed_event
+
+    if not config.checkpoint_mode:
+        return
+
+    # Create the event for this checkpoint wait
+    _checkpoint_proceed_event = asyncio.Event()
+
+    # Register signal handler for proceed signal
+    signal.signal(signal.SIGUSR1, _handle_checkpoint_proceed)
+
+    # Log the ready message (external script can grep for this)
+    logger.info("CHECKPOINT_READY: Model loaded, ready for container checkpoint")
+    logger.info("CHECKPOINT_READY: Send SIGUSR1 to proceed after restore (e.g., podman kill -s SIGUSR1 <container>)")
+
+    # Wait for SIGUSR1 signal
+    await _checkpoint_proceed_event.wait()
+
+    logger.info("Proceeding with endpoint registration after checkpoint restore")
+
 
 async def graceful_shutdown(runtime):
     """
@@ -58,9 +102,43 @@ async def worker():
     config = parse_args()
 
     loop = asyncio.get_running_loop()
+
+    # CHECKPOINT MODE: Load model BEFORE runtime creation
+    # This allows checkpointing GPU state before ETCD/NATS connections are established
+    pre_created_engine = None
+    if config.checkpoint_mode:
+        # Prepare config and download model
+        overwrite_args(config)
+        if not config.served_model_name:
+            config.served_model_name = config.engine_args.served_model_name = config.model
+        if not os.path.exists(config.model):
+            config.model = config.engine_args.model = await fetch_llm(config.model)
+
+        dump_config(config.dump_config_to, config)
+
+        # Set up vLLM engine (loads model into GPU)
+        # Note: stat_logger not available yet, will be None for checkpoint mode
+        pre_created_engine = setup_vllm_engine(config)
+
+        # Wait for checkpoint signal BEFORE creating runtime
+        await wait_for_checkpoint(config)
+
+    # Create runtime (fresh ETCD/NATS connections in checkpoint mode)
     runtime = DistributedRuntime(loop, config.store_kv, config.request_plane)
 
-    overwrite_args(config)
+    # NORMAL MODE: overwrite_args and model download happen here
+    if not config.checkpoint_mode:
+        overwrite_args(config)
+
+        # Download the model if necessary.
+        # register_llm would do this for us, but we want it on disk before we start vllm.
+        # Ensure the original HF name (e.g. "Qwen/Qwen3-0.6B") is used as the served_model_name.
+        if not config.served_model_name:
+            config.served_model_name = config.engine_args.served_model_name = config.model
+        if not os.path.exists(config.model):
+            config.model = config.engine_args.model = await fetch_llm(config.model)
+
+        dump_config(config.dump_config_to, config)
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
@@ -70,16 +148,6 @@ async def worker():
         loop.add_signal_handler(sig, signal_handler)
 
     logging.debug("Signal handlers set up for graceful shutdown")
-
-    dump_config(config.dump_config_to, config)
-
-    # Download the model if necessary.
-    # register_llm would do this for us, but we want it on disk before we start vllm.
-    # Ensure the original HF name (e.g. "Qwen/Qwen3-0.6B") is used as the served_model_name.
-    if not config.served_model_name:
-        config.served_model_name = config.engine_args.served_model_name = config.model
-    if not os.path.exists(config.model):
-        config.model = config.engine_args.model = await fetch_llm(config.model)
 
     # Route to appropriate initialization based on config flags
     if config.multimodal_processor:
@@ -93,13 +161,13 @@ async def worker():
         or config.multimodal_decode_worker
         or config.multimodal_encode_prefill_worker
     ):
-        await init_multimodal_worker(runtime, config)
+        await init_multimodal_worker(runtime, config, pre_created_engine=pre_created_engine)
         logger.debug("init_multimodal_worker completed")
     elif config.is_prefill_worker:
-        await init_prefill(runtime, config)
+        await init_prefill(runtime, config, pre_created_engine=pre_created_engine)
         logger.debug("init_prefill completed")
     else:
-        await init(runtime, config)
+        await init(runtime, config, pre_created_engine=pre_created_engine)
         logger.debug("init completed")
 
     logger.debug("Worker function completed, exiting...")
@@ -300,7 +368,7 @@ async def register_vllm_model(
     )
 
 
-async def init_prefill(runtime: DistributedRuntime, config: Config):
+async def init_prefill(runtime: DistributedRuntime, config: Config, pre_created_engine=None):
     """
     Instantiate and serve
     """
@@ -309,12 +377,21 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
-    (
-        engine_client,
-        vllm_config,
-        default_sampling_params,
-        prometheus_temp_dir,
-    ) = setup_vllm_engine(config)
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        (
+            engine_client,
+            vllm_config,
+            default_sampling_params,
+            prometheus_temp_dir,
+        ) = pre_created_engine
+    else:
+        (
+            engine_client,
+            vllm_config,
+            default_sampling_params,
+            prometheus_temp_dir,
+        ) = setup_vllm_engine(config)
 
     handler = PrefillWorkerHandler(
         runtime,
@@ -423,7 +500,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init(runtime: DistributedRuntime, config: Config):
+async def init(runtime: DistributedRuntime, config: Config, pre_created_engine=None):
     """
     Instantiate and serve
     """
@@ -441,12 +518,22 @@ async def init(runtime: DistributedRuntime, config: Config):
         config.engine_args.data_parallel_rank or 0,
         metrics_labels=[("model", config.served_model_name or config.model)],
     )
-    (
-        engine_client,
-        vllm_config,
-        default_sampling_params,
-        prometheus_temp_dir,
-    ) = setup_vllm_engine(config, factory)
+
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        (
+            engine_client,
+            vllm_config,
+            default_sampling_params,
+            prometheus_temp_dir,
+        ) = pre_created_engine
+    else:
+        (
+            engine_client,
+            vllm_config,
+            default_sampling_params,
+            prometheus_temp_dir,
+        ) = setup_vllm_engine(config, factory)
 
     # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
@@ -684,7 +771,7 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
         handler.cleanup()
 
 
-async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_worker(runtime: DistributedRuntime, config: Config, pre_created_engine=None):
     """
     Initialize multimodal worker component.
 
@@ -699,12 +786,21 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
-    (
-        engine_client,
-        vllm_config,
-        default_sampling_params,
-        prometheus_temp_dir,
-    ) = setup_vllm_engine(config)
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        (
+            engine_client,
+            vllm_config,
+            default_sampling_params,
+            prometheus_temp_dir,
+        ) = pre_created_engine
+    else:
+        (
+            engine_client,
+            vllm_config,
+            default_sampling_params,
+            prometheus_temp_dir,
+        ) = setup_vllm_engine(config)
 
     # Set up decode worker client for disaggregated mode
     decode_worker_client = None
