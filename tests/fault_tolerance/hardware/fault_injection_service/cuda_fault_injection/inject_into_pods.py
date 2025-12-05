@@ -159,7 +159,7 @@ def _patch_service_for_injection(
     if "env" not in service["extraPodSpec"]["mainContainer"]:
         service["extraPodSpec"]["mainContainer"]["env"] = []
 
-    # Remove existing LD_PRELOAD, CUDA_FAULT_INJECTION_ENABLED, and CUDA_XID_TYPE if present
+    # Remove existing CUDA fault injection env vars if present
     service["extraPodSpec"]["mainContainer"]["env"] = [
         env
         for env in service["extraPodSpec"]["mainContainer"]["env"]
@@ -168,6 +168,10 @@ def _patch_service_for_injection(
             "LD_PRELOAD",
             "CUDA_FAULT_INJECTION_ENABLED",
             "CUDA_XID_TYPE",
+            "CUDA_FAULT_AFTER_STEP",
+            "CUDA_FAULT_AFTER_SECONDS",
+            "CUDA_FAULT_GPU_ID",
+            "CUDA_FAULT_DEBUG",
         ]
     ]
 
@@ -323,6 +327,9 @@ def patch_deployment_env(
     use_configmap=True,
     target_node=None,
     xid_type=79,
+    after_step=None,
+    after_seconds=None,
+    target_gpu=None,
 ):
     """Patch deployment to add/remove LD_PRELOAD environment variable.
 
@@ -389,7 +396,28 @@ def patch_deployment_env(
                     {"name": "LD_PRELOAD", "value": lib_path},
                     {"name": "CUDA_FAULT_INJECTION_ENABLED", "value": "1"},
                     {"name": "CUDA_XID_TYPE", "value": str(xid_type)},
+                    {"name": "CUDA_FAULT_DEBUG", "value": "1"},  # Enable debug logging
                 ]
+
+                # Add time-based delay if specified (more reliable than step count)
+                if after_seconds is not None:
+                    new_envs.append(
+                        {
+                            "name": "CUDA_FAULT_AFTER_SECONDS",
+                            "value": str(after_seconds),
+                        }
+                    )
+                # Or step-based delay
+                elif after_step is not None:
+                    new_envs.append(
+                        {"name": "CUDA_FAULT_AFTER_STEP", "value": str(after_step)}
+                    )
+
+                # Add GPU targeting if specified (inject on specific GPU only)
+                if target_gpu is not None:
+                    new_envs.append(
+                        {"name": "CUDA_FAULT_GPU_ID", "value": str(target_gpu)}
+                    )
 
             # Patch worker services (VllmDecodeWorker and VllmPrefillWorker)
             services_to_patch = ["VllmDecodeWorker", "VllmPrefillWorker"]
