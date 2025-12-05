@@ -752,22 +752,14 @@ impl OpenAIPreprocessor {
         has_tools: bool,
     ) -> std::result::Result<bool, Error> {
         match (tool_call_parser, tool_choice, has_tools) {
-            // No parser but tools requested - error cases
-            (None, Some(ChatCompletionToolChoiceOption::Required), true) => {
-                tracing::warn!(
-                    "Tool choice 'required' specified but no tool parser configured; proceeding without jailing"
-                );
-                Ok(false)
-            }
+            // tool_choice=required/named work without parser (use Immediate jail mode)
+            (None, Some(ChatCompletionToolChoiceOption::Required), true) => Ok(true),
+            (None, Some(ChatCompletionToolChoiceOption::Named(_)), true) => Ok(true),
+
+            // tool_choice=auto requires a parser
             (None, Some(ChatCompletionToolChoiceOption::Auto), true) => {
                 tracing::warn!(
                     "Tool choice 'auto' specified but no tool parser configured; proceeding without jailing"
-                );
-                Ok(false)
-            }
-            (None, Some(ChatCompletionToolChoiceOption::Named(_)), _) => {
-                tracing::warn!(
-                    "Named tool choice specified but no tool parser configured; proceeding without jailing"
                 );
                 Ok(false)
             }
