@@ -462,14 +462,29 @@ vllm_configs = {
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload(
-                "Generate an email address",
+                "Generate a color name (red, blue, or green)",
                 repeat_count=1,
-                expected_response=["@"],
+                expected_response=["red", "blue", "green"],
                 temperature=0.0,
-                max_tokens=50,
-                extra_body={
-                    "guided_regex": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
-                },
+                max_tokens=20,
+                extra_body={"guided_regex": r"(red|blue|green)"},
+            )
+        ],
+    ),
+    "guided_decoding_choice": VLLMConfig(
+        name="guided_decoding_choice",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload(
+                "Generate a color name (red, blue, or green)",
+                repeat_count=1,
+                expected_response=["red", "blue", "green"],
+                temperature=0.0,
+                max_tokens=20,
+                extra_body={"guided_choice": ["red", "blue", "green"]},
             )
         ],
     ),
