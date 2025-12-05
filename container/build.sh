@@ -106,7 +106,7 @@ VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
-VLLM_BASE_IMAGE_TAG="25.10-cuda13.0-devel-ubuntu24.04"
+VLLM_BASE_IMAGE_TAG="25.11-cuda13.0-devel-ubuntu24.04"
 
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
@@ -511,14 +511,14 @@ BUILD_ARGS+=" --build-arg DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA "
 if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     # Set base image tag to CUDA 12.9 if using the default value (user didn't override)
     if [ "$BASE_IMAGE_TAG" == "$VLLM_BASE_IMAGE_TAG" ]; then
-        BASE_IMAGE_TAG="25.10-cuda13.0-devel-ubuntu24.04"
+        BASE_IMAGE_TAG="25.11-cuda13.0-devel-ubuntu24.04"
         echo "INFO: Automatically setting base-image-tag to $BASE_IMAGE_TAG for vLLM ARM64"
     fi
 
     # Add required build args if not already present
     if [[ "$BUILD_ARGS" != *"RUNTIME_IMAGE_TAG"* ]]; then
-        BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=25.10-cuda13.0-runtime-ubuntu24.04 "
-        echo "INFO: Automatically setting RUNTIME_IMAGE_TAG=25.10-cuda13.0-runtime-ubuntu24.04 for vLLM ARM64"
+        BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=25.11-cuda13.0-runtime-ubuntu24.04 "
+        echo "INFO: Automatically setting RUNTIME_IMAGE_TAG=25.11-cuda13.0-runtime-ubuntu24.04 for vLLM ARM64"
     fi
 
     if [[ "$BUILD_ARGS" != *"CUDA_VERSION"* ]]; then
