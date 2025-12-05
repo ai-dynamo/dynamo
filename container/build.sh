@@ -272,7 +272,7 @@ get_options() {
             ;;
         --cache-from)
             if [ "$2" ]; then
-                CACHE_FROM+="--cache-from $2"
+                CACHE_FROM+="--cache-from $2 "
                 shift
             else
                 missing_requirement "$1"
@@ -280,7 +280,7 @@ get_options() {
             ;;
         --cache-to)
             if [ "$2" ]; then
-                CACHE_TO+="--cache-to $2"
+                CACHE_TO+="--cache-to $2 "
                 shift
             else
                 missing_requirement "$1"
