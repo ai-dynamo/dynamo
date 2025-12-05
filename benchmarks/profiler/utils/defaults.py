@@ -31,6 +31,7 @@ AIPERF_PREFILL_BENCHMARK_OSL = 5
 AIPERF_PREFILL_ATTN_DP_NUM_REQ_RATIO = 4
 
 # Cost calculation defaults
+# TODO: allow user to configure this in GUI
 GPU_COST_PER_HOUR = 3.0  # Cost per GPU per hour in dollars
 
 
