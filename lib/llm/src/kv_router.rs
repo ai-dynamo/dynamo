@@ -34,6 +34,7 @@ pub mod sequence;
 pub mod subscriber;
 pub mod worker_query;
 
+use indexer::WorkerKvQueryResponse;
 pub use prefill_router::PrefillRouter;
 use worker_query::WorkerQueryClient;
 
@@ -518,7 +519,7 @@ impl KvRouter {
     pub async fn query_worker_local_kv(
         &self,
         worker_id: WorkerId,
-    ) -> Result<protocols::WorkerKvQueryResponse> {
+    ) -> Result<WorkerKvQueryResponse> {
         let query_client = self
             .worker_query_client
             .as_ref()

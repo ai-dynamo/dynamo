@@ -7,7 +7,8 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::traits::events::EventPublisher;
 
 use crate::kv_router::WORKER_KV_INDEXER_QUERY_SUBJECT;
-use crate::kv_router::protocols::{WorkerId, WorkerKvQueryRequest, WorkerKvQueryResponse};
+use crate::kv_router::indexer::{WorkerKvQueryRequest, WorkerKvQueryResponse};
+use crate::kv_router::protocols::WorkerId;
 
 /// Router-side client for querying worker local KV indexers
 ///
