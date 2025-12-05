@@ -174,7 +174,8 @@ jobs:
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
           push_tag: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
-          aws_push: ${{ github.ref_name == 'main' && 'true' || 'false' }}
+          # aws_push: ${{ github.ref_name == 'main' && 'true' || 'false' }}
+          aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -235,7 +236,8 @@ jobs:
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
           push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
-          aws_push: ${{ github.ref_name == 'main' && 'true' || 'false' }}
+          # aws_push: ${{ github.ref_name == 'main' && 'true' || 'false' }}
+          aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -296,7 +298,8 @@ jobs:
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
           push_tag: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
-          aws_push: ${{ github.ref_name == 'main' && 'true' || 'false' }}
+          # aws_push: ${{ github.ref_name == 'main' && 'true' || 'false' }}
+          aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
