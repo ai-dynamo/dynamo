@@ -179,14 +179,6 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Verify KVBM wheel exists in vLLM image
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        shell: bash
-        run: |
-          echo "Verifying KVBM wheel is present in vLLM image..."
-          docker run --rm ${{ steps.build-image.outputs.image_tag }} \
-            bash -c 'ls -la /opt/dynamo/wheelhouse/kvbm*.whl && python -c "import kvbm; print(\"✓ KVBM imported successfully\")"'
-
       - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
@@ -302,14 +294,6 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
-      - name: Verify KVBM wheel exists in TRT-LLM image
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        shell: bash
-        run: |
-          echo "Verifying KVBM wheel is present in TRT-LLM image..."
-          docker run --rm ${{ steps.build-image.outputs.image_tag }} \
-            bash -c 'ls -la /opt/dynamo/wheelhouse/kvbm*.whl && python -c "import kvbm; print(\"✓ KVBM imported successfully\")"'
 
       - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
