@@ -71,10 +71,31 @@ Note that the default pip wheel built is not compatible with CUDA 13 at the mome
 |-----------|--------------|----------|
 | `DYN_KVBM_CPU_CACHE_GB` | CPU pinned memory cache size (GB) | required |
 | `DYN_KVBM_DISK_CACHE_GB` | SSD Disk/Storage system cache size (GB) | optional |
+| `DYN_KVBM_DISK_CACHE_DIR` | Disk cache directory | `/tmp/` |
+| `DYN_KVBM_DISK_ZEROFILL_FALLBACK` | Enable zero-fill when `fallocate()` unsupported (e.g., Lustre) | `false` |
+| `DYN_KVBM_DISK_DISABLE_O_DIRECT` | Disable O_DIRECT for disk I/O (debug/compatibility) | `false` |
 | `DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS` | Timeout (in seconds) for the KVBM leader and worker to synchronize and allocate the required memory and storage. Increase this value if allocating large amounts of memory or storage. | 120 |
 | `DYN_KVBM_METRICS` | Enable metrics endpoint | `false` |
 | `DYN_KVBM_METRICS_PORT` | Metrics port | `6880` |
 | `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` | Disable disk offload filtering to remove SSD lifespan protection | `false` |
+
+#### Disk Storage Configuration
+
+**Why special configuration may be needed:**
+
+Some filesystems (e.g., Lustre, certain network filesystems) don't support `fallocate()`, which KVBM uses for fast disk space allocation. Additionally, KVBM uses O_DIRECT I/O for GPU DirectStorage (GDS) performance, which requires strict 4096-byte alignment.
+
+**Setup for filesystems without fallocate() support:**
+```bash
+export DYN_KVBM_DISK_CACHE_DIR=/mnt/storage/kvbm_cache
+export DYN_KVBM_DISK_ZEROFILL_FALLBACK=true  # Enables zero-fill fallback when fallocate() unsupported
+```
+
+**What happens:**
+- Without `ZEROFILL_FALLBACK=true`: Disk cache allocation may fail with "Operation not supported"
+- With `ZEROFILL_FALLBACK=true`: KVBM writes zeros using page-aligned buffers compatible with O_DIRECT requirements
+
+**Troubleshooting:** If you encounter "write all error" or EINVAL (errno 22), try disabling O_DIRECT: `export DYN_KVBM_DISK_DISABLE_O_DIRECT=true`
 
 ### vLLM
 

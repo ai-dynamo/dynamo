@@ -28,8 +28,16 @@ CONTEXT_LENGTH_ATTRS = [
     "sliding_window",  # Mistral with sliding window attention
 ]
 
-# only for MLA + MoE models, treat other MoE models as dense models
-MOE_ARCHITECTURES = {"DeepseekV3ForCausalLM", "DeepseekV32ForCausalLM"}
+# supported MoE architectures
+MOE_ARCHITECTURES = {
+    "DeepseekV3ForCausalLM",
+    "DeepseekV32ForCausalLM",  # MLA + MoE
+    "Qwen3MoeForCausalLM",  # GQA + MoE
+}
+# MoE architectures that sweeps TP additionally to TEP/DEP
+MOE_ADDITIONAL_TP_ARCHITECTURES = {
+    "Qwen3MoeForCausalLM",  # GQA + MoE
+}
 
 
 def get_local_model_weight_size(

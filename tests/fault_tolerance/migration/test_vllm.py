@@ -23,6 +23,14 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
+pytestmark = [
+    pytest.mark.vllm,
+    pytest.mark.gpu_1,
+    pytest.mark.e2e,
+    pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
+    pytest.mark.nightly,
+]
+
 
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with vLLM backend"""
@@ -100,10 +108,7 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(290)  # 3x average
 def test_request_migration_vllm_worker_failure(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -120,9 +125,6 @@ def test_request_migration_vllm_worker_failure(
         logger.info("Frontend started successfully")
 
         # Step 2: Start 2 workers sequentially
-
-        # Start worker1 first and wait for it to be ready
-        logger.info("Starting worker 1...")
         with DynamoWorkerProcess(request, "worker1") as worker1:
             logger.info(f"Worker 1 PID: {worker1.get_pid()}")
 
@@ -150,10 +152,7 @@ def test_request_migration_vllm_worker_failure(
                 verify_migration_occurred(frontend)
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(280)  # 3x average
 def test_request_migration_vllm_graceful_shutdown(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -201,10 +200,7 @@ def test_request_migration_vllm_graceful_shutdown(
                 verify_migration_occurred(frontend)
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(150)  # 3x average
 def test_no_request_migration_vllm_worker_failure(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -221,7 +217,6 @@ def test_no_request_migration_vllm_worker_failure(
         logger.info("Frontend started successfully")
 
         # Step 2: Start 2 workers sequentially with migration disabled
-        logger.info("Starting worker 1 with migration disabled...")
         with DynamoWorkerProcess(request, "worker1", migration_limit=0) as worker1:
             logger.info(f"Worker 1 PID: {worker1.get_pid()}")
 
@@ -265,10 +260,7 @@ def test_no_request_migration_vllm_worker_failure(
                     ), f"Unexpected migration message: {e}"
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(140)  # 3x average
 def test_no_request_migration_vllm_graceful_shutdown(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):

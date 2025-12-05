@@ -61,6 +61,7 @@
    backends/sglang/expert-distribution-eplb.md
    backends/sglang/gpt-oss.md
    backends/sglang/multimodal_epd.md
+   backends/sglang/profiling.md
    backends/sglang/sgl-hicache-example.md
    backends/sglang/sglang-disaggregation.md
    backends/sglang/prometheus.md
@@ -76,6 +77,7 @@
    backends/vllm/multi-node.md
    backends/vllm/multimodal.md
    backends/vllm/prometheus.md
+   backends/vllm/speculative_decoding.md
 
    benchmarks/kv-router-ab-testing.md
 
