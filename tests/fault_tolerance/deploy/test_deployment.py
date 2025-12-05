@@ -8,8 +8,8 @@ import os
 import re
 import signal
 from contextlib import contextmanager
-from typing import Any
 from multiprocessing.context import SpawnProcess
+from typing import Any
 
 import pytest
 
@@ -191,7 +191,6 @@ def _clients(
         logger.debug(f"{proc} joined")
 
 
-
 def _terminate_client_processes(
     client_procs: list[SpawnProcess],
     logger: logging.Logger,
@@ -233,7 +232,9 @@ async def _inject_failures(
 
         logger.info(f"Injecting failure for: {failure}")
 
-        affected_pods[failure.get_failure_key()] = await failure.execute(deployment, logger)
+        affected_pods[failure.get_failure_key()] = await failure.execute(
+            deployment, logger
+        )
 
     return affected_pods
 
@@ -263,9 +264,6 @@ def validation_context(request, scenario):  # noqa: F811
 
     yield context  # Test receives this and populates it
 
-    # Get log_dir from request.node if available (set by test), otherwise use node.name
-    base_log_dir = getattr(request.node, "log_dir", request.node.name)
-
     # Determine log paths based on whether this is a mixed token test
     log_paths = []
     test_name = request.node.name
@@ -273,8 +271,8 @@ def validation_context(request, scenario):  # noqa: F811
 
     if hasattr(scenario.load, "mixed_token_test") and scenario.load.mixed_token_test:
         # For mixed token tests, we have separate overflow and recovery directories
-        overflow_dir = f"{base_log_dir}{OVERFLOW_SUFFIX}"
-        recovery_dir = f"{base_log_dir}{RECOVERY_SUFFIX}"
+        overflow_dir = f"{request.node.name}{OVERFLOW_SUFFIX}"
+        recovery_dir = f"{request.node.name}{RECOVERY_SUFFIX}"
         log_paths = [overflow_dir, recovery_dir]
 
         logging.info("Mixed token test detected. Looking for results in:")
@@ -282,7 +280,7 @@ def validation_context(request, scenario):  # noqa: F811
         logging.info(f"  - Recovery phase: {recovery_dir}")
     else:
         # Standard test with single directory
-        log_paths = [base_log_dir]
+        log_paths = [request.node.name]
 
     # Use factory to auto-detect and parse results
     try:
@@ -495,7 +493,7 @@ async def test_fault_scenario(
 
     async with ManagedDeployment(
         namespace=namespace,
-        log_dir=request.node.log_dir,
+        log_dir=request.node.name,
         deployment_spec=scenario.deployment,
         skip_service_restart=skip_service_restart,
     ) as deployment:
@@ -505,14 +503,16 @@ async def test_fault_scenario(
 
         with _clients(
             logger,
-            request.node.log_dir,
+            request.node.name,
             scenario.deployment,
             namespace,
             model,
             scenario.load,  # Pass entire Load config object
         ) as client_procs:
             # Inject failures and capture which pods were affected
-            affected_pods = await _inject_failures(scenario.failures, logger, deployment)
+            affected_pods = await _inject_failures(
+                scenario.failures, logger, deployment
+            )
             logger.info(f"Affected pods during test: {affected_pods}")
 
             if scenario.load.continuous_load:
