@@ -12,7 +12,7 @@
 #   /opt/dynamo/venv      - TensorRT-LLM uses venv, so entire venv must be writable for pip install
 #
 # HOW TO ACHIEVE GROUP-WRITABLE PERMISSIONS:
-# 1. umask 002 wrapper      - RUN commands create group-writable files (775/664)
+# 1. SHELL + /etc/profile.d - Login shell sources umask 002 globally for all RUN commands (775/664)
 # 2. COPY --chmod=775       - Sets permissions on copied children (not destination)
 # 3. chmod g+w (no -R)      - Fixes destination dirs only (milliseconds vs minutes)
 
@@ -255,7 +255,10 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && mkdir -p /home/dynamo/.cache /opt/dynamo \
     # Potentially slow, but necessary
     && chown -R dynamo: /workspace /home/dynamo /opt/dynamo \
-    && chmod -R g+w /workspace /home/dynamo /opt/dynamo
+    && chmod -R g+w /workspace /home/dynamo /opt/dynamo \
+    # Set umask globally for all subsequent RUN commands (must be done as root before USER dynamo)
+    # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
+    && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
 # Install Python, build-essential and python3-dev as apt dependencies
 ARG PYTHON_VERSION
@@ -307,6 +310,9 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
 # Switch to dynamo user
 USER dynamo
 ENV HOME=/home/dynamo
+# This picks up the umask 002 from the /etc/profile.d/00-umask.sh file for subsequent RUN commands
+SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
+
 ENV DYNAMO_HOME=/workspace
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
@@ -348,7 +354,7 @@ COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 ARG ENABLE_KVBM
 COPY --chmod=775 --chown=dynamo:0 --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
-RUN umask 002 && uv pip install \
+RUN uv pip install \
       --no-cache \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
@@ -362,7 +368,7 @@ RUN umask 002 && uv pip install \
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    umask 002 && UV_GIT_LFS=1 uv pip install \
+    UV_GIT_LFS=1 uv pip install \
         --no-cache \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
@@ -464,10 +470,10 @@ COPY --from=dynamo_base --chown=dynamo:0 --chmod=775 /usr/local/cargo /usr/local
 RUN chmod g+w /usr/local/rustup /usr/local/cargo
 
 # Install maturin, for maturin develop
-RUN umask 002 && uv pip install --no-cache maturin[patchelf]
+RUN uv pip install --no-cache maturin[patchelf]
 
 # Editable install of dynamo
 COPY pyproject.toml README.md hatch_build.py /workspace/
-RUN umask 002 && uv pip install --no-cache --no-deps -e .
+RUN uv pip install --no-cache --no-deps -e .
 
 CMD []

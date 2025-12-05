@@ -13,7 +13,7 @@
 #   /home/dynamo/.local   - SGLang uses $HOME/.local/lib/python3.10/site-packages for pip install
 #
 # HOW TO ACHIEVE GROUP-WRITABLE PERMISSIONS:
-# 1. umask 002 wrapper      - RUN commands create group-writable files (775/664)
+# 1. SHELL + /etc/profile.d - Login shell sources umask 002 globally for all RUN commands (775/664)
 # 2. COPY --chmod=775       - Sets permissions on copied children (not destination)
 # 3. chmod g+w (no -R)      - Fixes destination dirs only (milliseconds vs minutes)
 
@@ -212,14 +212,19 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && mkdir -p /workspace /home/dynamo/.cache /opt/dynamo \
     # Potentially slow, but necessary
     && chown -R dynamo: /sgl-workspace /workspace /home/dynamo /opt/dynamo \
-    && chmod -R g+w /sgl-workspace /workspace /home/dynamo /opt/dynamo
+    && chmod -R g+w /sgl-workspace /workspace /home/dynamo /opt/dynamo \
+    # Set umask globally for all subsequent RUN commands (must be done as root before USER dynamo)
+    # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
+    && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
 USER dynamo
 ENV HOME=/home/dynamo
+# This picks up the umask 002 from the /etc/profile.d/00-umask.sh file for subsequent RUN commands
+SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 
 # Install SGLang (requires CUDA 12.8.1 or 12.9.1). Note that when system-wide packages is not writable,
 # so it gets installed to ~/.local/lib/python<version>/site-packages.
-RUN umask 002 && python3 -m pip install --no-cache-dir --ignore-installed pip==25.3 setuptools==80.9.0 wheel==0.45.1 html5lib==1.1 six==1.17.0 \
+RUN python3 -m pip install --no-cache-dir --ignore-installed pip==25.3 setuptools==80.9.0 wheel==0.45.1 html5lib==1.1 six==1.17.0 \
     && git clone --depth 1 --branch v${SGLANG_COMMIT} https://github.com/sgl-project/sglang.git \
     && cd sglang \
     && case "$CUDA_VERSION" in \
@@ -291,7 +296,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 # Install DeepEP
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    umask 002 && export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     cd /sgl-workspace/DeepEP && \
     NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST="9.0;10.0" pip install --no-build-isolation .
 
@@ -308,7 +313,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 
 # Install essential Python build tools
-RUN umask 002 && python3 -m pip install --no-cache-dir \
+RUN python3 -m pip install --no-cache-dir \
     mooncake-transfer-engine==0.3.6.post1 \
     scikit-build-core==0.11.6 \
     setuptools-rust==1.12.0
@@ -363,7 +368,7 @@ ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:${HOME}/.local/bin:$PATH
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /opt/dynamo/benchmarks/
 COPY --chmod=775 --chown=dynamo:0 --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
-RUN umask 002 && python3 -m pip install \
+RUN python3 -m pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
@@ -375,7 +380,7 @@ RUN umask 002 && python3 -m pip install \
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    umask 002 && python3 -m pip install \
+    python3 -m pip install \
         --no-cache \
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
@@ -436,7 +441,7 @@ ARG PYTHON_VERSION
 # For dev stage, we create a lightweight venv with --system-site-packages to satisfy maturin develop
 # requirements while still accessing all system-installed packages (sglang, torch, deepep, etc.)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN umask 002 && mkdir -p /opt/dynamo/venv && \
+RUN mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION --system-site-packages
 
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
@@ -505,10 +510,10 @@ RUN curl --retry 3 --retry-delay 2 -LSso /usr/local/bin/clang-format https://git
 
 # Editable install of dynamo
 COPY --chmod=664 pyproject.toml README.md hatch_build.py /workspace/
-RUN umask 002 && python3 -m pip install --no-deps -e .
+RUN python3 -m pip install --no-deps -e .
 
 # Install Python development packages
-RUN umask 002 && python3 -m pip install --no-cache-dir \
+RUN python3 -m pip install --no-cache-dir \
     maturin[patchelf] \
     pytest \
     black \
