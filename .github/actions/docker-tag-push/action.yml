@@ -7,6 +7,8 @@ inputs:
   push_tag:
     description: 'Target Name:Tag'
     required: true
+  # There isn't a clean way to have an additional tag that is conditional
+  # Adding this to handle this use-case (we want multiple tags for main builds)
   conditional_tag:
     description: 'Optional tag for conditionals'
     required: false
@@ -46,7 +48,7 @@ runs:
         PUSH_TAG: ${{ inputs.push_tag }}
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
-        if [[ ${{ inputs.conditional_tag != '' }} ]];
+        if [[ ${{ inputs.conditional_tag != '' }} ]]; then
             docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${{ inputs.conditional_tag }}
             docker push ${ECR_HOSTNAME}/${{ inputs.conditional_tag }}
         fi
