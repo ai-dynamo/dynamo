@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-tui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Terminal UI for monitoring Dynamo deployments"
+
+[dependencies]
+anyhow = { workspace = true }
+async-nats = { workspace = true }
+clap = { version = "4.5", features = ["derive", "env"] }
+crossterm = "0.27"
+dynamo-runtime = { workspace = true }
+futures = { workspace = true }
+humantime = { workspace = true }
+parking_lot = { workspace = true }
+ratatui = "0.27"
+reqwest = { workspace = true, features = ["gzip"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
