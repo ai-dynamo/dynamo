@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_async_openai::types::{
-    ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionNamedToolChoice,
+    ChatCompletionNamedToolChoice,
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionToolChoiceOption,
-    ChatCompletionToolType, CreateChatCompletionRequest, FunctionCallStream, FunctionName,
+    ChatCompletionToolType, CreateChatCompletionRequest, FunctionName,
 };
 use dynamo_llm::protocols::common;
 use dynamo_llm::protocols::common::llm_backend::BackendOutput;
