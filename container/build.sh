@@ -882,7 +882,7 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         # - SGLANG: Python 3.10, BASE_IMAGE=cuda-dl-base
         # - TRTLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=pytorch
 
-        # # Create build log directory for BuildKit reports
+        # Create build log directory for BuildKit reports
         BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
         mkdir -p "${BUILD_LOG_DIR}"
 
@@ -892,8 +892,6 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         echo "======================================"
 
         FRAMEWORK_BUILD_LOG="${BUILD_LOG_DIR}/framework-${FRAMEWORK,,}-build.log"
-
-        # BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
 
         # Use BuildKit for enhanced metadata
         if [ -z "$RUN_PREFIX" ]; then
