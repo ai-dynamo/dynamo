@@ -14,10 +14,6 @@ FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}-cu${CUDA_VERSION}-runtime
 
 WORKDIR /sgl-workspace
 
-# Install dynamo
-# Providing --build-arg BRANCH_TYPE=local will editable install the local dynamo repo
-# Providing --build-arg BRANCH_TYPE=remote will editable install the remote dynamo repo
-# Default is to install the latest published dynamo version
 ARG BRANCH_TYPE
 ARG CARGO_BUILD_JOBS
 
