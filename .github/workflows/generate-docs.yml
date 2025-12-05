@@ -407,7 +407,7 @@ jobs:
             # Create new version entry and insert after "latest" (index 1)
             jq --arg version "${VERSION}" \
                --arg url "${DOCS_BASE_URL}/archive/${VERSION}/" \
-               '.[0:1] + [{version: $version, url: $url}] + .[1:]' \
+               '.[0:2] + [{version: $version, url: $url}] + .[2:]' \
                "${LOCAL_MANIFEST}" > "${LOCAL_MANIFEST}.tmp"
             mv "${LOCAL_MANIFEST}.tmp" "${LOCAL_MANIFEST}"
 
