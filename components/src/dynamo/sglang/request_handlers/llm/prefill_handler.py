@@ -3,11 +3,11 @@
 
 import asyncio
 import logging
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
-from dynamo._core import Component, Context
+from dynamo._core import Component, Context, Endpoint
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -22,6 +22,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher,
+        generate_endpoint: Optional[Endpoint] = None,
     ) -> None:
         """Initialize prefill worker handler.
 
@@ -30,10 +31,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: The SGLang publisher instance.
+            generate_endpoint: Optional endpoint for LoRA registration.
         """
         self.engine = engine
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
-        super().__init__(component, engine, config, publisher)
+        super().__init__(
+            component, engine, config, publisher, generate_endpoint=generate_endpoint
+        )
         self._consume_tasks = set()
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
@@ -74,16 +78,38 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         yield bootstrap_info
 
-        input_param = self._get_input_param(request["request"])
+        inner_request = request["request"]
+        input_param = self._get_input_param(inner_request)
 
-        results = await self.engine.async_generate(
+        # Extract LoRA request if present
+        # Check if model name matches a loaded LoRA adapter
+        lora_path = None
+        model_name = inner_request.get("model")
+
+        if model_name and model_name in self.lora_id_for_name:
+            lora_path = self.lora_name_to_path.get(model_name)
+            logging.info(
+                f"Prefill request {context.id()} will use LoRA adapter: {model_name}, "
+                f"path: {lora_path}"
+            )
+        else:
+            logging.debug(
+                f"Prefill request {context.id()} has no LoRA specified (model: {model_name})"
+            )
+
+        # Build generation kwargs with optional LoRA path
+        generate_kwargs = {
             **input_param,
-            sampling_params=request["sampling_params"],
-            stream=True,
-            bootstrap_host=self.bootstrap_host,
-            bootstrap_port=self.bootstrap_port,
-            bootstrap_room=bootstrap_room,
-        )
+            "sampling_params": request["sampling_params"],
+            "stream": True,
+            "bootstrap_host": self.bootstrap_host,
+            "bootstrap_port": self.bootstrap_port,
+            "bootstrap_room": bootstrap_room,
+        }
+        if lora_path:
+            generate_kwargs["lora_path"] = lora_path
+
+        results = await self.engine.async_generate(**generate_kwargs)
 
         task = asyncio.create_task(self._consume_results(results, context))
         self._consume_tasks.add(task)
