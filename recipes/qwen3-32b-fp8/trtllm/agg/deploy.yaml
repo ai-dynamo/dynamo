@@ -62,7 +62,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0.post1
       replicas: 1
     TrtllmWorker:
       componentType: main
@@ -96,7 +96,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0.post1
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"
