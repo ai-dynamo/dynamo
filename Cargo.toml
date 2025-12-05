@@ -100,6 +100,7 @@ reqwest = { version = "0.12.24", default-features = false, features = [
 rmp-serde = { version = "1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
+serde_path_to_error = { version = "0.1" }
 strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 thiserror = { version = "2.0.17" }
