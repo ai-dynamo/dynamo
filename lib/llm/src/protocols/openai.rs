@@ -16,7 +16,6 @@ pub mod completions;
 pub mod embeddings;
 pub mod models;
 pub mod nvext;
-pub mod partial_json;
 pub mod responses;
 pub mod tools;
 pub mod validate;

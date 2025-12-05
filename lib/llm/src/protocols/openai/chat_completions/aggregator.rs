@@ -65,6 +65,28 @@ impl Default for DeltaAggregator {
     }
 }
 
+fn convert_tool_chunk_to_message_tool_call(
+    chunk: &dynamo_async_openai::types::ChatCompletionMessageToolCallChunk,
+) -> Option<dynamo_async_openai::types::ChatCompletionMessageToolCall> {
+    // Convert ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall
+    if let (Some(id), Some(r#type), Some(function)) = (&chunk.id, &chunk.r#type, &chunk.function) {
+        if let (Some(name), Some(arguments)) = (&function.name, &function.arguments) {
+            Some(dynamo_async_openai::types::ChatCompletionMessageToolCall {
+                id: id.clone(),
+                r#type: r#type.clone(),
+                function: dynamo_async_openai::types::FunctionCall {
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                },
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
 impl DeltaAggregator {
     /// Creates a new, empty [`DeltaAggregator`] instance.
     pub fn new() -> Self {
@@ -153,51 +175,26 @@ impl DeltaAggregator {
                                 .push_str(reasoning_content);
                         }
 
-                        // Aggregate tool calls incrementally
-                        // Each chunk may add a new tool call or append arguments to existing one
-                        if let Some(tool_call_chunks) = &choice.delta.tool_calls
-                            && !tool_call_chunks.is_empty()
+                        // Since one tool call is one chunk, we don't need to aggregate them
+                        // We just need to convert the ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall and append to the state_choice.tool_calls
+                        if let Some(tool_calls) = &choice.delta.tool_calls
+                            && !tool_calls.is_empty()
                         {
-                            // Initialize tool_calls vec if needed
-                            let existing_tool_calls = state_choice
-                                .tool_calls
-                                .get_or_insert_with(Vec::new);
+                            // Convert ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall
+                            let converted_tool_calls: Vec<
+                                dynamo_async_openai::types::ChatCompletionMessageToolCall,
+                            > = tool_calls
+                                .iter()
+                                .filter_map(convert_tool_chunk_to_message_tool_call)
+                                .collect();
 
-                            // Process each chunk
-                            for chunk in tool_call_chunks {
-                                let chunk_index = chunk.index as usize;
-
-                                // Find or create tool call at this index
-                                if chunk_index >= existing_tool_calls.len() {
-                                    // Extend the vec to accommodate this index
-                                    existing_tool_calls.resize_with(chunk_index + 1, || {
-                                        dynamo_async_openai::types::ChatCompletionMessageToolCall {
-                                            id: String::new(),
-                                            r#type: dynamo_async_openai::types::ChatCompletionToolType::Function,
-                                            function: dynamo_async_openai::types::FunctionCall {
-                                                name: String::new(),
-                                                arguments: String::new(),
-                                            },
-                                        }
-                                    });
-                                }
-
-                                let tool_call = &mut existing_tool_calls[chunk_index];
-
-                                // Update fields if present in chunk
-                                if let Some(id) = &chunk.id {
-                                    tool_call.id = id.clone();
-                                }
-                                if let Some(r#type) = &chunk.r#type {
-                                    tool_call.r#type = r#type.clone();
-                                }
-                                if let Some(function) = &chunk.function {
-                                    if let Some(name) = &function.name {
-                                        tool_call.function.name = name.clone();
-                                    }
-                                    if let Some(arguments) = &function.arguments {
-                                        tool_call.function.arguments.push_str(arguments);
-                                    }
+                            // Initialize and push the converted tool calls to state_choice.tool_calls
+                            // Only set tool_calls to Some if there are actual tool calls
+                            if !converted_tool_calls.is_empty() {
+                                if let Some(existing_tool_calls) = &mut state_choice.tool_calls {
+                                    existing_tool_calls.extend(converted_tool_calls);
+                                } else {
+                                    state_choice.tool_calls = Some(converted_tool_calls);
                                 }
                             }
                         }
@@ -273,17 +270,11 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
     /// The `function_call` field is deprecated.
     fn from(delta: DeltaChoice) -> Self {
         // If tool calls are present and non-empty, finish reason should be ToolCalls
-        // Unless it's a critical finish reason (Length, ContentFilter, Stop) that should be preserved
         let finish_reason = if delta
             .tool_calls
             .as_ref()
             .is_some_and(|calls| !calls.is_empty())
-            && !matches!(
-                delta.finish_reason,
-                Some(dynamo_async_openai::types::FinishReason::Stop)
-                    | Some(dynamo_async_openai::types::FinishReason::Length)
-                    | Some(dynamo_async_openai::types::FinishReason::ContentFilter)
-            ) {
+        {
             Some(dynamo_async_openai::types::FinishReason::ToolCalls)
         } else {
             delta.finish_reason
@@ -700,8 +691,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_calling_finish_reason_respects_explicit_stop() {
-        // Test that when tool calls are present and finish reason is Stop, it remains Stop
+    async fn test_tool_calling_finish_reason_override_from_stop() {
+        // Test that when tool calls are present but finish reason is Stop, it gets overridden to ToolCalls
         let tool_call_json =
             r#"{"name": "get_weather", "arguments": {"location": "New York", "unit": "celsius"}}"#;
 
@@ -735,22 +726,23 @@ mod tests {
         let tool_calls = choice.message.tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
 
-        // Finish reason should remain Stop because it was explicitly provided that way
+        // Most importantly, verify that finish reason was overridden to ToolCalls despite original being Stop
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::Stop)
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
         );
     }
 
     #[tokio::test]
-    async fn test_tool_calling_preserves_length_when_present() {
+    async fn test_tool_calling_finish_reason_override_from_length() {
+        // Test that when tool calls are present but finish reason is Length, it gets overridden to ToolCalls
         let tool_call_json = r#"{"name": "search", "arguments": {"query": "rust programming"}}"#;
 
         let annotated_delta = create_test_delta(
             0,
             "Let me search for that.",
             Some(dynamo_async_openai::types::Role::Assistant),
-            Some(dynamo_async_openai::types::FinishReason::Length),
+            Some(dynamo_async_openai::types::FinishReason::Length), // Original finish reason is Length
             None,
             Some(tool_call_json),
         );
@@ -771,13 +763,15 @@ mod tests {
         assert_eq!(response.choices.len(), 1);
         let choice = &response.choices[0];
 
+        // Verify tool calls are present
         assert!(choice.message.tool_calls.is_some());
         let tool_calls = choice.message.tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
 
+        // Verify that finish reason was overridden to ToolCalls despite original being Length
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::Length)
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
         );
     }
 
@@ -970,8 +964,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_calling_finish_reason_stop_remains_when_set() {
-        // When finish_reason is explicitly Stop, we preserve it even if tool_calls are present
+    async fn test_tool_calling_finish_reason_override_from_stop_alternative() {
+        // Test that when tool calls are present but finish reason is Stop, it gets overridden to ToolCalls
         let tool_call_json =
             r#"{"name": "get_weather", "arguments": {"location": "New York", "unit": "celsius"}}"#;
 
@@ -997,10 +991,10 @@ mod tests {
         assert_eq!(response.choices.len(), 1);
         let choice = &response.choices[0];
 
-        // The finish_reason should remain Stop because it was explicitly provided that way
+        // The finish_reason should be ToolCalls, not Stop, because tool calls are present
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::Stop)
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
         );
 
         // Verify tool calls are present
@@ -1008,86 +1002,5 @@ mod tests {
         let tool_calls = choice.message.tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "get_weather");
-    }
-
-    #[tokio::test]
-    async fn test_tool_calling_preserves_length_finish_reason() {
-        // Test that Length finish reason is preserved even with tool_calls present
-        let tool_call_json = r#"{"name": "get_weather", "arguments": {"location": "Paris"}}"#;
-
-        let annotated_delta = create_test_delta(
-            0,
-            "",
-            Some(dynamo_async_openai::types::Role::Assistant),
-            Some(dynamo_async_openai::types::FinishReason::Length), // Length finish reason
-            None,
-            Some(tool_call_json),
-        );
-
-        let data = annotated_delta.data.unwrap();
-        let annotated_delta = Annotated {
-            data: Some(data),
-            id: Some("test_id".to_string()),
-            event: None,
-            comment: None,
-        };
-        let stream = Box::pin(stream::iter(vec![annotated_delta]));
-
-        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
-
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        assert_eq!(response.choices.len(), 1);
-        let choice = &response.choices[0];
-
-        // Critical: Length finish reason MUST be preserved, not replaced with ToolCalls
-        assert_eq!(
-            choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::Length),
-            "Length finish reason must be preserved even when tool_calls are present"
-        );
-
-        // Verify tool calls are still present
-        assert!(choice.message.tool_calls.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_tool_calling_preserves_content_filter_finish_reason() {
-        // Test that ContentFilter finish reason is preserved even with tool_calls present
-        let tool_call_json = r#"{"name": "harmful_action", "arguments": {}}"#;
-
-        let annotated_delta = create_test_delta(
-            0,
-            "",
-            Some(dynamo_async_openai::types::Role::Assistant),
-            Some(dynamo_async_openai::types::FinishReason::ContentFilter), // ContentFilter
-            None,
-            Some(tool_call_json),
-        );
-
-        let data = annotated_delta.data.unwrap();
-        let annotated_delta = Annotated {
-            data: Some(data),
-            id: Some("test_id".to_string()),
-            event: None,
-            comment: None,
-        };
-        let stream = Box::pin(stream::iter(vec![annotated_delta]));
-
-        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
-
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        let choice = &response.choices[0];
-
-        // Critical: ContentFilter finish reason MUST be preserved
-        assert_eq!(
-            choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::ContentFilter),
-            "ContentFilter finish reason must be preserved even when tool_calls are present"
-        );
-
-        // Verify tool calls are still present
-        assert!(choice.message.tool_calls.is_some());
     }
 }

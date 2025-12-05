@@ -610,8 +610,10 @@ impl DistributedConfig {
 /// - `Http`: Use HTTP/2 for request distribution
 /// - `Tcp`: Use raw TCP for request distribution with msgpack support
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum RequestPlaneMode {
     /// Use NATS for request plane (default for backward compatibility)
+    #[default]
     Nats,
     /// Use HTTP/2 for request plane
     Http,
@@ -619,11 +621,6 @@ pub enum RequestPlaneMode {
     Tcp,
 }
 
-impl Default for RequestPlaneMode {
-    fn default() -> Self {
-        Self::Nats
-    }
-}
 
 impl fmt::Display for RequestPlaneMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

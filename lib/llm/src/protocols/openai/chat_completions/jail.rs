@@ -418,18 +418,15 @@ impl ChoiceJailStateCollection {
 
 /// Emission mode for handling multiple choices
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum EmissionMode {
     /// Pack multiple choices in the same chunk (default, matches original behavior)
+    #[default]
     Packed,
     /// Emit one choice per chunk for OpenAI compatibility
     SingleChoicePerChunk,
 }
 
-impl Default for EmissionMode {
-    fn default() -> Self {
-        Self::Packed
-    }
-}
 
 /// A stream transformer that can "jail" tokens based on configurable start/end sequences
 /// When jailed, tokens are accumulated rather than yielded immediately
@@ -522,7 +519,7 @@ impl JailedStream {
                             // Only filter out if this choice was ever jailed and lacks role
                             // (to avoid aggregator issues with deltas missing role after unjail)
                             let choice_state = choice_states.get_or_create_state(choice.index, false);
-                            let was_ever_jailed = choice_state.accumulated_content.len() > 0 || choice_state.is_jailed;
+                            let was_ever_jailed = !choice_state.accumulated_content.is_empty() || choice_state.is_jailed;
 
                             let should_emit = choice.delta.role.is_some()
                                 || choice.delta.tool_calls.is_some()
@@ -745,22 +742,19 @@ impl JailedStream {
                 match format {
                     ToolChoiceFormat::SingleObject { .. } => {
                         // Expect single object: {"location": "Paris", "unit": "celsius"}
-                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(accumulated_content) {
-                            if value.is_object() {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(accumulated_content)
+                            && value.is_object() {
                                 return (true, accumulated_content.len());
                             }
-                        }
                         (false, accumulated_content.len())
                     }
                     ToolChoiceFormat::ArrayOfTools => {
                         // Expect array: [{"name":"search","parameters":{...}}, ...]
-                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(accumulated_content) {
-                            if let Some(arr) = value.as_array() {
-                                if !arr.is_empty() {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(accumulated_content)
+                            && let Some(arr) = value.as_array()
+                                && !arr.is_empty() {
                                     return (true, accumulated_content.len());
                                 }
-                            }
-                        }
                         (false, accumulated_content.len())
                     }
                 }

@@ -73,12 +73,10 @@ fn test_model_discovery_scoping_scenarios() {
 
     // Scenario 1: Frontend configured for specific namespace should only see models from that namespace
     let frontend_namespace = "vllm-agg";
-    let available_models = vec![
-        create_test_endpoint("vllm-agg", "backend", "generate"),
+    let available_models = [create_test_endpoint("vllm-agg", "backend", "generate"),
         create_test_endpoint("vllm-agg", "backend", "generate"),
         create_test_endpoint("sglang-prod", "backend", "generate"),
-        create_test_endpoint("dynamo", "backend", "generate"),
-    ];
+        create_test_endpoint("dynamo", "backend", "generate")];
 
     let visible_models: Vec<&EndpointId> = available_models
         .iter()
