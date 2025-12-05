@@ -48,7 +48,6 @@ check_env MODEL_PATH
 check_env CONFIG_DIR
 check_env CONTAINER_IMAGE
 
-GPU_TYPE="gb200-fp8"
 GPUS_PER_NODE=4
 : "${NETWORK_INTERFACE:=enP6p9s0np0}"
 
@@ -62,7 +61,8 @@ ISL=$6
 OSL=$7
 CONCURRENCIES=$8
 REQUEST_RATE=$9
-SCRIPT_VARIANT=${10}
+GPU_TYPE=${10}
+SCRIPT_VARIANT=${11}
 
 RETRIES=1 # defaults to retry the job 1 time to avoid transient errors
 
@@ -86,7 +86,7 @@ command=(
     --model-dir $MODEL_PATH --config-dir $CONFIG_DIR
     --container-image $CONTAINER_IMAGE
 
-    --gpu-type $GPU_TYPE --gpus-per-node $GPUS_PER_NODE --network-interface $NETWORK_INTERFACE
+    --gpus-per-node $GPUS_PER_NODE --network-interface $NETWORK_INTERFACE
 
     --prefill-nodes $PREFILL_NODES --prefill-workers $PREFILL_WORKERS
     --decode-nodes $DECODE_NODES --decode-workers $DECODE_WORKERS
@@ -95,6 +95,8 @@ command=(
     --profiler "${profiler_args}"
 
     --retries $RETRIES
+
+    --gpu-type $GPU_TYPE
 
     --run-in-ci
     ${SCRIPT_VARIANT_ARGS[@]}
