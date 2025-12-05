@@ -813,8 +813,8 @@ if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
 fi
 # For other frameworks, ENABLE_KVBM defaults to false unless --enable-kvbm flag was provided
 
-if [  ! -z ${ENABLE_KVBM} ]; then
-    echo "Enabling the KVBM in the dynamo image"
+if [[ ${ENABLE_KVBM} == "true" ]]; then
+    echo "Enabling KVBM in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
 fi
 
