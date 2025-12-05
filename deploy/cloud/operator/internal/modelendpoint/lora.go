@@ -17,8 +17,6 @@
 
 package modelendpoint
 
-const contentTypeJSON = "application/json"
-
 import (
 	"bytes"
 	"context"
@@ -30,6 +28,8 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+const contentTypeJSON = "application/json"
 
 // loadLoRA loads a LoRA model on a single endpoint
 func (c *Client) loadLoRA(ctx context.Context, address, modelName, sourceURI string) error {
