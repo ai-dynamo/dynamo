@@ -21,6 +21,13 @@ from tests.utils.payloads import check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
 
+pytestmark = [
+    pytest.mark.sglang,
+    pytest.mark.e2e,
+    pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
+    pytest.mark.nightly,
+]
+
 
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with SGLang backend"""
@@ -146,11 +153,8 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.e2e
-@pytest.mark.sglang
+@pytest.mark.timeout(160)  # 3x average
 @pytest.mark.gpu_1
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.nightly
 @pytest.mark.xfail(strict=False)
 def test_request_cancellation_sglang_aggregated(
     request, runtime_services, predownload_models
@@ -236,11 +240,8 @@ def test_request_cancellation_sglang_aggregated(
                 logger.info(f"{description} detected successfully")
 
 
-@pytest.mark.e2e
-@pytest.mark.sglang
+@pytest.mark.timeout(185)  # 3x average
 @pytest.mark.gpu_2
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.nightly
 def test_request_cancellation_sglang_decode_cancel(
     request, runtime_services, predownload_models
 ):

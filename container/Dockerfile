@@ -14,6 +14,7 @@ ARG BASE_IMAGE_TAG
 
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
+ARG ENABLE_MEDIA_NIXL
 ARG CARGO_BUILD_JOBS
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -278,7 +279,11 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-    maturin build --release --out /opt/dynamo/dist && \
+    if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
+        maturin build --release --features dynamo-llm/media-nixl --out /opt/dynamo/dist; \
+    else \
+        maturin build --release --out /opt/dynamo/dist; \
+    fi && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out target/wheels && \
@@ -354,7 +359,7 @@ USER dynamo
 ENV HOME=/home/dynamo \
     DYNAMO_HOME=/opt/dynamo \
     CARGO_TARGET_DIR=/opt/dynamo/target
-ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda/compat/lib.real:${LD_LIBRARY_PATH}
 
 # Create and activate virtual environment
 ARG PYTHON_VERSION

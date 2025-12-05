@@ -13,10 +13,11 @@ use crate::metrics::MetricsHierarchy;
 use crate::traits::DistributedRuntimeProvider;
 use axum::{
     Router,
+    body::Bytes,
     extract::{Json, Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{any, delete, get, post},
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -182,6 +183,13 @@ pub async fn spawn_system_status_server(
             get({
                 let state = Arc::clone(&server_state);
                 move || metadata_handler(state)
+            }),
+        )
+        .route(
+            "/engine/{*path}",
+            any({
+                let state = Arc::clone(&server_state);
+                move |path, body| engine_route_handler(state, path, body)
             }),
         );
 
@@ -521,6 +529,77 @@ fn parse_lora_response(response_data: &serde_json::Value) -> LoraResponse {
             .get("count")
             .and_then(|c| c.as_u64())
             .map(|c| c as usize),
+    }
+}
+
+/// Engine route handler for /engine/* routes
+///
+/// This handler looks up registered callbacks in the engine routes registry
+/// and invokes them with the request body, returning the response as JSON.
+#[tracing::instrument(skip_all, level = "trace", fields(path = %path))]
+async fn engine_route_handler(
+    state: Arc<SystemStatusState>,
+    Path(path): Path<String>,
+    body: Bytes,
+) -> impl IntoResponse {
+    tracing::trace!("Engine route request to /engine/{}", path);
+
+    // Parse body as JSON (empty object for GET/empty body)
+    let body_json: serde_json::Value = if body.is_empty() {
+        serde_json::json!({})
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::warn!("Invalid JSON in request body: {}", e);
+                return (
+                    StatusCode::BAD_REQUEST,
+                    json!({
+                        "error": "Invalid JSON",
+                        "message": format!("{}", e)
+                    })
+                    .to_string(),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    // Look up callback
+    let callback = match state.drt().engine_routes().get(&path) {
+        Some(cb) => cb,
+        None => {
+            tracing::debug!("Route /engine/{} not found", path);
+            return (
+                StatusCode::NOT_FOUND,
+                json!({
+                    "error": "Route not found",
+                    "message": format!("Route /engine/{} not found", path)
+                })
+                .to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    // Call callback (it's async, so await it)
+    match callback(body_json).await {
+        Ok(response) => {
+            tracing::trace!("Engine route handler succeeded for /engine/{}", path);
+            (StatusCode::OK, response.to_string()).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Engine route handler error for /engine/{}: {}", path, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({
+                    "error": "Handler error",
+                    "message": format!("{}", e)
+                })
+                .to_string(),
+            )
+                .into_response()
+        }
     }
 }
 

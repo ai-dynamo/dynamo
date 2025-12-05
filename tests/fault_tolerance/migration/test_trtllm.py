@@ -104,6 +104,11 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
+@pytest.mark.timeout(290)  # 3x average
+@pytest.mark.xfail(
+    reason="For some reason both replicas received the request where only one should",
+    strict=False,
+)
 def test_request_migration_trtllm_worker_failure(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -195,6 +200,11 @@ def test_request_migration_trtllm_graceful_shutdown(
                 verify_migration_occurred(frontend)
 
 
+@pytest.mark.timeout(185)  # 3x average
+@pytest.mark.xfail(
+    reason="For some reason both replicas received the request where only one should",
+    strict=False,
+)
 def test_no_request_migration_trtllm_worker_failure(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):

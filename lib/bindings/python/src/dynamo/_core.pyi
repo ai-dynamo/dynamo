@@ -5,6 +5,7 @@ from typing import (
     Any,
     AsyncGenerator,
     AsyncIterator,
+    Awaitable,
     Callable,
     Dict,
     List,
@@ -54,6 +55,32 @@ class DistributedRuntime:
     def child_token(self) -> CancellationToken:
         """
         Get a child cancellation token that can be passed to async tasks
+        """
+        ...
+
+    def register_engine_route(
+        self,
+        route_name: str,
+        callback: Callable[[dict], Awaitable[dict]],
+    ) -> None:
+        """
+        Register an async callback for /engine/{route_name} on the system status server.
+
+        Args:
+            route_name: The route path (e.g., "start_profile" creates /engine/start_profile)
+            callback: Async function with signature: async def(body: dict) -> dict
+
+        Example:
+            async def start_profile(body: dict) -> dict:
+                await engine.start_profile(**body)
+                return {"status": "ok", "message": "Profiling started"}
+
+            runtime.register_engine_route("start_profile", start_profile)
+
+        The callback receives the JSON request body as a dict and should return
+        a dict that will be serialized as the JSON response.
+
+        For GET requests or empty bodies, an empty dict {} is passed.
         """
         ...
 
