@@ -77,34 +77,20 @@ fn test_named_tool_choice_parses_json() {
     assert!(delta.content.is_none());
     let tool_calls = delta.tool_calls.as_ref().unwrap();
 
-    // In streaming mode, we emit 2 chunks: first with id/name, second with arguments
-    assert!(
-        !tool_calls.is_empty(),
-        "Should have at least 1 tool call chunk"
-    );
+    assert_eq!(tool_calls.len(), 1);
 
-    // Find the chunk with the name (first chunk)
-    let name_chunk = tool_calls
-        .iter()
-        .find(|tc| tc.function.as_ref().and_then(|f| f.name.as_ref()).is_some());
-    assert!(name_chunk.is_some(), "Should have chunk with name");
-    let name_chunk = name_chunk.unwrap();
-
-    assert_eq!(name_chunk.index, 0);
-    assert_eq!(name_chunk.id.as_deref(), Some("call_1"));
+    let tool_call = &tool_calls[0];
+    assert_eq!(tool_call.index, 0);
+    assert_eq!(tool_call.id.as_deref(), Some("call-1"));
+    assert_eq!(tool_call.r#type, Some(ChatCompletionToolType::Function));
     assert_eq!(
-        name_chunk.function.as_ref().unwrap().name.as_deref(),
+        tool_call.function.as_ref().unwrap().name.as_deref(),
         Some("get_weather")
     );
-
-    // Arguments may be in the same chunk or a subsequent one
-    let has_arguments = tool_calls.iter().any(|tc| {
-        tc.function
-            .as_ref()
-            .and_then(|f| f.arguments.as_ref())
-            .is_some_and(|args| !args.is_empty())
-    });
-    assert!(has_arguments, "Should have arguments in some chunk");
+    assert_eq!(
+        tool_call.function.as_ref().unwrap().arguments.as_deref(),
+        Some(r#"{"location":"Paris"}"#)
+    );
 }
 
 #[test]
@@ -130,52 +116,30 @@ fn test_required_tool_choice_parses_json_array() {
     assert!(delta.content.is_none());
     let tool_calls = delta.tool_calls.as_ref().unwrap();
 
-    // With incremental streaming, we emit separate chunks for name and arguments
-    // Expected: 4 chunks total (2 per tool: name chunk + arguments chunk)
-    assert_eq!(tool_calls.len(), 4);
+    assert_eq!(tool_calls.len(), 2);
 
-    // First tool: name chunk
     assert_eq!(tool_calls[0].index, 0);
+    assert_eq!(tool_calls[0].id.as_deref(), Some("call-1"));
+    assert_eq!(tool_calls[0].r#type, Some(ChatCompletionToolType::Function));
     assert_eq!(
         tool_calls[0].function.as_ref().unwrap().name.as_deref(),
         Some("search")
     );
-    assert!(tool_calls[0].id.is_some());
-
-    // First tool: arguments chunk
-    assert_eq!(tool_calls[1].index, 0);
-    assert!(tool_calls[1].function.as_ref().unwrap().name.is_none());
-    assert!(
-        tool_calls[1]
-            .function
-            .as_ref()
-            .unwrap()
-            .arguments
-            .as_ref()
-            .unwrap()
-            .contains("rust")
+    assert_eq!(
+        tool_calls[0].function.as_ref().unwrap().arguments.as_deref(),
+        Some(r#"{"query":"rust"}"#)
     );
 
-    // Second tool: name chunk
-    assert_eq!(tool_calls[2].index, 1);
+    assert_eq!(tool_calls[1].index, 1);
+    assert_eq!(tool_calls[1].id.as_deref(), Some("call-2"));
+    assert_eq!(tool_calls[1].r#type, Some(ChatCompletionToolType::Function));
     assert_eq!(
-        tool_calls[2].function.as_ref().unwrap().name.as_deref(),
+        tool_calls[1].function.as_ref().unwrap().name.as_deref(),
         Some("summarize")
     );
-    assert!(tool_calls[2].id.is_some());
-
-    // Second tool: arguments chunk
-    assert_eq!(tool_calls[3].index, 1);
-    assert!(tool_calls[3].function.as_ref().unwrap().name.is_none());
-    assert!(
-        tool_calls[3]
-            .function
-            .as_ref()
-            .unwrap()
-            .arguments
-            .as_ref()
-            .unwrap()
-            .contains("memory")
+    assert_eq!(
+        tool_calls[1].function.as_ref().unwrap().arguments.as_deref(),
+        Some(r#"{"topic":"memory"}"#)
     );
 }
 
@@ -191,13 +155,12 @@ fn test_tool_choice_parse_failure_suppresses_text() {
         .expect("choice generation");
 
     let delta = &response.choices[0].delta;
-    // When tool_choice is active but parsing fails, we suppress the text output
     assert!(delta.content.is_none());
     assert!(delta.tool_calls.is_none());
 }
 
 #[test]
-fn test_streaming_named_tool_incremental() {
+fn test_streaming_named_tool_buffers_until_finish() {
     let mut request = create_test_request();
     request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Named(
         ChatCompletionNamedToolChoice {
@@ -210,9 +173,11 @@ fn test_streaming_named_tool_incremental() {
 
     let mut generator = request.response_generator("req-stream-1".to_string());
 
-    // Simulate streaming chunks
-    // For simplicity in testing, send complete JSON in final chunk
-    let chunks = [r#"{"location":"Paris","unit":"celsius"}"#];
+    let chunks = [
+        r#"{"location":""#,
+        r#"Paris","unit":""#,
+        r#"celsius"}"#,
+    ];
 
     let mut all_responses = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
@@ -239,18 +204,23 @@ fn test_streaming_named_tool_incremental() {
         all_responses.push(response);
     }
 
-    // Last response should have finish_reason
+    for i in 0..all_responses.len() - 1 {
+        assert!(all_responses[i].choices[0].delta.tool_calls.is_none());
+    }
+
     let last_response = all_responses.last().unwrap();
     assert_eq!(
         last_response.choices[0].finish_reason,
         Some(dynamo_async_openai::types::FinishReason::Stop)
     );
 
-    // Should have tool_calls somewhere in the stream
-    let has_tool_calls = all_responses
-        .iter()
-        .any(|r| r.choices[0].delta.tool_calls.is_some());
-    assert!(has_tool_calls, "No tool calls found in any response");
+    let tool_calls = last_response.choices[0].delta.tool_calls.as_ref().unwrap();
+    assert_eq!(tool_calls.len(), 1);
+    assert_eq!(tool_calls[0].function.as_ref().unwrap().name.as_deref(), Some("get_weather"));
+    assert_eq!(
+        tool_calls[0].function.as_ref().unwrap().arguments.as_deref(),
+        Some(r#"{"location":"Paris","unit":"celsius"}"#)
+    );
 }
 
 #[test]
@@ -260,7 +230,6 @@ fn test_streaming_required_tool_parallel() {
 
     let mut generator = request.response_generator("req-stream-2".to_string());
 
-    // Simulate streaming array of tool calls
     let chunks = [
         r#"[{"name":"search","parameters":{"query":"rust"}},"#,
         r#"{"name":"summarize","parameters":{"topic":"memory"}}]"#,
@@ -291,38 +260,28 @@ fn test_streaming_required_tool_parallel() {
         all_responses.push(response);
     }
 
-    // Final chunk should have finish_reason = ToolCalls
+    for i in 0..all_responses.len() - 1 {
+        assert!(all_responses[i].choices[0].delta.tool_calls.is_none());
+    }
+
     let last_response = all_responses.last().unwrap();
     assert_eq!(
         last_response.choices[0].finish_reason,
         Some(dynamo_async_openai::types::FinishReason::ToolCalls)
     );
 
-    // Should have detected both tools
-    let mut found_search = false;
-    let mut found_summarize = false;
-    for resp in &all_responses {
-        if let Some(tool_calls) = &resp.choices[0].delta.tool_calls {
-            for tc in tool_calls {
-                if let Some(func) = &tc.function
-                    && let Some(name) = &func.name
-                {
-                    if name == "search" {
-                        found_search = true;
-                    }
-                    if name == "summarize" {
-                        found_summarize = true;
-                    }
-                }
-            }
-        }
-    }
-    assert!(found_search, "Should detect search tool");
-    assert!(found_summarize, "Should detect summarize tool");
+    let tool_calls = last_response.choices[0].delta.tool_calls.as_ref().unwrap();
+    assert_eq!(tool_calls.len(), 2);
+
+    assert_eq!(tool_calls[0].function.as_ref().unwrap().name.as_deref(), Some("search"));
+    assert_eq!(tool_calls[0].function.as_ref().unwrap().arguments.as_deref(), Some(r#"{"query":"rust"}"#));
+
+    assert_eq!(tool_calls[1].function.as_ref().unwrap().name.as_deref(), Some("summarize"));
+    assert_eq!(tool_calls[1].function.as_ref().unwrap().arguments.as_deref(), Some(r#"{"topic":"memory"}"#));
 }
 
 #[test]
-fn test_streaming_with_incremental_arguments() {
+fn test_streaming_buffers_until_finish() {
     let mut request = create_test_request();
     request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Named(
         ChatCompletionNamedToolChoice {
@@ -335,11 +294,11 @@ fn test_streaming_with_incremental_arguments() {
 
     let mut generator = request.response_generator("req-stream-3".to_string());
 
-    // Character-by-character streaming
     let full_json = r#"{"query":"rust programming"}"#;
     let mut responses = Vec::new();
 
-    for ch in full_json.chars() {
+    for (i, ch) in full_json.chars().enumerate() {
+        let is_last = i == full_json.len() - 1;
         let backend_output = BackendOutput {
             token_ids: vec![],
             tokens: vec![],
@@ -347,7 +306,11 @@ fn test_streaming_with_incremental_arguments() {
             cum_log_probs: None,
             log_probs: None,
             top_logprobs: None,
-            finish_reason: None,
+            finish_reason: if is_last {
+                Some(common::FinishReason::Stop)
+            } else {
+                None
+            },
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
@@ -359,16 +322,26 @@ fn test_streaming_with_incremental_arguments() {
         responses.push(response);
     }
 
-    // Should have suppressed raw text output
     for resp in &responses {
         assert!(resp.choices[0].delta.content.is_none());
     }
+
+    for i in 0..responses.len() - 1 {
+        assert!(responses[i].choices[0].delta.tool_calls.is_none());
+    }
+
+    let last = responses.last().unwrap();
+    assert!(last.choices[0].delta.tool_calls.is_some());
+    assert_eq!(
+        last.choices[0].delta.tool_calls.as_ref().unwrap()[0]
+            .function.as_ref().unwrap().arguments.as_deref(),
+        Some(r#"{"query":"rust programming"}"#)
+    );
 }
 
 #[test]
-fn test_no_streaming_when_tool_choice_none() {
+fn test_no_tool_choice_outputs_normal_text() {
     let request = create_test_request();
-    // tool_choice = None (default)
 
     let mut generator = request.response_generator("req-stream-4".to_string());
 
@@ -389,7 +362,6 @@ fn test_no_streaming_when_tool_choice_none() {
         .choice_from_postprocessor(backend_output)
         .expect("normal text");
 
-    // Should have text content, not tool_calls
     assert_eq!(
         response.choices[0].delta.content.as_deref(),
         Some("Hello world")
@@ -397,165 +369,6 @@ fn test_no_streaming_when_tool_choice_none() {
     assert!(response.choices[0].delta.tool_calls.is_none());
 }
 
-#[test]
-fn test_true_incremental_streaming_named() {
-    let mut request = create_test_request();
-    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Named(
-        ChatCompletionNamedToolChoice {
-            r#type: ChatCompletionToolType::Function,
-            function: FunctionName {
-                name: "get_weather".to_string(),
-            },
-        },
-    ));
-
-    let mut generator = request.response_generator("req-stream-inc-1".to_string());
-
-    // Simulate realistic token-by-token streaming
-    let chunks = vec![
-        r#"{"#,
-        r#""location""#,
-        r#":"#,
-        r#""Paris""#,
-        r#","#,
-        r#""unit""#,
-        r#":"#,
-        r#""celsius""#,
-        r#"}"#,
-    ];
-
-    let mut responses = Vec::new();
-    for (i, chunk) in chunks.iter().enumerate() {
-        let backend_output = BackendOutput {
-            token_ids: vec![],
-            tokens: vec![],
-            text: Some(chunk.to_string()),
-            cum_log_probs: None,
-            log_probs: None,
-            top_logprobs: None,
-            finish_reason: if i == chunks.len() - 1 {
-                Some(common::FinishReason::Stop)
-            } else {
-                None
-            },
-            index: Some(0),
-            completion_usage: None,
-            disaggregated_params: None,
-        };
-
-        let response = generator
-            .choice_from_postprocessor(backend_output)
-            .expect("chunk");
-        responses.push(response);
-    }
-
-    // Should have emitted tool_calls in one of the early chunks
-    let first_tool_call_idx = responses
-        .iter()
-        .position(|r| r.choices[0].delta.tool_calls.is_some())
-        .expect("Should find tool_calls in stream");
-
-    // First tool call should have id, type, name
-    let first_tc = &responses[first_tool_call_idx].choices[0]
-        .delta
-        .tool_calls
-        .as_ref()
-        .unwrap()[0];
-    assert!(first_tc.id.is_some());
-    assert_eq!(first_tc.r#type, Some(ChatCompletionToolType::Function));
-    assert_eq!(
-        first_tc.function.as_ref().unwrap().name.as_deref(),
-        Some("get_weather")
-    );
-
-    // Should have multiple chunks with arguments deltas
-    let args_chunks: Vec<_> = responses
-        .iter()
-        .filter_map(|r| r.choices[0].delta.tool_calls.as_ref())
-        .flat_map(|tcs| tcs.iter())
-        .filter_map(|tc| tc.function.as_ref()?.arguments.as_ref())
-        .collect();
-
-    assert!(
-        args_chunks.len() > 1,
-        "Should have multiple argument delta chunks"
-    );
-}
-
-#[test]
-fn test_true_incremental_streaming_parallel() {
-    let mut request = create_test_request();
-    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Required);
-
-    let mut generator = request.response_generator("req-stream-inc-2".to_string());
-
-    // Simulate streaming: array with two tool calls
-    let chunks = [
-        r#"["#,
-        r#"{"name":"search","#,
-        r#""parameters":{"query":"rust"}"#,
-        r#"},"#,
-        r#"{"name":"summarize","#,
-        r#""parameters":{"topic":"memory"}"#,
-        r#"}]"#,
-    ];
-
-    let mut responses = Vec::new();
-    for (i, chunk) in chunks.iter().enumerate() {
-        let backend_output = BackendOutput {
-            token_ids: vec![],
-            tokens: vec![],
-            text: Some(chunk.to_string()),
-            cum_log_probs: None,
-            log_probs: None,
-            top_logprobs: None,
-            finish_reason: if i == chunks.len() - 1 {
-                Some(common::FinishReason::Stop)
-            } else {
-                None
-            },
-            index: Some(0),
-            completion_usage: None,
-            disaggregated_params: None,
-        };
-
-        let response = generator
-            .choice_from_postprocessor(backend_output)
-            .expect("chunk");
-        responses.push(response);
-    }
-
-    // Count tool call initializations (first chunks with names)
-    let mut tool_names_seen = std::collections::HashSet::new();
-    for resp in &responses {
-        if let Some(tool_calls) = &resp.choices[0].delta.tool_calls {
-            for tc in tool_calls {
-                if let Some(func) = &tc.function
-                    && let Some(name) = &func.name
-                {
-                    tool_names_seen.insert(name.clone());
-                }
-            }
-        }
-    }
-
-    assert_eq!(tool_names_seen.len(), 2, "Should detect both tool calls");
-    assert!(tool_names_seen.contains("search"));
-    assert!(tool_names_seen.contains("summarize"));
-
-    // Verify that tool calls are streamed incrementally, not just at the end
-    let chunks_with_tool_calls: Vec<_> = responses
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| r.choices[0].delta.tool_calls.is_some())
-        .map(|(i, _)| i)
-        .collect();
-
-    assert!(
-        chunks_with_tool_calls.len() > 1,
-        "Should have multiple chunks with tool_calls (not just final)"
-    );
-}
 
 /// Helper function to create a streaming chunk
 fn create_chunk(
@@ -594,67 +407,33 @@ fn create_chunk(
 }
 
 #[tokio::test]
-async fn test_aggregator_named_tool_accumulates_arguments() {
+async fn test_aggregator_named_tool() {
     use dynamo_llm::protocols::Annotated;
     use dynamo_llm::protocols::openai::ParsingOptions;
     use dynamo_llm::protocols::openai::chat_completions::aggregator::DeltaAggregator;
     use futures::stream;
 
-    // Simulate streaming chunks for named tool choice: get_weather
     let chunks = vec![
-        // Chunk 1: role
         create_chunk(
             0,
             Some(dynamo_async_openai::types::Role::Assistant),
             None,
             None,
         ),
-        // Chunk 2: tool call start (id, type, name, empty arguments)
         create_chunk(
             0,
             None,
             Some(ChatCompletionMessageToolCallChunk {
                 index: 0,
-                id: Some("call_1".to_string()),
+                id: Some("call-1".to_string()),
                 r#type: Some(ChatCompletionToolType::Function),
                 function: Some(FunctionCallStream {
                     name: Some("get_weather".to_string()),
-                    arguments: Some(String::new()),
+                    arguments: Some(r#"{"location":"Paris","unit":"celsius"}"#.to_string()),
                 }),
             }),
             None,
         ),
-        // Chunk 3: first part of arguments (raw JSON fragment from buffer)
-        create_chunk(
-            0,
-            None,
-            Some(ChatCompletionMessageToolCallChunk {
-                index: 0,
-                id: None,
-                r#type: None,
-                function: Some(FunctionCallStream {
-                    name: None,
-                    arguments: Some(r#"{"location":"Paris""#.to_string()),
-                }),
-            }),
-            None,
-        ),
-        // Chunk 4: second part of arguments (continuation)
-        create_chunk(
-            0,
-            None,
-            Some(ChatCompletionMessageToolCallChunk {
-                index: 0,
-                id: None,
-                r#type: None,
-                function: Some(FunctionCallStream {
-                    name: None,
-                    arguments: Some(r#","unit":"celsius"}"#.to_string()),
-                }),
-            }),
-            None,
-        ),
-        // Chunk 5: finish
         create_chunk(
             0,
             None,
@@ -663,7 +442,6 @@ async fn test_aggregator_named_tool_accumulates_arguments() {
         ),
     ];
 
-    // Convert to Annotated stream
     let annotated_chunks: Vec<Annotated<_>> = chunks
         .into_iter()
         .map(|chunk| Annotated {
@@ -675,29 +453,23 @@ async fn test_aggregator_named_tool_accumulates_arguments() {
         .collect();
 
     let stream = Box::pin(stream::iter(annotated_chunks));
-
-    // Aggregate the stream
     let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
     assert!(result.is_ok());
     let response = result.unwrap();
 
-    // Verify aggregated response
     assert_eq!(response.choices.len(), 1);
     let choice = &response.choices[0];
 
-    // Check tool calls
     assert!(choice.message.tool_calls.is_some());
     let tool_calls = choice.message.tool_calls.as_ref().unwrap();
     assert_eq!(tool_calls.len(), 1);
 
     let tool_call = &tool_calls[0];
-    assert_eq!(tool_call.id, "call_1");
+    assert_eq!(tool_call.id, "call-1");
     assert_eq!(tool_call.function.name, "get_weather");
-    // THIS IS THE KEY ASSERTION - arguments should be accumulated!
     assert_eq!(
-        tool_call.function.arguments, r#"{"location":"Paris","unit":"celsius"}"#,
-        "Arguments should be fully accumulated from all chunks"
+        tool_call.function.arguments, r#"{"location":"Paris","unit":"celsius"}"#
     );
 }
 
@@ -711,91 +483,41 @@ async fn test_aggregator_required_tool_parallel_calls() {
     use dynamo_llm::protocols::openai::chat_completions::aggregator::DeltaAggregator;
     use futures::stream;
 
-    // Simulate streaming chunks for required tool choice with parallel calls
     let chunks = vec![
-        // Chunk 1: role
         create_chunk(
             0,
             Some(dynamo_async_openai::types::Role::Assistant),
             None,
             None,
         ),
-        // Chunk 2: first tool call start
         create_chunk(
             0,
             None,
             Some(ChatCompletionMessageToolCallChunk {
                 index: 0,
-                id: Some("call_1".to_string()),
+                id: Some("call-1".to_string()),
                 r#type: Some(ChatCompletionToolType::Function),
                 function: Some(FunctionCallStream {
                     name: Some("search".to_string()),
-                    arguments: Some(String::new()),
-                }),
-            }),
-            None,
-        ),
-        // Chunk 3: first tool arguments
-        create_chunk(
-            0,
-            None,
-            Some(ChatCompletionMessageToolCallChunk {
-                index: 0,
-                id: None,
-                r#type: None,
-                function: Some(FunctionCallStream {
-                    name: None,
                     arguments: Some(r#"{"query":"rust"}"#.to_string()),
                 }),
             }),
             None,
         ),
-        // Chunk 4: second tool call start
         create_chunk(
             0,
             None,
             Some(ChatCompletionMessageToolCallChunk {
                 index: 1,
-                id: Some("call_2".to_string()),
+                id: Some("call-2".to_string()),
                 r#type: Some(ChatCompletionToolType::Function),
                 function: Some(FunctionCallStream {
                     name: Some("summarize".to_string()),
-                    arguments: Some(String::new()),
+                    arguments: Some(r#"{"text":"long article"}"#.to_string()),
                 }),
             }),
             None,
         ),
-        // Chunk 5: second tool arguments (partial)
-        create_chunk(
-            0,
-            None,
-            Some(ChatCompletionMessageToolCallChunk {
-                index: 1,
-                id: None,
-                r#type: None,
-                function: Some(FunctionCallStream {
-                    name: None,
-                    arguments: Some(r#"{"text":"#.to_string()),
-                }),
-            }),
-            None,
-        ),
-        // Chunk 6: second tool arguments (rest)
-        create_chunk(
-            0,
-            None,
-            Some(ChatCompletionMessageToolCallChunk {
-                index: 1,
-                id: None,
-                r#type: None,
-                function: Some(FunctionCallStream {
-                    name: None,
-                    arguments: Some(r#""long article"}"#.to_string()),
-                }),
-            }),
-            None,
-        ),
-        // Chunk 7: finish
         create_chunk(
             0,
             None,
@@ -804,7 +526,6 @@ async fn test_aggregator_required_tool_parallel_calls() {
         ),
     ];
 
-    // Convert to Annotated stream
     let annotated_chunks: Vec<Annotated<_>> = chunks
         .into_iter()
         .map(|chunk| Annotated {
@@ -816,39 +537,25 @@ async fn test_aggregator_required_tool_parallel_calls() {
         .collect();
 
     let stream = Box::pin(stream::iter(annotated_chunks));
-
-    // Aggregate the stream
     let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
     assert!(result.is_ok());
     let response = result.unwrap();
 
-    // Verify aggregated response
     assert_eq!(response.choices.len(), 1);
     let choice = &response.choices[0];
 
-    // Check tool calls
     assert!(choice.message.tool_calls.is_some());
     let tool_calls = choice.message.tool_calls.as_ref().unwrap();
-    assert_eq!(tool_calls.len(), 2, "Should have 2 tool calls");
+    assert_eq!(tool_calls.len(), 2);
 
-    // Verify first tool call
-    let tool_call_1 = &tool_calls[0];
-    assert_eq!(tool_call_1.id, "call_1");
-    assert_eq!(tool_call_1.function.name, "search");
-    assert_eq!(
-        tool_call_1.function.arguments, r#"{"query":"rust"}"#,
-        "First tool arguments should be complete"
-    );
+    assert_eq!(tool_calls[0].id, "call-1");
+    assert_eq!(tool_calls[0].function.name, "search");
+    assert_eq!(tool_calls[0].function.arguments, r#"{"query":"rust"}"#);
 
-    // Verify second tool call - THIS IS THE CRITICAL TEST
-    let tool_call_2 = &tool_calls[1];
-    assert_eq!(tool_call_2.id, "call_2");
-    assert_eq!(tool_call_2.function.name, "summarize");
-    assert_eq!(
-        tool_call_2.function.arguments, r#"{"text":"long article"}"#,
-        "Second tool arguments should be accumulated from multiple chunks"
-    );
+    assert_eq!(tool_calls[1].id, "call-2");
+    assert_eq!(tool_calls[1].function.name, "summarize");
+    assert_eq!(tool_calls[1].function.arguments, r#"{"text":"long article"}"#);
 
     assert_eq!(
         choice.finish_reason,
