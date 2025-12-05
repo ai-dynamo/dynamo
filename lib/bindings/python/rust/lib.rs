@@ -1039,6 +1039,18 @@ impl Annotated {
         self.inner.comment.clone()
     }
 
+    fn error_message(&self) -> Option<String> {
+        if self.inner.is_error() {
+            if let Some(comment) = &self.inner.comment {
+                if !comment.is_empty() {
+                    return Some(comment.join("; "));
+                }
+            }
+            return Some("unknown error".to_string());
+        }
+        None
+    }
+
     fn id(&self) -> Option<String> {
         self.inner.id.clone()
     }

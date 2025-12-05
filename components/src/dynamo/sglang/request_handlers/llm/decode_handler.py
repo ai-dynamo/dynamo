@@ -200,50 +200,72 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future = asyncio.Future()
-        async with self._cancellation_monitor(request_id_future, context):
-            async for res in stream_source:
-                # Extract SGLang request ID from the first response and set the future
-                if not request_id_future.done():
-                    meta_info = res.get("meta_info", {})
-                    sglang_request_id = meta_info.get("id")
-                    if sglang_request_id:
-                        request_id_future.set_result(sglang_request_id)
-                        logging.debug(f"New SGLang Request ID: {sglang_request_id}")
+        try:
+            async with self._cancellation_monitor(request_id_future, context):
+                async for res in stream_source:
+                    if hasattr(res, "is_error") and callable(getattr(res, "is_error")):
+                        try:
+                            if res.is_error():
+                                err = None
+                                err_attr = getattr(res, "error_message", None)
+                                if callable(err_attr):
+                                    err = err_attr()
+                                elif err_attr is not None:
+                                    err = err_attr
+                                raise GeneratorExit(
+                                    f"SGLang decode engine returned error: {err or 'incomplete stream'}"
+                                )
+                        except AttributeError:
+                            pass
 
-                # Check cancellation before yielding to allow proper cleanup.
-                # This lets SGLang proceed to the second token generation, which will
-                # async context switch and allow the abort monitor to signal cancellation.
-                # The loop should exit by itself when context.is_stopped() returns True.
-                out = {}
-                finish_reason = res["meta_info"]["finish_reason"]
-                if finish_reason:
-                    out["finish_reason"] = finish_reason["type"]
+                    # Extract SGLang request ID from the first response and set the future
+                    if not request_id_future.done():
+                        meta_info = res.get("meta_info", {})
+                        sglang_request_id = meta_info.get("id")
+                        if sglang_request_id:
+                            request_id_future.set_result(sglang_request_id)
+                            logging.debug(f"New SGLang Request ID: {sglang_request_id}")
 
-                output_ids = res.get("output_ids", [])
-                # If request is not finished yet, but there are no outputs, return an error.
-                if not output_ids and not finish_reason:
+                    # Check cancellation before yielding to allow proper cleanup.
+                    # This lets SGLang proceed to the second token generation, which will
+                    # async context switch and allow the abort monitor to signal cancellation.
+                    # The loop should exit by itself when context.is_stopped() returns True.
+                    out = {}
+                    finish_reason = res["meta_info"]["finish_reason"]
+                    if finish_reason:
+                        out["finish_reason"] = finish_reason["type"]
+
+                    output_ids = res.get("output_ids", [])
+                    # If request is not finished yet, but there are no outputs, return an error.
+                    if not output_ids and not finish_reason:
+                        if not context.is_stopped():
+                            yield {"finish_reason": "error", "token_ids": []}
+                        break
+
+                    next_total_toks = len(output_ids)
+                    out["token_ids"] = output_ids[num_output_tokens_so_far:]
+                    num_output_tokens_so_far = next_total_toks
+                    if finish_reason:
+                        input_tokens = res["meta_info"]["prompt_tokens"]
+                        completion_tokens = res["meta_info"]["completion_tokens"]
+                        cached_tokens = res["meta_info"]["cached_tokens"]
+                        prefill_prompt_tokens_details = None
+                        if cached_tokens is not None and cached_tokens > 0:
+                            prefill_prompt_tokens_details = {
+                                "cached_tokens": cached_tokens
+                            }
+                        out["completion_usage"] = {
+                            "prompt_tokens": input_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": input_tokens + completion_tokens,
+                            "prompt_tokens_details": prefill_prompt_tokens_details,
+                        }
                     if not context.is_stopped():
-                        yield {"finish_reason": "error", "token_ids": []}
-                    break
-
-                next_total_toks = len(output_ids)
-                out["token_ids"] = output_ids[num_output_tokens_so_far:]
-                num_output_tokens_so_far = next_total_toks
-                if finish_reason:
-                    input_tokens = res["meta_info"]["prompt_tokens"]
-                    completion_tokens = res["meta_info"]["completion_tokens"]
-                    cached_tokens = res["meta_info"]["cached_tokens"]
-                    prefill_prompt_tokens_details = None
-                    if cached_tokens is not None and cached_tokens > 0:
-                        prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
-                    out["completion_usage"] = {
-                        "prompt_tokens": input_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": input_tokens + completion_tokens,
-                        "prompt_tokens_details": prefill_prompt_tokens_details,
-                    }
-                if not context.is_stopped():
-                    yield out
+                        yield out
+        except asyncio.CancelledError:
+            raise GeneratorExit(
+                "SGLang decode engine was shut down during token generation."
+            ) from None
 
     async def _process_text_stream(
         self,
@@ -263,42 +285,64 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future = asyncio.Future()
-        async with self._cancellation_monitor(request_id_future, context):
-            async for res in stream_source:
-                # Extract SGLang request ID from the first response and set the future
-                if not request_id_future.done():
-                    meta_info = res.get("meta_info", {})
-                    sglang_request_id = meta_info.get("id")
-                    if sglang_request_id:
-                        request_id_future.set_result(sglang_request_id)
-                        logging.debug(f"New SGLang Request ID: {sglang_request_id}")
+        try:
+            async with self._cancellation_monitor(request_id_future, context):
+                async for res in stream_source:
+                    if hasattr(res, "is_error") and callable(getattr(res, "is_error")):
+                        try:
+                            if res.is_error():
+                                err = None
+                                err_attr = getattr(res, "error_message", None)
+                                if callable(err_attr):
+                                    err = err_attr()
+                                elif err_attr is not None:
+                                    err = err_attr
+                                raise GeneratorExit(
+                                    f"SGLang decode engine returned error: {err or 'incomplete stream'}"
+                                )
+                        except AttributeError:
+                            pass
 
-                # Check cancellation before yielding to allow proper cleanup.
-                # This lets SGLang proceed to the second token generation, which will
-                # async context switch and allow the abort monitor to signal cancellation.
-                # The loop should exit by itself when context.is_stopped() returns True.
+                    # Extract SGLang request ID from the first response and set the future
+                    if not request_id_future.done():
+                        meta_info = res.get("meta_info", {})
+                        sglang_request_id = meta_info.get("id")
+                        if sglang_request_id:
+                            request_id_future.set_result(sglang_request_id)
+                            logging.debug(f"New SGLang Request ID: {sglang_request_id}")
 
-                index = res.get("index", 0)
-                text = res.get("text", "")
+                    # Check cancellation before yielding to allow proper cleanup.
+                    # This lets SGLang proceed to the second token generation, which will
+                    # async context switch and allow the abort monitor to signal cancellation.
+                    # The loop should exit by itself when context.is_stopped() returns True.
 
-                finish_reason = res["meta_info"]["finish_reason"]
-                finish_reason_type = finish_reason["type"] if finish_reason else None
-                next_count = len(text)
-                delta = text[count:]
+                    index = res.get("index", 0)
+                    text = res.get("text", "")
 
-                choice_data = {
-                    "index": index,
-                    "delta": {"role": "assistant", "content": delta},
-                    "finish_reason": finish_reason_type,
-                }
+                    finish_reason = res["meta_info"]["finish_reason"]
+                    finish_reason_type = (
+                        finish_reason["type"] if finish_reason else None
+                    )
+                    next_count = len(text)
+                    delta = text[count:]
 
-                response = {
-                    "id": res["meta_info"]["id"],
-                    "created": int(time.time()),
-                    "choices": [choice_data],
-                    "model": self.config.server_args.served_model_name,
-                    "object": "chat.completion.chunk",
-                }
-                if not context.is_stopped():
-                    yield response
-                count = next_count
+                    choice_data = {
+                        "index": index,
+                        "delta": {"role": "assistant", "content": delta},
+                        "finish_reason": finish_reason_type,
+                    }
+
+                    response = {
+                        "id": res["meta_info"]["id"],
+                        "created": int(time.time()),
+                        "choices": [choice_data],
+                        "model": self.config.server_args.served_model_name,
+                        "object": "chat.completion.chunk",
+                    }
+                    if not context.is_stopped():
+                        yield response
+                    count = next_count
+        except asyncio.CancelledError:
+            raise GeneratorExit(
+                "SGLang decode engine was shut down during token generation."
+            ) from None

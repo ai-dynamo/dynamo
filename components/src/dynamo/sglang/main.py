@@ -175,7 +175,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
-                graceful_shutdown=True,
+                graceful_shutdown=dynamo_args.migration_limit <= 0,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
@@ -245,7 +245,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     tasks = [
         generate_endpoint.serve_endpoint(
             handler.generate,
-            graceful_shutdown=True,
+            graceful_shutdown=dynamo_args.migration_limit <= 0,
             metrics_labels=metrics_labels,
             health_check_payload=health_check_payload,
         )
