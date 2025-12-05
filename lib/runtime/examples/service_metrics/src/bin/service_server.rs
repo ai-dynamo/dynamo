@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use service_metrics::{DEFAULT_NAMESPACE, MyStats};
+use service_metrics::DEFAULT_NAMESPACE;
 
 use dynamo_runtime::{
     DistributedRuntime, Runtime, Worker, logging,
@@ -63,11 +63,6 @@ async fn backend(runtime: DistributedRuntime) -> anyhow::Result<()> {
     component
         .endpoint("generate")
         .endpoint_builder()
-        .stats_handler(|stats| {
-            println!("stats: {:?}", stats);
-            let stats = MyStats { val: 10 };
-            serde_json::to_value(stats).unwrap()
-        })
         .handler(ingress)
         .start()
         .await

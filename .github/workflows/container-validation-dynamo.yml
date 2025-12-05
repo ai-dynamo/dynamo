@@ -48,15 +48,15 @@ jobs:
         working-directory: ./deploy
         run: |
           docker compose up -d nats-server etcd-server
-      - name: Run Rust checks (block-manager + integration tests)
+      - name: Run Rust checks (block-manager + media-nixl + integration tests)
         run: |
           docker run --rm -w /workspace/lib/llm \
             --name ${{ env.CONTAINER_ID }}_rust_checks \
             ${{ steps.define_image_tag.outputs.image_tag }} \
             bash -ec 'rustup component add rustfmt clippy && \
                       cargo fmt -- --check && \
-                      cargo clippy --features block-manager --no-deps --all-targets -- -D warnings && \
-                      cargo test --locked --all-targets --features=block-manager && \
+                      cargo clippy --features block-manager,media-nixl --no-deps --all-targets -- -D warnings && \
+                      cargo test --locked --all-targets --features=block-manager,media-nixl && \
                       cargo test --locked --features integration -- --nocapture'
       - name: Cleanup services
         if: always()
@@ -65,7 +65,7 @@ jobs:
           docker compose down
       - name: Run pytest (parallel tests with xdist)
         env:
-          PYTEST_MARKS: "pre_merge and parallel"
+          PYTEST_MARKS: "pre_merge and parallel and not (vllm or sglang or trtllm)"
         run: |
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest_parallel \
@@ -77,7 +77,7 @@ jobs:
           docker cp ${{ env.CONTAINER_ID }}_pytest_parallel:/workspace/${{ env.PYTEST_PARALLEL_XML_FILE }} . || echo "No parallel test report found"
       - name: Run pytest (sequential tests)
         env:
-          PYTEST_MARKS: "(pre_merge and not parallel) or mypy"
+          PYTEST_MARKS: "((pre_merge and not parallel) or mypy) and not (vllm or sglang or trtllm)"
         run: |
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest \
