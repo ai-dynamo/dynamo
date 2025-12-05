@@ -328,17 +328,18 @@ class DeploymentSpec:
         Set an environment variable for a specific service
         """
         service = self.get_service(service_name)
-        if service.envs is None:
-            service.envs = []
+        envs = service.envs if service.envs is not None else []
 
         # if env var already exists, update it
-        for env in service.envs:
+        for env in envs:
             if env["name"] == name:
                 env["value"] = value
+                service.envs = envs  # Save back to trigger the setter
                 return
 
         # if env var does not exist, add it
-        service.envs.append({"name": name, "value": value})
+        envs.append({"name": name, "value": value})
+        service.envs = envs  # Save back to trigger the setter
 
     def get_service_env_vars(self, service_name: str) -> list[dict]:
         """
@@ -754,7 +755,7 @@ class ManagedDeployment:
                 f"Failed to patch deployment {self._deployment_name}: {e}"
             )
             raise
-    
+
     async def get_pod_names(self, service_names: list[str] | None = None) -> list[str]:
         if not service_names:
             service_names = [service.name for service in self.deployment_spec.services]
@@ -766,10 +767,12 @@ class ManagedDeployment:
                 f"nvidia.com/selector={self._deployment_name}-{service_name.lower()}"
             )
             assert self._core_api is not None, "Kubernetes API not initialized"
-            pods: client.V1PodList = await self._core_api.list_namespaced_pod(self.namespace, label_selector=label_selector)
+            pods: client.V1PodList = await self._core_api.list_namespaced_pod(
+                self.namespace, label_selector=label_selector
+            )
             for pod in pods.items:
                 pod_names.append(pod.metadata.name)
-        
+
         return pod_names
 
     def get_processes(self, pod: Pod) -> list[PodProcess]:
