@@ -32,7 +32,7 @@ spec:
         - name: model-cache
           mountPoint: /opt/models
       sharedMemory:
-        size: 20Gi
+        size: 128Gi
       extraPodSpec:
         mainContainer:
           env:
