@@ -15,7 +15,7 @@ spec:
         imagePullSecrets:
         - name: nvcr-imagepullsecret
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post1
     VllmDecodeWorker:
       dynamoNamespace: vllm-moe-disagg
       envFromSecret: hf-token-secret
@@ -51,7 +51,7 @@ spec:
         imagePullSecrets:
         - name: nvcr-imagepullsecret
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post1
           workingDir: /workspace/examples/backends/vllm
           command:
           - python3
@@ -116,7 +116,7 @@ spec:
         imagePullSecrets:
         - name: nvcr-imagepullsecret
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post1
           workingDir: /workspace/examples/backends/vllm
           command:
           - python3
