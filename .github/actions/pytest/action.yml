@@ -63,9 +63,13 @@ runs:
           echo "No GPU detected, running in CPU-only mode"
         fi
 
+        # DO NOT USE --network host: Test containers will share the same network namespace,
+        # causing port conflicts (e.g., multiple tests trying to bind to 8000, 8081, 8082).
+        # This leads to intermittent failures when tests run in parallel or sequentially.
+        # Use --network bridge (default) to isolate each container's network.
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
-          --network host \
+          --network bridge \
           --name ${{ env.CONTAINER_ID }}_pytest \
           ${{ inputs.image_tag }} \
           bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
