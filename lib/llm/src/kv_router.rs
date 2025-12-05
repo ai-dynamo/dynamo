@@ -380,13 +380,6 @@ impl KvRouter {
         }
 
         // Initialize worker query client using namespace abstraction
-        let worker_query_endpoint = component.endpoint(WORKER_KV_INDEXER_QUERY_SUBJECT.to_string());
-        tracing::info!(
-            "Namespace={}, Component={}, Worker queryendpoint={}",
-            component.namespace().name(),
-            component.name(),
-            worker_query_endpoint.name()
-        );
         let worker_query_client = Some(worker_query::WorkerQueryClient::new(
             component.clone(),
             local_indexer_rx,
