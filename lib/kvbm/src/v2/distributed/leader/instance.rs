@@ -1286,7 +1286,9 @@ impl Leader for InstanceLeader {
         let remote_leaders = self.remote_leaders.read().unwrap().clone();
         let sequence_hashes = sequence_hashes.to_vec();
 
-        tokio::spawn(async move {
+        let handle = self.nova.runtime();
+
+        handle.spawn(async move {
             if let Err(e) = session.run(rx, remote_leaders, sequence_hashes).await {
                 eprintln!("InitiatorSession error: {e}");
                 // Try to update status to indicate error

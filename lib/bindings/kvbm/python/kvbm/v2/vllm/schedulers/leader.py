@@ -32,6 +32,7 @@ KvbmRequest = _v2.KvbmRequest
 
 # Import the handshake metadata type from worker module
 from .worker import NovaPeerMetadata
+from ..sched_output import process_scheduler_output
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -68,6 +69,7 @@ class SchedulerConnectorLeader:
         self.vllm_kv_cache_config = kv_cache_config
         self.kvbm_override_config = kwargs.get("kvbm_override_config", None)
 
+        self.iteration = 0
         self.block_size = vllm_config.cache_config.block_size
 
         # JSON config has highest priority (overrides env vars and TOML files)
@@ -87,7 +89,7 @@ class SchedulerConnectorLeader:
         request: Request,
         num_computed_tokens: int,
     ) -> tuple[Optional[int], bool]:
-        self._create_slot(request.request_id)
+        self._create_slot(request)
         return self.leader.get_num_new_matched_tokens(request.request_id, num_computed_tokens)
 
     def update_state_after_alloc(
@@ -105,66 +107,18 @@ class SchedulerConnectorLeader:
         """
         Build connector metadata for workers.
 
-        Workers are already initialized via configure_layouts RPC in
-        set_xfer_handshake_metadata, so we just return empty bytes.
+        This processes the vLLM scheduler output and generates connector metadata
+        that workers use to execute KV transfers.
+
+        Args:
+            scheduler_output: vLLM's SchedulerOutput object
 
         Returns:
-            bytes: Empty bytes (no additional metadata needed)
+            bytes: Serialized connector metadata
         """
-        return b""
-
-        # TODO: Re-enable when v2 connector bindings are updated
-        # output = RustSchedulerOutput()
-        #
-        # for req in scheduler_output.scheduled_new_reqs:
-        #     prompt_ids = [int(token) for token in req.prompt_token_ids]
-        #     block_ids = [int(block_id) for block_id in req.block_ids[0]]
-        #     output.add_new_request(
-        #         req.req_id,
-        #         prompt_ids,
-        #         block_ids,
-        #         int(req.num_computed_tokens),
-        #     )
-        #
-        # cached = scheduler_output.scheduled_cached_reqs
-        # if cached is not None:
-        #     for (
-        #         req_id,
-        #         resumed_from_preemption,
-        #         new_token_ids,
-        #         new_block_ids,
-        #         num_computed_tokens,
-        #     ) in zip(
-        #         cached.req_ids,
-        #         cached.resumed_from_preemption,
-        #         cached.new_token_ids,
-        #         cached.new_block_ids,
-        #         cached.num_computed_tokens,
-        #     ):
-        #         tokens = (
-        #             [int(token) for token in new_token_ids] if new_token_ids else []
-        #         )
-        #         block_ids = (
-        #             [int(block_id) for block_id in new_block_ids[0]]
-        #             if new_block_ids is not None and len(new_block_ids) > 0
-        #             else []
-        #         )
-        #         output.add_cached_request(
-        #             req_id,
-        #             bool(resumed_from_preemption),
-        #             tokens,
-        #             block_ids,
-        #             int(num_computed_tokens),
-        #         )
-        #
-        # counts_source = getattr(scheduler_output, "num_scheduled_tokens", None)
-        # if counts_source:
-        #     counts = {
-        #         str(req_id): int(value) for req_id, value in counts_source.items()
-        #     }
-        #     output.set_num_scheduled_tokens(counts)
-        #
-        # return bytes(self._connector.build_connector_metadata(output))
+        self.iteration = self.iteration + 1
+        output = process_scheduler_output(self.iteration, scheduler_output)
+        return bytes(self.leader.build_connector_metadata(output))
 
     def request_finished(
         self,
@@ -181,7 +135,10 @@ class SchedulerConnectorLeader:
         return (delay, None)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
-        self.leader.update_connector_output(connector_output.finished_sending, connector_output.finished_recving)
+        # Convert None to empty sets for Rust binding compatibility
+        finished_sending = connector_output.finished_sending if connector_output.finished_sending is not None else set()
+        finished_recving = connector_output.finished_recving if connector_output.finished_recving is not None else set()
+        self.leader.update_connector_output(finished_sending, finished_recving)
 
     def get_finished_count(self) -> Optional[int]:
         """No finished count tracking for Phase 1."""
@@ -232,11 +189,6 @@ class SchedulerConnectorLeader:
 
     # Utility functions
 
-    def _ensure_slot(self, request_id: str) -> None:
-        """Ensure we're tracking this request."""
-        if request_id not in self._slots:
-            self._slots[request_id] = True
-
     # note: creates a request slot for tracking state
     def _create_slot(self, request: "Request") -> None:
         if self.leader.has_slot(request.request_id):
@@ -246,10 +198,15 @@ class SchedulerConnectorLeader:
             getattr(request, "mm_positions", None)
         ):
             raise ValueError("Unsupported request - requires mm extra keys")
-    
-        all_token_ids = [
-            [int(token) for token in tokens] for tokens in request.all_token_ids
-        ]
+
+        # For v1 API, all_token_ids is already a flat list for single-sequence
+        # For multi-sequence (hybrid), it would be a list of sequences - handle both
+        if isinstance(request.all_token_ids[0], (list, tuple)):
+            # Multi-sequence case: take first sequence
+            all_token_ids = [int(token) for token in request.all_token_ids[0]]
+        else:
+            # Single-sequence case: already flat
+            all_token_ids = [int(token) for token in request.all_token_ids]
     
         kv_request = KvbmRequest(
             request_id=request.request_id,
@@ -260,6 +217,7 @@ class SchedulerConnectorLeader:
             salt_hash=str(getattr(request, "cache_salt", None))
             if getattr(request, "cache_salt", None) is not None
             else None,
+            max_tokens=request.max_tokens,
         )
     
         self.leader.create_slot(kv_request)

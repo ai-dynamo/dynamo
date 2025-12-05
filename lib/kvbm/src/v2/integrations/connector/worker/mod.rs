@@ -20,6 +20,7 @@ use crate::KvbmRuntime;
 use crate::v2::distributed::worker::{
     DirectWorker, LeaderLayoutConfig, NovaWorkerService, WorkerLayoutResponse,
 };
+use crate::v2::integrations::connector::leader::scheduler::KvConnectorMetadata;
 use crate::v2::integrations::vllm::layout::determine_kv_layout;
 
 pub const ONBOARD_COMPLETE_HANDLER: &str = "kvbm.connector.worker.onboard_complete";
@@ -36,6 +37,12 @@ pub trait ConnectorWorkerInterface: Send + Sync {
         page_size: usize,
         dtype_width_bytes: usize,
     ) -> Result<()>;
+
+    /// Bind connector metadata from the leader.
+    fn bind_connector_metadata(&self, metadata: KvConnectorMetadata) -> Result<()>;
+
+    /// Clear connector metadata.
+    fn clear_connector_metadata(&self) -> Result<()>;
 
     // /// Complete NIXL initialization with leader-provided config.
     // fn complete_initialization(&self, config: LeaderLayoutConfig) -> Result<WorkerLayoutResponse>;
@@ -309,6 +316,15 @@ impl ConnectorWorkerInterface for ConnectorWorker {
 
         *self.state.pending_state.lock().unwrap() = Some(pending);
 
+        Ok(())
+    }
+
+    fn bind_connector_metadata(&self, metadata: KvConnectorMetadata) -> Result<()> {
+        tracing::debug!("metadata: {:#?}", metadata);
+        Ok(())
+    }
+
+    fn clear_connector_metadata(&self) -> Result<()> {
         Ok(())
     }
 

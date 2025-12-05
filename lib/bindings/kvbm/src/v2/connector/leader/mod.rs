@@ -23,6 +23,9 @@ use crate::v2::runtime::PyKvbmRuntime;
 mod request;
 pub use request::PyRequest;
 
+mod scheduler;
+pub use scheduler::PySchedulerOutput;
+
 /// Python wrapper for WorkerClient.
 ///
 /// This client provides leader-specific coordination operations via Nova RPC.
@@ -110,6 +113,26 @@ impl PyConnectorLeader {
             .update_connector_output(finished_sending, finished_recving)
             .map_err(to_pyerr)?;
         Ok(())
+    }
+
+    /// Build connector metadata from scheduler output.
+    ///
+    /// This processes the scheduler output and generates connector metadata
+    /// that workers use to execute KV transfers.
+    ///
+    /// Args:
+    ///     output: The scheduler output containing scheduled requests
+    ///
+    /// Returns:
+    ///     bytes: Serialized connector metadata
+    pub fn build_connector_metadata(&self, output: &PySchedulerOutput) -> PyResult<Vec<u8>> {
+        let rust_output = output.inner();
+        let metadata = self
+            .inner
+            .build_connector_meta(rust_output)
+            .map_err(to_pyerr)?;
+        let bytes = serde_json::to_vec(&metadata).map_err(to_pyerr)?;
+        Ok(bytes)
     }
 
     /// Register a worker peer with Nova.

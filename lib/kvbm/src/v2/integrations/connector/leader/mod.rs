@@ -20,9 +20,11 @@ use std::collections::HashSet;
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
 
+use scheduler::{DefaultOracle, Oracle};
 use slot::{MatchCheckOutcome, RequestSlot, TransactionState};
 
 pub use request::Request;
+pub use scheduler::{CachedRequestData, NewRequestData, SchedulerOutput};
 pub use slot::FinishedStatus;
 
 pub trait ConnectorLeaderInterface: Send + Sync {}
@@ -33,6 +35,7 @@ pub struct ConnectorLeader {
     state: Arc<Mutex<ConnectorLeaderState>>,
     instance_leader: OnceLock<InstanceLeader>,
     slots: DashMap<String, Arc<Mutex<RequestSlot>>>,
+    oracle: Arc<dyn Oracle>,
 }
 
 #[derive(Default)]
@@ -55,6 +58,9 @@ mod onboard;
 // Implementation of offloading engine which will be triggered by the build_connector_metadata function.
 mod offload;
 
+// Implementation of the [`scheduler::SchedulerOutput`] struct.
+pub mod scheduler;
+
 impl ConnectorLeader {
     pub fn new(runtime: Arc<KvbmRuntime>, block_size: usize) -> Self {
         Self {
@@ -63,6 +69,7 @@ impl ConnectorLeader {
             state: Arc::new(Mutex::new(ConnectorLeaderState::default())),
             instance_leader: OnceLock::new(),
             slots: DashMap::new(),
+            oracle: Arc::new(DefaultOracle::default()),
         }
     }
 
@@ -195,6 +202,14 @@ impl ConnectorLeader {
                 todo!("clean up session and free resources")
             }
         }
+    }
+
+    #[tracing::instrument(level = "debug", skip(self), fields(iteration = output.iteration))]
+    pub fn build_connector_meta(
+        &self,
+        output: &scheduler::SchedulerOutput,
+    ) -> Result<scheduler::KvConnectorMetadata> {
+        self.process_scheduler_output(output)
     }
 
     /// Mark a request as finished, returning the status.

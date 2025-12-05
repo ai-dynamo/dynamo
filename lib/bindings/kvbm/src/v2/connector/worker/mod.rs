@@ -8,6 +8,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+use dynamo_kvbm::v2::integrations::connector::leader::scheduler::KvConnectorMetadata;
 use dynamo_kvbm::v2::integrations::connector::worker::{ConnectorWorker, ConnectorWorkerInterface};
 use dynamo_memory::TensorDescriptor;
 
@@ -108,6 +109,25 @@ impl PyConnectorWorker {
     /// This ensures proper cleanup of NIXL registrations.
     pub fn shutdown(&self) -> PyResult<()> {
         self.inner.shutdown().map_err(to_pyerr)
+    }
+
+    /// Bind connector metadata from the leader.
+    ///
+    /// Args:
+    ///     data: The connector metadata bytes
+    pub fn bind_connector_metadata(&self, data: Vec<u8>) -> PyResult<()> {
+        let metadata: KvConnectorMetadata = serde_json::from_slice(&data).map_err(to_pyerr)?;
+        self.inner
+            .bind_connector_metadata(metadata)
+            .map_err(to_pyerr)
+    }
+
+    /// Clear connector metadata.
+    ///
+    /// This function should be called by the model runner every time
+    /// after the model execution.
+    pub fn clear_connector_metadata(&self) -> PyResult<()> {
+        self.inner.clear_connector_metadata().map_err(to_pyerr)
     }
 
     /// Get completed transfer request IDs (drains the sets).

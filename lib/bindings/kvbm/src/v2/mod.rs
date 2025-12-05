@@ -20,6 +20,7 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<connector::worker::PyConnectorWorker>()?;
 
     m.add_class::<connector::leader::PyRequest>()?;
+    m.add_class::<connector::leader::PySchedulerOutput>()?;
 
     // // vLLM specific classes
     // // Leader connector classes for v2 vLLM integration

@@ -170,49 +170,8 @@ class SchedulerConnectorWorker:
     def bind_connector_metadata(self, data: bytes) -> None:
         """
         Bind connector metadata from the leader.
-
-        If the data contains layout configuration (init_required=True),
-        this triggers deferred NIXL initialization with the leader-provided
-        G2/G3 block counts.
         """
-        if not data:
-            return
-
-        try:
-            config = json.loads(data.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            # Not JSON - ignore (backwards compatibility)
-            return
-
-        # Check if this is an initialization message from the leader
-        if not config.get("init_required", False):
-            return
-
-        # Already initialized - skip
-        if self.connector_worker.is_initialized():
-            return
-
-        host_block_count = config.get("host_block_count", 0)
-        disk_block_count = config.get("disk_block_count")
-        enable_posix = config.get("enable_posix", False)
-        enable_gds = config.get("enable_gds", False)
-
-        print("[KVBM] Leader triggered initialization:")
-        print(f"  - host_block_count: {host_block_count}")
-        print(f"  - disk_block_count: {disk_block_count}")
-
-        # Complete initialization - creates TransferManager + G1/G2 layouts
-        metadata_bytes = self.connector_worker.complete_initialization(
-            host_block_count=host_block_count,
-            disk_block_count=disk_block_count,
-            enable_posix=enable_posix,
-            enable_gds=enable_gds,
-        )
-
-        print("[KVBM] Deferred initialization complete:")
-        print(f"  - G1 (device): {self._num_device_blocks} blocks")
-        print(f"  - G2 (pinned host): {host_block_count} blocks")
-        print(f"  - Metadata size: {len(metadata_bytes)} bytes")
+        self.connector_worker.bind_connector_metadata(data)
 
     def clear_connector_metadata(self) -> None:
         """
