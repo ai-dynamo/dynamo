@@ -105,3 +105,20 @@ func (v *SharedSpecValidator) validateSharedMemory() error {
 	}
 	return nil
 }
+
+// GetWarnings returns deprecation warnings for the spec.
+// This should be called after Validate() to collect any deprecation notices.
+func (v *SharedSpecValidator) GetWarnings() []string {
+	var warnings []string
+
+	// Check for deprecated autoscaling field
+	//nolint:staticcheck // SA1019: Intentionally checking deprecated field to warn users
+	if v.spec.Autoscaling != nil {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s.autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter "+
+				"with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md",
+			v.fieldPath))
+	}
+
+	return warnings
+}

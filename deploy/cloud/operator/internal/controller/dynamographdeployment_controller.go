@@ -643,8 +643,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
 					Replicas: currentReplicas,
 					DGDRef: nvidiacomv1alpha1.DynamoGraphDeploymentServiceRef{
-						Name:    dynamoDeployment.Name,
-						Service: serviceName,
+						Name:        dynamoDeployment.Name,
+						ServiceName: serviceName,
 					},
 				},
 			}
@@ -669,7 +669,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 
 	for i := range adapterList.Items {
 		adapter := &adapterList.Items[i]
-		serviceName := adapter.Spec.DGDRef.Service
+		serviceName := adapter.Spec.DGDRef.ServiceName
 
 		// Check if service still exists in DGD
 		if _, exists := dynamoDeployment.Spec.Services[serviceName]; !exists {

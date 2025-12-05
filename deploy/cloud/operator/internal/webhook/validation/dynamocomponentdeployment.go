@@ -46,9 +46,12 @@ func (v *DynamoComponentDeploymentValidator) Validate() (admission.Warnings, err
 		return nil, err
 	}
 
+	// Collect deprecation warnings
+	warnings := sharedValidator.GetWarnings()
+
 	// DCD-specific validation would go here (currently none)
 
-	return nil, nil
+	return warnings, nil
 }
 
 // ValidateUpdate performs stateful validation comparing old and new DynamoComponentDeployment.

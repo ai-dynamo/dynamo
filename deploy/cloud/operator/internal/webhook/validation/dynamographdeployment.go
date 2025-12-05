@@ -51,14 +51,18 @@ func (v *DynamoGraphDeploymentValidator) Validate() (admission.Warnings, error) 
 		return nil, err
 	}
 
+	var allWarnings admission.Warnings
+
 	// Validate each service
 	for serviceName, service := range v.deployment.Spec.Services {
-		if err := v.validateService(serviceName, service); err != nil {
+		warnings, err := v.validateService(serviceName, service)
+		if err != nil {
 			return nil, err
 		}
+		allWarnings = append(allWarnings, warnings...)
 	}
 
-	return nil, nil
+	return allWarnings, nil
 }
 
 // ValidateUpdate performs stateful validation comparing old and new DynamoGraphDeployment.
@@ -74,11 +78,19 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.D
 }
 
 // validateService validates a single service configuration using SharedSpecValidator.
-func (v *DynamoGraphDeploymentValidator) validateService(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) error {
+// Returns warnings and error.
+func (v *DynamoGraphDeploymentValidator) validateService(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
 	// Use SharedSpecValidator to validate service spec (which is a DynamoComponentDeploymentSharedSpec)
 	fieldPath := fmt.Sprintf("spec.services[%s]", serviceName)
 	sharedValidator := NewSharedSpecValidator(service, fieldPath)
-	return sharedValidator.Validate()
+
+	if err := sharedValidator.Validate(); err != nil {
+		return nil, err
+	}
+
+	// Collect deprecation warnings
+	warnings := sharedValidator.GetWarnings()
+	return warnings, nil
 }
 
 // validatePVCs validates the PVC configurations.

@@ -18,6 +18,7 @@
 package v1alpha1
 
 import (
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -50,6 +51,22 @@ type VolumeMount struct {
 	// When true, backend-specific environment variables will be set and default mount points may be used.
 	// +kubebuilder:default=false
 	UseAsCompilationCache bool `json:"useAsCompilationCache,omitempty"`
+}
+
+// Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
+// with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+// for migration guidance. This field will be removed in a future API version.
+type Autoscaling struct {
+	// Deprecated: This field is ignored.
+	Enabled bool `json:"enabled,omitempty"`
+	// Deprecated: This field is ignored.
+	MinReplicas int `json:"minReplicas,omitempty"`
+	// Deprecated: This field is ignored.
+	MaxReplicas int `json:"maxReplicas,omitempty"`
+	// Deprecated: This field is ignored.
+	Behavior *autoscalingv2.HorizontalPodAutoscalerBehavior `json:"behavior,omitempty"`
+	// Deprecated: This field is ignored.
+	Metrics []autoscalingv2.MetricSpec `json:"metrics,omitempty"`
 }
 
 type SharedMemorySpec struct {

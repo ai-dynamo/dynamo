@@ -74,6 +74,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Resources requested and limits for this component, including CPU, memory,
 	// GPUs/devices, and any runtime-specific resources.
 	Resources *Resources `json:"resources,omitempty"`
+	// Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
+	// with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+	// for migration guidance. This field will be removed in a future API version.
+	Autoscaling *Autoscaling `json:"autoscaling,omitempty"`
 	// Envs defines additional environment variables to inject into the component containers.
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
 	// EnvFromSecret references a Secret whose key/value pairs will be exposed as

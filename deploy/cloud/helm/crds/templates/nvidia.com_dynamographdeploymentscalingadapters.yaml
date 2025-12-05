@@ -38,7 +38,7 @@ spec:
           name: DGD
           type: string
         - description: Service name
-          jsonPath: .spec.dgdRef.service
+          jsonPath: .spec.dgdRef.serviceName
           name: SERVICE
           type: string
         - description: Current replicas
@@ -87,13 +87,13 @@ spec:
                       description: Name of the DynamoGraphDeployment
                       minLength: 1
                       type: string
-                    service:
-                      description: Service is the key name of the service within the DGD's spec.services map to scale
+                    serviceName:
+                      description: ServiceName is the key name of the service within the DGD's spec.services map to scale
                       minLength: 1
                       type: string
                   required:
                     - name
-                    - service
+                    - serviceName
                   type: object
                 replicas:
                   description: |-

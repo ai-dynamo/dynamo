@@ -41,10 +41,10 @@ type DynamoGraphDeploymentServiceRef struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
-	// Service is the key name of the service within the DGD's spec.services map to scale
+	// ServiceName is the key name of the service within the DGD's spec.services map to scale
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	Service string `json:"service"`
+	ServiceName string `json:"serviceName"`
 }
 
 // DynamoGraphDeploymentScalingAdapterStatus defines the observed state of DynamoGraphDeploymentScalingAdapter
@@ -68,7 +68,7 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:printcolumn:name="DGD",type="string",JSONPath=".spec.dgdRef.name",description="DynamoGraphDeployment name"
-// +kubebuilder:printcolumn:name="SERVICE",type="string",JSONPath=".spec.dgdRef.service",description="Service name"
+// +kubebuilder:printcolumn:name="SERVICE",type="string",JSONPath=".spec.dgdRef.serviceName",description="Service name"
 // +kubebuilder:printcolumn:name="REPLICAS",type="integer",JSONPath=".status.replicas",description="Current replicas"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:resource:shortName={dgdsa}

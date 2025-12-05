@@ -85,13 +85,13 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 	}
 
 	// 3. Find the target service in DGD's spec.services map
-	component, exists := dgd.Spec.Services[adapter.Spec.DGDRef.Service]
+	component, exists := dgd.Spec.Services[adapter.Spec.DGDRef.ServiceName]
 	if !exists {
 		logger.Error(nil, "Service not found in DGD",
-			"service", adapter.Spec.DGDRef.Service,
+			"service", adapter.Spec.DGDRef.ServiceName,
 			"dgd", dgd.Name,
 			"availableServices", getServiceKeys(dgd.Spec.Services))
-		return ctrl.Result{}, fmt.Errorf("service %s not found in DGD", adapter.Spec.DGDRef.Service)
+		return ctrl.Result{}, fmt.Errorf("service %s not found in DGD", adapter.Spec.DGDRef.ServiceName)
 	}
 
 	// Get current replicas from DGD (default to 1 if not set)
@@ -104,7 +104,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 	// If DGD replicas differ from adapter status, DGD was modified externally
 	if currentReplicas != adapter.Status.Replicas {
 		logger.Info("Detected out-of-band DGD change, syncing adapter from DGD",
-			"service", adapter.Spec.DGDRef.Service,
+			"service", adapter.Spec.DGDRef.ServiceName,
 			"dgdReplicas", currentReplicas,
 			"adapterStatusReplicas", adapter.Status.Replicas)
 
@@ -123,7 +123,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 	if currentReplicas != adapter.Spec.Replicas {
 		// Update the service's replicas in DGD
 		component.Replicas = &adapter.Spec.Replicas
-		dgd.Spec.Services[adapter.Spec.DGDRef.Service] = component
+		dgd.Spec.Services[adapter.Spec.DGDRef.ServiceName] = component
 
 		if err := r.Update(ctx, dgd); err != nil {
 			logger.Error(err, "Failed to update DGD")
@@ -134,12 +134,12 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 
 		logger.Info("Scaled service",
 			"dgd", dgd.Name,
-			"service", adapter.Spec.DGDRef.Service,
+			"service", adapter.Spec.DGDRef.ServiceName,
 			"from", currentReplicas,
 			"to", adapter.Spec.Replicas)
 
 		r.Recorder.Eventf(adapter, corev1.EventTypeNormal, "Scaled",
-			"Scaled service %s from %d to %d replicas", adapter.Spec.DGDRef.Service, currentReplicas, adapter.Spec.Replicas)
+			"Scaled service %s from %d to %d replicas", adapter.Spec.DGDRef.ServiceName, currentReplicas, adapter.Spec.Replicas)
 
 		// Record scaling event
 		now := metav1.Now()
@@ -148,7 +148,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 
 	// 7. Update adapter status
 	adapter.Status.Replicas = adapter.Spec.Replicas
-	adapter.Status.Selector = r.buildPodSelector(dgd, adapter.Spec.DGDRef.Service)
+	adapter.Status.Selector = r.buildPodSelector(dgd, adapter.Spec.DGDRef.ServiceName)
 
 	if err := r.Status().Update(ctx, adapter); err != nil {
 		logger.Error(err, "Failed to update adapter status")
