@@ -27,7 +27,10 @@ use futures::StreamExt;
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_QUERY_SUBJECT,
-    indexer::{KvIndexerMetrics, LocalKvIndexer, RouterEvent, compute_block_hash_for_seq},
+    indexer::{
+        KvIndexerMetrics, LocalKvIndexer, RouterEvent, WorkerKvQueryRequest, WorkerKvQueryResponse,
+        compute_block_hash_for_seq,
+    },
     protocols::*,
     scoring::LoadEvent,
 };
@@ -335,10 +338,10 @@ async fn start_worker_kv_query_service(
                 tracing::debug!("Received WorkerKvQueryRequest: {:?}", request);
 
                 // Get events from local indexer (TODO for now, dump all events)
-                let events = local_indexer.get_all_buffered_events().into_iter().map(|(_worker_id, kv_event) | kv_event).collect();
+                let events = local_indexer.get_all_buffered_events();
 
                 // Build WorkerKvQueryResponse
-                let response = WorkerKvQueryResponse { worker_id, events };
+                let response = WorkerKvQueryResponse { events };
 
                 // Send reply back (if reply subject exists)
                 if let Some(reply_subject) = msg.reply {
@@ -1803,8 +1806,7 @@ mod tests_startup_helpers {
         // followed by applying the returned events
         // TODO be able to identify which event id is the last that Router has,
         // and query worker(s) for buffer starting after it
-        for (worker_id, event) in buffered {
-            let router_event = RouterEvent::new(worker_id, event);
+        for router_event in buffered {
             router_indexer
                 .event_sender()
                 .send(router_event)
@@ -1827,88 +1829,6 @@ mod tests_startup_helpers {
         );
 
         token.cancel();
-    }
-}
-
-#[cfg(test)]
-mod tests_local_indexer_query {
-    use super::*;
-    use crate::kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
-
-    #[tokio::test]
-    async fn test_local_indexer_buffer_and_serialization() {
-        // Tests components of the LocalKvIndexer query without using nats
-
-        let worker_id = 42u64;
-
-        // Create a local indexer
-        let token = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
-
-        // Add events to local indexer's buffer
-        let test_event_1 = RouterEvent::new(
-            worker_id,
-            KvCacheEvent {
-                event_id: 1,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    blocks: vec![KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(100),
-                        tokens_hash: LocalBlockHash(200),
-                    }],
-                }),
-                dp_rank: 0,
-            },
-        );
-
-        // Apply events with buffer
-        local_indexer
-            .apply_event_with_buffer(test_event_1)
-            .await
-            .unwrap();
-
-        // Wait for events to be processed
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        // Get buffered events (what the query service would return)
-        let buffered_events = local_indexer.get_all_buffered_events();
-
-        // Verify buffer contents
-        assert_eq!(buffered_events.len(), 1, "Buffer should have 1 event");
-        assert_eq!(buffered_events[0].0, worker_id);
-        assert_eq!(buffered_events[0].1.event_id, 1);
-
-        // Extract just the KvCacheEvents (what goes in response)
-        let events: Vec<KvCacheEvent> = buffered_events
-            .into_iter()
-            .map(|(_, kv_event)| kv_event)
-            .collect();
-
-        // Build the response that would be sent
-        let response = WorkerKvQueryResponse {
-            worker_id,
-            events: events.clone(),
-        };
-
-        // Test serialization/deserialization (simulating NATS round-trip)
-        let serialized = serde_json::to_vec(&response).unwrap();
-        let deserialized: WorkerKvQueryResponse = serde_json::from_slice(&serialized).unwrap();
-
-        // Verify response correctness
-        assert_eq!(deserialized.worker_id, worker_id);
-        assert_eq!(deserialized.events.len(), 1);
-        assert_eq!(deserialized.events[0].event_id, 1);
-
-        // Verify event data
-        match &deserialized.events[0].data {
-            KvCacheEventData::Stored(store_data) => {
-                assert_eq!(store_data.blocks.len(), 1);
-                assert_eq!(store_data.blocks[0].block_hash.0, 100);
-                assert_eq!(store_data.blocks[0].tokens_hash.0, 200);
-            }
-            _ => panic!("Expected Stored event"),
-        }
     }
 }
 

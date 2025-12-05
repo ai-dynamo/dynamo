@@ -315,26 +315,6 @@ impl<'de> Deserialize<'de> for ExternalSequenceBlockHash {
     }
 }
 
-// -------
-// Distributed router
-// -------
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct WorkerKvQueryRequest {
-    /// The worker ID of the worker to query.
-    /// TODO: let request query for `n` events.
-    /// For now, assume that every request is
-    /// a request to dump the whole event buffer
-    /// in the worker local KvIndexer
-    pub worker_id: WorkerId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct WorkerKvQueryResponse {
-    pub worker_id: WorkerId,
-    /// The events from the worker local KvIndexer.
-    pub events: Vec<KvCacheEvent>,
-}
-
 // ------
 // Tests
 // ------
