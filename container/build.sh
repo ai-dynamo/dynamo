@@ -59,7 +59,7 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
 TRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
-TRTLLM_BASE_IMAGE_TAG=25.06-py3
+TRTLLM_BASE_IMAGE_TAG=25.10-py3
 
 # Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
 # we need to build the TensorRT-LLM wheel from source.
@@ -89,31 +89,35 @@ DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="0c9430e5a530ba958fc9dca561a3ad865ad9f492"
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="31116825b39f4e6a6a1e127001f5204b73d1dc32" # 1.2.0rc2
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
 
 # TensorRT-LLM PyPI index URL
-DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
+DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.1.0rc5"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc3"
 TENSORRTLLM_PIP_WHEEL=""
 
-
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-# FIXME: NCCL will hang with 25.03, so use 25.01 for now
+# FIXME: OPS-612 NCCL will hang with 25.03, so use 25.01 for now
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
-VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+VLLM_BASE_IMAGE_TAG="25.04-cuda12.9-devel-ubuntu24.04"
 
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
+SGLANG_CUDA_VERSION="12.9.1"
+# This is for Dockerfile
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+# This is for Dockerfile.sglang. Unlike the other frameworks, it is using a different base image
+SGLANG_FRAMEWORK_IMAGE="nvcr.io/nvidia/cuda"
+SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
 
 NIXL_REF=0.7.1
 NIXL_UCX_REF=v1.19.0
@@ -293,6 +297,9 @@ get_options() {
         --enable-kvbm)
             ENABLE_KVBM=true
             ;;
+        --enable-media-nixl)
+            ENABLE_MEDIA_NIXL=true
+            ;;
         --make-efa)
             NIXL_UCX_REF=$NIXL_UCX_EFA_REF
             ;;
@@ -324,6 +331,9 @@ get_options() {
             else
                 missing_requirement "$1"
             fi
+            ;;
+        --no-tag-latest)
+            NO_TAG_LATEST=true
             ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
@@ -462,10 +472,12 @@ show_help() {
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
+    echo "  [--enable-media-nixl Enable media processing with NIXL support (default: true for frameworks, false for none)]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
     echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
+    echo "  [--no-tag-latest do not add latest-{framework} tag to built image]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -793,12 +805,26 @@ fi
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
     echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
     ENABLE_KVBM=true
+else
+    ENABLE_KVBM=false
 fi
 
 if [  ! -z ${ENABLE_KVBM} ]; then
     echo "Enabling the KVBM in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
 fi
+
+# ENABLE_MEDIA_NIXL: Enable media processing with NIXL support
+# Used in base Dockerfile for maturin build feature flag.
+# Can be explicitly overridden with --enable-media-nixl flag
+if [ -z "${ENABLE_MEDIA_NIXL}" ]; then
+    if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
+        ENABLE_MEDIA_NIXL=true
+    else
+        ENABLE_MEDIA_NIXL=false
+    fi
+fi
+BUILD_ARGS+=" --build-arg ENABLE_MEDIA_NIXL=${ENABLE_MEDIA_NIXL} "
 
 # NIXL_UCX_REF: Used in base Dockerfile only.
 #               Passed to framework Dockerfile.{vllm,sglang,...} where it's NOT used.
@@ -810,9 +836,16 @@ fi
 if [ -n "${MAX_JOBS}" ]; then
     BUILD_ARGS+=" --build-arg MAX_JOBS=${MAX_JOBS} "
 fi
+
 if [[ $FRAMEWORK == "SGLANG" ]]; then
-    echo "Forcing Python version to 3.10 for sglang image build"
+    echo "Customizing Python, CUDA, and framework images for sglang images"
     BUILD_ARGS+=" --build-arg PYTHON_VERSION=3.10"
+    BUILD_ARGS+=" --build-arg CUDA_VERSION=${SGLANG_CUDA_VERSION}"
+    # Unlike the other two frameworks, SGLang's framework image is different from the base image, so we need to set it explicitly.
+    BUILD_ARGS+=" --build-arg FRAMEWORK_IMAGE=${SGLANG_FRAMEWORK_IMAGE}"
+    BUILD_ARGS+=" --build-arg FRAMEWORK_IMAGE_TAG=${SGLANG_FRAMEWORK_IMAGE_TAG}"
+else
+    BUILD_ARGS+=" --build-arg PYTHON_VERSION=3.12"
 fi
 # Add sccache build arguments
 if [ "$USE_SCCACHE" = true ]; then
@@ -826,9 +859,12 @@ if [[ "$PLATFORM" == *"linux/arm64"* && "${FRAMEWORK}" == "SGLANG" ]]; then
     # Add arguments required for sglang blackwell build
     BUILD_ARGS+=" --build-arg GRACE_BLACKWELL=true --build-arg BUILD_TYPE=blackwell_aarch64"
 fi
-LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
-if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
-    LATEST_TAG="${LATEST_TAG}-${TARGET}"
+LATEST_TAG=""
+if [ -z "${NO_TAG_LATEST}" ]; then
+    LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
+    if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
+        LATEST_TAG="${LATEST_TAG}-${TARGET}"
+    fi
 fi
 
 show_image_options
@@ -842,21 +878,87 @@ fi
 if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
     # Follow 2-step build process for all frameworks
     if [[ $FRAMEWORK != "NONE" ]]; then
-        # Define base image tag before using it
-        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
+        # Define base image tag with framework suffix to prevent clobbering
+        # Different frameworks require different base configurations:
+        # - VLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=cuda-dl-base
+        # - SGLANG: Python 3.10, BASE_IMAGE=cuda-dl-base
+        # - TRTLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=pytorch
+        # Without unique tags, building different frameworks would overwrite each other's names
+        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}-${FRAMEWORK,,}"
         # Start base image build
         echo "======================================"
         echo "Starting Build 1: Base Image"
         echo "======================================"
-        $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+
+        # Create build log directory for BuildKit reports
+        BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
+        mkdir -p "${BUILD_LOG_DIR}"
+        BASE_BUILD_LOG="${BUILD_LOG_DIR}/base-image-build.log"
+
+        # Use BuildKit for enhanced metadata
+        if [ -z "$RUN_PREFIX" ]; then
+            if docker buildx version &>/dev/null; then
+                docker buildx build --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            else
+                DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            fi
+
+            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+                exit ${BUILD_EXIT_CODE}
+            fi
+        else
+            $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        fi
+
         # Start framework build
         echo "======================================"
         echo "Starting Build 2: Framework Image"
         echo "======================================"
+
+        FRAMEWORK_BUILD_LOG="${BUILD_LOG_DIR}/framework-${FRAMEWORK,,}-build.log"
+
         BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
-        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+
+        # Use BuildKit for enhanced metadata
+        if [ -z "$RUN_PREFIX" ]; then
+            if docker buildx version &>/dev/null; then
+                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            else
+                DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            fi
+
+            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+                exit ${BUILD_EXIT_CODE}
+            fi
+        else
+            $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        fi
     else
-        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        # Create build log directory for BuildKit reports
+        BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
+        mkdir -p "${BUILD_LOG_DIR}"
+        SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
+
+        # Use BuildKit for enhanced metadata
+        if [ -z "$RUN_PREFIX" ]; then
+            if docker buildx version &>/dev/null; then
+                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            else
+                DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            fi
+
+            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+                exit ${BUILD_EXIT_CODE}
+            fi
+        else
+            $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        fi
     fi
 fi
 

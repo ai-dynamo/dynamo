@@ -38,7 +38,7 @@
    kvbm/trtllm-setup.md
    agents/tool-calling.md
    guides/jail_stream_readme.md
-   guides/request_planes.md
+   guides/request_plane.md
 
    router/kv_cache_routing.md
    planner/load_planner.md
@@ -61,6 +61,7 @@
    backends/sglang/expert-distribution-eplb.md
    backends/sglang/gpt-oss.md
    backends/sglang/multimodal_epd.md
+   backends/sglang/profiling.md
    backends/sglang/sgl-hicache-example.md
    backends/sglang/sglang-disaggregation.md
    backends/sglang/prometheus.md

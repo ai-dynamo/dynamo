@@ -5,6 +5,7 @@ from typing import (
     Any,
     AsyncGenerator,
     AsyncIterator,
+    Awaitable,
     Callable,
     Dict,
     List,
@@ -54,6 +55,32 @@ class DistributedRuntime:
     def child_token(self) -> CancellationToken:
         """
         Get a child cancellation token that can be passed to async tasks
+        """
+        ...
+
+    def register_engine_route(
+        self,
+        route_name: str,
+        callback: Callable[[dict], Awaitable[dict]],
+    ) -> None:
+        """
+        Register an async callback for /engine/{route_name} on the system status server.
+
+        Args:
+            route_name: The route path (e.g., "start_profile" creates /engine/start_profile)
+            callback: Async function with signature: async def(body: dict) -> dict
+
+        Example:
+            async def start_profile(body: dict) -> dict:
+                await engine.start_profile(**body)
+                return {"status": "ok", "message": "Profiling started"}
+
+            runtime.register_engine_route("start_profile", start_profile)
+
+        The callback receives the JSON request body as a dict and should return
+        a dict that will be serialized as the JSON response.
+
+        For GET requests or empty bodies, an empty dict {} is passed.
         """
         ...
 
@@ -613,32 +640,77 @@ class KvIndexer:
 
 class ApproxKvIndexer:
     """
-    A KV Indexer that doesn't use KV cache events. It instead relies solely on the input tokens.
+    An approximate KV Indexer that doesn't receive KV cache events from workers.
+    Instead, it relies on routing decisions with TTL-based expiration and pruning
+    to estimate which blocks are cached on which workers.
+
+    This is useful when:
+    - Backend engines don't emit KV events
+    - You want to reduce event processing overhead
+    - Lower routing accuracy is acceptable
     """
 
-    def __init__(self, component: Component, kv_block_size: int, ttl_secs: float) -> None:
+    ...
+
+    def __init__(
+        self,
+        component: Component,
+        kv_block_size: int,
+        router_ttl_secs: float = 120.0,
+        router_max_tree_size: int = 1024,
+        router_prune_target_ratio: float = 0.8,
+    ) -> None:
         """
-        Create a `ApproxKvIndexer` object
+        Create an `ApproxKvIndexer` object
+
+        Args:
+            component: The component to associate with this indexer
+            kv_block_size: The KV cache block size
+            router_ttl_secs: TTL for blocks in seconds (default: 120.0)
+            router_max_tree_size: Maximum tree size before pruning (default: 1024)
+            router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
         """
         ...
 
-    def find_matches_for_request(self, token_ids: List[int], lora_id: int) -> OverlapScores:
+    def find_matches_for_request(
+        self, token_ids: List[int]
+    ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
+
+        Args:
+            token_ids: List of token IDs to find matches for
+
+        Returns:
+            OverlapScores containing worker matching scores and frequencies
         """
         ...
 
     def block_size(self) -> int:
         """
         Return the block size of the ApproxKvIndexer.
+
+        Returns:
+            The KV cache block size
         """
         ...
 
-    def process_routing_decision_for_request(self, tokens: List[int], lora_id: int, worker_id: int) -> None:
+    async def process_routing_decision_for_request(
+        self, tokens: List[int], worker_id: int, dp_rank: int = 0
+    ) -> None:
         """
-        Notify the indexer that a token sequence has been sent to a specific worker.
+        Notify the indexer that a token sequence has been routed to a specific worker.
+
+        This updates the indexer's internal state to track which blocks are likely
+        cached on which workers based on routing decisions.
+
+        Args:
+            tokens: List of token IDs that were routed
+            worker_id: The worker ID the request was routed to
+            dp_rank: The data parallel rank (default: 0)
         """
         ...
+
 
 class KvRecorder:
     """
@@ -978,7 +1050,36 @@ class RouterConfig:
 
 class KvRouterConfig:
     """Values for KV router"""
-    ...
+
+    def __init__(
+        self,
+        overlap_score_weight: float = 1.0,
+        router_temperature: float = 0.0,
+        use_kv_events: bool = True,
+        router_replica_sync: bool = False,
+        router_track_active_blocks: bool = True,
+        router_snapshot_threshold: Optional[int] = 1000000,
+        router_reset_states: bool = False,
+        router_ttl_secs: float = 120.0,
+        router_max_tree_size: int = 1024,
+        router_prune_target_ratio: float = 0.8,
+    ) -> None:
+        """
+        Create a KV router configuration.
+
+        Args:
+            overlap_score_weight: Weight for overlap score in worker selection (default: 1.0)
+            router_temperature: Temperature for worker sampling via softmax (default: 0.0)
+            use_kv_events: Whether to use KV events from workers (default: True)
+            router_replica_sync: Enable replica synchronization (default: False)
+            router_track_active_blocks: Track active blocks for load balancing (default: True)
+            router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
+            router_reset_states: Reset router state on startup (default: False)
+            router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
+            router_max_tree_size: Maximum tree size before pruning (default: 1024)
+            router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
+        """
+        ...
 
 async def register_llm(
     model_input: ModelInput,
@@ -993,8 +1094,36 @@ async def register_llm(
     runtime_config: Optional[ModelRuntimeConfig] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
+    lora_name: Optional[str] = None,
+    base_model_path: Optional[str] = None,
 ) -> None:
-    """Attach the model at path to the given endpoint, and advertise it as model_type"""
+    """
+    Attach the model at path to the given endpoint, and advertise it as model_type.
+    LoRA Registration:
+        The `lora_name` and `base_model_path` parameters must be provided together or not at all.
+        Providing only one of these parameters will raise a ValueError.
+        - `lora_name`: The served model name for the LoRA model
+        - `base_model_path`: Path to the base model that the LoRA extends
+
+    For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
+    and a minimal model card is registered directly. Use model_path as the display name
+    for these models.
+    """
+    ...
+
+async def unregister_llm(
+    endpoint: Endpoint,
+    lora_name: Optional[str] = None,
+) -> None:
+    """
+    Unregister a model from the discovery system.
+
+    If lora_name is provided, unregisters a LoRA adapter instead of a base model.
+    """
+    ...
+
+def lora_name_to_id(lora_name: str) -> int:
+    """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
 
 async def fetch_llm(remote_name: str) -> str:

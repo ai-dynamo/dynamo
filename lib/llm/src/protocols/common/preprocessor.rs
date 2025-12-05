@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::kv_router::RouterConfigOverride;
+#[cfg(feature = "media-nixl")]
+use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -20,7 +22,8 @@ pub struct PrefillResult {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum MultimodalData {
     Url(url::Url),
-    // TODO: Decoded(DecodedMediaData),
+    #[cfg(feature = "media-nixl")]
+    Decoded(RdmaMediaDataDescriptor),
 }
 
 // multimodal map containing {mm_part_type: [data...]}
@@ -40,6 +43,7 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_data: Option<MultimodalDataMap>,
+
     /// StopConditions are conditions that the inference engine will use to stop generation.
     pub stop_conditions: StopConditions,
 

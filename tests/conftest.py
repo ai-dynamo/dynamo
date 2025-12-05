@@ -17,17 +17,54 @@ import logging
 import os
 import shutil
 import tempfile
+from pathlib import Path
+from typing import Optional
 
 import pytest
+from filelock import FileLock
 
 from tests.utils.constants import TEST_MODELS
 from tests.utils.managed_process import ManagedProcess
 
 
 def pytest_configure(config):
-    # Defining model morker to avoid `'model' not found in `markers` configuration option`
-    # error when pyproject.toml is not available in the container
-    config.addinivalue_line("markers", "model: model id used by a test or parameter")
+    # Defining markers to avoid `<marker> not found in 'markers' configuration option`
+    # errors when pyproject.toml is not available in the container (e.g. some CI jobs).
+    # IMPORTANT: Keep this marker list in sync with [tool.pytest.ini_options].markers
+    # in pyproject.toml. If you add or remove markers there, mirror the change here.
+    markers = [
+        "pre_merge: marks tests to run before merging",
+        "post_merge: marks tests to run after merge",
+        "parallel: marks tests that can run in parallel with pytest-xdist",
+        "nightly: marks tests to run nightly",
+        "weekly: marks tests to run weekly",
+        "gpu_0: marks tests that don't require GPU",
+        "gpu_1: marks tests to run on GPU",
+        "gpu_2: marks tests to run on 2GPUs",
+        "gpu_4: marks tests to run on 4GPUs",
+        "gpu_8: marks tests to run on 8GPUs",
+        "e2e: marks tests as end-to-end tests",
+        "integration: marks tests as integration tests",
+        "unit: marks tests as unit tests",
+        "stress: marks tests as stress tests",
+        "performance: marks tests as performance tests",
+        "vllm: marks tests as requiring vllm",
+        "trtllm: marks tests as requiring trtllm",
+        "sglang: marks tests as requiring sglang",
+        "multimodal: marks tests as multimodal (image/video) tests",
+        "slow: marks tests as known to be slow",
+        "h100: marks tests to run on H100",
+        "router: marks tests for router component",
+        "planner: marks tests for planner component",
+        "kvbm: marks tests for KV behavior and model determinism",
+        "kvbm_v2: marks tests using KVBM V2",
+        "model: model id used by a test or parameter",
+        "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
+        "k8s: marks tests as requiring Kubernetes",
+        "fault_tolerance: marks tests as fault tolerance tests",
+    ]
+    for marker in markers:
+        config.addinivalue_line("markers", marker)
 
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -229,11 +266,150 @@ class NatsServer(ManagedProcess):
         )
 
 
+class SharedManagedProcess:
+    """Base class for ManagedProcess with file-based reference counting for multi-process sharing."""
+
+    def __init__(
+        self,
+        request,
+        tmp_path_factory,
+        resource_name: str,
+        port: int,
+        timeout: int = 300,
+    ):
+        self.request = request
+        self.port = port
+        self.timeout = timeout
+        self.resource_name = resource_name
+        self._server: Optional[ManagedProcess] = None
+        self._owns_process = False
+
+        root_tmp = Path(tempfile.gettempdir()) / "pytest_ref_counting"
+        root_tmp.mkdir(parents=True, exist_ok=True)
+
+        self.ref_file = root_tmp / f"pytest_{resource_name}_{port}_ref_count"
+        self.lock_file = str(self.ref_file) + ".lock"
+
+    def _create_server(self) -> ManagedProcess:
+        """Create the underlying server instance. Must be implemented by subclasses."""
+        raise NotImplementedError
+
+    def _read_ref_count(self) -> int:
+        """Read current reference count."""
+        if self.ref_file.exists():
+            try:
+                return int(self.ref_file.read_text().strip())
+            except (ValueError, IOError):
+                return 0
+        return 0
+
+    def _write_ref_count(self, count: int):
+        """Write reference count atomically."""
+        self.ref_file.write_text(str(count))
+
+    def _increment_ref_count(self) -> int:
+        """Increment reference count and return new count."""
+        count = self._read_ref_count()
+        count += 1
+        self._write_ref_count(count)
+        return count
+
+    def _decrement_ref_count(self) -> int:
+        """Decrement reference count and return new count."""
+        count = self._read_ref_count()
+        count = max(0, count - 1)
+        self._write_ref_count(count)
+        return count
+
+    def __enter__(self):
+        with FileLock(self.lock_file):
+            ref_count = self._increment_ref_count()
+            if ref_count == 1:
+                # First reference - start the process
+                self._server = self._create_server()
+                self._server.__enter__()
+                self._owns_process = True
+                logging.info(f"[{self.resource_name}] Started process (ref_count=1)")
+            else:
+                # Process already running, just track reference
+                self._owns_process = False
+                logging.info(
+                    f"[{self.resource_name}] Reusing existing process (ref_count={ref_count})"
+                )
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        with FileLock(self.lock_file):
+            ref_count = self._decrement_ref_count()
+            if ref_count == 0 and self._owns_process:
+                # Last reference - stop the process
+                if self._server:
+                    self._server.__exit__(exc_type, exc_val, exc_tb)
+                logging.info(f"[{self.resource_name}] Stopped process (ref_count=0)")
+            elif ref_count == 0:
+                # Last reference but we don't own it - shouldn't happen, but clean up ref file
+                if self.ref_file.exists():
+                    self.ref_file.unlink()
+                logging.warning(
+                    f"[{self.resource_name}] Ref count reached 0 but we don't own process"
+                )
+            else:
+                logging.info(
+                    f"[{self.resource_name}] Released reference (ref_count={ref_count})"
+                )
+
+
+class SharedEtcdServer(SharedManagedProcess):
+    """EtcdServer with file-based reference counting for multi-process sharing."""
+
+    def __init__(self, request, tmp_path_factory, port=2379, timeout=300):
+        super().__init__(request, tmp_path_factory, "etcd", port, timeout)
+        # Create a log directory for session-scoped servers
+        self._log_dir = tempfile.mkdtemp(prefix=f"pytest_{self.resource_name}_logs_")
+
+    def _create_server(self) -> ManagedProcess:
+        """Create EtcdServer instance."""
+        server = EtcdServer(self.request, port=self.port, timeout=self.timeout)
+        # Override log_dir since request.node.name is empty in session scope
+        server.log_dir = self._log_dir
+        return server
+
+
+class SharedNatsServer(SharedManagedProcess):
+    """NatsServer with file-based reference counting for multi-process sharing."""
+
+    def __init__(self, request, tmp_path_factory, port=4222, timeout=300):
+        super().__init__(request, tmp_path_factory, "nats", port, timeout)
+        # Create a log directory for session-scoped servers
+        self._log_dir = tempfile.mkdtemp(prefix=f"pytest_{self.resource_name}_logs_")
+
+    def _create_server(self) -> ManagedProcess:
+        """Create NatsServer instance."""
+        server = NatsServer(self.request, port=self.port, timeout=self.timeout)
+        # Override log_dir since request.node.name is empty in session scope
+        server.log_dir = self._log_dir
+        return server
+
+
 @pytest.fixture()
 def runtime_services(request):
     with NatsServer(request) as nats_process:
         with EtcdServer(request) as etcd_process:
             yield nats_process, etcd_process
+
+
+@pytest.fixture(scope="session")
+def runtime_services_session(request, tmp_path_factory):
+    """Session-scoped fixture that provides shared NATS and etcd instances for all tests.
+
+    Uses file-based reference counting to coordinate between pytest-xdist worker processes.
+    Only the first worker starts services, and only the last worker tears them down.
+
+    Test isolation is achieved through unique namespaces (test-namespace-{random-suffix}).
+    """
+    with SharedNatsServer(request, tmp_path_factory) as nats:
+        with SharedEtcdServer(request, tmp_path_factory) as etcd:
+            yield nats, etcd
 
 
 @pytest.fixture

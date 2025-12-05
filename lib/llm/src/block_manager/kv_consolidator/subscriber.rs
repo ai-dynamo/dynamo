@@ -3,7 +3,7 @@
 
 //! Simple ZMQ Subscriber for vLLM KV Events
 //!
-//! This is a simplified subscriber that deserializes raw vLLM events.
+//! This is a simplified subscriber that deserializes raw vLLM/TensorRT-LLM events.
 
 use anyhow::{Context, Result};
 use rmp_serde::Deserializer;
@@ -14,13 +14,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
-use super::tracker::{CacheStatusTracker, StorageTier};
+use super::tracker::{CacheStatusTracker, EventSource, StorageTier};
 
-/// Event batch received from vLLM (array format)
+/// Event batch received from vLLM/TensorRT-LLM (array format)
 /// Format: [timestamp, [events], data_parallel_rank]
 ///
 /// Note: This uses a tuple struct to deserialize from array [ts, events, rank]
-/// rather than an object {"ts": ..., "events": ..., "rank": ...} for vLLM compatibility.
+/// rather than an object {"ts": ..., "events": ..., "rank": ...} for vLLM/TensorRT-LLM compatibility.
 #[derive(Debug, Deserialize)]
 struct VllmEventBatch(
     f64,               // ts
@@ -43,17 +43,93 @@ impl VllmEventBatch {
 }
 
 /// Block hash can be either an integer or a string (bytes hex-encoded)
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+///
+/// Note: Integers can be u64 or i64 (msgpack compatibility) but we convert to u64 for internal use.
+/// - vLLM uses u64 block hashes
+/// - TensorRT-LLM uses i64 block hashes (signed integers)
+#[derive(Debug, Clone)]
 enum BlockHash {
-    Int(u64),
+    IntU64(u64),
+    IntI64(i64), // Added for TensorRT-LLM support (uses signed i64 hashes)
     Str(String),
+}
+
+impl<'de> serde::Deserialize<'de> for BlockHash {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, Visitor};
+        use std::fmt;
+
+        struct BlockHashVisitor;
+
+        impl<'de> Visitor<'de> for BlockHashVisitor {
+            type Value = BlockHash;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("an integer or a string")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(BlockHash::IntU64(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(BlockHash::IntI64(value))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(BlockHash::Str(value.to_string()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(BlockHash::Str(value))
+            }
+        }
+
+        deserializer.deserialize_any(BlockHashVisitor)
+    }
+}
+
+impl BlockHash {
+    /// Convert to u64, handling both signed and unsigned integers
+    /// Returns None if the hash cannot be converted (e.g., invalid hex string)
+    /// This avoids silently collapsing invalid hashes to 0, which could cause collisions
+    fn to_u64(&self) -> Option<u64> {
+        match self {
+            BlockHash::IntU64(n) => Some(*n),
+            BlockHash::IntI64(n) => {
+                // Convert signed i64 back to unsigned u64 (two's complement)
+                // Rust's `as u64` automatically handles two's complement conversion
+                Some(*n as u64)
+            }
+            BlockHash::Str(s) => {
+                // Try to parse as hex string, return None on failure
+                // This avoids silently mapping invalid hashes to 0, which could cause collisions
+                u64::from_str_radix(s, 16).ok()
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for BlockHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BlockHash::Int(n) => write!(f, "{}", n),
+            BlockHash::IntU64(n) => write!(f, "{}", n),
+            BlockHash::IntI64(n) => write!(f, "{}", n),
             BlockHash::Str(s) => write!(f, "{}", s),
         }
     }
@@ -88,9 +164,12 @@ pub async fn start_simple_zmq_listener(
     endpoint: String,
     tracker: Arc<RwLock<CacheStatusTracker>>,
     cancellation_token: CancellationToken,
+    engine_source: EventSource,
 ) -> Result<JoinHandle<()>> {
     let handle = tokio::spawn(async move {
-        if let Err(e) = run_listener_loop(endpoint, tracker, cancellation_token).await {
+        if let Err(e) =
+            run_listener_loop(endpoint, tracker, cancellation_token, engine_source).await
+        {
             tracing::error!("ZMQ listener task failed: {}", e);
         }
     });
@@ -102,6 +181,7 @@ async fn run_listener_loop(
     endpoint: String,
     tracker: Arc<RwLock<CacheStatusTracker>>,
     cancellation_token: CancellationToken,
+    engine_source: EventSource,
 ) -> Result<()> {
     tracing::info!(
         "KV event consolidator ZMQ listener connecting to {}",
@@ -174,7 +254,7 @@ async fn run_listener_loop(
                 // Process events
                 let mut tracker_guard = tracker.write().await;
                 for event in batch.events() {
-                    process_event(&mut tracker_guard, event.clone(), dp_rank);
+                    process_event(&mut tracker_guard, event.clone(), dp_rank, engine_source);
                 }
             }
         }
@@ -187,6 +267,7 @@ fn process_event(
     tracker: &mut CacheStatusTracker,
     event: VllmRawEvent,
     data_parallel_rank: Option<i32>,
+    engine_source: EventSource,
 ) {
     match event {
         VllmRawEvent::BlockStored {
@@ -252,14 +333,35 @@ fn process_event(
 
             // Process each block with its corresponding token chunk
             // For batches, chain the blocks: each block's parent is the previous block in the batch
-            let mut current_parent = parent_block_hash.as_ref().map(|h| h.to_string());
+            let mut current_parent = parent_block_hash
+                .as_ref()
+                .and_then(|h| {
+                    h.to_u64().or_else(|| {
+                        tracing::warn!(
+                            "Skipping parent block hash with unparsable string hash {:?}",
+                            h
+                        );
+                        None
+                    })
+                })
+                .map(|h| h.to_string());
 
             for (i, block_hash) in block_hashes.iter().enumerate() {
                 let block_tokens = token_chunks[i].clone();
 
+                // Skip blocks with invalid/unparsable hashes to avoid collisions
+                let Some(block_hash_u64) = block_hash.to_u64() else {
+                    tracing::warn!(
+                        "Skipping block with unparsable string hash {:?} (index {})",
+                        block_hash,
+                        i
+                    );
+                    continue;
+                };
+
                 tracker.handle_store(
-                    block_hash.to_string(),
-                    crate::block_manager::kv_consolidator::EventSource::Vllm,
+                    block_hash_u64.to_string(),
+                    engine_source,
                     block_tokens,
                     current_parent.clone(),
                     block_size_usize,
@@ -268,8 +370,8 @@ fn process_event(
                     data_parallel_rank,
                 );
 
-                // Next block's parent is this block
-                current_parent = Some(block_hash.to_string());
+                // Next block's parent is this block (only if hash was valid)
+                current_parent = Some(block_hash_u64.to_string());
             }
         }
 
@@ -289,10 +391,15 @@ fn process_event(
             );
 
             for block_hash in block_hashes {
-                tracker.handle_remove(
-                    &block_hash.to_string(),
-                    crate::block_manager::kv_consolidator::EventSource::Vllm,
-                );
+                // Skip blocks with invalid/unparsable hashes to avoid collisions
+                let Some(block_hash_u64) = block_hash.to_u64() else {
+                    tracing::warn!(
+                        "Skipping removal of block with unparsable string hash {:?}",
+                        block_hash
+                    );
+                    continue;
+                };
+                tracker.handle_remove(&block_hash_u64.to_string(), engine_source);
             }
         }
 

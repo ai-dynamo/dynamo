@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 import logging
 import os
+import random
 from dataclasses import dataclass, field
 
 import pytest
@@ -12,6 +14,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
+from tests.serve.conftest import MULTIMODAL_IMG_PATH, MULTIMODAL_IMG_URL
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     backend_health_check_payload,
@@ -20,6 +23,7 @@ from tests.utils.payload_builder import (
     completion_payload_default,
     metric_payload_default,
 )
+from tests.utils.payloads import ToolCallingChatPayload
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +39,14 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
 
+
 # vLLM test configurations
 vllm_configs = {
     "aggregated": VLLMConfig(
         name="aggregated",
         directory=vllm_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             backend_health_check_payload(port=8081),
@@ -50,11 +55,40 @@ vllm_configs = {
             metric_payload_default(min_num_requests=6, backend="vllm"),
         ],
     ),
+    "aggregated_lmcache": VLLMConfig(
+        name="aggregated_lmcache",
+        directory=vllm_dir,
+        script_name="agg_lmcache.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(min_num_requests=6, backend="vllm"),
+            metric_payload_default(min_num_requests=6, backend="lmcache"),
+        ],
+    ),
+    "aggregated_lmcache_multiproc": VLLMConfig(
+        name="aggregated_lmcache_multiproc",
+        directory=vllm_dir,
+        script_name="agg_lmcache_multiproc.sh",
+        marks=[pytest.mark.gpu_1],
+        model="Qwen/Qwen3-0.6B",
+        env={
+            "PROMETHEUS_MULTIPROC_DIR": f"/tmp/prometheus_multiproc_test_{os.getpid()}_{random.randint(0, 10000)}"
+        },
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(min_num_requests=6, backend="vllm"),
+            metric_payload_default(min_num_requests=6, backend="lmcache"),
+        ],
+    ),
     "agg-request-plane-tcp": VLLMConfig(
         name="agg-request-plane-tcp",
         directory=vllm_dir,
         script_name="agg_request_planes.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen3-0.6B",
         script_args=["--tcp"],
         request_payloads=[
@@ -67,7 +101,7 @@ vllm_configs = {
         name="agg-request-plane-http",
         directory=vllm_dir,
         script_name="agg_request_planes.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen3-0.6B",
         script_args=["--http"],
         request_payloads=[
@@ -80,7 +114,7 @@ vllm_configs = {
         name="agg-router",
         directory=vllm_dir,
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(
@@ -99,7 +133,7 @@ vllm_configs = {
         name="disaggregated",
         directory=vllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(),
@@ -114,6 +148,7 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.vllm,
             pytest.mark.h100,
+            pytest.mark.nightly,
         ],
         model="deepseek-ai/DeepSeek-V2-Lite",
         script_args=[
@@ -128,31 +163,33 @@ vllm_configs = {
         ],
         timeout=700,
         request_payloads=[
-            chat_payload_default(expected_response=["joke"]),
-            completion_payload_default(expected_response=["joke"]),
+            chat_payload_default(),
+            completion_payload_default(),
         ],
     ),
     "multimodal_agg_llava_epd": VLLMConfig(
         name="multimodal_agg_llava_epd",
         directory=vllm_dir,
         script_name="agg_multimodal_epd.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="llava-hf/llava-1.5-7b-hf",
         script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
         request_payloads=[
             chat_payload(
                 [
-                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "text",
+                        "text": "What colors are in the following image? Respond only with the colors.",
+                    },
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
-                        },
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["bus"],
+                expected_response=["purple"],
                 temperature=0.0,
+                max_tokens=100,
             )
         ],
     ),
@@ -160,7 +197,7 @@ vllm_configs = {
         name="multimodal_agg_qwen_epd",
         directory=vllm_dir,
         script_name="agg_multimodal_epd.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
@@ -168,16 +205,18 @@ vllm_configs = {
         request_payloads=[
             chat_payload(
                 [
-                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "text",
+                        "text": "What colors are in the following image? Respond only with the colors.",
+                    },
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
-                        },
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["bus"],
+                expected_response=["purple"],
+                max_tokens=100,
             )
         ],
     ),
@@ -185,9 +224,40 @@ vllm_configs = {
         name="multimodal_agg_qwen",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
+        delayed_start=0,
+        timeout=360,
+        request_payloads=[
+            chat_payload(
+                [
+                    {
+                        "type": "text",
+                        "text": "What colors are in the following image? Respond only with the colors.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["purple"],
+                max_tokens=100,
+            ),
+        ],
+    ),
+    "multimodal_agg_llava": VLLMConfig(
+        name="multimodal_agg_llava",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[
+            pytest.mark.gpu_2,
+            # https://github.com/ai-dynamo/dynamo/issues/4501
+            pytest.mark.xfail(strict=False),
+        ],
+        model="llava-hf/llava-1.5-7b-hf",
+        script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
         delayed_start=0,
         timeout=360,
         request_payloads=[
@@ -204,18 +274,10 @@ vllm_configs = {
                 ],
                 repeat_count=1,
                 expected_response=["bus"],
+                temperature=0.0,
             ),
-            # Base64 data URL test (1x1 PNG inline, avoids network fetch)
-            chat_payload(
-                [
-                    {"type": "text", "text": "What do you see in this image?"},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNoAAAAggCBd81ytgAAAABJRU5ErkJggg=="
-                        },
-                    },
-                ],
+            # String content test - verifies string → array conversion for multimodal templates
+            chat_payload_default(
                 repeat_count=1,
                 expected_response=[],  # Just validate no error
             ),
@@ -226,7 +288,7 @@ vllm_configs = {
         name="multimodal_video_agg",
         directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
         script_name="video_agg.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
         delayed_start=0,
         script_args=["--model", "llava-hf/LLaVA-NeXT-Video-7B-hf"],
@@ -276,6 +338,74 @@ vllm_configs = {
             )
         ],
     ),
+    "aggregated_toolcalling": VLLMConfig(
+        name="aggregated_toolcalling",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.multimodal],
+        model="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        script_args=[
+            "--model",
+            "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+            "--max-model-len",
+            "10000",
+            "--dyn-tool-call-parser",
+            "hermes",
+        ],
+        delayed_start=0,
+        timeout=600,
+        request_payloads=[
+            ToolCallingChatPayload(
+                body={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Describe what you see in this image in detail.",
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": MULTIMODAL_IMG_URL},
+                                },
+                            ],
+                        }
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "describe_image",
+                                "description": "Provides detailed description of objects and scenes in an image",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "objects": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                            "description": "List of objects detected in the image",
+                                        },
+                                        "scene": {
+                                            "type": "string",
+                                            "description": "Overall scene description",
+                                        },
+                                    },
+                                    "required": ["objects", "scene"],
+                                },
+                            },
+                        }
+                    ],
+                    "tool_choice": "auto",
+                    "max_tokens": 1024,
+                },
+                repeat_count=1,
+                expected_response=["purple"],  # Validate image understanding
+                expected_log=[],
+                expected_tool_name="describe_image",  # Validate tool call happened
+            )
+        ],
+    ),
     # TODO: Enable this test case when we have 4 GPUs runners.
     # "multimodal_disagg": VLLMConfig(
     #     name="multimodal_disagg",
@@ -286,6 +416,22 @@ vllm_configs = {
     #     delayed_start=45,
     #     script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
     # ),
+    "completions_only": VLLMConfig(
+        name="completions_only",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1],
+        model="deepseek-ai/deepseek-llm-7b-base",
+        script_args=[
+            "--model",
+            "deepseek-ai/deepseek-llm-7b-base",
+            "--dyn-endpoint-types",
+            "completions",
+        ],
+        request_payloads=[
+            completion_payload_default(),
+        ],
+    ),
 }
 
 
@@ -297,11 +443,59 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
+@pytest.mark.nightly
 def test_serve_deployment(
-    vllm_config_test, request, runtime_services, predownload_models
+    vllm_config_test, request, runtime_services, predownload_models, image_server
 ):
     """
     Test dynamo serve deployments with different graph configurations.
     """
     config = vllm_config_test
+    run_serve_deployment(config, request)
+
+
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.gpu_2
+def test_multimodal_b64(request, runtime_services, predownload_models):
+    """
+    Test multimodal inference with base64 url passthrough.
+
+    This test is separate because it loads the required image at runtime
+    (not collection time), ensuring it only fails when actually executed.
+    """
+    # Load B64 image at test execution time
+    with open(MULTIMODAL_IMG_PATH, "rb") as f:
+        b64_img = base64.b64encode(f.read()).decode()
+
+    # Create payload with B64 image
+    b64_payload = chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "What colors are in the following image? Respond only with the colors.",
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{b64_img}"},
+            },
+        ],
+        repeat_count=1,
+        expected_response=["purple"],
+        max_tokens=100,
+    )
+
+    # Create test config
+    config = VLLMConfig(
+        name="test_multimodal_b64",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[],  # markers at function-level
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
+        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
+        delayed_start=0,
+        timeout=360,
+        request_payloads=[b64_payload],
+    )
+
     run_serve_deployment(config, request)
