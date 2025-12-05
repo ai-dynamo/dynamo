@@ -62,6 +62,24 @@ pub struct JailConfig<'a> {
     pub tool_call_parser: Option<&'a str>,
 }
 
+/// Jail activation mode
+#[derive(Debug, Clone, PartialEq)]
+pub enum JailMode {
+    /// Traditional: wait for start marker, then jail
+    MarkerBased,
+    /// Immediate: start jailed from first token (for tool_choice)
+    Immediate { format: ToolChoiceFormat },
+}
+
+/// Format for tool_choice immediate jail mode
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolChoiceFormat {
+    /// tool_choice=named: expect single object {"location": "Paris", ...}
+    SingleObject { tool_name: String },
+    /// tool_choice=required: expect array [{name:"search", parameters:{...}}, ...]
+    ArrayOfTools,
+}
+
 /// State tracking for an individual choice during jail processing
 #[derive(Debug, Clone)]
 struct ChoiceJailState {
@@ -103,10 +121,10 @@ fn create_choice_stream(
 
 impl ChoiceJailState {
     /// Create a new jail state for a choice
-    fn new(index: u32) -> Self {
+    fn new(index: u32, starts_jailed: bool) -> Self {
         Self {
             index,
-            is_jailed: false,
+            is_jailed: starts_jailed,
             accumulated_content: String::new(),
             partial_match_buffer: String::new(),
             stream_finish_reason: None,
@@ -381,7 +399,7 @@ impl ChoiceJailStateCollection {
     }
 
     /// Get or create state for a choice index
-    fn get_or_create_state(&mut self, index: u32) -> &mut ChoiceJailState {
+    fn get_or_create_state(&mut self, index: u32, starts_jailed: bool) -> &mut ChoiceJailState {
         // Find the position where this index should be
         match self.states.binary_search_by_key(&index, |s| s.index) {
             Ok(pos) => {
@@ -390,7 +408,7 @@ impl ChoiceJailStateCollection {
             }
             Err(insert_pos) => {
                 // Need to create new state
-                let new_state = ChoiceJailState::new(index);
+                let new_state = ChoiceJailState::new(index, starts_jailed);
                 self.states.insert(insert_pos, new_state);
                 &mut self.states[insert_pos]
             }
@@ -422,6 +440,7 @@ pub struct JailedStream {
     tool_call_parser: Option<String>,
     emission_mode: EmissionMode,
     marker_matcher: MarkerMatcher,
+    jail_mode: JailMode,
 }
 
 impl JailedStream {
@@ -439,8 +458,9 @@ impl JailedStream {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
+        let jail_mode = self.jail_mode.clone();
         let jailed_stream = self.apply(stream);
-        JailedStream::fix_finish_reason(jailed_stream)
+        JailedStream::fix_finish_reason(jailed_stream, jail_mode)
     }
 
     /// Apply the jail transformation to a stream of chat completion responses
@@ -480,7 +500,8 @@ impl JailedStream {
                     // Process each choice independently using the new architecture
                     for choice in &chat_response.choices {
                         if let Some(ref content) = choice.delta.content {
-                            let choice_state = choice_states.get_or_create_state(choice.index);
+                            let starts_jailed = matches!(self.jail_mode, JailMode::Immediate { .. });
+                            let choice_state = choice_states.get_or_create_state(choice.index, starts_jailed);
 
                             // Store metadata when any choice becomes jailed (first time only)
                             if !choice_state.is_jailed && self.should_start_jail(content)
@@ -498,14 +519,24 @@ impl JailedStream {
                             all_emissions.extend(emissions);
                         } else {
                             // Handle choices without content (e.g., final chunks with finish_reason)
-                            // These should always pass through
-                            let pass_through_choice = ChatChoiceStream {
-                                index: choice.index,
-                                delta: choice.delta.clone(),
-                                finish_reason: choice.finish_reason,
-                                logprobs: choice.logprobs.clone(),
-                            };
-                            all_emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
+                            // Only filter out if this choice was ever jailed and lacks role
+                            // (to avoid aggregator issues with deltas missing role after unjail)
+                            let choice_state = choice_states.get_or_create_state(choice.index, false);
+                            let was_ever_jailed = choice_state.accumulated_content.len() > 0 || choice_state.is_jailed;
+
+                            let should_emit = choice.delta.role.is_some()
+                                || choice.delta.tool_calls.is_some()
+                                || !was_ever_jailed; // Always pass through if never jailed
+
+                            if should_emit {
+                                let pass_through_choice = ChatChoiceStream {
+                                    index: choice.index,
+                                    delta: choice.delta.clone(),
+                                    finish_reason: choice.finish_reason,
+                                    logprobs: choice.logprobs.clone(),
+                                };
+                                all_emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
+                            }
                         }
                     }
 
@@ -673,38 +704,67 @@ impl JailedStream {
 
     /// Check if accumulated content should end jail
     async fn should_end_jail(&self, accumulated_content: &str) -> (bool, usize) {
-        // Path 1: End sequence detected
-        let end_marker_info = if !self.jail_end_sequences.is_empty() {
-            self.jail_end_sequences.iter().find_map(|seq| {
-                accumulated_content
-                    .find(seq)
-                    .map(|pos| (pos + seq.len(), seq.clone()))
-            })
-        } else {
-            None
-        };
+        match &self.jail_mode {
+            JailMode::MarkerBased => {
+                // Path 1: End sequence detected
+                let end_marker_info = if !self.jail_end_sequences.is_empty() {
+                    self.jail_end_sequences.iter().find_map(|seq| {
+                        accumulated_content
+                            .find(seq)
+                            .map(|pos| (pos + seq.len(), seq.clone()))
+                    })
+                } else {
+                    None
+                };
 
-        // Path 2: Complete tool call(s) can be parsed (early exit)
-        let early_exit = self.should_exit_jail_early(accumulated_content).await;
+                // Path 2: Complete tool call(s) can be parsed (early exit)
+                let early_exit = self.should_exit_jail_early(accumulated_content).await;
 
-        if let Some((end_pos, _)) = end_marker_info {
-            (true, end_pos)
-        } else if early_exit {
-            // For early exit, find where the complete tool call ends
-            if let Some(parser) = &self.tool_call_parser {
-                if let Ok((_, _)) =
-                    try_tool_call_parse_aggregate(accumulated_content, Some(parser)).await
-                {
-                    let split_pos = find_tool_call_end_position(accumulated_content, Some(parser));
-                    (true, split_pos)
+                if let Some((end_pos, _)) = end_marker_info {
+                    (true, end_pos)
+                } else if early_exit {
+                    // For early exit, find where the complete tool call ends
+                    if let Some(parser) = &self.tool_call_parser {
+                        if let Ok((_, _)) =
+                            try_tool_call_parse_aggregate(accumulated_content, Some(parser)).await
+                        {
+                            let split_pos = find_tool_call_end_position(accumulated_content, Some(parser));
+                            (true, split_pos)
+                        } else {
+                            (false, accumulated_content.len())
+                        }
+                    } else {
+                        (false, accumulated_content.len())
+                    }
                 } else {
                     (false, accumulated_content.len())
                 }
-            } else {
-                (false, accumulated_content.len())
             }
-        } else {
-            (false, accumulated_content.len())
+            JailMode::Immediate { format } => {
+                // For tool_choice, check if we have valid complete JSON
+                match format {
+                    ToolChoiceFormat::SingleObject { .. } => {
+                        // Expect single object: {"location": "Paris", "unit": "celsius"}
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(accumulated_content) {
+                            if value.is_object() {
+                                return (true, accumulated_content.len());
+                            }
+                        }
+                        (false, accumulated_content.len())
+                    }
+                    ToolChoiceFormat::ArrayOfTools => {
+                        // Expect array: [{"name":"search","parameters":{...}}, ...]
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(accumulated_content) {
+                            if let Some(arr) = value.as_array() {
+                                if !arr.is_empty() {
+                                    return (true, accumulated_content.len());
+                                }
+                            }
+                        }
+                        (false, accumulated_content.len())
+                    }
+                }
+            }
         }
     }
 
@@ -715,46 +775,131 @@ impl JailedStream {
         accumulated_content: &str,
         base_choice: &ChatChoiceStream,
     ) -> ChatChoiceStream {
-        if let Ok((tool_calls, normal_text)) =
-            try_tool_call_parse_aggregate(accumulated_content, self.tool_call_parser.as_deref())
-                .await
-            && !tool_calls.is_empty()
-        {
-            // Convert to streaming format
-            let tool_call_chunks: Vec<ChatCompletionMessageToolCallChunk> = tool_calls
-                .into_iter()
-                .enumerate()
-                .map(|(idx, tool_call)| ChatCompletionMessageToolCallChunk {
-                    index: idx as u32,
-                    id: Some(tool_call.id),
-                    r#type: Some(tool_call.r#type),
-                    function: Some(FunctionCallStream {
-                        name: Some(tool_call.function.name),
-                        arguments: Some(tool_call.function.arguments),
-                    }),
-                })
-                .collect();
-            // Create choice with tool calls
-            let choice = create_choice_stream(
-                choice_index,
-                Some(Role::Assistant),
-                normal_text.as_deref().unwrap_or(""),
-                Some(tool_call_chunks),
-                None,
-                None,
-            );
-            return choice;
-        }
+        match &self.jail_mode {
+            JailMode::MarkerBased => {
+                // Traditional marker-based tool call parsing
+                if let Ok((tool_calls, normal_text)) =
+                    try_tool_call_parse_aggregate(accumulated_content, self.tool_call_parser.as_deref())
+                        .await
+                    && !tool_calls.is_empty()
+                {
+                    // Convert to streaming format
+                    let tool_call_chunks: Vec<ChatCompletionMessageToolCallChunk> = tool_calls
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, tool_call)| ChatCompletionMessageToolCallChunk {
+                            index: idx as u32,
+                            id: Some(tool_call.id),
+                            r#type: Some(tool_call.r#type),
+                            function: Some(FunctionCallStream {
+                                name: Some(tool_call.function.name),
+                                arguments: Some(tool_call.function.arguments),
+                            }),
+                        })
+                        .collect();
+                    // Create choice with tool calls
+                    let choice = create_choice_stream(
+                        choice_index,
+                        Some(Role::Assistant),
+                        normal_text.as_deref().unwrap_or(""),
+                        Some(tool_call_chunks),
+                        None,
+                        None,
+                    );
+                    return choice;
+                }
 
-        // No tool calls found or parsing failed, return content choice
-        create_choice_stream(
-            choice_index,
-            Some(Role::Assistant),
-            accumulated_content,
-            None,
-            base_choice.finish_reason,
-            base_choice.logprobs.clone(),
-        )
+                // No tool calls found or parsing failed, return content choice
+                create_choice_stream(
+                    choice_index,
+                    Some(Role::Assistant),
+                    accumulated_content,
+                    None,
+                    base_choice.finish_reason,
+                    base_choice.logprobs.clone(),
+                )
+            }
+            JailMode::Immediate { format } => {
+                // tool_choice mode: parse JSON and convert to tool calls
+                match self.parse_tool_choice_json(accumulated_content, format) {
+                    Ok(tool_call_chunks) if !tool_call_chunks.is_empty() => {
+                        create_choice_stream(
+                            choice_index,
+                            Some(Role::Assistant),
+                            "",
+                            Some(tool_call_chunks),
+                            base_choice.finish_reason,
+                            base_choice.logprobs.clone(),
+                        )
+                    }
+                    Ok(_) | Err(_) => {
+                        // Parsing failed, return as content
+                        create_choice_stream(
+                            choice_index,
+                            Some(Role::Assistant),
+                            accumulated_content,
+                            None,
+                            base_choice.finish_reason,
+                            base_choice.logprobs.clone(),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// Parse tool_choice JSON output into tool call chunks
+    fn parse_tool_choice_json(
+        &self,
+        json_content: &str,
+        format: &ToolChoiceFormat,
+    ) -> anyhow::Result<Vec<ChatCompletionMessageToolCallChunk>> {
+        let parsed = serde_json::from_str::<serde_json::Value>(json_content)?;
+
+        match format {
+            ToolChoiceFormat::SingleObject { tool_name } => {
+                // For named tool choice: JSON is the parameters object
+                if parsed.is_object() {
+                    Ok(vec![ChatCompletionMessageToolCallChunk {
+                        index: 0,
+                        id: Some("call-1".to_string()),
+                        r#type: Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
+                        function: Some(FunctionCallStream {
+                            name: Some(tool_name.clone()),
+                            arguments: Some(json_content.to_string()),
+                        }),
+                    }])
+                } else {
+                    Ok(vec![])
+                }
+            }
+            ToolChoiceFormat::ArrayOfTools => {
+                // For required tool choice: JSON is array of {name, parameters}
+                if let Some(array) = parsed.as_array() {
+                    let chunks: Vec<ChatCompletionMessageToolCallChunk> = array
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(idx, entry)| {
+                            let name = entry.get("name")?.as_str()?.to_string();
+                            let parameters = entry.get("parameters")?;
+                            let args = serde_json::to_string(parameters).ok()?;
+                            Some(ChatCompletionMessageToolCallChunk {
+                                index: idx as u32,
+                                id: Some(format!("call-{}", idx + 1)),
+                                r#type: Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
+                                function: Some(FunctionCallStream {
+                                    name: Some(name),
+                                    arguments: Some(args),
+                                }),
+                            })
+                        })
+                        .collect();
+                    Ok(chunks)
+                } else {
+                    Ok(vec![])
+                }
+            }
+        }
     }
 
     /// Check if accumulated content contains complete tool calls that can be parsed
@@ -775,8 +920,9 @@ impl JailedStream {
 
     /// Post-processor that sets finish_reason to ToolCalls when tool calls were emitted
     /// This should be called after apply() to fix the finish_reason for tool call chunks
-    pub fn fix_finish_reason<S>(
+    fn fix_finish_reason<S>(
         input_stream: S,
+        jail_mode: JailMode,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
@@ -795,13 +941,39 @@ impl JailedStream {
                     }
                 }
 
-                // If this chunk has finish_reason and the choice had tool calls, override to ToolCalls
+                // Fix finish_reason based on jail mode and whether tool calls were emitted
                 if let Some(ref mut data) = response.data {
                     for choice in &mut data.choices {
-                        if choice.finish_reason.is_some() && choice.finish_reason == Some(FinishReason::Stop)
-                            && has_tool_calls_per_choice.get(&choice.index).copied().unwrap_or(false)
-                        {
-                            choice.finish_reason = Some(FinishReason::ToolCalls);
+                        if let Some(finish) = choice.finish_reason {
+                            // Only modify Stop finish reason, preserve Length/ContentFilter
+                            if finish == FinishReason::Stop {
+                                let has_tool_calls = has_tool_calls_per_choice.get(&choice.index).copied().unwrap_or(false);
+
+                                match &jail_mode {
+                                    JailMode::MarkerBased => {
+                                        // Traditional: if tool calls emitted, change to ToolCalls
+                                        if has_tool_calls {
+                                            choice.finish_reason = Some(FinishReason::ToolCalls);
+                                        }
+                                    }
+                                    JailMode::Immediate { format } => {
+                                        // tool_choice mode: apply specific finish_reason logic
+                                        match format {
+                                            ToolChoiceFormat::SingleObject { .. } => {
+                                                // Named tool choice: keep Stop
+                                                // (already Stop, no change needed)
+                                            }
+                                            ToolChoiceFormat::ArrayOfTools => {
+                                                // Required tool choice: change to ToolCalls
+                                                if has_tool_calls {
+                                                    choice.finish_reason = Some(FinishReason::ToolCalls);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // Length and ContentFilter are preserved as-is
                         }
                     }
                 }
@@ -818,6 +990,7 @@ pub struct JailedStreamBuilder {
     jail_end_sequences: Vec<String>,
     tool_call_parser: Option<String>,
     emission_mode: EmissionMode,
+    jail_mode: JailMode,
 }
 
 impl JailedStreamBuilder {
@@ -828,6 +1001,7 @@ impl JailedStreamBuilder {
             jail_end_sequences: Vec::new(),
             tool_call_parser: None,
             emission_mode: EmissionMode::default(),
+            jail_mode: JailMode::MarkerBased,
         }
     }
 
@@ -884,6 +1058,22 @@ impl JailedStreamBuilder {
     /// Enable packed emission mode (multiple choices per chunk)
     pub fn packed_emission(mut self) -> Self {
         self.emission_mode = EmissionMode::Packed;
+        self
+    }
+
+    /// Enable immediate jail mode for tool_choice=named
+    pub fn tool_choice_named(mut self, tool_name: String) -> Self {
+        self.jail_mode = JailMode::Immediate {
+            format: ToolChoiceFormat::SingleObject { tool_name },
+        };
+        self
+    }
+
+    /// Enable immediate jail mode for tool_choice=required
+    pub fn tool_choice_required(mut self) -> Self {
+        self.jail_mode = JailMode::Immediate {
+            format: ToolChoiceFormat::ArrayOfTools,
+        };
         self
     }
 
@@ -965,6 +1155,7 @@ impl JailedStreamBuilder {
             tool_call_parser: self.tool_call_parser,
             emission_mode: self.emission_mode,
             marker_matcher,
+            jail_mode: self.jail_mode,
         }
     }
 }

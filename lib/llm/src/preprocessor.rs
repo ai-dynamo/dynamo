@@ -786,15 +786,36 @@ impl OpenAIPreprocessor {
 
     /// Apply tool calling jail to the stream if needed
     pub fn apply_tool_calling_jail<S>(
-        tool_call_parser: String,
+        tool_call_parser: Option<String>,
+        tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        let jail = JailedStream::builder()
-            .tool_call_parser(tool_call_parser)
-            .build();
+        use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
+
+        let mut builder = JailedStream::builder();
+
+        // Configure jail based on tool_choice
+        match tool_choice {
+            Some(ChatCompletionToolChoiceOption::Named(named)) => {
+                // Immediate jail mode for named tool choice
+                builder = builder.tool_choice_named(named.function.name.clone());
+            }
+            Some(ChatCompletionToolChoiceOption::Required) => {
+                // Immediate jail mode for required tool choice
+                builder = builder.tool_choice_required();
+            }
+            Some(ChatCompletionToolChoiceOption::Auto) | Some(ChatCompletionToolChoiceOption::None) | None => {
+                // Traditional marker-based jail for auto/none/unspecified
+                if let Some(parser) = tool_call_parser {
+                    builder = builder.tool_call_parser(parser);
+                }
+            }
+        }
+
+        let jail = builder.build();
         jail.apply_with_finish_reason(stream)
     }
 
@@ -957,11 +978,11 @@ impl
 
         // Apply jail conditionally
         let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
-            if let Some(parser) = self.tool_call_parser.clone() {
-                Box::pin(Self::apply_tool_calling_jail(parser, stream))
-            } else {
-                Box::pin(stream) // Should not happen due to should_jail check
-            }
+            Box::pin(Self::apply_tool_calling_jail(
+                self.tool_call_parser.clone(),
+                request.inner.tool_choice.clone(),
+                stream,
+            ))
         } else {
             Box::pin(stream)
         };

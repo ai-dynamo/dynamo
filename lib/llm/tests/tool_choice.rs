@@ -35,6 +35,79 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
     }
 }
 
+async fn apply_jail_transformation(
+    raw_response: dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+    tool_choice: Option<ChatCompletionToolChoiceOption>,
+) -> dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+    use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
+    use futures::stream;
+    use futures::StreamExt;
+    use dynamo_runtime::protocols::annotated::Annotated;
+
+    let input_stream = stream::iter(vec![Annotated {
+        data: Some(raw_response),
+        id: None,
+        event: None,
+        comment: None,
+    }]);
+
+    let mut builder = JailedStream::builder();
+
+    match tool_choice {
+        Some(ChatCompletionToolChoiceOption::Named(ref named)) => {
+            builder = builder.tool_choice_named(named.function.name.clone());
+        }
+        Some(ChatCompletionToolChoiceOption::Required) => {
+            builder = builder.tool_choice_required();
+        }
+        _ => {}
+    }
+
+    let jail = builder.build();
+    let output_stream = jail.apply_with_finish_reason(input_stream);
+
+    tokio::pin!(output_stream);
+    output_stream.next().await.unwrap().data.unwrap()
+}
+
+async fn apply_jail_transformation_streaming(
+    raw_responses: Vec<dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse>,
+    tool_choice: Option<ChatCompletionToolChoiceOption>,
+) -> Vec<dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse> {
+    use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
+    use futures::stream;
+    use futures::StreamExt;
+    use dynamo_runtime::protocols::annotated::Annotated;
+
+    let input_stream = stream::iter(raw_responses.into_iter().map(|r| Annotated {
+        data: Some(r),
+        id: None,
+        event: None,
+        comment: None,
+    }));
+
+    let mut builder = JailedStream::builder();
+
+    match tool_choice {
+        Some(ChatCompletionToolChoiceOption::Named(ref named)) => {
+            builder = builder.tool_choice_named(named.function.name.clone());
+        }
+        Some(ChatCompletionToolChoiceOption::Required) => {
+            builder = builder.tool_choice_required();
+        }
+        _ => {}
+    }
+
+    let jail = builder.build();
+    let output_stream = jail.apply_with_finish_reason(input_stream);
+
+    tokio::pin!(output_stream);
+    output_stream
+        .filter_map(|ann| async move { ann.data })
+        .collect()
+        .await
+}
+
 fn build_backend_output(text: &str) -> BackendOutput {
     BackendOutput {
         token_ids: vec![],
@@ -50,10 +123,10 @@ fn build_backend_output(text: &str) -> BackendOutput {
     }
 }
 
-#[test]
-fn test_named_tool_choice_parses_json() {
+#[tokio::test]
+async fn test_named_tool_choice_parses_json() {
     let mut request = create_test_request();
-    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Named(
+    let tool_choice = Some(ChatCompletionToolChoiceOption::Named(
         ChatCompletionNamedToolChoice {
             r#type: ChatCompletionToolType::Function,
             function: FunctionName {
@@ -61,20 +134,23 @@ fn test_named_tool_choice_parses_json() {
             },
         },
     ));
+    request.inner.tool_choice = tool_choice.clone();
 
     let mut generator = request.response_generator("req-1".to_string());
     let backend_output = build_backend_output(r#"{"location":"Paris"}"#);
-    let response = generator
+    let raw_response = generator
         .choice_from_postprocessor(backend_output)
         .expect("choice generation");
 
+    let response = apply_jail_transformation(raw_response, tool_choice).await;
     let choice = &response.choices[0];
+
     assert_eq!(
         choice.finish_reason,
         Some(dynamo_async_openai::types::FinishReason::Stop)
     );
     let delta = &choice.delta;
-    assert!(delta.content.is_none());
+    assert!(delta.content.is_none() || delta.content.as_deref() == Some(""));
     let tool_calls = delta.tool_calls.as_ref().unwrap();
 
     assert_eq!(tool_calls.len(), 1);
@@ -93,27 +169,30 @@ fn test_named_tool_choice_parses_json() {
     );
 }
 
-#[test]
-fn test_required_tool_choice_parses_json_array() {
+#[tokio::test]
+async fn test_required_tool_choice_parses_json_array() {
     let mut request = create_test_request();
-    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Required);
+    let tool_choice = Some(ChatCompletionToolChoiceOption::Required);
+    request.inner.tool_choice = tool_choice.clone();
 
     let mut generator = request.response_generator("req-2".to_string());
     let backend_output = build_backend_output(
         r#"[{"name":"search","parameters":{"query":"rust"}},
             {"name":"summarize","parameters":{"topic":"memory"}}]"#,
     );
-    let response = generator
+    let raw_response = generator
         .choice_from_postprocessor(backend_output)
         .expect("choice generation");
 
+    let response = apply_jail_transformation(raw_response, tool_choice).await;
     let choice = &response.choices[0];
+
     assert_eq!(
         choice.finish_reason,
         Some(dynamo_async_openai::types::FinishReason::ToolCalls)
     );
     let delta = &choice.delta;
-    assert!(delta.content.is_none());
+    assert!(delta.content.is_none() || delta.content.as_deref() == Some(""));
     let tool_calls = delta.tool_calls.as_ref().unwrap();
 
     assert_eq!(tool_calls.len(), 2);
@@ -143,26 +222,31 @@ fn test_required_tool_choice_parses_json_array() {
     );
 }
 
-#[test]
-fn test_tool_choice_parse_failure_suppresses_text() {
+#[tokio::test]
+async fn test_tool_choice_parse_failure_returns_as_content() {
     let mut request = create_test_request();
-    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Required);
+    let tool_choice = Some(ChatCompletionToolChoiceOption::Required);
+    request.inner.tool_choice = tool_choice.clone();
 
     let mut generator = request.response_generator("req-3".to_string());
     let backend_output = build_backend_output("not-json");
-    let response = generator
+    let raw_response = generator
         .choice_from_postprocessor(backend_output)
         .expect("choice generation");
 
+    let response = apply_jail_transformation(raw_response, tool_choice).await;
     let delta = &response.choices[0].delta;
-    assert!(delta.content.is_none());
+
+    // Jail stream behavior: if parsing fails, return accumulated content as-is
+    // This matches marker-based FC behavior
+    assert_eq!(delta.content.as_deref(), Some("not-json"));
     assert!(delta.tool_calls.is_none());
 }
 
-#[test]
-fn test_streaming_named_tool_buffers_until_finish() {
+#[tokio::test]
+async fn test_streaming_named_tool_buffers_until_finish() {
     let mut request = create_test_request();
-    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Named(
+    let tool_choice = Some(ChatCompletionToolChoiceOption::Named(
         ChatCompletionNamedToolChoice {
             r#type: ChatCompletionToolType::Function,
             function: FunctionName {
@@ -170,6 +254,7 @@ fn test_streaming_named_tool_buffers_until_finish() {
             },
         },
     ));
+    request.inner.tool_choice = tool_choice.clone();
 
     let mut generator = request.response_generator("req-stream-1".to_string());
 
@@ -179,7 +264,7 @@ fn test_streaming_named_tool_buffers_until_finish() {
         r#"celsius"}"#,
     ];
 
-    let mut all_responses = Vec::new();
+    let mut raw_responses = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let backend_output = BackendOutput {
             token_ids: vec![],
@@ -201,20 +286,21 @@ fn test_streaming_named_tool_buffers_until_finish() {
         let response = generator
             .choice_from_postprocessor(backend_output)
             .expect("streaming chunk");
-        all_responses.push(response);
+        raw_responses.push(response);
     }
 
-    for i in 0..all_responses.len() - 1 {
-        assert!(all_responses[i].choices[0].delta.tool_calls.is_none());
-    }
+    let all_responses = apply_jail_transformation_streaming(raw_responses, tool_choice).await;
 
-    let last_response = all_responses.last().unwrap();
+    // Jail stream buffers content until valid JSON, then emits once
+    assert_eq!(all_responses.len(), 1);
+
+    let response = &all_responses[0];
     assert_eq!(
-        last_response.choices[0].finish_reason,
+        response.choices[0].finish_reason,
         Some(dynamo_async_openai::types::FinishReason::Stop)
     );
 
-    let tool_calls = last_response.choices[0].delta.tool_calls.as_ref().unwrap();
+    let tool_calls = response.choices[0].delta.tool_calls.as_ref().unwrap();
     assert_eq!(tool_calls.len(), 1);
     assert_eq!(tool_calls[0].function.as_ref().unwrap().name.as_deref(), Some("get_weather"));
     assert_eq!(
@@ -223,10 +309,11 @@ fn test_streaming_named_tool_buffers_until_finish() {
     );
 }
 
-#[test]
-fn test_streaming_required_tool_parallel() {
+#[tokio::test]
+async fn test_streaming_required_tool_parallel() {
     let mut request = create_test_request();
-    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Required);
+    let tool_choice = Some(ChatCompletionToolChoiceOption::Required);
+    request.inner.tool_choice = tool_choice.clone();
 
     let mut generator = request.response_generator("req-stream-2".to_string());
 
@@ -235,7 +322,7 @@ fn test_streaming_required_tool_parallel() {
         r#"{"name":"summarize","parameters":{"topic":"memory"}}]"#,
     ];
 
-    let mut all_responses = Vec::new();
+    let mut raw_responses = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let backend_output = BackendOutput {
             token_ids: vec![],
@@ -257,20 +344,21 @@ fn test_streaming_required_tool_parallel() {
         let response = generator
             .choice_from_postprocessor(backend_output)
             .expect("streaming chunk");
-        all_responses.push(response);
+        raw_responses.push(response);
     }
 
-    for i in 0..all_responses.len() - 1 {
-        assert!(all_responses[i].choices[0].delta.tool_calls.is_none());
-    }
+    let all_responses = apply_jail_transformation_streaming(raw_responses, tool_choice).await;
 
-    let last_response = all_responses.last().unwrap();
+    // Jail stream buffers until complete JSON array
+    assert_eq!(all_responses.len(), 1);
+
+    let response = &all_responses[0];
     assert_eq!(
-        last_response.choices[0].finish_reason,
+        response.choices[0].finish_reason,
         Some(dynamo_async_openai::types::FinishReason::ToolCalls)
     );
 
-    let tool_calls = last_response.choices[0].delta.tool_calls.as_ref().unwrap();
+    let tool_calls = response.choices[0].delta.tool_calls.as_ref().unwrap();
     assert_eq!(tool_calls.len(), 2);
 
     assert_eq!(tool_calls[0].function.as_ref().unwrap().name.as_deref(), Some("search"));
@@ -280,10 +368,10 @@ fn test_streaming_required_tool_parallel() {
     assert_eq!(tool_calls[1].function.as_ref().unwrap().arguments.as_deref(), Some(r#"{"topic":"memory"}"#));
 }
 
-#[test]
-fn test_streaming_buffers_until_finish() {
+#[tokio::test]
+async fn test_streaming_buffers_until_finish() {
     let mut request = create_test_request();
-    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Named(
+    let tool_choice = Some(ChatCompletionToolChoiceOption::Named(
         ChatCompletionNamedToolChoice {
             r#type: ChatCompletionToolType::Function,
             function: FunctionName {
@@ -291,11 +379,12 @@ fn test_streaming_buffers_until_finish() {
             },
         },
     ));
+    request.inner.tool_choice = tool_choice.clone();
 
     let mut generator = request.response_generator("req-stream-3".to_string());
 
     let full_json = r#"{"query":"rust programming"}"#;
-    let mut responses = Vec::new();
+    let mut raw_responses = Vec::new();
 
     for (i, ch) in full_json.chars().enumerate() {
         let is_last = i == full_json.len() - 1;
@@ -319,21 +408,18 @@ fn test_streaming_buffers_until_finish() {
         let response = generator
             .choice_from_postprocessor(backend_output)
             .expect("char chunk");
-        responses.push(response);
+        raw_responses.push(response);
     }
 
-    for resp in &responses {
-        assert!(resp.choices[0].delta.content.is_none());
-    }
+    let responses = apply_jail_transformation_streaming(raw_responses, tool_choice).await;
 
-    for i in 0..responses.len() - 1 {
-        assert!(responses[i].choices[0].delta.tool_calls.is_none());
-    }
+    // Jail stream buffers all content until complete JSON
+    assert_eq!(responses.len(), 1);
 
-    let last = responses.last().unwrap();
-    assert!(last.choices[0].delta.tool_calls.is_some());
+    let response = &responses[0];
+    assert!(response.choices[0].delta.tool_calls.is_some());
     assert_eq!(
-        last.choices[0].delta.tool_calls.as_ref().unwrap()[0]
+        response.choices[0].delta.tool_calls.as_ref().unwrap()[0]
             .function.as_ref().unwrap().arguments.as_deref(),
         Some(r#"{"query":"rust programming"}"#)
     );

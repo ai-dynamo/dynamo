@@ -51,10 +51,45 @@ fn build_backend_output_with_finish(text: &str, finish: common::FinishReason) ->
     }
 }
 
-#[test]
-fn test_named_tool_choice_preserves_length_finish_reason() {
+async fn apply_jail_transformation(
+    raw_response: dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+    tool_choice: Option<ChatCompletionToolChoiceOption>,
+) -> dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+    use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
+    use futures::stream;
+    use futures::StreamExt;
+    use dynamo_runtime::protocols::annotated::Annotated;
+
+    let input_stream = stream::iter(vec![Annotated {
+        data: Some(raw_response),
+        id: None,
+        event: None,
+        comment: None,
+    }]);
+
+    let mut builder = JailedStream::builder();
+
+    match tool_choice {
+        Some(ChatCompletionToolChoiceOption::Named(ref named)) => {
+            builder = builder.tool_choice_named(named.function.name.clone());
+        }
+        Some(ChatCompletionToolChoiceOption::Required) => {
+            builder = builder.tool_choice_required();
+        }
+        _ => {}
+    }
+
+    let jail = builder.build();
+    let output_stream = jail.apply_with_finish_reason(input_stream);
+
+    tokio::pin!(output_stream);
+    output_stream.next().await.unwrap().data.unwrap()
+}
+
+#[tokio::test]
+async fn test_named_tool_choice_preserves_length_finish_reason() {
     let mut request = create_test_request();
-    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Named(
+    let tool_choice = Some(ChatCompletionToolChoiceOption::Named(
         ChatCompletionNamedToolChoice {
             r#type: ChatCompletionToolType::Function,
             function: FunctionName {
@@ -62,6 +97,7 @@ fn test_named_tool_choice_preserves_length_finish_reason() {
             },
         },
     ));
+    request.inner.tool_choice = tool_choice.clone();
 
     let mut generator = request.response_generator("req-length-1".to_string());
     let backend_output = build_backend_output_with_finish(
@@ -69,9 +105,11 @@ fn test_named_tool_choice_preserves_length_finish_reason() {
         common::FinishReason::Length,
     );
 
-    let response = generator
+    let raw_response = generator
         .choice_from_postprocessor(backend_output)
         .expect("choice generation");
+
+    let response = apply_jail_transformation(raw_response, tool_choice).await;
 
     // Critical: Length finish reason should be preserved, NOT replaced with Stop
     assert_eq!(
@@ -186,10 +224,11 @@ fn test_named_tool_choice_normal_stop_becomes_stop() {
     );
 }
 
-#[test]
-fn test_required_tool_choice_normal_stop_becomes_tool_calls() {
+#[tokio::test]
+async fn test_required_tool_choice_normal_stop_becomes_tool_calls() {
     let mut request = create_test_request();
-    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Required);
+    let tool_choice = Some(ChatCompletionToolChoiceOption::Required);
+    request.inner.tool_choice = tool_choice.clone();
 
     let mut generator = request.response_generator("req-stop-2".to_string());
     let backend_output = build_backend_output_with_finish(
@@ -197,9 +236,11 @@ fn test_required_tool_choice_normal_stop_becomes_tool_calls() {
         common::FinishReason::Stop,
     );
 
-    let response = generator
+    let raw_response = generator
         .choice_from_postprocessor(backend_output)
         .expect("choice generation");
+
+    let response = apply_jail_transformation(raw_response, tool_choice).await;
 
     // Normal completion: Stop should become ToolCalls for required tool choice
     assert_eq!(

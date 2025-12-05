@@ -6,16 +6,9 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::{
         common::{self},
-        openai::partial_json::{AllowPartial, loads},
     },
     types::TokenIdType,
 };
-use dynamo_async_openai::types::{
-    ChatCompletionMessageToolCallChunk, ChatCompletionToolChoiceOption, ChatCompletionToolType,
-    FunctionCallStream,
-};
-use serde_json::{self};
-use tracing::error;
 
 /// Provides a method for generating a [`DeltaGenerator`] from a chat completion request.
 impl NvCreateChatCompletionRequest {
@@ -50,14 +43,6 @@ impl NvCreateChatCompletionRequest {
     /// # Returns
     /// * [`DeltaGenerator`] configured with model name and response options.
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
-        let tool_choice_context = match self.inner.tool_choice.as_ref() {
-            Some(ChatCompletionToolChoiceOption::Named(named)) => {
-                ToolChoiceContext::Named(named.function.name.clone())
-            }
-            Some(ChatCompletionToolChoiceOption::Required) => ToolChoiceContext::Required,
-            _ => ToolChoiceContext::None,
-        };
-
         let options = DeltaGeneratorOptions {
             enable_usage: self
                 .inner
@@ -68,7 +53,6 @@ impl NvCreateChatCompletionRequest {
             enable_logprobs: self.inner.logprobs.unwrap_or(false)
                 || self.inner.top_logprobs.unwrap_or(0) > 0,
             runtime_config: ModelRuntimeConfig::default(),
-            tool_choice: tool_choice_context,
         };
 
         DeltaGenerator::new(self.inner.model.clone(), options, request_id)
@@ -84,15 +68,6 @@ pub struct DeltaGeneratorOptions {
     pub enable_logprobs: bool,
 
     pub runtime_config: ModelRuntimeConfig,
-    pub tool_choice: ToolChoiceContext,
-}
-
-#[derive(Debug, Clone, Default)]
-pub enum ToolChoiceContext {
-    #[default]
-    None,
-    Named(String),
-    Required,
 }
 
 /// Generates incremental chat completion responses in a streaming fashion.
@@ -115,8 +90,6 @@ pub struct DeltaGenerator {
     msg_counter: u64,
     /// Configuration options for response generation.
     options: DeltaGeneratorOptions,
-    /// Buffer for accumulating tool call JSON during streaming
-    tool_call_buffer: String,
 }
 
 impl DeltaGenerator {
@@ -159,7 +132,6 @@ impl DeltaGenerator {
             usage,
             msg_counter: 0,
             options,
-            tool_call_buffer: String::new(),
         }
     }
 
@@ -264,7 +236,7 @@ impl DeltaGenerator {
         text: Option<String>,
         finish_reason: Option<dynamo_async_openai::types::FinishReason>,
         logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
-        tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
+        tool_calls: Option<Vec<dynamo_async_openai::types::ChatCompletionMessageToolCallChunk>>,
     ) -> NvCreateChatCompletionStreamResponse {
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
             content: text,
@@ -333,113 +305,6 @@ impl DeltaGenerator {
         self.options.enable_usage
     }
 
-    fn process_complete_tool_calls(
-        &mut self,
-        delta_text: &str,
-        is_final: bool,
-    ) -> anyhow::Result<Option<Vec<ChatCompletionMessageToolCallChunk>>> {
-        self.tool_call_buffer.push_str(delta_text);
-
-        if !is_final {
-            return Ok(None);
-        }
-
-        let parsed = match loads(&self.tool_call_buffer, AllowPartial::all()) {
-            Ok(value) => value,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    buffer = %self.tool_call_buffer,
-                    "failed to parse tool_choice output"
-                );
-                return Ok(None);
-            }
-        };
-
-        let chunks = match &self.options.tool_choice {
-            ToolChoiceContext::Named(name) => {
-                if parsed.as_object().is_some() {
-                    vec![ChatCompletionMessageToolCallChunk {
-                        index: 0,
-                        id: Some("call-1".to_string()),
-                        r#type: Some(ChatCompletionToolType::Function),
-                        function: Some(FunctionCallStream {
-                            name: Some(name.clone()),
-                            arguments: Some(self.tool_call_buffer.clone()),
-                        }),
-                    }]
-                } else {
-                    vec![]
-                }
-            }
-            ToolChoiceContext::Required => {
-                if let Some(array) = parsed.as_array() {
-                    array
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(idx, entry)| {
-                            let name = entry.get("name")?.as_str()?.to_string();
-                            let parameters = entry.get("parameters")?;
-                            let args = serde_json::to_string(parameters).ok()?;
-                            Some(ChatCompletionMessageToolCallChunk {
-                                index: idx as u32,
-                                id: Some(format!("call-{}", idx + 1)),
-                                r#type: Some(ChatCompletionToolType::Function),
-                                function: Some(FunctionCallStream {
-                                    name: Some(name),
-                                    arguments: Some(args),
-                                }),
-                            })
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                }
-            }
-            ToolChoiceContext::None => vec![],
-        };
-
-        Ok(Some(chunks))
-    }
-
-    fn determine_streaming_finish_reason(
-        &self,
-        backend_finish: Option<common::FinishReason>,
-    ) -> Option<dynamo_async_openai::types::FinishReason> {
-        backend_finish.as_ref()?;
-
-        // For critical/error finish reasons, preserve them regardless of tool_choice mode
-        match backend_finish {
-            Some(common::FinishReason::Length) => {
-                return Some(dynamo_async_openai::types::FinishReason::Length);
-            }
-            Some(common::FinishReason::ContentFilter) => {
-                return Some(dynamo_async_openai::types::FinishReason::ContentFilter);
-            }
-            _ => {}
-        }
-
-        // For normal finish reasons (Stop/EoS/Cancelled), apply tool_choice semantics
-        match &self.options.tool_choice {
-            ToolChoiceContext::None => match backend_finish {
-                Some(common::FinishReason::EoS) | Some(common::FinishReason::Stop) => {
-                    Some(dynamo_async_openai::types::FinishReason::Stop)
-                }
-                Some(common::FinishReason::Cancelled) => {
-                    Some(dynamo_async_openai::types::FinishReason::Stop)
-                }
-                _ => None,
-            },
-            ToolChoiceContext::Named(_) => {
-                // Named tool choice finishes with "stop" for normal completion
-                Some(dynamo_async_openai::types::FinishReason::Stop)
-            }
-            ToolChoiceContext::Required => {
-                // Required tool choice finishes with "tool_calls" for normal completion
-                Some(dynamo_async_openai::types::FinishReason::ToolCalls)
-            }
-        }
-    }
 }
 
 /// Implements the [`crate::protocols::openai::DeltaGeneratorExt`] trait for [`DeltaGenerator`], allowing
@@ -490,8 +355,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         );
 
         // Map backend finish reasons to OpenAI's finish reasons.
-        let backend_finish_reason = delta.finish_reason.clone();
-        let mut finish_reason = match delta.finish_reason {
+        let finish_reason = match delta.finish_reason {
             Some(common::FinishReason::EoS) => Some(dynamo_async_openai::types::FinishReason::Stop),
             Some(common::FinishReason::Stop) => {
                 Some(dynamo_async_openai::types::FinishReason::Stop)
@@ -513,39 +377,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Create the streaming response.
         let index = 0;
-        let mut delta_text = delta.text;
-        let mut tool_call_chunks = None;
-
-        // Handle tool_choice logic: accumulate buffer and emit tool calls at the end
-        if !matches!(self.options.tool_choice, ToolChoiceContext::None) {
-            if let Some(raw) = delta_text.as_ref() {
-                let is_final = finish_reason.is_some();
-
-                match self.process_complete_tool_calls(raw, is_final) {
-                    Ok(Some(chunks)) if !chunks.is_empty() => {
-                        tool_call_chunks = Some(chunks);
-                        delta_text = None;
-                    }
-                    Ok(_) => {
-                        delta_text = None;
-                    }
-                    Err(err) => {
-                        error!(
-                            error = %err,
-                            "failed to parse tool_choice output"
-                        );
-                        delta_text = None;
-                    }
-                }
-            }
-
-            if finish_reason.is_some() {
-                finish_reason = self.determine_streaming_finish_reason(backend_finish_reason);
-            }
-        }
+        let delta_text = delta.text;
 
         let mut stream_response =
-            self.build_choice(index, delta_text, finish_reason, logprobs, tool_call_chunks);
+            self.build_choice(index, delta_text, finish_reason, logprobs, None);
 
         // Extract worker_id from disaggregated_params and inject into nvext if present
         if let Some(worker_id_json) = delta
