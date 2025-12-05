@@ -9,7 +9,10 @@ import sys
 project = "NVIDIA Dynamo"
 copyright = "2024-2025, NVIDIA CORPORATION & AFFILIATES"
 author = "NVIDIA"
-release = "latest"
+
+# Version is set via DYNAMO_DOCS_VERSION env var during build (e.g., "0.3.0")
+# Defaults to "dev" for main branch and PR builds
+release = os.environ.get("DYNAMO_DOCS_VERSION", "dev")
 
 # -- General configuration ---------------------------------------------------
 

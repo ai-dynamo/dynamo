@@ -48,15 +48,15 @@ jobs:
         working-directory: ./deploy
         run: |
           docker compose up -d nats-server etcd-server
-      - name: Run Rust checks (block-manager + integration tests)
+      - name: Run Rust checks (block-manager + media-nixl + integration tests)
         run: |
           docker run --rm -w /workspace/lib/llm \
             --name ${{ env.CONTAINER_ID }}_rust_checks \
             ${{ steps.define_image_tag.outputs.image_tag }} \
             bash -ec 'rustup component add rustfmt clippy && \
                       cargo fmt -- --check && \
-                      cargo clippy --features block-manager --no-deps --all-targets -- -D warnings && \
-                      cargo test --locked --all-targets --features=block-manager && \
+                      cargo clippy --features block-manager,media-nixl --no-deps --all-targets -- -D warnings && \
+                      cargo test --locked --all-targets --features=block-manager,media-nixl && \
                       cargo test --locked --features integration -- --nocapture'
       - name: Cleanup services
         if: always()
