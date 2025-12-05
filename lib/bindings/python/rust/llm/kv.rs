@@ -106,6 +106,9 @@ pub struct ZmqKvEventPublisherConfig {
     pub zmq_endpoint: String,
     #[pyo3(get, set)]
     pub zmq_topic: String,
+    #[pyo3(get, set)]
+    pub enable_local_indexer: bool, // whether the underlying KvEventPublisher publishes to
+                                    // both global and worker-local KvIndexers
 }
 
 #[pymethods]
@@ -115,19 +118,22 @@ impl ZmqKvEventPublisherConfig {
         worker_id,
         kv_block_size,
         zmq_endpoint = "tcp://127.0.0.1:5557".to_string(),
-        zmq_topic = "".to_string()
+        zmq_topic = "".to_string(),
+        enable_local_indexer = false
     ))]
     pub fn new(
         worker_id: WorkerId,
         kv_block_size: usize,
         zmq_endpoint: String,
         zmq_topic: String,
+        enable_local_indexer: bool,
     ) -> Self {
         Self {
             worker_id,
             kv_block_size,
             zmq_endpoint,
             zmq_topic,
+            enable_local_indexer,
         }
     }
 }
@@ -141,13 +147,14 @@ pub(crate) struct ZmqKvEventPublisher {
 impl ZmqKvEventPublisher {
     #[new]
     fn new(component: Component, config: ZmqKvEventPublisherConfig) -> PyResult<Self> {
-        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
+        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
             component.inner,
             config.kv_block_size as u32,
             Some(KvEventSourceConfig::Zmq {
                 endpoint: config.zmq_endpoint,
                 topic: config.zmq_topic,
             }),
+            config.enable_local_indexer,
         )
         .map_err(to_pyerr)?;
         Ok(Self { inner })

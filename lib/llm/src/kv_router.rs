@@ -301,12 +301,22 @@ impl KvRouter {
             endpoint: endpoint_id.name.clone(),
         };
         let discovery_stream = discovery
-            .list_and_watch(discovery_key, Some(cancellation_token.clone()))
+            .list_and_watch(discovery_key.clone(), Some(cancellation_token.clone()))
             .await?;
         let runtime_configs_rx =
             watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
                 card.runtime_config
             });
+
+        // Watch for local indexer states via discovery interface (separate stream needed
+        // because streams are consumed by watch_and_extract_field)
+        let discovery_stream_local_indexer = discovery
+            .list_and_watch(discovery_key, Some(cancellation_token.clone()))
+            .await?;
+        let local_indexer_rx = watch_and_extract_field(
+            discovery_stream_local_indexer,
+            |card: ModelDeploymentCard| card.runtime_config.enable_local_indexer,
+        );
 
         let indexer = if kv_router_config.overlap_score_weight == 0.0 {
             // When overlap_score_weight is zero, we don't need to track prefixes
@@ -367,19 +377,19 @@ impl KvRouter {
             .await?;
         }
 
-        // Initialize worker query client using the namespace abstraction
-        // NATS client is managed by DRT and accessed through namespace.drt()
-        let worker_query_client = if std::env::var(
-            dynamo_runtime::config::environment_names::nats::NATS_SERVER,
-        )
-        .is_ok()
-        {
-            Some(worker_query::WorkerQueryClient::new(
-                component.namespace().clone(),
-            ))
-        } else {
-            None
-        };
+        // Initialize worker query client using namespace abstraction
+        let worker_query_endpoint = component.endpoint(WORKER_KV_INDEXER_QUERY_SUBJECT.to_string());
+        tracing::info!(
+            "Namespace={}, Component={}, Worker queryendpoint={}",
+            component.namespace().name(),
+            component.name(),
+            worker_query_endpoint.name()
+        );
+        let worker_query_client = Some(worker_query::WorkerQueryClient::new(
+            component.clone(),
+            local_indexer_rx,
+        ));
+        tracing::info!("Worker query client initialized");
 
         tracing::info!("KV Routing initialized");
         Ok(Self {

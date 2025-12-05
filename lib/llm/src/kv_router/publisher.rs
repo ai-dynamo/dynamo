@@ -98,11 +98,6 @@ pub struct KvEventPublisher {
     cancellation_token: CancellationToken,
     /// The channel to send events to.
     tx: mpsc::UnboundedSender<KvCacheEvent>,
-    /// Optional worker-local indexer for tracking this worker's own KV cache.
-    /// When present, events are applied to this indexer before being published to NATS.
-    local_indexer: Option<Arc<LocalKvIndexer>>,
-    /// Optional runtime for router->local indexer comm (TODO might be refactored)
-    local_indexer_query_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl KvEventPublisher {
@@ -111,7 +106,7 @@ impl KvEventPublisher {
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
-        Self::new_with_local_indexer(component, kv_block_size, source_config, true)
+        Self::new_with_local_indexer(component, kv_block_size, source_config, false)
     }
 
     pub fn new_with_local_indexer(
@@ -165,7 +160,7 @@ impl KvEventPublisher {
         };
 
         // Spawn runtime for router->local indexer comm if requested
-        let local_indexer_query_handle = local_indexer.as_ref().map(|local_indexer_ref| {
+        let _local_indexer_query_handle = local_indexer.as_ref().map(|local_indexer_ref| {
             let component = component.clone();
             let local_indexer = local_indexer_ref.clone();
 
@@ -177,6 +172,7 @@ impl KvEventPublisher {
                     component,
                     worker_id,
                     local_indexer,
+                    cancellation_token.clone(),
                 ))
         });
 
@@ -215,8 +211,6 @@ impl KvEventPublisher {
             source,
             cancellation_token,
             tx,
-            local_indexer,
-            local_indexer_query_handle,
         })
     }
 
@@ -228,11 +222,6 @@ impl KvEventPublisher {
         self.kv_block_size
     }
 
-    /// Get reference to local indexer if enabled.
-    pub fn local_indexer(&self) -> Option<Arc<LocalKvIndexer>> {
-        self.local_indexer.clone()
-    }
-
     pub fn shutdown(&mut self) {
         if !self.cancellation_token.is_cancelled() {
             self.cancellation_token.cancel();
@@ -240,10 +229,6 @@ impl KvEventPublisher {
 
         if let Some(source) = self.source.take() {
             source.shutdown();
-        }
-
-        if let Some(handle) = self.local_indexer_query_handle.take() {
-            handle.abort();
         }
     }
 }
@@ -304,24 +289,21 @@ async fn start_worker_kv_query_service(
     component: Component,
     worker_id: u64,
     local_indexer: Arc<LocalKvIndexer>,
+    cancellation_token: CancellationToken,
 ) {
-    // NOTE: referenced discover/worker_monitor.rs for pub/sub pattern
-    let cancellation_token = component.drt().child_token();
-
     // Create NATS subscriber on a subject specific to worker's id
     let subject = format!("{}.{}", WORKER_KV_INDEXER_QUERY_SUBJECT, worker_id);
-    let full_subject = format!("namespace.{}.{}", component.namespace().name(), subject); // TODO make a helper like subject()
-    let mut subscriber = match component.namespace().subscribe(&subject).await {
+    let mut subscriber = match component.subscribe(&subject).await {
         Ok(sub) => sub,
         Err(e) => {
             tracing::error!("Failed to subscribe to {}: {}", subject, e);
             return; // No ? because function doesn't return Result
         }
     };
-    tracing::info!(
+    tracing::debug!(
         "Query service on worker {} listening on NATS subject: {}",
         worker_id,
-        full_subject
+        subject
     );
 
     // Receive query request from router, retrieve event(s) from LocalKvIndexer, return response
@@ -2181,12 +2163,12 @@ mod test_integration_publisher {
     #[ignore] // Requires NATS/etcd. Run with: cargo test --package dynamo-llm --lib --features integration test_distributed_kvindexer_e2e -- --ignored --nocapture
     async fn test_distributed_kvindexer_e2e() -> anyhow::Result<()> {
         use crate::kv_router::scheduler::DefaultWorkerSelector;
-        use crate::kv_router::{
-            KvPushRouter, KvRouter, KvRouterConfig, worker_query::WorkerQueryClient,
-        };
+        use crate::kv_router::{KvPushRouter, KvRouter, KvRouterConfig};
+        use crate::local_model::LocalModelBuilder;
+        use crate::local_model::runtime_config::ModelRuntimeConfig;
         use crate::mocker::engine::MOCKER_COMPONENT;
         use crate::mocker::engine::MockVllmEngine;
-        use crate::mocker::protocols::{MockEngineArgs, WorkerType};
+        use crate::mocker::protocols::MockEngineArgs;
         use crate::protocols::common::{
             OutputOptions, SamplingOptions, StopConditions,
             llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -2218,9 +2200,8 @@ mod test_integration_publisher {
         let mocker_args = MockEngineArgs::builder()
             .block_size(BLOCK_SIZE as usize)
             .dp_size(1) // single worker per runtime
-            .worker_type(WorkerType::Aggregated)
-            .speedup_ratio(50.0)
             .enable_prefix_caching(true)
+            .enable_local_indexer(true) // affects scheduler/publisher args
             .build()?;
 
         let worker_components = vec![component1.clone(), component2.clone()];
@@ -2231,6 +2212,29 @@ mod test_integration_publisher {
             let engine = Arc::new(MockVllmEngine::new(mocker_args.clone()));
             engine.start(comp.clone()).await?;
             tracing::info!("MockVllmEngine started for {:?}", comp);
+
+            // Register MDC with runtime_config so router can discover enable_local_indexer.
+            // (Without this step, the MDC-based assert in query_worker() in worker_query.rs will fail.)
+            // This inlines code which in the Python path would be performed by:
+            // - local_model.rs: LocalModelBuilder::build() sets runtime_config from MockEngineArgs
+            // - entrypoint/input/endpoint.rs: LocalModel::attach() registers MDC via discovery
+            let endpoint = comp.endpoint("generate");
+            let mut runtime_config = ModelRuntimeConfig::default();
+            runtime_config.enable_local_indexer = true;
+            let mut builder = LocalModelBuilder::default();
+            builder
+                .model_name(Some("mock".to_string()))
+                .kv_cache_block_size(Some(BLOCK_SIZE))
+                .runtime_config(runtime_config);
+            let mut local_model = builder.build().await?;
+            local_model
+                .attach(
+                    &endpoint,
+                    crate::model_type::ModelType::Chat,
+                    crate::model_type::ModelInput::Tokens,
+                    None,
+                )
+                .await?;
 
             let ingress = Ingress::for_engine(engine.clone())?;
             let endpoint_component = comp.clone();
@@ -2296,7 +2300,6 @@ mod test_integration_publisher {
                 })
                 .sampling_options(SamplingOptions::default())
                 .output_options(OutputOptions::default())
-                .eos_token_ids(vec![])
                 .build()
                 .unwrap()
         }; // from mocker/engine.rs
@@ -2320,12 +2323,13 @@ mod test_integration_publisher {
         // ===== TEST PART 2: QUERY WORKER-LOCAL KVINDEXERS DIRECTLY =====
         // TODO: This could be refactored as router function (e.g. router.refresh_from_worker(worker_id))
         // (which should also update the global kvIndexer with the buffer from the local kvIndexer)
-        let query_client = WorkerQueryClient::new(router_namespace.clone());
+        // let query_client = WorkerQueryClient::new(router_namespace.clone());
         let mut best_worker_info: Option<(u64, usize)> = None;
 
         // Exactly one worker should have been routed requests. Find that worker
         for &worker_id in &worker_ids {
-            let response = query_client.query_worker(worker_id).await?;
+            // let response = query_client.query_worker(worker_id).await?;
+            let response = kv_router.query_worker_local_kv(worker_id).await?;
             assert_eq!(response.worker_id, worker_id);
 
             if !response.events.is_empty() {
@@ -2353,7 +2357,8 @@ mod test_integration_publisher {
                 continue;
             }
 
-            let response = query_client.query_worker(worker_id).await?;
+            // let response = query_client.query_worker(worker_id).await?;
+            let response = kv_router.query_worker_local_kv(worker_id).await?;
             assert!(
                 response.events.is_empty(),
                 "Worker {worker_id} should not report buffered KV events; best worker {best_worker_id} reported {best_worker_event_count}"
