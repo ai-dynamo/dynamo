@@ -162,7 +162,7 @@ pub struct RuntimeConfig {
 
     /// Enable active health checking with payloads
     /// Set this at runtime with environment variable DYN_HEALTH_CHECK_ENABLED
-    #[builder(default = "false")]
+    #[builder(default = "true")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub health_check_enabled: bool,
 
@@ -358,7 +358,7 @@ impl RuntimeConfig {
             compute_threads: Some(1),
             compute_stack_size: Some(2 * 1024 * 1024),
             compute_thread_prefix: "compute".to_string(),
-            health_check_enabled: false,
+            health_check_enabled: true,
             canary_wait_time_secs: DEFAULT_CANARY_WAIT_TIME_SECS,
             health_check_request_timeout_secs: DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
         }
@@ -394,7 +394,7 @@ impl Default for RuntimeConfig {
             compute_threads: None,
             compute_stack_size: Some(2 * 1024 * 1024),
             compute_thread_prefix: "compute".to_string(),
-            health_check_enabled: false,
+            health_check_enabled: true,
             canary_wait_time_secs: DEFAULT_CANARY_WAIT_TIME_SECS,
             health_check_request_timeout_secs: DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
         }

@@ -24,16 +24,16 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 pytestmark = [
-    pytest.mark.vllm,
+    pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.nightly,
+    pytest.mark.pre_merge,  # can be moved to nightly once stable for a week
 ]
 
 
 class DynamoWorkerProcess(ManagedProcess):
-    """Process manager for Dynamo worker with vLLM backend"""
+    """Process manager for Dynamo worker with TRT-LLM backend"""
 
     def __init__(self, request, worker_id: str, migration_limit: int = 3):
         self.worker_id = worker_id
@@ -41,13 +41,14 @@ class DynamoWorkerProcess(ManagedProcess):
         command = [
             "python3",
             "-m",
-            "dynamo.vllm",
+            "dynamo.trtllm",
             "--model",
             FAULT_TOLERANCE_MODEL_NAME,
-            "--enforce-eager",
-            "--gpu-memory-utilization",
+            "--disaggregation-mode",
+            "prefill_and_decode",
+            "--free-gpu-memory-fraction",
             "0.45",
-            "--max-model-len",
+            "--max-seq-len",
             "8192",
             "--migration-limit",
             str(migration_limit),
@@ -55,9 +56,6 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Set debug logging environment
         env = os.environ.copy()
-        env["DYN_VLLM_KV_EVENT_PORT"] = f"2008{worker_id[-1]}"
-        env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = f"560{worker_id[-1]}"
-
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = f"808{worker_id[-1]}"
@@ -84,8 +82,6 @@ class DynamoWorkerProcess(ManagedProcess):
             timeout=300,
             display_output=True,
             terminate_existing=False,
-            stragglers=["VLLM::EngineCore"],
-            straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
         )
 
@@ -108,11 +104,11 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-def test_request_migration_vllm_worker_failure(
+def test_request_migration_trtllm_worker_failure(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
     """
-    End-to-end test for worker fault tolerance with migration support.
+    End-to-end test for worker fault tolerance with migration support using TRT-LLM.
 
     This test verifies that when a worker is killed during request processing,
     the system can handle the failure gracefully and migrate the request to
@@ -135,7 +131,7 @@ def test_request_migration_vllm_worker_failure(
 
                 # Step 4: Use polling to determine which worker received the request
                 worker, worker_name = determine_request_receiving_worker(
-                    worker1, worker2, receiving_pattern="Decode Request ID: "
+                    worker1, worker2, receiving_pattern="New Request ID: "
                 )
 
                 # Step 5: Kill the worker that has the request
@@ -151,11 +147,12 @@ def test_request_migration_vllm_worker_failure(
                 verify_migration_occurred(frontend)
 
 
-def test_request_migration_vllm_graceful_shutdown(
+@pytest.mark.skip(reason="TRT-LLM graceful shutdown not yet implemented")
+def test_request_migration_trtllm_graceful_shutdown(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
     """
-    End-to-end test for worker fault tolerance with graceful shutdown and migration support.
+    End-to-end test for worker fault tolerance with graceful shutdown and migration support using TRT-LLM.
 
     This test verifies that when a worker receives a graceful shutdown signal (SIGTERM)
     during request processing, the system can handle the shutdown gracefully and migrate
@@ -180,7 +177,7 @@ def test_request_migration_vllm_graceful_shutdown(
 
                 # Step 4: Use polling to determine which worker received the request
                 worker, worker_name = determine_request_receiving_worker(
-                    worker1, worker2, receiving_pattern="Decode Request ID: "
+                    worker1, worker2, receiving_pattern="New Request ID: "
                 )
 
                 # Step 5: Gracefully shutdown the worker that has the request
@@ -198,15 +195,15 @@ def test_request_migration_vllm_graceful_shutdown(
                 verify_migration_occurred(frontend)
 
 
-def test_no_request_migration_vllm_worker_failure(
+def test_no_request_migration_trtllm_worker_failure(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
     """
-    End-to-end test for worker fault tolerance with migration disabled.
+    End-to-end test for worker fault tolerance with migration disabled using TRT-LLM.
 
     This test verifies that when migration is disabled (migration_limit=0) and a worker
     is killed during request processing, the request fails as expected without migration.
-    This is the opposite behavior of test_request_migration_vllm_worker_failure.
+    This is the opposite behavior of test_request_migration_trtllm_worker_failure.
     """
 
     # Step 1: Start the frontend
@@ -225,7 +222,7 @@ def test_no_request_migration_vllm_worker_failure(
 
                 # Step 4: Use polling to determine which worker received the request
                 worker, worker_name = determine_request_receiving_worker(
-                    worker1, worker2, receiving_pattern="Decode Request ID: "
+                    worker1, worker2, receiving_pattern="New Request ID: "
                 )
 
                 # Step 5: Kill the worker that has the request
@@ -257,16 +254,17 @@ def test_no_request_migration_vllm_worker_failure(
                     ), f"Unexpected migration message: {e}"
 
 
-def test_no_request_migration_vllm_graceful_shutdown(
+@pytest.mark.skip(reason="TRT-LLM graceful shutdown not yet implemented")
+def test_no_request_migration_trtllm_graceful_shutdown(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
     """
-    End-to-end test for worker fault tolerance with graceful shutdown and migration disabled.
+    End-to-end test for worker fault tolerance with graceful shutdown and migration disabled using TRT-LLM.
 
     This test verifies that when migration is disabled (migration_limit=0) and a worker
     receives a graceful shutdown signal (SIGTERM) during request processing, the request
     fails as expected without migration. This is the opposite behavior of
-    test_request_migration_vllm_graceful_shutdown.
+    test_request_migration_trtllm_graceful_shutdown.
     """
 
     # Step 1: Start the frontend
@@ -285,7 +283,7 @@ def test_no_request_migration_vllm_graceful_shutdown(
 
                 # Step 4: Use polling to determine which worker received the request
                 worker, worker_name = determine_request_receiving_worker(
-                    worker1, worker2, receiving_pattern="Decode Request ID: "
+                    worker1, worker2, receiving_pattern="New Request ID: "
                 )
 
                 # Step 5: Gracefully shutdown the worker that has the request
