@@ -105,7 +105,7 @@ func TestLoadLoRA_RequestBody(t *testing.T) {
 				body, _ := io.ReadAll(r.Body)
 				_ = json.Unmarshal(body, &capturedBody)
 
-				if r.Header.Get("Content-Type") != "application/json" {
+				if r.Header.Get("Content-Type") != contentTypeJSON {
 					t.Errorf("expected Content-Type application/json, got %s", r.Header.Get("Content-Type"))
 				}
 
@@ -245,7 +245,7 @@ func TestUnloadLoRA_RequestBody(t *testing.T) {
 				body, _ := io.ReadAll(r.Body)
 				_ = json.Unmarshal(body, &capturedBody)
 
-				if r.Header.Get("Content-Type") != "application/json" {
+				if r.Header.Get("Content-Type") != contentTypeJSON {
 					t.Errorf("expected Content-Type application/json, got %s", r.Header.Get("Content-Type"))
 				}
 

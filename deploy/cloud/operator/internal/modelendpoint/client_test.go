@@ -39,7 +39,7 @@ func TestLoadLoRA(t *testing.T) {
 			return
 		}
 		// Verify Content-Type header
-		if r.Header.Get("Content-Type") != "application/json" {
+		if r.Header.Get("Content-Type") != contentTypeJSON {
 			t.Errorf("expected Content-Type application/json, got %s", r.Header.Get("Content-Type"))
 		}
 		w.WriteHeader(http.StatusOK)

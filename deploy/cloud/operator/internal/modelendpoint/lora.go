@@ -17,6 +17,8 @@
 
 package modelendpoint
 
+const contentTypeJSON = "application/json"
+
 import (
 	"bytes"
 	"context"
@@ -57,7 +59,7 @@ func (c *Client) loadLoRA(ctx context.Context, address, modelName, sourceURI str
 	if err != nil {
 		return fmt.Errorf("failed to create load LoRA request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentTypeJSON)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -105,7 +107,7 @@ func (c *Client) unloadLoRA(ctx context.Context, address, modelName string) erro
 		logs.V(1).Info("Failed to create unload LoRA request", "error", err)
 		return fmt.Errorf("failed to create unload LoRA request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentTypeJSON)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
