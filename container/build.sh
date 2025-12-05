@@ -270,41 +270,9 @@ get_options() {
         --no-cache)
             NO_CACHE=" --no-cache"
             ;;
-        --dynamo-base-cache-from)
-            if [ "$2" ]; then
-                DYNAMO_BASE_CACHE_FROM="--cache-from $2"
-                shift
-            else
-                missing_requirement "$1"
-            fi
-            ;;
-        --dynamo-base-cache-to)
-            if [ "$2" ]; then
-                DYNAMO_BASE_CACHE_TO="--cache-to $2"
-                shift
-            else
-                missing_requirement "$1"
-            fi
-            ;;
-        --framework-cache-from)
-            if [ "$2" ]; then
-                FRAMEWORK_CACHE_FROM="--cache-from $2"
-                shift
-            else
-                missing_requirement "$1"
-            fi
-            ;;
-        --framework-cache-to)
-            if [ "$2" ]; then
-                FRAMEWORK_CACHE_TO="--cache-to $2"
-                shift
-            else
-                missing_requirement "$1"
-            fi
-            ;;
         --cache-from)
             if [ "$2" ]; then
-                CACHE_FROM="--cache-from $2"
+                CACHE_FROM+="--cache-from $2"
                 shift
             else
                 missing_requirement "$1"
@@ -312,7 +280,7 @@ get_options() {
             ;;
         --cache-to)
             if [ "$2" ]; then
-                CACHE_TO="--cache-to $2"
+                CACHE_TO+="--cache-to $2"
                 shift
             else
                 missing_requirement "$1"
@@ -489,12 +457,8 @@ show_help() {
     echo "  [--tensorrtllm-index-url tensorrtllm PyPI index URL if providing the wheel from artifactory]"
     echo "  [--tensorrtllm-git-url tensorrtllm git repository URL for cloning]"
     echo "  [--build-arg additional build args to pass to docker build]"
-    echo "  [--cache-from cache location to start from, overrides dynamo-base-cache-from and framework-cache-from]"
-    echo "  [--cache-to location where to cache the build output, overrides dynamo-base-cache-to and framework-cache-to]"
-    echo "  [--dynamo-base-cache-from cache location to start from for dynamo base when building multiple images]"
-    echo "  [--dynamo-base-cache-to location where to cache the dynamo-base build output when building multiple images]"
-    echo "  [--framework-cache-from cache location to start from for frameworks when building multiple images]"
-    echo "  [--framework-cache-to location where to cache the framework build output when building multiple images]"
+    echo "  [--cache-from cache location to start from]"
+    echo "  [--cache-to location where to cache the build output]"
     echo "  [--tag tag for image]"
     echo "  [--dev-image dev image to build local-dev from]"
     echo "  [--uid user ID for local-dev images (only with --dev-image or --target local-dev)]"
@@ -538,16 +502,6 @@ fi
 # Set the commit sha in the container so we can inspect what build this relates to
 DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA:-$(git rev-parse HEAD)}
 BUILD_ARGS+=" --build-arg DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA "
-
-# Cache arg overrides
-if [[ -n $CACHE_FROM ]]; then
-    DYNAMO_BASE_CACHE_FROM=$CACHE_FROM
-    FRAMEWORK_CACHE_FROM=$CACHE_FROM
-fi
-if [[ -n $CACHE_TO ]]; then
-    DYNAMO_BASE_CACHE_TO=$CACHE_TO
-    FRAMEWORK_CACHE_TO=$CACHE_TO
-fi
 
 # Special handling for vLLM on ARM64 - set required defaults if not already specified by user
 if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
@@ -954,7 +908,7 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         # Use BuildKit for enhanced metadata
         if [ -z "$RUN_PREFIX" ]; then
             if docker buildx version &>/dev/null; then
-                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $FRAMEWORK_CACHE_FROM $FRAMEWORK_CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
+                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
                 BUILD_EXIT_CODE=${PIPESTATUS[0]}
             else
                 DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
