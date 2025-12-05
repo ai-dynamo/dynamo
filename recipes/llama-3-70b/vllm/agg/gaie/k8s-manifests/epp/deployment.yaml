@@ -38,7 +38,7 @@ spec:
 
       containers:
         - name: epp
-          image: nvcr.io/nvidia/ai-dynamo/frontend:<my-tag>
+          image: nvcr.io/nvstaging/ai-dynamo/epp-inference-extension-dynamo:0-8-0
           imagePullPolicy: IfNotPresent
           resources:
             requests:

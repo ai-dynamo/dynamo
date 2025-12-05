@@ -18,7 +18,7 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:a-gaie-test
           workingDir: /workspace/examples/backends/vllm
       envs:
         - name: HF_HOME
@@ -43,12 +43,39 @@ spec:
             - name: HF_HOME
               value: /opt/models
           args:
-          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
+            - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
           command:
-          - /bin/sh
-          - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+            - /bin/sh
+            - -c
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:a-gaie-test
           workingDir: /workspace/examples/backends/vllm
+
+          startupProbe:
+            httpGet:
+              path: /live
+              port: system
+            initialDelaySeconds: 600 # wait 10 min before probing
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 400 # allows 200 min to load weights
+
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: system
+            initialDelaySeconds: 1800 # wait 30 min before liveness killing
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: system
+            initialDelaySeconds: 1800
+            periodSeconds: 20
+            timeoutSeconds: 5
+
       replicas: 1
       resources:
         limits:
