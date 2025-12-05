@@ -282,9 +282,11 @@ impl ComponentBuilder {
         if drt.request_plane().is_nats() {
             let mut rx = drt.register_nats_service(component.clone());
             // Wait synchronously for the NATS service registration to complete.
-            // Uses blocking_recv() which bridges sync/async: the registration runs
-            // in a spawned async task, but we block here until it signals completion.
-            match rx.blocking_recv() {
+            // Uses block_in_place() to safely call blocking_recv() from async contexts.
+            // This temporarily moves the current task off the runtime thread to allow
+            // blocking without deadlocking the runtime.
+            let result = tokio::task::block_in_place(|| rx.blocking_recv());
+            match result {
                 Some(Ok(())) => {
                     tracing::debug!(
                         component = component.service_name(),
