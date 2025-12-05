@@ -174,7 +174,7 @@ TRT-LLM components communicate using NATS messaging:
 | **Frontend → Prefill** | Request with image URL or embedding path | No |
 | **Encode → Prefill (pre-computed embeddings)** | NIXL metadata (pre-computed embeddings) | Yes (Embeddings tensor) |
 | **Encode → Prefill (Image URL) (WIP)** | Disaggregated params with multimodal handles | No (Handles via params) |
-| **Prefill → Decode** | Disaggregated params | Yes/No (KV cache - UCX or NIXL) |
+| **Prefill → Decode** | Disaggregated params | Configurable (KV cache: NIXL default, UCX optional) |
 
 
 ## **NIXL USE**

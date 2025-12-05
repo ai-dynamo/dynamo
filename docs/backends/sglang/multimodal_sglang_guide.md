@@ -39,7 +39,7 @@ AGGREGATED (E->PD):
 
 DISAGGREGATED (E->P->D):
   Client → Frontend → Processor → Encoder [NIXL] → Prefill [bootstrap] → Decode → Response
-  • 4 components • Vision encoder + KV sharing • Bootstrap coordination
+  • 4 components • Vision encoder in Python • KV cache transfer via bootstrap mechanism
 ```
 
 ## Aggregated Mode (E->PD)
