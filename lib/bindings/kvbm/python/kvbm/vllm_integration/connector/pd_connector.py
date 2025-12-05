@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Type
 
 from kvbm.vllm_integration.connector.dynamo_connector import DynamoConnector
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
+    KVConnectorRole,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
     MultiKVConnectorMetadata,
@@ -83,6 +86,18 @@ class PdConnector(MultiConnector):
     # ==============================
     # Worker-side methods
     # ==============================
+
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
+        """
+        Propagate handshake metadata to child connectors.
+
+        This is required for NIXL connector to start its handshake listener
+        which decode workers connect to for KV transfer coordination.
+        """
+        for c in self._connectors:
+            c.set_xfer_handshake_metadata(metadata)
 
     def bind_connector_metadata(self, connector_metadata: PdConnectorMetadata) -> None:
         assert isinstance(connector_metadata, PdConnectorMetadata)
