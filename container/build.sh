@@ -805,7 +805,8 @@ fi
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
     echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
     ENABLE_KVBM=true
-else
+elif [[ -z "${ENABLE_KVBM}" ]]; then
+    # Only set to false if not explicitly set by user via --enable-kvbm
     ENABLE_KVBM=false
 fi
 

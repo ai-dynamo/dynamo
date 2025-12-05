@@ -97,6 +97,46 @@ jobs:
             ${{ env.PYTEST_XML_FILE }}
             ${{ env.PYTEST_PARALLEL_XML_FILE }}
 
+  kvbm-wheel-test:
+    runs-on:
+        group: Fastchecker
+    name: KVBM Wheel Generation Test
+    env:
+      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_kvbm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to NGC
+        if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
+        run: |
+          echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+      - name: Define Image Tag
+        id: define_image_tag
+        run: |
+          echo "image_tag=dynamo:kvbm-test" >> $GITHUB_OUTPUT
+      - name: Build image with KVBM enabled
+        env:
+          GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
+        run: |
+          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target dev --framework none --enable-kvbm
+      - name: Verify KVBM wheel exists
+        run: |
+          docker run --rm ${{ steps.define_image_tag.outputs.image_tag }} \
+            bash -c 'ls -la /opt/dynamo/wheelhouse/kvbm*.whl'
+      - name: Verify KVBM wheel can be imported
+        run: |
+          docker run --rm ${{ steps.define_image_tag.outputs.image_tag }} \
+            bash -c 'python -c "import kvbm; from kvbm import BlockManager, KvbmLeader, KvbmWorker; print(\"✓ KVBM imported successfully\")"'
+      - name: List all wheels for debugging
+        if: always()
+        run: |
+          docker run --rm ${{ steps.define_image_tag.outputs.image_tag }} \
+            bash -c 'echo "=== All wheels in /opt/dynamo/wheelhouse/ ===" && find /opt/dynamo/wheelhouse/ -name "*.whl" -type f'
+
   event_file:
     name: "Event File"
     runs-on: ubuntu-latest
