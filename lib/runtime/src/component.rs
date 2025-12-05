@@ -275,10 +275,38 @@ impl ComponentBuilder {
 
     pub fn build(self) -> Result<Component, anyhow::Error> {
         let component = self.build_internal()?;
-        // If this component is using NATS, register the NATS service in background
+        // If this component is using NATS, register the NATS service and wait for completion.
+        // This prevents a race condition where serve_endpoint() tries to look up the service
+        // before it's registered in the component registry.
         let drt = component.drt();
         if drt.request_plane().is_nats() {
-            drt.register_nats_service(component.clone());
+            let mut rx = drt.register_nats_service(component.clone());
+            // Wait synchronously for the NATS service registration to complete.
+            // Uses block_in_place() to safely call blocking_recv() from async contexts.
+            // This temporarily moves the current task off the runtime thread to allow
+            // blocking without deadlocking the runtime.
+            let result = tokio::task::block_in_place(|| rx.blocking_recv());
+            match result {
+                Some(Ok(())) => {
+                    tracing::debug!(
+                        component = component.service_name(),
+                        "NATS service registration completed"
+                    );
+                }
+                Some(Err(e)) => {
+                    return Err(anyhow::anyhow!(
+                        "NATS service registration failed for component '{}': {}",
+                        component.service_name(),
+                        e
+                    ));
+                }
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "NATS service registration channel closed unexpectedly for component '{}'",
+                        component.service_name()
+                    ));
+                }
+            }
         }
         Ok(component)
     }
