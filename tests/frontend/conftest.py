@@ -22,4 +22,3 @@ def pytest_ignore_collect(collection_path, config):
             return True  # torch not available, skip this file
 
     return None
-

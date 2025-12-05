@@ -131,12 +131,12 @@ class TestPromptEmbedsE2E:
         )
 
         assert response.usage is not None, "Should have usage statistics"
-        assert response.usage.prompt_tokens != 0, (
-            "BUG REGRESSION: prompt_tokens is 0! This was the bug in v2.0.3."
-        )
-        assert response.usage.prompt_tokens == sequence_length, (
-            f"Expected prompt_tokens={sequence_length}, got {response.usage.prompt_tokens}"
-        )
+        assert (
+            response.usage.prompt_tokens != 0
+        ), "BUG REGRESSION: prompt_tokens is 0! This was the bug in v2.0.3."
+        assert (
+            response.usage.prompt_tokens == sequence_length
+        ), f"Expected prompt_tokens={sequence_length}, got {response.usage.prompt_tokens}"
         assert response.usage.total_tokens == (
             response.usage.prompt_tokens + response.usage.completion_tokens
         ), "total_tokens should equal prompt_tokens + completion_tokens"

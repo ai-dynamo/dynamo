@@ -199,18 +199,6 @@ impl OpenAIPreprocessor {
         Ok((builder.build()?, annotations))
     }
 
-    /// Update ISL (input sequence length) on the response generator for usage statistics.
-    /// Skips update for embeddings since the worker extracts sequence length from tensor shape.
-    fn maybe_update_isl<G: crate::protocols::ResponseGenerator + ?Sized>(
-        common_request: &PreprocessedRequest,
-        response_generator: &mut G,
-    ) {
-        if common_request.prompt_embeds.is_none() {
-            let isl = common_request.token_ids.len() as u32;
-            response_generator.update_isl(isl);
-        }
-    }
-
     pub fn builder<
         R: OAIChatLikeRequest
             + AnnotationsProvider
@@ -912,7 +900,11 @@ impl
 
         let mut response_generator = Box::new(response_generator);
 
-        Self::maybe_update_isl(&common_request, response_generator.as_mut());
+        // Update ISL only for text prompts (embeddings get sequence length from tensor shape)
+        if common_request.prompt_embeds.is_none() {
+            let isl = common_request.token_ids.len() as u32;
+            response_generator.update_isl(isl);
+        }
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);
@@ -1059,7 +1051,11 @@ impl
 
         let common_request = builder.build()?;
 
-        Self::maybe_update_isl(&common_request, response_generator.as_mut());
+        // Update ISL only for text prompts (embeddings get sequence length from tensor shape)
+        if common_request.prompt_embeds.is_none() {
+            let isl = common_request.token_ids.len() as u32;
+            response_generator.update_isl(isl);
+        }
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);
