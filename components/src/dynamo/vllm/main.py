@@ -224,6 +224,7 @@ def setup_kv_event_publisher(
             worker_id=generate_endpoint.connection_id(),
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
+            enable_local_indexer=config.enable_local_indexer,
         )
         kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
         kv_publishers.append(kv_publisher)
@@ -336,6 +337,7 @@ async def register_vllm_model(
     runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
+    runtime_config.enable_local_indexer = config.enable_local_indexer
 
     # Add tool/reasoning parsers for decode models
     if model_type != ModelType.Prefill:
