@@ -7,6 +7,9 @@ inputs:
   push_tag:
     description: 'Target Name:Tag'
     required: true
+  conditional_tag:
+    description: 'Optional tag for conditionals'
+    required: false
   aws_push:
     description: 'Push to AWS Boolean'
     required: false
@@ -43,6 +46,10 @@ runs:
         PUSH_TAG: ${{ inputs.push_tag }}
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
+        if [[ ${{ inputs.conditional_tag != '' }} ]];
+            docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${{ inputs.conditional_tag }}
+            docker push ${ECR_HOSTNAME}/${{ inputs.conditional_tag }}
+        fi
         docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${PUSH_TAG}
         docker push ${ECR_HOSTNAME}/${PUSH_TAG}
     - name: ACR Tag and Push
