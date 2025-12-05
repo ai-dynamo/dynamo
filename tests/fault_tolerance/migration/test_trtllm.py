@@ -28,7 +28,7 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.pre_merge,  # can be moved to nightly once stable for a week
+    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
 ]
 
 
