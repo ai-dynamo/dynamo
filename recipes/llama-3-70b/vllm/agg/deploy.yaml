@@ -18,7 +18,7 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:a-gaie-test
+          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:a-gaie-test
           workingDir: /workspace/examples/backends/vllm
       envs:
         - name: HF_HOME
@@ -47,7 +47,7 @@ spec:
           command:
             - /bin/sh
             - -c
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:a-gaie-test
+          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:a-gaie-test
           workingDir: /workspace/examples/backends/vllm
 
           startupProbe:
