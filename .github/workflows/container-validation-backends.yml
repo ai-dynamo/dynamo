@@ -468,39 +468,6 @@ jobs:
         run: |
           set -x
           
-          # Determine test outcome
-          if [ "${{ steps.run-ft-tests.outcome }}" == "success" ]; then
-            TEST_STATUS="passed"
-            TEST_CONCLUSION="success"
-          else
-            TEST_STATUS="failed"
-            TEST_CONCLUSION="failure"
-          fi
-          
-          echo "📊 Test Status: ${TEST_STATUS}"
-          
-          # Create structured test metadata file with unique naming
-          METADATA_FILE="test-results/ft_test_metadata_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.json"
-          
-          cat > "${METADATA_FILE}" << EOF
-          {
-            "job_name": "${{ github.job }}",
-            "framework": "${{ matrix.framework.name }}",
-            "test_scenario": "${{ matrix.framework.test_scenario }}",
-            "platform_arch": "amd64",
-            "test_type": "fault_tolerance",
-            "namespace": "${{ env.NAMESPACE }}",
-            "test_status": "${TEST_STATUS}",
-            "test_conclusion": "${TEST_CONCLUSION}",
-            "run_id": "${{ github.run_id }}",
-            "job_id": "${{ job.check_run_id }}",
-            "junit_xml_file": "pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml"
-          }
-          EOF
-          
-          echo "📝 Created test metadata file: ${METADATA_FILE}"
-          cat "${METADATA_FILE}"
-          
           # Rename JUnit XML with unique naming if it exists
           if [ -f "test-results/pytest_ft_report.xml" ]; then
             mv "test-results/pytest_ft_report.xml" "test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml"
@@ -514,9 +481,7 @@ jobs:
         if: always()
         with:
           name: test-results-${{ matrix.framework.name }}-fault_tolerance-amd64-${{ github.run_id }}-${{ job.check_run_id }}
-          path: |
-            test-results/ft_test_metadata_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.json
-            test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml
+          path: test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml
           retention-days: 7
 
       - name: Cleanup
@@ -824,41 +789,6 @@ jobs:
         # Create test-results directory
         mkdir -p test-results
         
-        # Determine test outcome
-        if [ "${{ steps.run-tests.outcome }}" == "success" ]; then
-          TEST_STATUS="passed"
-          TEST_CONCLUSION="success"
-        else
-          TEST_STATUS="failed"
-          TEST_CONCLUSION="failure"
-        fi
-        
-        echo "📊 Test Status: ${TEST_STATUS}"
-        
-        # Create structured test metadata file with unique naming
-        METADATA_FILE="test-results/deploy_test_metadata_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.json"
-        
-        cat > "${METADATA_FILE}" << EOF
-        {
-          "job_name": "${{ github.job }}",
-          "framework": "${{ env.FRAMEWORK }}",
-          "profile": "${{ matrix.profile }}",
-          "platform_arch": "amd64",
-          "test_type": "deployment",
-          "model_name": "${{ env.MODEL_NAME }}",
-          "namespace": "${{ needs.deploy-operator.outputs.NAMESPACE }}",
-          "graph_name": "${{ env.GRAPH_NAME }}",
-          "test_status": "${TEST_STATUS}",
-          "test_conclusion": "${TEST_CONCLUSION}",
-          "run_id": "${{ github.run_id }}",
-          "job_id": "${{ job.check_run_id }}",
-          "log_file": "deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log"
-        }
-        EOF
-        
-        echo "📝 Created test metadata file: ${METADATA_FILE}"
-        cat "${METADATA_FILE}"
-        
         # Copy and rename the test output log with unique naming
         if [ -f "test-output.log" ]; then
           cp test-output.log "test-results/deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log"
@@ -872,9 +802,7 @@ jobs:
       if: always()
       with:
         name: test-results-${{ env.FRAMEWORK }}-deploy-${{ matrix.profile }}-amd64-${{ github.run_id }}-${{ job.check_run_id }}
-        path: |
-          test-results/deploy_test_metadata_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.json
-          test-results/deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log
+        path: test-results/deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log
         retention-days: 7
 
     - name: Cleanup
