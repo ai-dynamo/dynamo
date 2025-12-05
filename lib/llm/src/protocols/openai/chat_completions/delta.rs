@@ -258,8 +258,6 @@ impl DeltaGenerator {
 
         let choices = vec![choice];
 
-        self.msg_counter += 1;
-
         // According to OpenAI spec: when stream_options.include_usage is true,
         // all intermediate chunks should have usage: null
         // The final usage chunk will be sent separately with empty choices
