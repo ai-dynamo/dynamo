@@ -417,8 +417,7 @@ impl ChoiceJailStateCollection {
 }
 
 /// Emission mode for handling multiple choices
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EmissionMode {
     /// Pack multiple choices in the same chunk (default, matches original behavior)
     #[default]
@@ -426,7 +425,6 @@ pub enum EmissionMode {
     /// Emit one choice per chunk for OpenAI compatibility
     SingleChoicePerChunk,
 }
-
 
 /// A stream transformer that can "jail" tokens based on configurable start/end sequences
 /// When jailed, tokens are accumulated rather than yielded immediately
@@ -725,7 +723,8 @@ impl JailedStream {
                         if let Ok((_, _)) =
                             try_tool_call_parse_aggregate(accumulated_content, Some(parser)).await
                         {
-                            let split_pos = find_tool_call_end_position(accumulated_content, Some(parser));
+                            let split_pos =
+                                find_tool_call_end_position(accumulated_content, Some(parser));
                             (true, split_pos)
                         } else {
                             (false, accumulated_content.len())
@@ -742,19 +741,23 @@ impl JailedStream {
                 match format {
                     ToolChoiceFormat::SingleObject { .. } => {
                         // Expect single object: {"location": "Paris", "unit": "celsius"}
-                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(accumulated_content)
-                            && value.is_object() {
-                                return (true, accumulated_content.len());
-                            }
+                        if let Ok(value) =
+                            serde_json::from_str::<serde_json::Value>(accumulated_content)
+                            && value.is_object()
+                        {
+                            return (true, accumulated_content.len());
+                        }
                         (false, accumulated_content.len())
                     }
                     ToolChoiceFormat::ArrayOfTools => {
                         // Expect array: [{"name":"search","parameters":{...}}, ...]
-                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(accumulated_content)
+                        if let Ok(value) =
+                            serde_json::from_str::<serde_json::Value>(accumulated_content)
                             && let Some(arr) = value.as_array()
-                                && !arr.is_empty() {
-                                    return (true, accumulated_content.len());
-                                }
+                            && !arr.is_empty()
+                        {
+                            return (true, accumulated_content.len());
+                        }
                         (false, accumulated_content.len())
                     }
                 }
@@ -772,9 +775,11 @@ impl JailedStream {
         match &self.jail_mode {
             JailMode::MarkerBased => {
                 // Traditional marker-based tool call parsing
-                if let Ok((tool_calls, normal_text)) =
-                    try_tool_call_parse_aggregate(accumulated_content, self.tool_call_parser.as_deref())
-                        .await
+                if let Ok((tool_calls, normal_text)) = try_tool_call_parse_aggregate(
+                    accumulated_content,
+                    self.tool_call_parser.as_deref(),
+                )
+                .await
                     && !tool_calls.is_empty()
                 {
                     // Convert to streaming format
@@ -816,16 +821,14 @@ impl JailedStream {
             JailMode::Immediate { format } => {
                 // tool_choice mode: parse JSON and convert to tool calls
                 match self.parse_tool_choice_json(accumulated_content, format) {
-                    Ok(tool_call_chunks) if !tool_call_chunks.is_empty() => {
-                        create_choice_stream(
-                            choice_index,
-                            Some(Role::Assistant),
-                            "",
-                            Some(tool_call_chunks),
-                            base_choice.finish_reason,
-                            base_choice.logprobs.clone(),
-                        )
-                    }
+                    Ok(tool_call_chunks) if !tool_call_chunks.is_empty() => create_choice_stream(
+                        choice_index,
+                        Some(Role::Assistant),
+                        "",
+                        Some(tool_call_chunks),
+                        base_choice.finish_reason,
+                        base_choice.logprobs.clone(),
+                    ),
                     Ok(_) | Err(_) => {
                         // Parsing failed, return as content
                         create_choice_stream(
@@ -880,7 +883,9 @@ impl JailedStream {
                             Some(ChatCompletionMessageToolCallChunk {
                                 index: idx as u32,
                                 id: Some(format!("call-{}", idx + 1)),
-                                r#type: Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
+                                r#type: Some(
+                                    dynamo_async_openai::types::ChatCompletionToolType::Function,
+                                ),
                                 function: Some(FunctionCallStream {
                                     name: Some(name),
                                     arguments: Some(args),

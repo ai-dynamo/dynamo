@@ -4,9 +4,7 @@
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
-    protocols::{
-        common::{self},
-    },
+    protocols::common::{self},
     types::TokenIdType,
 };
 
@@ -304,7 +302,6 @@ impl DeltaGenerator {
     pub fn is_usage_enabled(&self) -> bool {
         self.options.enable_usage
     }
-
 }
 
 /// Implements the [`crate::protocols::openai::DeltaGeneratorExt`] trait for [`DeltaGenerator`], allowing

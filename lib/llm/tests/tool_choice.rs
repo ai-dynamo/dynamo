@@ -40,9 +40,9 @@ async fn apply_jail_transformation(
     tool_choice: Option<ChatCompletionToolChoiceOption>,
 ) -> dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
     use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
-    use futures::stream;
-    use futures::StreamExt;
     use dynamo_runtime::protocols::annotated::Annotated;
+    use futures::StreamExt;
+    use futures::stream;
 
     let input_stream = stream::iter(vec![Annotated {
         data: Some(raw_response),
@@ -71,13 +71,15 @@ async fn apply_jail_transformation(
 }
 
 async fn apply_jail_transformation_streaming(
-    raw_responses: Vec<dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse>,
+    raw_responses: Vec<
+        dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+    >,
     tool_choice: Option<ChatCompletionToolChoiceOption>,
 ) -> Vec<dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse> {
     use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
-    use futures::stream;
-    use futures::StreamExt;
     use dynamo_runtime::protocols::annotated::Annotated;
+    use futures::StreamExt;
+    use futures::stream;
 
     let input_stream = stream::iter(raw_responses.into_iter().map(|r| Annotated {
         data: Some(r),
@@ -205,7 +207,12 @@ async fn test_required_tool_choice_parses_json_array() {
         Some("search")
     );
     assert_eq!(
-        tool_calls[0].function.as_ref().unwrap().arguments.as_deref(),
+        tool_calls[0]
+            .function
+            .as_ref()
+            .unwrap()
+            .arguments
+            .as_deref(),
         Some(r#"{"query":"rust"}"#)
     );
 
@@ -217,7 +224,12 @@ async fn test_required_tool_choice_parses_json_array() {
         Some("summarize")
     );
     assert_eq!(
-        tool_calls[1].function.as_ref().unwrap().arguments.as_deref(),
+        tool_calls[1]
+            .function
+            .as_ref()
+            .unwrap()
+            .arguments
+            .as_deref(),
         Some(r#"{"topic":"memory"}"#)
     );
 }
@@ -258,11 +270,7 @@ async fn test_streaming_named_tool_buffers_until_finish() {
 
     let mut generator = request.response_generator("req-stream-1".to_string());
 
-    let chunks = [
-        r#"{"location":""#,
-        r#"Paris","unit":""#,
-        r#"celsius"}"#,
-    ];
+    let chunks = [r#"{"location":""#, r#"Paris","unit":""#, r#"celsius"}"#];
 
     let mut raw_responses = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
@@ -302,9 +310,17 @@ async fn test_streaming_named_tool_buffers_until_finish() {
 
     let tool_calls = response.choices[0].delta.tool_calls.as_ref().unwrap();
     assert_eq!(tool_calls.len(), 1);
-    assert_eq!(tool_calls[0].function.as_ref().unwrap().name.as_deref(), Some("get_weather"));
     assert_eq!(
-        tool_calls[0].function.as_ref().unwrap().arguments.as_deref(),
+        tool_calls[0].function.as_ref().unwrap().name.as_deref(),
+        Some("get_weather")
+    );
+    assert_eq!(
+        tool_calls[0]
+            .function
+            .as_ref()
+            .unwrap()
+            .arguments
+            .as_deref(),
         Some(r#"{"location":"Paris","unit":"celsius"}"#)
     );
 }
@@ -361,11 +377,33 @@ async fn test_streaming_required_tool_parallel() {
     let tool_calls = response.choices[0].delta.tool_calls.as_ref().unwrap();
     assert_eq!(tool_calls.len(), 2);
 
-    assert_eq!(tool_calls[0].function.as_ref().unwrap().name.as_deref(), Some("search"));
-    assert_eq!(tool_calls[0].function.as_ref().unwrap().arguments.as_deref(), Some(r#"{"query":"rust"}"#));
+    assert_eq!(
+        tool_calls[0].function.as_ref().unwrap().name.as_deref(),
+        Some("search")
+    );
+    assert_eq!(
+        tool_calls[0]
+            .function
+            .as_ref()
+            .unwrap()
+            .arguments
+            .as_deref(),
+        Some(r#"{"query":"rust"}"#)
+    );
 
-    assert_eq!(tool_calls[1].function.as_ref().unwrap().name.as_deref(), Some("summarize"));
-    assert_eq!(tool_calls[1].function.as_ref().unwrap().arguments.as_deref(), Some(r#"{"topic":"memory"}"#));
+    assert_eq!(
+        tool_calls[1].function.as_ref().unwrap().name.as_deref(),
+        Some("summarize")
+    );
+    assert_eq!(
+        tool_calls[1]
+            .function
+            .as_ref()
+            .unwrap()
+            .arguments
+            .as_deref(),
+        Some(r#"{"topic":"memory"}"#)
+    );
 }
 
 #[test]

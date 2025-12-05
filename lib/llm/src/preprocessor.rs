@@ -807,7 +807,9 @@ impl OpenAIPreprocessor {
                 // Immediate jail mode for required tool choice
                 builder = builder.tool_choice_required();
             }
-            Some(ChatCompletionToolChoiceOption::Auto) | Some(ChatCompletionToolChoiceOption::None) | None => {
+            Some(ChatCompletionToolChoiceOption::Auto)
+            | Some(ChatCompletionToolChoiceOption::None)
+            | None => {
                 // Traditional marker-based jail for auto/none/unspecified
                 if let Some(parser) = tool_call_parser {
                     builder = builder.tool_call_parser(parser);

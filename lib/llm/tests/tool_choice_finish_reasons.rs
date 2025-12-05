@@ -56,9 +56,9 @@ async fn apply_jail_transformation(
     tool_choice: Option<ChatCompletionToolChoiceOption>,
 ) -> dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
     use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
-    use futures::stream;
-    use futures::StreamExt;
     use dynamo_runtime::protocols::annotated::Annotated;
+    use futures::StreamExt;
+    use futures::stream;
 
     let input_stream = stream::iter(vec![Annotated {
         data: Some(raw_response),
