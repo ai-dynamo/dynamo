@@ -125,6 +125,10 @@ NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
 NO_CACHE=""
 
+# KVBM (KV Cache Block Manager) - default disabled, enabled automatically for VLLM/TRTLLM
+# or can be explicitly enabled via --enable-kvbm flag
+ENABLE_KVBM=false
+
 # sccache configuration for S3
 USE_SCCACHE=""
 SCCACHE_BUCKET=""
@@ -802,13 +806,12 @@ fi
 
 # ENABLE_KVBM: Used in base Dockerfile for block-manager feature.
 #              Declared but not currently used in Dockerfile.{vllm,trtllm}.
+# Force KVBM to be enabled for VLLM and TRTLLM frameworks
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
     echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
     ENABLE_KVBM=true
-elif [[ -z "${ENABLE_KVBM}" ]]; then
-    # Only set to false if not explicitly set by user via --enable-kvbm
-    ENABLE_KVBM=false
 fi
+# For other frameworks, ENABLE_KVBM defaults to false unless --enable-kvbm flag was provided
 
 if [  ! -z ${ENABLE_KVBM} ]; then
     echo "Enabling the KVBM in the dynamo image"
