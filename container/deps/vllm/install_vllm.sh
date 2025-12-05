@@ -11,7 +11,8 @@
 
 set -euo pipefail
 
-VLLM_REF="v0.12.0"
+VLLM_VER="0.12.0"
+VLLM_REF="v${VLLM_VER}"
 
 # Basic Configurations
 ARCH=$(uname -m)
@@ -19,9 +20,9 @@ MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 
 # VLLM and Dependency Configurations
-TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels
+TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels -- check if we need to add 12.0+PTX
 DEEPGEMM_REF=""
-CUDA_VERSION="12.9"
+CUDA_VERSION="13.0"
 FLASHINF_REF="v0.5.3"
 # LMCache version - 0.3.9+ required for vLLM 0.11.2 compatibility
 LMCACHE_REF="0.3.10"
@@ -116,35 +117,41 @@ else
     echo "⚠ Skipping LMCache on ARM64 (compatibility issues)"
 fi
 
-echo "\n=== Cloning vLLM repository ==="
-# Clone needed for DeepGEMM and EP kernels install scripts
-cd $INSTALLATION_DIR
-git clone https://github.com/vllm-project/vllm.git vllm
-cd vllm
-git checkout $VLLM_REF
 
 echo "\n=== Installing vLLM & FlashInfer ==="
 echo "Installing vLLM $VLLM_REF from PyPI..."
-
-uv pip install vllm[flashinfer]==$VLLM_REF --torch-backend=${TORCH_BACKEND}
-uv pip install flashinfer-cubin==$FLASHINF_REF
-uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
-
+# uv pip install vllm[flashinfer]==$VLLM_REF --torch-backend=${TORCH_BACKEND}
+uv pip install \
+    --no-cache \
+    --index-strategy=unsafe-best-match \
+    --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND} \
+    https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER}/vllm-${VLLM_VER}+${TORCH_BACKEND}-cp38-abi3-manylinux_2_31_x86_64.whl[flashinfer]
+uv pip install --no-cache flashinfer-cubin==$FLASHINF_REF
+uv pip install --no-cache flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
 echo "✓ vLLM installation completed"
+
+
+echo "\n=== Cloning vLLM repository ==="
+# Clone needed for DeepGEMM and EP kernels install scripts
+cd $INSTALLATION_DIR
+git clone https://github.com/dmitry-tokarev-nv/vllm vllm # TODO: switch to official repo when the nvshmem fix is merged
+cd vllm
+git checkout nvshmem-3.3.24-cuda-13
+echo "✓ vLLM repository cloned"
 
 echo "\n=== Installing DeepGEMM ==="
 cd $INSTALLATION_DIR/vllm/tools
 
 if [ -n "$DEEPGEMM_REF" ]; then
-    bash install_deepgemm.sh --cuda-version "${CUDA_VERSION}" --ref "$DEEPGEMM_REF"
+    UV_NO_CACHE=1 bash install_deepgemm.sh --cuda-version "${CUDA_VERSION}" --ref "$DEEPGEMM_REF"
 else
-    bash install_deepgemm.sh --cuda-version "${CUDA_VERSION}"
+    UV_NO_CACHE=1 bash install_deepgemm.sh --cuda-version "${CUDA_VERSION}"
 fi
 echo "✓ DeepGEMM installation completed"
 
 echo "\n=== Installing EP Kernels (PPLX and DeepEP) ==="
 cd ep_kernels/
 # TODO we will be able to specify which pplx and deepep commit we want in future
-TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries.sh
+UV_NO_CACHE=1 TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries.sh
 
 echo "\n✅ All installations completed successfully!"
