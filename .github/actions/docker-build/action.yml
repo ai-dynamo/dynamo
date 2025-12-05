@@ -280,13 +280,6 @@ runs:
         if [ ${PARSER_EXIT_CODE} -eq 0 ] && [ -f "$COMPREHENSIVE_JSON" ]; then
           echo "✅ Comprehensive build metrics generated successfully"
           echo "📄 Output file: ${COMPREHENSIVE_JSON}"
-          echo ""
-          echo "=========================================="
-          echo "📋 FULL JSON OUTPUT (for debugging)"
-          echo "=========================================="
-          cat "$COMPREHENSIVE_JSON"
-          echo ""
-          echo "=========================================="
         else
           echo "⚠️  Metrics generation had issues but continuing..."
         fi
