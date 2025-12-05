@@ -2323,12 +2323,10 @@ mod test_integration_publisher {
         // ===== TEST PART 2: QUERY WORKER-LOCAL KVINDEXERS DIRECTLY =====
         // TODO: This could be refactored as router function (e.g. router.refresh_from_worker(worker_id))
         // (which should also update the global kvIndexer with the buffer from the local kvIndexer)
-        // let query_client = WorkerQueryClient::new(router_namespace.clone());
         let mut best_worker_info: Option<(u64, usize)> = None;
 
         // Exactly one worker should have been routed requests. Find that worker
         for &worker_id in &worker_ids {
-            // let response = query_client.query_worker(worker_id).await?;
             let response = kv_router.query_worker_local_kv(worker_id).await?;
             assert_eq!(response.worker_id, worker_id);
 
@@ -2357,7 +2355,6 @@ mod test_integration_publisher {
                 continue;
             }
 
-            // let response = query_client.query_worker(worker_id).await?;
             let response = kv_router.query_worker_local_kv(worker_id).await?;
             assert!(
                 response.events.is_empty(),

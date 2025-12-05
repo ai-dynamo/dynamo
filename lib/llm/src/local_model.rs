@@ -242,7 +242,7 @@ impl LocalModelBuilder {
 
         // frontend and echo engine don't need a path.
         if self.model_path.is_none() {
-            let mut card: ModelDeploymentCard = ModelDeploymentCard::with_name_only(
+            let mut card = ModelDeploymentCard::with_name_only(
                 self.model_name.as_deref().unwrap_or(DEFAULT_NAME),
             );
             card.kv_cache_block_size = self.kv_cache_block_size;
