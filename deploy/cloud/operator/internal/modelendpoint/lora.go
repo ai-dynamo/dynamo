@@ -47,8 +47,8 @@ func (c *Client) loadLoRA(ctx context.Context, address, modelName, sourceURI str
 	}
 
 	// Build URL robustly using url.JoinPath to handle trailing slashes
-	// Pass path segments without leading slash to preserve any existing path in address (e.g., /v1)
-	apiURL, err := url.JoinPath(address, "v1", "loras")
+	// LoRA management uses /engine/v1/* routes
+	apiURL, err := url.JoinPath(address, "engine", "v1", "load_lora")
 	if err != nil {
 		return fmt.Errorf("failed to construct load LoRA URL: %w", err)
 	}
@@ -83,19 +83,29 @@ func (c *Client) loadLoRA(ctx context.Context, address, modelName, sourceURI str
 func (c *Client) unloadLoRA(ctx context.Context, address, modelName string) error {
 	logs := log.FromContext(ctx)
 
-	// Build URL robustly using url.JoinPath to handle trailing slashes and encode modelName
-	// Pass path segments without leading slash to preserve any existing path in address (e.g., /v1)
-	apiURL, err := url.JoinPath(address, "v1", "loras", modelName)
+	// Build URL robustly using url.JoinPath to handle trailing slashes
+	// LoRA management uses /engine/v1/* routes
+	apiURL, err := url.JoinPath(address, "engine", "v1", "unload_lora")
 	if err != nil {
 		logs.V(1).Info("Failed to construct unload LoRA URL", "error", err)
 		return fmt.Errorf("failed to construct unload LoRA URL: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "DELETE", apiURL, nil)
+	// Build request body with lora_name
+	unloadReq := map[string]interface{}{
+		"lora_name": modelName,
+	}
+	unloadBody, err := json.Marshal(unloadReq)
+	if err != nil {
+		return fmt.Errorf("failed to marshal unload LoRA request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(unloadBody))
 	if err != nil {
 		logs.V(1).Info("Failed to create unload LoRA request", "error", err)
 		return fmt.Errorf("failed to create unload LoRA request: %w", err)
 	}
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

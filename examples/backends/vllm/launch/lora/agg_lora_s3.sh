@@ -42,8 +42,8 @@ DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
 # Check available models
 curl http://localhost:8000/v1/models | jq .
 
-# Load LoRA using s3 uri
-curl -X POST http://localhost:8081/v1/loras \
+# Load LoRA using s3 uri (via /engine/v1/* route)
+curl -X POST http://localhost:8081/engine/v1/load_lora \
   -H "Content-Type: application/json" \
   -d '{
     "lora_name": "Neural-Hacker/Qwen3-Math-Reasoning-LoRA",
@@ -51,6 +51,11 @@ curl -X POST http://localhost:8081/v1/loras \
       "uri": "s3://my-loras/Neural-Hacker/Qwen3-Math-Reasoning-LoRA"
     }
   }'
+
+# List loaded LoRAs
+curl -X POST http://localhost:8081/engine/v1/list_loras \
+  -H "Content-Type: application/json" \
+  -d '{}'
 
 # Test LoRA inference
 curl -X POST http://localhost:8000/v1/chat/completions \
@@ -73,5 +78,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
     "temperature": 0.0
   }'
 
-# Unload LoRA
-curl -X DELETE http://localhost:8081/v1/loras/Neural-Hacker/Qwen3-Math-Reasoning-LoRA
+# Unload LoRA (via /engine/v1/* route)
+curl -X POST http://localhost:8081/engine/v1/unload_lora \
+  -H "Content-Type: application/json" \
+  -d '{"lora_name": "Neural-Hacker/Qwen3-Math-Reasoning-LoRA"}'

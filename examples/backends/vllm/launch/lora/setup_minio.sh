@@ -294,7 +294,7 @@ full_setup() {
     echo "     ./agg_lora_s3.sh"
     echo ""
     echo "  2. Load the LoRA adapter:"
-    echo "     curl -X POST http://localhost:8081/v1/loras \\"
+    echo "     curl -X POST http://localhost:8081/engine/v1/load_lora \\"
     echo "       -H \"Content-Type: application/json\" \\"
     echo "       -d '{\"lora_name\": \"${LORA_NAME}\", \"source\": {\"uri\": \"s3://${BUCKET_NAME}/${LORA_NAME}\"}}'"
     echo ""

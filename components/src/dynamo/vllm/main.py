@@ -526,30 +526,30 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
-    # Register engine routes for LoRA management (accessible via /engine/*)
+    # Register engine routes for LoRA management (accessible via /engine/v1/*)
     async def load_lora_handler(body: dict) -> dict:
-        """Handle /engine/load_lora requests"""
+        """Handle /engine/v1/load_lora requests"""
         async for result in handler.load_lora(body):
             return result
         return {"status": "error", "message": "No response from load_lora handler"}
 
     async def unload_lora_handler(body: dict) -> dict:
-        """Handle /engine/unload_lora requests"""
+        """Handle /engine/v1/unload_lora requests"""
         async for result in handler.unload_lora(body):
             return result
         return {"status": "error", "message": "No response from unload_lora handler"}
 
     async def list_loras_handler(body: dict) -> dict:
-        """Handle /engine/list_loras requests"""
+        """Handle /engine/v1/list_loras requests"""
         async for result in handler.list_loras(body):
             return result
         return {"status": "error", "message": "No response from list_loras handler"}
 
-    runtime.register_engine_route("load_lora", load_lora_handler)
-    runtime.register_engine_route("unload_lora", unload_lora_handler)
-    runtime.register_engine_route("list_loras", list_loras_handler)
+    runtime.register_engine_route("v1/load_lora", load_lora_handler)
+    runtime.register_engine_route("v1/unload_lora", unload_lora_handler)
+    runtime.register_engine_route("v1/list_loras", list_loras_handler)
     logger.info(
-        "Registered engine routes: /engine/load_lora, /engine/unload_lora, /engine/list_loras"
+        "Registered engine routes: /engine/v1/load_lora, /engine/v1/unload_lora, /engine/v1/list_loras"
     )
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register

@@ -36,17 +36,17 @@ func TestLoadLoRA_URLConstruction(t *testing.T) {
 		{
 			name:            "address without trailing slash",
 			baseAddress:     "http://10.0.1.5:9090",
-			expectedURLPath: "/v1/loras",
+			expectedURLPath: "/engine/v1/load_lora",
 		},
 		{
 			name:            "address with trailing slash",
 			baseAddress:     "http://10.0.1.5:9090/",
-			expectedURLPath: "/v1/loras",
+			expectedURLPath: "/engine/v1/load_lora",
 		},
 		{
 			name:            "address with path",
 			baseAddress:     "http://10.0.1.5:9090/api",
-			expectedURLPath: "/api/v1/loras",
+			expectedURLPath: "/api/engine/v1/load_lora",
 		},
 	}
 
@@ -210,26 +210,26 @@ func TestLoadLoRA_ResponseHandling(t *testing.T) {
 	}
 }
 
-func TestUnloadLoRA_URLConstruction(t *testing.T) {
+func TestUnloadLoRA_RequestBody(t *testing.T) {
 	tests := []struct {
-		name            string
-		modelName       string
-		expectedURLPath string
+		name             string
+		modelName        string
+		expectedLoraName string
 	}{
 		{
-			name:            "simple model name",
-			modelName:       "my-lora",
-			expectedURLPath: "/v1/loras/my-lora",
+			name:             "simple model name",
+			modelName:        "my-lora",
+			expectedLoraName: "my-lora",
 		},
 		{
-			name:            "model name with special chars",
-			modelName:       "my-lora-v1.0",
-			expectedURLPath: "/v1/loras/my-lora-v1.0",
+			name:             "model name with special chars",
+			modelName:        "my-lora-v1.0",
+			expectedLoraName: "my-lora-v1.0",
 		},
 		{
-			name:            "model name with slashes (URL encoded)",
-			modelName:       "org/model",
-			expectedURLPath: "/v1/loras/org/model",
+			name:             "model name with slashes",
+			modelName:        "org/model",
+			expectedLoraName: "org/model",
 		},
 	}
 
@@ -238,9 +238,17 @@ func TestUnloadLoRA_URLConstruction(t *testing.T) {
 			// Create a test server that captures the request
 			var capturedPath string
 			var capturedMethod string
+			var capturedBody map[string]interface{}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				capturedPath = r.URL.Path
 				capturedMethod = r.Method
+				body, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(body, &capturedBody)
+
+				if r.Header.Get("Content-Type") != "application/json" {
+					t.Errorf("expected Content-Type application/json, got %s", r.Header.Get("Content-Type"))
+				}
+
 				w.WriteHeader(http.StatusOK)
 			}))
 			defer server.Close()
@@ -254,12 +262,20 @@ func TestUnloadLoRA_URLConstruction(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			if capturedMethod != "DELETE" {
-				t.Errorf("expected DELETE method, got %s", capturedMethod)
+			// Verify HTTP method is POST
+			if capturedMethod != "POST" {
+				t.Errorf("expected POST method, got %s", capturedMethod)
 			}
 
-			if capturedPath != tt.expectedURLPath {
-				t.Errorf("expected URL path %s, got %s", tt.expectedURLPath, capturedPath)
+			// Verify URL path is correct
+			expectedPath := "/engine/v1/unload_lora"
+			if capturedPath != expectedPath {
+				t.Errorf("expected URL path %s, got %s", expectedPath, capturedPath)
+			}
+
+			// Verify request body contains correct lora_name
+			if capturedBody["lora_name"] != tt.expectedLoraName {
+				t.Errorf("expected lora_name %s in body, got %v", tt.expectedLoraName, capturedBody["lora_name"])
 			}
 		})
 	}

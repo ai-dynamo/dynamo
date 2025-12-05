@@ -100,7 +100,7 @@ curl http://localhost:8000/v1/models | jq .
 Load a LoRA from S3-compatible storage backend (e.g. MinIO):
 
 ```bash
-curl -X POST http://localhost:8081/v1/loras \
+curl -X POST http://localhost:8081/engine/v1/load_lora \
   -H "Content-Type: application/json" \
   -d '{
     "lora_name": "Neural-Hacker/Qwen3-Math-Reasoning-LoRA",
@@ -125,7 +125,9 @@ Expected response:
 Check which LoRAs are currently loaded:
 
 ```bash
-curl http://localhost:8081/v1/loras | jq .
+curl -X POST http://localhost:8081/engine/v1/list_loras \
+  -H "Content-Type: application/json" \
+  -d '{}' | jq .
 ```
 
 ### 4. Verify LoRA in Models List
@@ -176,7 +178,9 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 When you no longer need a LoRA, unload it to free up resources:
 
 ```bash
-curl -X DELETE http://localhost:8081/v1/loras/Neural-Hacker/Qwen3-Math-Reasoning-LoRA | jq .
+curl -X POST http://localhost:8081/engine/v1/unload_lora \
+  -H "Content-Type: application/json" \
+  -d '{"lora_name": "Neural-Hacker/Qwen3-Math-Reasoning-LoRA"}' | jq .
 ```
 
 Expected response:
@@ -187,7 +191,7 @@ Expected response:
 }
 ```
 
-After unloading, the LoRA will be removed from both `/v1/loras` and `/v1/models` endpoints.
+After unloading, the LoRA will be removed from both `/engine/v1/list_loras` and `/v1/models` endpoints.
 
 ## Configuration
 
@@ -230,7 +234,7 @@ Access the MinIO web console at http://localhost:9001
 
 ### Inference fails
 - Verify the model name matches exactly (case-sensitive)
-- Check if the LoRA is loaded: `curl http://localhost:8081/v1/loras`
+- Check if the LoRA is loaded: `curl -X POST http://localhost:8081/engine/v1/list_loras -H "Content-Type: application/json" -d '{}'`
 - Ensure the base model supports the LoRA rank
 - Check that max_lora_rank in the worker config is >= the LoRA rank
 
@@ -247,12 +251,12 @@ You can load multiple LoRA adapters simultaneously:
 
 ```bash
 # Load first LoRA
-curl -X POST http://localhost:8081/v1/loras \
+curl -X POST http://localhost:8081/engine/v1/load_lora \
   -H "Content-Type: application/json" \
   -d '{"lora_name": "lora1", "source": {"uri": "s3://my-loras/lora1"}}'
 
 # Load second LoRA
-curl -X POST http://localhost:8081/v1/loras \
+curl -X POST http://localhost:8081/engine/v1/load_lora \
   -H "Content-Type: application/json" \
   -d '{"lora_name": "lora2", "source": {"uri": "s3://my-loras/lora2"}}'
 ```
@@ -296,24 +300,32 @@ rm -rf /tmp/dynamo_loras_minio
 
 ## API Reference
 
-### Load LoRA
-- **Endpoint**: `POST /v1/loras`
+### Engine Routes (Worker Endpoints)
+
+These endpoints are served by the worker on port 8081:
+
+#### Load LoRA
+- **Endpoint**: `POST /engine/v1/load_lora`
 - **Body**: `{"lora_name": "string", "source": {"uri": "string"}}`
-- **Response**: `{"status": "success", "lora_id": int}`
+- **Response**: `{"status": "success", "lora_name": "string", "lora_id": int}`
 
-### List LoRAs
-- **Endpoint**: `GET /v1/loras`
-- **Response**: Array of loaded LoRAs
+#### List LoRAs
+- **Endpoint**: `POST /engine/v1/list_loras`
+- **Body**: `{}`
+- **Response**: `{"status": "success", "loras": {...}, "count": int}`
 
-### Unload LoRA
-- **Endpoint**: `DELETE /v1/loras/{lora_name}`
+#### Unload LoRA
+- **Endpoint**: `POST /engine/v1/unload_lora`
+- **Body**: `{"lora_name": "string"}`
 - **Response**: `{"status": "success", "message": "string"}`
 
-### List Models
+### Frontend Endpoints (Port 8000)
+
+#### List Models
 - **Endpoint**: `GET /v1/models`
 - **Response**: OpenAI-compatible models list
 
-### Chat Completions
+#### Chat Completions
 - **Endpoint**: `POST /v1/chat/completions`
 - **Body**: OpenAI-compatible chat completion request
 - **Response**: OpenAI-compatible chat completion response
