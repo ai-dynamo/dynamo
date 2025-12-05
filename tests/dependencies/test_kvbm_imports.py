@@ -22,7 +22,9 @@ def test_kvbm_wheel_exists():
         f"stdout: {result.stdout}\n"
         f"stderr: {result.stderr}"
     )
-    assert "kvbm" in result.stdout, f"Expected kvbm wheel in output, got: {result.stdout}"
+    assert (
+        "kvbm" in result.stdout
+    ), f"Expected kvbm wheel in output, got: {result.stdout}"
 
 
 @pytest.mark.pre_merge
