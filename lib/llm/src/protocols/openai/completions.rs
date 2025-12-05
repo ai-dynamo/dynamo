@@ -143,6 +143,12 @@ impl AnnotationsProvider for NvCreateCompletionRequest {
     }
 }
 
+impl crate::protocols::common::MetadataProvider for NvCreateCompletionRequest {
+    fn metadata(&self) -> Option<&serde_json::Value> {
+        self.metadata.as_ref()
+    }
+}
+
 impl OpenAISamplingOptionsProvider for NvCreateCompletionRequest {
     fn get_temperature(&self) -> Option<f32> {
         self.inner.temperature

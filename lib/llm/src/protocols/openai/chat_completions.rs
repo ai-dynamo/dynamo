@@ -45,6 +45,10 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
 
+    /// Metadata - passthrough parameter without restrictions
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+
     /// Catch-all for unsupported fields - checked during validation
     #[serde(flatten, default, skip_serializing)]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
@@ -104,6 +108,12 @@ impl AnnotationsProvider for NvCreateChatCompletionRequest {
             .and_then(|nvext| nvext.annotations.as_ref())
             .map(|annotations| annotations.contains(&annotation.to_string()))
             .unwrap_or(false)
+    }
+}
+
+impl crate::protocols::common::MetadataProvider for NvCreateChatCompletionRequest {
+    fn metadata(&self) -> Option<&serde_json::Value> {
+        self.metadata.as_ref()
     }
 }
 
@@ -368,5 +378,45 @@ mod tests {
 
             assert_eq!(output_options.skip_special_tokens, Some(skip_value));
         }
+    }
+
+    #[test]
+    fn test_metadata_propagates() {
+        let metadata_value = json!({"user_id": "12345", "session": "abc"});
+        let json_str = json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "metadata": metadata_value
+        });
+
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        assert_eq!(request.metadata, Some(metadata_value.clone()));
+
+        // Test MetadataProvider trait implementation
+        use crate::protocols::common::MetadataProvider;
+        assert_eq!(request.metadata(), Some(&metadata_value));
+    }
+
+    #[test]
+    fn test_metadata_none() {
+        let json_str = json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        assert_eq!(request.metadata, None);
+
+        // Test MetadataProvider trait implementation
+        use crate::protocols::common::MetadataProvider;
+        assert_eq!(request.metadata(), None);
     }
 }
