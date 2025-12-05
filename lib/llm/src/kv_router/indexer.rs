@@ -44,7 +44,7 @@ use std::{
     collections::{HashMap, VecDeque},
     iter,
     rc::Rc,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -1297,7 +1297,7 @@ pub struct LocalKvIndexer {
     indexer: KvIndexer,
     /// Circular buffer of recent events
     /// Stores (worker_id, event) tuples
-    event_buffer: std::sync::Mutex<std::collections::VecDeque<(WorkerId, KvCacheEvent)>>,
+    event_buffer: Mutex<VecDeque<(WorkerId, KvCacheEvent)>>,
     /// Maximum number of events to keep in buffer
     max_buffer_size: usize,
 }
@@ -1409,14 +1409,12 @@ impl LocalKvIndexer {
             && event.event_id != last_event.event_id + 1
         {
             let expected = last_event.event_id + 1;
-            tracing::warn!(
+            tracing::error!(
                 worker_id,
                 expected,
                 got = event.event_id,
                 "Non-consecutive KV event id; buffer may have gaps"
             );
-            // panics in debug mode. TODO do we want it to abort in production too?
-            debug_assert_eq!(expected, event.event_id, "KV events should be consecutive");
         }
 
         // Add to back

@@ -35,6 +35,7 @@ pub mod subscriber;
 pub mod worker_query;
 
 pub use prefill_router::PrefillRouter;
+use worker_query::WorkerQueryClient;
 
 use crate::{
     kv_router::{
@@ -274,7 +275,7 @@ pub struct KvRouter {
 
     client: Client,
 
-    worker_query_client: Option<worker_query::WorkerQueryClient>,
+    worker_query_client: Option<WorkerQueryClient>,
 }
 
 impl KvRouter {
@@ -369,17 +370,7 @@ impl KvRouter {
 
         // Initialize worker query client using the namespace abstraction
         // NATS client is managed by DRT and accessed through namespace.drt()
-        let worker_query_client = if std::env::var(
-            dynamo_runtime::config::environment_names::nats::NATS_SERVER,
-        )
-        .is_ok()
-        {
-            Some(worker_query::WorkerQueryClient::new(
-                component.namespace().clone(),
-            ))
-        } else {
-            None
-        };
+        let worker_query_client = Some(WorkerQueryClient::new(component.namespace().clone()));
 
         tracing::info!("KV Routing initialized");
         Ok(Self {
