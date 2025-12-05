@@ -63,22 +63,29 @@ runs:
           echo "No GPU detected, running in CPU-only mode"
         fi
 
+        # Get absolute path for test-results directory and ensure it has proper permissions
+        TEST_RESULTS_DIR="$(pwd)/test-results"
+        chmod 777 "${TEST_RESULTS_DIR}"
+        echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
+
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \
+          -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
-          bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          bash -c "pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
-        # Copy test results from container to host
-        docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/test-results . || echo "Failed to copy test results"
-
-        # Clean up container
-        docker rm -f ${{ env.CONTAINER_ID }}_pytest || echo "Failed to clean up container"
+        # Verify test results were written
+        if [[ -f "${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}" ]]; then
+          echo "✅ Test results file found: ${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}"
+        else
+          echo "⚠️  Test results file not found: ${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}"
+        fi
 
         # Always continue to results processing
         exit 0
@@ -103,23 +110,9 @@ runs:
           ERROR_TESTS=$(grep -o 'errors="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
           echo "📊 ${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
 
-          # Create uniquely named metadata file with step context information
-          # Use framework-testtype-arch to make it unique per test run
-          METADATA_FILE="test-results/test_metadata_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}.json"
-          JUNIT_NAME="pytest_test_report_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}.xml"
-
           # Rename XML file to unique name
+          JUNIT_NAME="pytest_test_report_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
           mv "$JUNIT_FILE" "test-results/$JUNIT_NAME"
-
-          echo '{' > "$METADATA_FILE"
-          echo '  "job_name": "${{ github.job }}",' >> "$METADATA_FILE"
-          echo '  "framework": "${{ inputs.framework }}",' >> "$METADATA_FILE"
-          echo '  "test_type": "${{ inputs.test_type }}",' >> "$METADATA_FILE"
-          echo '  "platform_arch": "${{ inputs.platform_arch }}",' >> "$METADATA_FILE"
-          echo '  "junit_xml_file": "'"$JUNIT_NAME"'",' >> "$METADATA_FILE"
-          echo '  "step_name": "Run ${{ inputs.test_type }} tests"' >> "$METADATA_FILE"
-          echo '}' >> "$METADATA_FILE"
-          echo "📝 Created test metadata file: $METADATA_FILE"
           echo "📝 Renamed XML file to: $JUNIT_NAME"
         else
           echo "⚠️  JUnit XML file not found - test results may not be available for upload"
@@ -135,8 +128,6 @@ runs:
       uses: actions/upload-artifact@v4
       if: always()  # Always upload test results, even if tests failed
       with:
-        name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}
-        path: |
-          test-results/pytest_test_report_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}.xml
-          test-results/test_metadata_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}.json
+        name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/pytest_test_report_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
         retention-days: 7
