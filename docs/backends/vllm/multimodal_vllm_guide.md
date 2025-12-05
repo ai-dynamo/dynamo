@@ -32,7 +32,7 @@ This document provides a comprehensive guide for multimodal inference using vLLM
 
 vLLM multimodal supports three deployment patterns:
 
-```
+```text
 SIMPLE AGGREGATED ([examples/backends/vllm/launch/agg_multimodal.sh](../../../examples/backends/vllm/launch/agg_multimodal.sh)):
   Client → Frontend (Rust processor) → Worker [image load, encode, P+D] → Response
   • 2 components • --connector none • Easiest setup
@@ -61,7 +61,7 @@ In simple aggregated mode, encoding, prefill, and decode happen within the same 
 
 ### Architecture
 
-```
+```text
 HTTP Frontend with Rust processor
     ↓
 Worker (Python - ModelInput.Tokens)
@@ -75,7 +75,7 @@ In EPD aggregated mode, encoding happens in a separate worker and prefill and de
 
 ### Architecture
 
-```
+```text
 HTTP Frontend (Rust)
     ↓
 Processor (Python - ModelInput.Text)
@@ -101,7 +101,7 @@ In EPD disaggregated mode, encoding, prefill, and decode are handled by separate
 
 ### Architecture
 
-```
+```text
 HTTP Frontend (Rust)
     ↓
 Processor (Python - ModelInput.Text)
@@ -130,7 +130,7 @@ Llama 4 models don't support pre-computed embeddings, so they use a combined Enc
 
 ### Architecture
 
-```
+```text
 HTTP Frontend (Rust)
     ↓
 Processor (Python - ModelInput.Text)

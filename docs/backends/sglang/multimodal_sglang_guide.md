@@ -32,7 +32,7 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 
 SGLang multimodal supports two deployment patterns:
 
-```
+```text
 AGGREGATED (E->PD):
   Client → Frontend (Rust) → Processor → Encoder [NIXL] → PD Worker → Response
   • 3 components • Vision encoder in Python • NIXL embeddings transfer
@@ -48,7 +48,7 @@ In aggregated mode, encoding happens in a separate worker, but prefill and decod
 
 ### Architecture
 
-```
+```text
 HTTP Frontend (Rust)
     ↓
 Processor (Python - ModelInput.Text - REGISTERED)
@@ -81,7 +81,7 @@ In disaggregated mode, encoding, prefill, and decode are handled by separate wor
 
 ### Architecture
 
-```
+```text
 HTTP Frontend (Rust)
     ↓
 Processor (Python - ModelInput.Text - REGISTERED)
@@ -109,7 +109,7 @@ Response → Processor → Frontend
 SGLang disaggregation uses a bootstrap mechanism for P->D coordination:
 
 **Request Flow (Important):**
-```
+```text
 Client → Frontend → Processor → Encode → DECODE Worker → Prefill Worker
                                                ↑
                                     Entry point for disaggregation!
@@ -174,13 +174,13 @@ prefill_client = (
 All component-to-component communication happens via NATS:
 
 **Aggregated Mode (E→PD):**
-```
+```text
 Processor → Encode Worker → PD Worker
   (NATS)        (NATS + NIXL embeddings)
 ```
 
 **Disaggregated Mode (E→P→D):**
-```
+```text
 Processor → Encode Worker → DECODE Worker → Prefill Worker
   (NATS)        (NATS)            (NATS)
                              ↓
@@ -195,7 +195,7 @@ Processor → Encode Worker → DECODE Worker → Prefill Worker
 
 **Detailed Message Flow:**
 
-```
+```text
 Processor → Encode Worker:
   - NATS round_robin with SglangMultimodalRequest
   - Contains: tokenized input_ids, image URL, sampling params
@@ -219,7 +219,7 @@ Prefill ↔ Decode (via bootstrap):
 
 NIXL is used only for embedding transfer:
 
-```
+```python
 Encode Worker:
   descriptor = connect.Descriptor(precomputed_embeddings)
   with connector.create_readable(descriptor) as readable:
@@ -372,7 +372,7 @@ if not request.multimodal_input.image_url:
 - Request path: `Encode → Decode → Prefill` (Decode calls Prefill)
 
 **Architectural Pattern:**
-```
+```text
 Encode Worker → pd_worker_client → DECODE Worker
                                          ↓
                                     prefill_client → PREFILL Worker

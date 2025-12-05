@@ -30,7 +30,7 @@ This document provides a comprehensive guide for multimodal inference using Tens
 
 TRT-LLM multimodal supports three deployment patterns:
 
-```
+```text
 SIMPLE AGGREGATED (agg.sh):
   Client → Frontend (Rust) → Worker [image load, encode, P+D] → Response
   • 2 components • worker flag `--modality multimodal` • Easiest setup
@@ -59,7 +59,7 @@ In aggregated mode, all processing (image loading, encoding, prefill, decode) ha
 
 ### Architecture
 
-```
+```text
 HTTP Frontend (Rust)
     ↓
 TRT-LLM Worker (Python - ModelInput.Tokens)
@@ -83,7 +83,7 @@ In disaggregated mode, prefill and decode are handled by separate workers. The p
 
 ### Architecture
 
-```
+```text
 HTTP Frontend (Rust)
     ↓
 Prefill Worker (Python - ModelInput.Tokens)
@@ -112,7 +112,7 @@ In EPD mode, encoding, prefill, and decode are handled by separate workers. The 
 
 ### Architecture
 
-```
+```text
 HTTP Frontend (Rust)
     ↓
 Encode Worker (Python - NOT registered, uses MultimodalEncoder)
@@ -172,7 +172,7 @@ TRT-LLM components communicate using NATS messaging:
 | Transfer Stage | NATS Message | NIXL Transfer |
 |----------------|--------------|---------------|
 | **Frontend → Prefill** | Request with image URL or embedding path | No |
-| **Encode → Prefill (Precomputed Embeddings)** | NIXL metadata (pre-computed embeddings) | Yes (Embeddings tensor) |
+| **Encode → Prefill (pre-computed embeddings)** | NIXL metadata (pre-computed embeddings) | Yes (Embeddings tensor) |
 | **Encode → Prefill (Image URL) (WIP)** | Disaggregated params with multimodal handles | No (Handles via params) |
 | **Prefill → Decode** | Disaggregated params | Yes/No (KV cache - UCX or NIXL) |
 
@@ -183,7 +183,7 @@ TRT-LLM components communicate using NATS messaging:
 |----------|--------|------------|---------------|
 | Simple Aggregated | [`examples/backends/trtllm/launch/agg.sh`](../../../examples/backends/trtllm/launch/agg.sh) | ❌ No | All in one worker |
 | P->D Disaggregated | [`examples/backends/trtllm/launch/disagg_multimodal.sh`](../../../examples/backends/trtllm/launch/disagg_multimodal.sh) | ⚙️ Optional | Prefill → Decode (KV cache via UCX or NIXL) |
-| E->P->D Disaggregated (Precomputed Embeddings) | [`examples/backends/trtllm/launch/epd_disagg.sh`](../../../examples/backends/trtllm/launch/epd_disagg.sh) | ✅ Yes | Encoder → Prefill (pre-computed embeddings via NIXL) |
+| E->P->D Disaggregated (pre-computed embeddings) | [`examples/backends/trtllm/launch/epd_disagg.sh`](../../../examples/backends/trtllm/launch/epd_disagg.sh) | ✅ Yes | Encoder → Prefill (pre-computed embeddings via NIXL) |
 | E->P->D Disaggregated (WIP) | `examples/backends/trtllm/launch/url_epd_disagg.sh` | ❌ No | Encoder → Prefill (multimodal handles via disaggregated_params)<br>Prefill → Decode (KV cache via UCX/NIXL) |
 
 **Note:** NIXL for KV cache transfer is currently beta and only supported on AMD64 (x86_64) architecture.
@@ -221,7 +221,8 @@ TRT-LLM supports providing pre-computed embeddings, bypassing image-to-embedding
 
 TRT-LLM supports two formats for embedding files:
 
-**1. Simple Tensor Format**
+#### 1. Simple Tensor Format
+
 - Direct tensor saved as `.pt` file
 - Example: `llava_next_mm_embed_seashore.pt`
 - Contains only the embedding tensor
@@ -232,7 +233,8 @@ embedding_tensor = torch.rand(1, 576, 4096)  # [batch, seq_len, hidden_dim]
 torch.save(embedding_tensor, "embedding.pt")
 ```
 
-**2. Dictionary Format with Auxiliary Data**
+#### 2. Dictionary Format with Auxiliary Data
+
 - Dictionary containing multiple keys
 - Used by models like Llama-4 that require additional metadata
 - Must contain `mm_embeddings` key with the main tensor
