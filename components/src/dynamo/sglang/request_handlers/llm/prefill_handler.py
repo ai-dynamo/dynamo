@@ -147,6 +147,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         trace_header = build_trace_headers(context) if self.enable_trace else None
 
+        # Extract LoRA path if model name matches a loaded adapter
+        lora_path = None
+        model_name = inner_request.get("model")
+        if model_name and model_name in self.lora_id_for_name:
+            lora_path = self.lora_name_to_path.get(model_name)
+            logging.debug(
+                f"Prefill request {context.id()} will use LoRA adapter: {model_name}"
+            )
+
         results = await self.engine.async_generate(
             **input_param,
             sampling_params=sampling_params,
@@ -158,6 +167,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             rid=trace_id,
             data_parallel_rank=dp_rank,
             **self._session_kwargs(inner_request),
+            lora_path=lora_path,
             **self._priority_kwargs(priority),
         )
 

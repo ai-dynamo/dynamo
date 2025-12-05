@@ -7,6 +7,7 @@ import importlib
 import inspect
 import json
 import logging
+import os
 import random
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
@@ -25,12 +26,48 @@ import sglang as sgl
 
 from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
-from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
+from dynamo.llm import (
+    KvEventPublisher,
+    ModelInput,
+    ModelType,
+    WorkerMetricsPublisher,
+    lora_name_to_id,
+    register_llm,
+    unregister_llm,
+)
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
+
+logger = logging.getLogger(__name__)
+
+# LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
+# None = not yet initialized, False = disabled/failed, LoRAManager = initialized
+_lora_manager = None
+
+
+def get_lora_manager():
+    """Get the LoRAManager singleton, initializing it on first call if enabled."""
+    global _lora_manager
+
+    if _lora_manager is not None:
+        return _lora_manager
+
+    if os.environ.get("DYN_LORA_ENABLED", "").lower() in ("true", "1", "yes"):
+        try:
+            from dynamo.common.lora import LoRAManager
+
+            _lora_manager = LoRAManager()
+            logger.info("LoRAManager initialized successfully")
+            return _lora_manager
+        except Exception as e:
+            logger.warning(
+                f"Failed to initialize LoRAManager: {e}. URI-based LoRA loading will be disabled."
+            )
+
+    return None
 
 
 class SGLangEngineQuiesceController:
@@ -292,6 +329,10 @@ class BaseWorkerHandler(RLMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             SGLangEngineQuiesceController(engine) if engine is not None else None
         )
         self._quiesce_lock = asyncio.Lock()
+
+        # LoRA tracking
+        self.lora_id_for_name: dict[str, int] = {}
+        self.lora_name_to_path: dict[str, str] = {}
 
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
         if priority is not None and self._engine_supports_priority:
@@ -586,6 +627,260 @@ class BaseWorkerHandler(RLMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         # session_control is served as a discoverable service endpoint
         # (not an engine route) so the router can find it via
         # component.endpoint("session_control"). See init_llm.py.
+
+    async def load_lora(self, request: Optional[Dict[str, Any]] = None):
+        """
+        Load a LoRA adapter dynamically into the SGLang engine.
+
+        Request format:
+        {
+            "lora_name": str,
+            "source": {
+                "uri": str  # e.g., "s3://bucket/path" or "file:///path"
+            }
+        }
+        """
+        try:
+            if request is None:
+                yield {
+                    "status": "error",
+                    "message": "Request is required with 'lora_name' and 'source.uri'",
+                }
+                return
+
+            lora_name = request.get("lora_name")
+            if not lora_name:
+                yield {
+                    "status": "error",
+                    "message": "'lora_name' is required in request",
+                }
+                return
+
+            source = request.get("source")
+            if not source or not isinstance(source, dict):
+                yield {
+                    "status": "error",
+                    "message": "'source' object is required in request",
+                }
+                return
+
+            lora_uri = source.get("uri")
+            if not lora_uri:
+                yield {
+                    "status": "error",
+                    "message": "'source.uri' is required in request",
+                }
+                return
+
+            # Use LoRAManager to download from URI
+            lora_manager = get_lora_manager()
+            if lora_manager is None:
+                yield {
+                    "status": "error",
+                    "message": "LoRAManager not initialized. Set DYN_LORA_ENABLED=true to enable URI-based LoRA loading.",
+                }
+                return
+
+            logger.info(f"Downloading LoRA adapter: {lora_name} from {lora_uri}")
+            download_result = await lora_manager.download_lora(lora_uri)
+
+            if download_result["status"] != "success":
+                yield {
+                    "status": "error",
+                    "message": f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
+                }
+                return
+
+            lora_path = download_result["local_path"]
+
+            # Generate deterministic ID from lora_name
+            lora_id = lora_name_to_id(lora_name)
+
+            # Add the LoRA to the SGLang engine via tokenizer_manager
+            if (
+                hasattr(self.engine, "tokenizer_manager")
+                and self.engine.tokenizer_manager
+            ):
+                await self.engine.tokenizer_manager.load_lora_adapter(lora_path)
+            else:
+                yield {
+                    "status": "error",
+                    "message": "SGLang engine does not support LoRA loading (tokenizer_manager not available)",
+                }
+                return
+
+            # Track the LoRA
+            self.lora_id_for_name[lora_name] = lora_id
+            self.lora_name_to_path[lora_name] = lora_path
+            logger.info(
+                f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
+            )
+
+            # Publish LoRA as a ModelDeploymentCard
+            if self.generate_endpoint is not None and self.config is not None:
+                try:
+                    user_data = {
+                        "lora_adapter": True,
+                        "lora_id": lora_id,
+                    }
+
+                    await register_llm(
+                        model_input=ModelInput.Tokens,
+                        model_type=ModelType.Chat | ModelType.Completions,
+                        endpoint=self.generate_endpoint,
+                        model_path=self.config.server_args.model_path,
+                        kv_cache_block_size=self.config.server_args.page_size,
+                        user_data=user_data,
+                        lora_name=lora_name,
+                        base_model_path=self.config.server_args.model_path,
+                    )
+                    logger.info(
+                        f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
+                    )
+                    # Rollback: remove the LoRA from the engine
+                    try:
+                        await self.engine.tokenizer_manager.unload_lora_adapter(
+                            lora_path
+                        )
+                        self.lora_id_for_name.pop(lora_name, None)
+                        self.lora_name_to_path.pop(lora_name, None)
+                    except Exception as rollback_error:
+                        logger.error(
+                            f"Failed to rollback LoRA {lora_name}: {rollback_error}"
+                        )
+
+                    yield {
+                        "status": "error",
+                        "message": f"Failed to register LoRA '{lora_name}' in discovery registry: {str(e)}",
+                        "lora_name": lora_name,
+                    }
+                    return
+
+            yield {
+                "status": "success",
+                "message": f"LoRA adapter '{lora_name}' loaded successfully",
+                "lora_name": lora_name,
+                "lora_id": lora_id,
+            }
+        except Exception as e:
+            logger.error(f"Failed to load LoRA adapter: {e}")
+            yield {"status": "error", "message": str(e)}
+
+    async def unload_lora(self, request: Optional[Dict[str, Any]] = None):
+        """
+        Unload a LoRA adapter dynamically from the SGLang engine.
+
+        Request format:
+        {
+            "lora_name": str,
+        }
+        """
+        try:
+            if request is None:
+                yield {
+                    "status": "error",
+                    "message": "Request is required with 'lora_name' field",
+                }
+                return
+            lora_name = request.get("lora_name")
+            if not lora_name:
+                yield {
+                    "status": "error",
+                    "message": "'lora_name' is required in request",
+                }
+                return
+
+            if lora_name not in self.lora_id_for_name:
+                yield {
+                    "status": "error",
+                    "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.lora_id_for_name.keys())}",
+                }
+                return
+
+            lora_id = self.lora_id_for_name[lora_name]
+            lora_path = self.lora_name_to_path.get(lora_name)
+
+            # Unload from SGLang engine
+            if (
+                hasattr(self.engine, "tokenizer_manager")
+                and self.engine.tokenizer_manager
+            ):
+                await self.engine.tokenizer_manager.unload_lora_adapter(lora_path)
+            else:
+                yield {
+                    "status": "error",
+                    "message": "SGLang engine does not support LoRA unloading (tokenizer_manager not available)",
+                }
+                return
+
+            # Remove from tracking
+            del self.lora_id_for_name[lora_name]
+            self.lora_name_to_path.pop(lora_name, None)
+
+            # Unregister from discovery
+            if self.generate_endpoint is not None:
+                try:
+                    await unregister_llm(
+                        endpoint=self.generate_endpoint,
+                        lora_name=lora_name,
+                    )
+                    logger.info(
+                        f"Successfully unregistered LoRA '{lora_name}' ModelDeploymentCard"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to unregister LoRA {lora_name} ModelDeploymentCard: {e}"
+                    )
+                    # Rollback: re-add the LoRA to engine
+                    try:
+                        await self.engine.tokenizer_manager.load_lora_adapter(lora_path)
+                        self.lora_id_for_name[lora_name] = lora_id
+                        if lora_path:
+                            self.lora_name_to_path[lora_name] = lora_path
+                    except Exception as rollback_error:
+                        logger.error(
+                            f"Failed to rollback LoRA {lora_name}: {rollback_error}"
+                        )
+
+                    yield {
+                        "status": "error",
+                        "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {str(e)}",
+                        "lora_name": lora_name,
+                    }
+                    return
+
+            logger.info(
+                f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"
+            )
+            yield {
+                "status": "success",
+                "message": f"LoRA adapter '{lora_name}' unloaded successfully",
+                "lora_name": lora_name,
+                "lora_id": lora_id,
+            }
+        except Exception as e:
+            logger.error(f"Failed to unload LoRA adapter: {e}")
+            yield {"status": "error", "message": str(e)}
+
+    async def list_loras(self, request: Optional[Dict[str, Any]] = None):
+        """
+        List all loaded LoRA adapters.
+        Returns a dictionary of lora_name -> lora_id mappings.
+        """
+        try:
+            loras = dict(self.lora_id_for_name)
+            yield {
+                "status": "success",
+                "loras": loras,
+                "count": len(loras),
+            }
+        except Exception as e:
+            logger.error(f"Failed to list LoRA adapters: {e}")
+            yield {"status": "error", "message": str(e)}
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
