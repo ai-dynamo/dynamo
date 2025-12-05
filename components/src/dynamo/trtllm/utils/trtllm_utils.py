@@ -61,6 +61,7 @@ class Config:
         self.dyn_endpoint_types: str = "chat,completions"
         self.store_kv: str = ""
         self.request_plane: str = ""
+        self.connector: Optional[str] = None
 
     def __str__(self) -> str:
         return (
@@ -276,6 +277,13 @@ def cmd_line_args():
         choices=get_reasoning_parser_names(),
         help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
     )
+    parser.add_argument(
+        "--connector",
+        type=str,
+        default=None,
+        choices=["kvbm"],
+        help="Connector to use for the model.",
+    )
     add_config_dump_args(parser)
     parser.add_argument(
         "--custom-jinja-template",
@@ -365,6 +373,7 @@ def cmd_line_args():
     config.dyn_endpoint_types = args.dyn_endpoint_types
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
+    config.connector = args.connector
 
     # Handle custom jinja template path expansion (environment variables and home directory)
     if args.custom_jinja_template:

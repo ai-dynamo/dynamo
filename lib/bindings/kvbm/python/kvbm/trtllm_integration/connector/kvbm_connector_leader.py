@@ -118,6 +118,12 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
         output = RustSchedulerOutput()
 
         for req in scheduler_output.new_requests:
+            if not hasattr(req, "num_scheduled_tokens"):
+                raise ValueError(
+                    """num_scheduled_tokens is not found in the SchedulerOutput!
+                    This indicates you're using an older, unsupported version of TensorRT-LLM.
+                    Are you running at least TRTLLM v1.2.0rc2?"""
+                )
             output.add_new_request(
                 str(req.request_id),
                 req.new_tokens,
@@ -134,6 +140,14 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
                 req.new_block_ids,
                 req.computed_position,
             )
+
+        output.add_num_scheduled_tokens(
+            {
+                str(req.request_id): req.num_scheduled_tokens
+                for req in scheduler_output.new_requests
+                + scheduler_output.cached_requests
+            }
+        )
 
         return self._connector.build_connector_metadata(output)
 
