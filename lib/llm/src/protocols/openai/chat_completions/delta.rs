@@ -216,6 +216,7 @@ impl DeltaGenerator {
     ///
     /// # Returns
     /// * An [`dynamo_async_openai::types::CreateChatCompletionStreamResponse`] instance representing the choice.
+    #[allow(deprecated)]
     pub fn create_choice(
         &mut self,
         index: u32,
@@ -223,23 +224,10 @@ impl DeltaGenerator {
         finish_reason: Option<dynamo_async_openai::types::FinishReason>,
         logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
     ) -> NvCreateChatCompletionStreamResponse {
-        self.build_choice(index, text, finish_reason, logprobs, None)
-    }
-
-    /// Internal method to build a streaming chat completion response with optional tool_calls.
-    #[allow(deprecated)]
-    fn build_choice(
-        &mut self,
-        index: u32,
-        text: Option<String>,
-        finish_reason: Option<dynamo_async_openai::types::FinishReason>,
-        logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
-        tool_calls: Option<Vec<dynamo_async_openai::types::ChatCompletionMessageToolCallChunk>>,
-    ) -> NvCreateChatCompletionStreamResponse {
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
             content: text,
             function_call: None,
-            tool_calls,
+            tool_calls: None,
             role: if self.msg_counter == 0 {
                 Some(dynamo_async_openai::types::Role::Assistant)
             } else {
@@ -372,10 +360,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Create the streaming response.
         let index = 0;
-        let delta_text = delta.text;
-
-        let mut stream_response =
-            self.build_choice(index, delta_text, finish_reason, logprobs, None);
+        let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
 
         // Extract worker_id from disaggregated_params and inject into nvext if present
         if let Some(worker_id_json) = delta
