@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn test_prompt_embeds_only() {
         // Create valid embeddings: > 100 bytes (PyTorch format)
-        let valid_data = vec![0u8; 256]; // 256 bytes
+        let valid_data = vec![0u8; 256];
         let encoded = base64::engine::general_purpose::STANDARD.encode(&valid_data);
 
         let json_str = json!({
@@ -535,7 +535,7 @@ mod tests {
     fn test_both_prompt_and_embeds() {
         // Both fields are allowed, prompt_embeds takes precedence at worker level
         // Create valid embeddings: > 100 bytes (PyTorch format)
-        let valid_data = vec![0u8; 256]; // 256 bytes
+        let valid_data = vec![0u8; 256];
         let encoded = base64::engine::general_purpose::STANDARD.encode(&valid_data);
 
         let json_str = json!({
@@ -617,24 +617,6 @@ mod tests {
     }
 
     #[test]
-    fn test_valid_large_embeddings() {
-        // Create valid embeddings: large enough (>100B, PyTorch format)
-        let valid_data = vec![0u8; 256]; // 256 bytes
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&valid_data);
-
-        let json_str = json!({
-            "model": "test-model",
-            "prompt": "test",
-            "prompt_embeds": encoded
-        });
-
-        let request: NvCreateCompletionRequest =
-            serde_json::from_value(json_str).expect("Failed to deserialize request");
-
-        assert!(ValidateRequest::validate(&request).is_ok());
-    }
-
-    #[test]
     fn test_embeddings_with_empty_prompt() {
         // Test that empty prompt is ALLOWED when embeddings provided
         let valid_data = vec![0u8; 256]; // Valid size and aligned
@@ -651,22 +633,6 @@ mod tests {
 
         // Should succeed - embeddings take precedence, prompt can be empty
         assert!(ValidateRequest::validate(&request).is_ok());
-    }
-
-    #[test]
-    fn test_backward_compatibility_no_embeddings() {
-        // Ensure requests without prompt_embeds still work perfectly
-        let json_str = json!({
-            "model": "test-model",
-            "prompt": "Hello, world!",
-            "max_tokens": 50
-        });
-
-        let request: NvCreateCompletionRequest =
-            serde_json::from_value(json_str).expect("Failed to deserialize request");
-
-        assert!(ValidateRequest::validate(&request).is_ok());
-        assert!(request.inner.prompt_embeds.is_none());
     }
 
     #[test]

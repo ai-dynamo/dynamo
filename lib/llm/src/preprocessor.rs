@@ -199,6 +199,18 @@ impl OpenAIPreprocessor {
         Ok((builder.build()?, annotations))
     }
 
+    /// Update ISL (input sequence length) on the response generator for usage statistics.
+    /// Skips update for embeddings since the worker extracts sequence length from tensor shape.
+    fn maybe_update_isl<G: crate::protocols::ResponseGenerator + ?Sized>(
+        common_request: &PreprocessedRequest,
+        response_generator: &mut G,
+    ) {
+        if common_request.prompt_embeds.is_none() {
+            let isl = common_request.token_ids.len() as u32;
+            response_generator.update_isl(isl);
+        }
+    }
+
     pub fn builder<
         R: OAIChatLikeRequest
             + AnnotationsProvider
@@ -900,14 +912,7 @@ impl
 
         let mut response_generator = Box::new(response_generator);
 
-        // Update ISL only for text prompts
-        // For embeddings, the worker extracts sequence length from tensor shape
-        // and includes it in completion_usage, so we skip update_isl() to avoid
-        // overwriting the worker's correct prompt_tokens value
-        if common_request.prompt_embeds.is_none() {
-            let isl = common_request.token_ids.len() as u32;
-            response_generator.update_isl(isl);
-        }
+        Self::maybe_update_isl(&common_request, response_generator.as_mut());
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);
@@ -1042,29 +1047,19 @@ impl
             // Skip tokenization for embeddings
             builder.token_ids(vec![]); // Empty token IDs
             builder.prompt_embeds(Some(prompt_embeds.clone()));
-
-            // Still gather multimodal data (embeddings can have images/video)
-            self.gather_multi_modal_data(&request, &mut builder).await?;
-
             // No token annotations
             HashMap::new()
         } else {
             // Normal path: tokenize the prompt
-            let annotations = self.gather_tokens(&request, &mut builder, None)?;
-            self.gather_multi_modal_data(&request, &mut builder).await?;
-            annotations
+            self.gather_tokens(&request, &mut builder, None)?
         };
+
+        // Gather multimodal data (works with both embeddings and text prompts)
+        self.gather_multi_modal_data(&request, &mut builder).await?;
 
         let common_request = builder.build()?;
 
-        // Update ISL only for text prompts
-        // For embeddings, the worker extracts sequence length from tensor shape
-        // and includes it in completion_usage, so we skip update_isl() to avoid
-        // overwriting the worker's correct prompt_tokens value
-        if request.inner.prompt_embeds.is_none() {
-            let isl = common_request.token_ids.len() as u32;
-            response_generator.update_isl(isl);
-        }
+        Self::maybe_update_isl(&common_request, response_generator.as_mut());
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);

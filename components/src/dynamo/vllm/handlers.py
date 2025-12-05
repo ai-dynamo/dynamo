@@ -7,9 +7,12 @@ import os
 import tempfile
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict, Final
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, Final
 
-from vllm.inputs import TokensPrompt
+if TYPE_CHECKING:
+    import torch
+
+from vllm.inputs import EmbedsPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -540,6 +543,41 @@ class BaseWorkerHandler(ABC):
             logger.error(f"Failed to decode prompt_embeds: {e}")
             raise ValueError(f"Failed to decode prompt_embeds as PyTorch tensor: {e}")
 
+    def _create_prompt_from_embeddings(
+        self, prompt_embeds_base64: str
+    ) -> tuple["EmbedsPrompt", int, "torch.Tensor"]:
+        """
+        Decode prompt embeddings and create EmbedsPrompt for vLLM.
+
+        Args:
+            prompt_embeds_base64: Base64-encoded PyTorch tensor
+
+        Returns:
+            Tuple of (EmbedsPrompt, sequence_length, tensor) where:
+            - EmbedsPrompt: The vLLM prompt input
+            - sequence_length: Extracted from tensor shape for usage statistics
+            - tensor: The decoded tensor (for logging shape/dtype)
+
+        Raises:
+            ValueError: If decoding fails or tensor is invalid
+        """
+        embeddings_tensor = self._decode_prompt_embeds(prompt_embeds_base64)
+
+        # Extract sequence length from tensor shape for usage reporting
+        # Shape is typically (sequence_length, hidden_dim) or (batch, sequence_length, hidden_dim)
+        if embeddings_tensor.dim() == 2:
+            sequence_length = embeddings_tensor.shape[0]
+        elif embeddings_tensor.dim() == 3:
+            sequence_length = embeddings_tensor.shape[1]
+        else:
+            # Fallback for unexpected shapes
+            sequence_length = embeddings_tensor.shape[0]
+
+        # EmbedsInputs TypedDict has: {type: 'embeds', prompt_embeds: Tensor, cache_salt?: str}
+        prompt = EmbedsPrompt(prompt_embeds=embeddings_tensor)
+
+        return prompt, sequence_length, embeddings_tensor
+
     async def _extract_multimodal_data(
         self, request: Dict[str, Any]
     ) -> Dict[str, Any] | None:
@@ -752,41 +790,24 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         multi_modal_data = await self._extract_multimodal_data(request)
 
         # Check if prompt_embeds is provided (takes precedence over token_ids)
-        # Track embedding sequence length for usage statistics
         embedding_sequence_length = None
 
         if "prompt_embeds" in request and request["prompt_embeds"]:
             try:
-                # Decode embeddings
-                embeddings_tensor = self._decode_prompt_embeds(request["prompt_embeds"])
-
-                # Extract sequence length from tensor shape for usage reporting
-                # Shape is typically (sequence_length, hidden_dim) or (batch, sequence_length, hidden_dim)
-                if embeddings_tensor.dim() == 2:
-                    embedding_sequence_length = embeddings_tensor.shape[0]
-                elif embeddings_tensor.dim() == 3:
-                    embedding_sequence_length = embeddings_tensor.shape[1]
-                else:
-                    # Fallback for unexpected shapes
-                    embedding_sequence_length = embeddings_tensor.shape[0]
-
-                # Use EmbedsPrompt to create the correct input dict for vLLM 0.11.0
-                # EmbedsInputs TypedDict has: {type: 'embeds', prompt_embeds: Tensor, cache_salt?: str}
-                # It does NOT support prompt_token_ids
-                from vllm.inputs import EmbedsPrompt
-
-                prompt = EmbedsPrompt(prompt_embeds=embeddings_tensor)
+                (
+                    prompt,
+                    embedding_sequence_length,
+                    tensor,
+                ) = self._create_prompt_from_embeddings(request["prompt_embeds"])
                 logger.info(
-                    f"Using prompt embeddings: shape={embeddings_tensor.shape}, "
-                    f"dtype={embeddings_tensor.dtype}, sequence_length={embedding_sequence_length}, "
+                    f"Using prompt embeddings: shape={tensor.shape}, "
+                    f"dtype={tensor.dtype}, sequence_length={embedding_sequence_length}, "
                     f"request_id={request_id}"
                 )
             except Exception as e:
                 logger.error(
                     f"Failed to process prompt_embeds for request {request_id}: {e}"
                 )
-                # Use string format "error: message" for consistency with vLLM's string-based finish_reason
-                # Rust will parse this into FinishReason::Error(message)
                 yield {
                     "finish_reason": f"error: Invalid prompt_embeds: {e}",
                     "token_ids": [],
@@ -898,41 +919,24 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         multi_modal_data = await self._extract_multimodal_data(request)
 
         # Check if prompt_embeds is provided (takes precedence over token_ids)
-        # Track embedding sequence length for usage statistics
         embedding_sequence_length = None
 
         if "prompt_embeds" in request and request["prompt_embeds"]:
             try:
-                # Decode embeddings
-                embeddings_tensor = self._decode_prompt_embeds(request["prompt_embeds"])
-
-                # Extract sequence length from tensor shape for usage reporting
-                # Shape is typically (sequence_length, hidden_dim) or (batch, sequence_length, hidden_dim)
-                if embeddings_tensor.dim() == 2:
-                    embedding_sequence_length = embeddings_tensor.shape[0]
-                elif embeddings_tensor.dim() == 3:
-                    embedding_sequence_length = embeddings_tensor.shape[1]
-                else:
-                    # Fallback for unexpected shapes
-                    embedding_sequence_length = embeddings_tensor.shape[0]
-
-                # Use EmbedsPrompt to create the correct input dict for vLLM 0.11.0
-                # EmbedsInputs TypedDict has: {type: 'embeds', prompt_embeds: Tensor, cache_salt?: str}
-                # It does NOT support prompt_token_ids
-                from vllm.inputs import EmbedsPrompt
-
-                prompt = EmbedsPrompt(prompt_embeds=embeddings_tensor)
+                (
+                    prompt,
+                    embedding_sequence_length,
+                    tensor,
+                ) = self._create_prompt_from_embeddings(request["prompt_embeds"])
                 logger.info(
-                    f"Prefill using prompt embeddings: shape={embeddings_tensor.shape}, "
-                    f"dtype={embeddings_tensor.dtype}, sequence_length={embedding_sequence_length}, "
+                    f"Prefill using prompt embeddings: shape={tensor.shape}, "
+                    f"dtype={tensor.dtype}, sequence_length={embedding_sequence_length}, "
                     f"request_id={request_id}"
                 )
             except Exception as e:
                 logger.error(
                     f"Failed to process prompt_embeds for prefill request {request_id}: {e}"
                 )
-                # Use string format "error: message" for consistency with vLLM's string-based finish_reason
-                # Rust will parse this into FinishReason::Error(message)
                 yield {
                     "finish_reason": f"error: Invalid prompt_embeds: {e}",
                     "token_ids": [],
@@ -941,9 +945,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 return
         else:
             # Normal path: use token IDs
-            token_ids = request["token_ids"]
             prompt = TokensPrompt(
-                prompt_token_ids=token_ids, multi_modal_data=multi_modal_data
+                prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
             )
 
         # Build sampling params from request using shared utility

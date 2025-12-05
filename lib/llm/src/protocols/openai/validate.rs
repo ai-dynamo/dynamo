@@ -496,8 +496,7 @@ pub fn validate_prompt_embeds(prompt_embeds: Option<&str>) -> Result<(), anyhow:
         const MIN_SIZE: usize = 100;
         if decoded.len() < MIN_SIZE {
             anyhow::bail!(
-                "prompt_embeds decoded data must be at least {} bytes, got {} bytes",
-                MIN_SIZE,
+                "prompt_embeds decoded data must be at least {MIN_SIZE} bytes, got {} bytes",
                 decoded.len()
             );
         }
