@@ -174,15 +174,11 @@ jobs:
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
           push_tag: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
-          # push_tag: ai-dynamo/dynamo:main-vllm-${{ matrix.platform.arch }}
-          # OPS-1145: Switch aws_push to true
-          aws_push: 'true'
+          aws_push: ${{ github.ref_name == 'main' && 'true' || 'false' }}
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
       - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
@@ -238,16 +234,12 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:main-sglang-${{ matrix.platform.arch }}
-          # push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
-          # OPS-1145: Switch aws_push to true
-          aws_push: 'true'
+          push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
+          aws_push: ${{ github.ref_name == 'main' && 'true' || 'false' }}
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
       - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
@@ -304,14 +296,11 @@ jobs:
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
           push_tag: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
-          # OPS-1145: Switch aws_push to true
-          aws_push: 'true'
+          aws_push: ${{ github.ref_name == 'main' && 'true' || 'false' }}
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
       - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
