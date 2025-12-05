@@ -10,9 +10,9 @@ ARG BASE_IMAGE_TAG
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 
-ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
-ARG CUDA_VERSION="12.9"
+ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+ARG RUNTIME_IMAGE_TAG="25.10-cuda13.0-runtime-ubuntu24.04"
+ARG CUDA_VERSION="13.0"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
 ARG VLLM_REF="v0.12.0"
@@ -188,8 +188,8 @@ COPY --from=base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
 COPY --from=base /usr/local/cuda/include/ /usr/local/cuda/include/
 COPY --from=base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
 COPY --from=base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
-RUN ln -s /usr/local/cuda/lib64/libcublas.so.12 /usr/local/cuda/lib64/libcublas.so
-RUN ln -s /usr/local/cuda/lib64/libcublasLt.so.12 /usr/local/cuda/lib64/libcublasLt.so
+RUN ln -s /usr/local/cuda/lib64/libcublas.so.13 /usr/local/cuda/lib64/libcublas.so
+RUN ln -s /usr/local/cuda/lib64/libcublasLt.so.13 /usr/local/cuda/lib64/libcublasLt.so
 
 # DeepGemm runs nvcc for JIT kernel compilation, however the CUDA include path
 # is not properly set for complilation. Set CPATH to help nvcc find the headers.
@@ -234,9 +234,10 @@ RUN apt-get update && \
         ninja-build \
         g++ \
         # prometheus dependencies
-        ca-certificates \
-        # DeepGemm uses 'cuobjdump' which does not come with CUDA image
-        cuda-command-line-tools-12-9 && \
+        ca-certificates &&\
+        # DeepGemm uses 'cuobjdump' which does not come with vanillay CUDA image
+        # cuda-command-line-tools-12-9 && \
+        # cuda-cuobjdump-13-0 is pre-installed in nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-runtime-ubuntu24.04
     rm -rf /var/lib/apt/lists/*
 
 USER dynamo
@@ -272,12 +273,12 @@ COPY --chown=dynamo: benchmarks/ /workspace/benchmarks/
 # Install dynamo, NIXL, and dynamo-specific dependencies
 ARG ENABLE_KVBM
 COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
-RUN uv pip install \
+RUN uv pip install --no-cache \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
       /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && if [ "${ENABLE_KVBM}" = "true" ]; then \
-        uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
+        uv pip install --no-cache /opt/dynamo/wheelhouse/kvbm*.whl; \
        fi \
     && cd /workspace/benchmarks \
     && UV_GIT_LFS=1 uv pip install --no-cache .
