@@ -10,6 +10,18 @@ use crate::kv_router::RouterConfigOverride;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct BootstrapInfo {
+    /// The host address for bootstrap connection
+    pub bootstrap_host: String,
+
+    /// The port for bootstrap connection
+    pub bootstrap_port: u16,
+
+    /// Unique room ID for this request's KV transfer session
+    pub bootstrap_room: u64,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PrefillResult {
     /// Disaggregated execution parameters
@@ -86,6 +98,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_result: Option<PrefillResult>,
+
+    /// Bootstrap info for disaggregated serving
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_info: Option<BootstrapInfo>,
 
     /// Data parallel rank for the request (used with data parallelism)
     #[builder(default)]
