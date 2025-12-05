@@ -1041,7 +1041,9 @@ impl Annotated {
 
     fn error_message(&self) -> Option<String> {
         if self.inner.is_error() {
-            if let Some(comment) = &self.inner.comment && !comment.is_empty() {
+            if let Some(comment) = &self.inner.comment
+                && !comment.is_empty()
+            {
                 return Some(comment.join("; "));
             }
             return Some("unknown error".to_string());
