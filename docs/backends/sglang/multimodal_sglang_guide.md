@@ -298,6 +298,7 @@ Supported templates: `qwen2-vl`, `llama-3`, `vicuna`, etc.
 - **No audio support** - No audio encoder implementation
 - **Only Processor registers with Dynamo** - Workers are internal components, frontend routes to Processor only
 - **Disaggregated routing** - Decode Worker is the entry point (calls Prefill), cannot route directly to Prefill workers
+- **Limited model generalization** - Token expansion logic is model-specific; adding new models may require implementation updates
 
 ## Supported Models
 
