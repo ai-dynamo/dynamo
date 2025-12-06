@@ -24,6 +24,10 @@ inputs:
     description: 'Platform architecture (amd64, arm64)'
     required: false
     default: 'amd64'
+  dry_run:
+    description: 'Run pytest in dry-run mode (collect tests only, do not execute)'
+    required: false
+    default: 'false'
 
 
 runs:
@@ -54,21 +58,32 @@ runs:
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
 
-        # Detect GPU availability and conditionally add GPU flags
-        GPU_FLAGS=""
-        if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
-          echo "GPU detected, enabling GPU runtime"
-          GPU_FLAGS="--runtime=nvidia --gpus all"
+        # Determine docker runtime flags and pytest command based on dry_run mode
+        if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+          echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
+          GPU_FLAGS=""
+          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
-          echo "No GPU detected, running in CPU-only mode"
+          echo "🚀 Running pytest in normal mode"
+          PYTEST_CMD="pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
+
+          # Detect GPU availability and conditionally add GPU flags
+          GPU_FLAGS=""
+          if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
+            echo "✓ GPU detected, enabling GPU runtime"
+            GPU_FLAGS="--runtime=nvidia --gpus all"
+          else
+            echo "⚠️  No GPU detected, running in CPU-only mode"
+          fi
         fi
 
-        docker run ${GPU_FLAGS} --rm -w /workspace \
+        # Run without --rm so we can copy results even if container crashes (example SIGSEGV exit 139)
+        docker run ${GPU_FLAGS} -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \
           ${{ inputs.image_tag }} \
-          bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          bash -c "mkdir -p /workspace/test-results && ${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
@@ -91,6 +106,13 @@ runs:
         # Remove commas and spaces from test_type for use in filenames
         STR_TEST_TYPE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
         echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
+
+        # Skip XML processing if in dry-run mode
+        if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+          echo "✅ Dry-run mode: Test collection completed"
+          echo "⏭️  No JUnit XML generated (dry-run mode)"
+          exit 0
+        fi
 
         # Check for JUnit XML file and determine test status
         JUNIT_FILE="test-results/pytest_test_report.xml"
@@ -133,7 +155,7 @@ runs:
 
     - name: Upload Test Results
       uses: actions/upload-artifact@v4
-      if: always()  # Always upload test results, even if tests failed
+      if: always() && inputs.dry_run != 'true'  # Skip upload in dry-run mode
       with:
         name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}
         path: |
