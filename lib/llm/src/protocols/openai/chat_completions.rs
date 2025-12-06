@@ -12,7 +12,7 @@ use super::{
     common_ext::{CommonExt, CommonExtProvider},
     nvext::NvExt,
     nvext::NvExtProvider,
-    validate,
+    tools, validate,
 };
 
 pub mod aggregator;
@@ -159,8 +159,24 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
     }
 
     /// Guided Decoding Options
-    fn get_guided_json(&self) -> Option<&serde_json::Value> {
-        self.common.guided_json.as_ref()
+    fn get_guided_json(&self) -> Option<serde_json::Value> {
+        if let Some(value) = self.common.guided_json.clone() {
+            return Some(value);
+        }
+
+        let tool_choice = self.inner.tool_choice.as_ref()?;
+        let tools = self.inner.tools.as_deref()?;
+
+        match tools::get_json_schema_from_tools(Some(tool_choice), Some(tools)) {
+            Ok(schema) => schema,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "failed to derive guided_json from tool_choice"
+                );
+                None
+            }
+        }
     }
 
     fn get_guided_regex(&self) -> Option<String> {
