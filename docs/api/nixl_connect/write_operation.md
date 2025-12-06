@@ -39,7 +39,7 @@ Cancellation is handled asynchronously.
     ) -> None:
       descriptor = dynamo.nixl_connect.Descriptor(local_tensor)
 
-      with self.connector.begin_write(descriptor, remote_metadata) as write_op:
+      with await self.connector.begin_write(descriptor, remote_metadata) as write_op:
         # Wait for the operation to complete writing local_tensor to the remote worker.
         await write_op.wait_for_completion()
 ```

@@ -332,7 +332,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     connector = None
     logging.info("Initializing NIXL Connect.")
     connector = nixl_connect.Connector()
-    await connector.initialize()
 
     dump_config(
         config.dump_config_to, {"engine_args": engine_args, "dynamo_args": config}
