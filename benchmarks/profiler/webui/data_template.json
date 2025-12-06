@@ -1,0 +1,98 @@
+{
+    "settings": {
+        "allow_confirm_datapoint": true,
+        "hide_show_config": true
+    },
+    "prefill": {
+        "chart": {
+            "labels": [],
+            "datasets": [
+                {
+                    "label": "Prefill Performance",
+                    "data": [],
+                    "backgroundColor": "#1f77b4",
+                    "borderColor": "#1f77b4"
+                }
+            ],
+            "target_line": {
+                "value": 0.0,
+                "label": "Target TTFT: ? ms"
+            },
+            "axes": {
+                "x": {
+                    "title": "Time to First Token (ms)",
+                    "min": 0
+                },
+                "y": {
+                    "title": "Prefill Throughput per GPU (tokens/s/GPU)",
+                    "min": 0
+                }
+            }
+        },
+        "table": {
+            "columns": [
+                "GPUs",
+                "TTFT (ms)",
+                "Throughput (tokens/s/GPU)",
+                "Action"
+            ],
+            "data": []
+        }
+    },
+    "decode": {
+        "chart": {
+            "datasets": [],
+            "target_line": {
+                "value": 0.0,
+                "label": "Target ITL: ? ms"
+            },
+            "axes": {
+                "x": {
+                    "title": "Inter Token Latency (ms)",
+                    "min": 0
+                },
+                "y": {
+                    "title": "Decode Throughput per GPU (tokens/s/GPU)",
+                    "min": 0
+                }
+            }
+        },
+        "table": {
+            "columns": [
+                "GPUs",
+                "ITL (ms)",
+                "Throughput (tokens/s/GPU)",
+                "Action"
+            ],
+            "data": []
+        }
+    },
+    "cost": {
+        "chart": {
+            "datasets": [],
+            "axes": {
+                "x": {
+                    "title": "Tokens per User",
+                    "min": 0
+                },
+                "y": {
+                    "title": "Cost ($)",
+                    "min": 0
+                }
+            },
+            "title": "Cost Per 1000 ? requests"
+        },
+        "table": {
+            "columns": [
+                "TTFT (ms)",
+                "Prefill Thpt (tokens/s/GPU)",
+                "ITL (ms)",
+                "Decode Thpt (tokens/s/GPU)",
+                "Tokens/User",
+                "Cost ($)",
+                "Action"
+            ],
+            "data": []
+        }
+    }
+}
