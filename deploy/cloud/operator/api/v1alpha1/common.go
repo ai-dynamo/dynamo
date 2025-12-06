@@ -53,12 +53,20 @@ type VolumeMount struct {
 	UseAsCompilationCache bool `json:"useAsCompilationCache,omitempty"`
 }
 
+// Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
+// with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+// for migration guidance. This field will be removed in a future API version.
 type Autoscaling struct {
-	Enabled     bool                                           `json:"enabled,omitempty"`
-	MinReplicas int                                            `json:"minReplicas,omitempty"`
-	MaxReplicas int                                            `json:"maxReplicas,omitempty"`
-	Behavior    *autoscalingv2.HorizontalPodAutoscalerBehavior `json:"behavior,omitempty"`
-	Metrics     []autoscalingv2.MetricSpec                     `json:"metrics,omitempty"`
+	// Deprecated: This field is ignored.
+	Enabled bool `json:"enabled,omitempty"`
+	// Deprecated: This field is ignored.
+	MinReplicas int `json:"minReplicas,omitempty"`
+	// Deprecated: This field is ignored.
+	MaxReplicas int `json:"maxReplicas,omitempty"`
+	// Deprecated: This field is ignored.
+	Behavior *autoscalingv2.HorizontalPodAutoscalerBehavior `json:"behavior,omitempty"`
+	// Deprecated: This field is ignored.
+	Metrics []autoscalingv2.MetricSpec `json:"metrics,omitempty"`
 }
 
 type SharedMemorySpec struct {

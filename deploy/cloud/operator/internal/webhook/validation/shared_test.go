@@ -41,11 +41,6 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			name: "valid spec with all fields",
 			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				Replicas: &validReplicas,
-				Autoscaling: &nvidiacomv1alpha1.Autoscaling{
-					Enabled:     true,
-					MinReplicas: 1,
-					MaxReplicas: 10,
-				},
 				Ingress: &nvidiacomv1alpha1.IngressSpec{
 					Enabled: true,
 					Host:    "example.com",
@@ -76,44 +71,6 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			fieldPath: "spec",
 			wantErr:   true,
 			errMsg:    "spec.replicas must be non-negative",
-		},
-		{
-			name: "autoscaling minReplicas too low",
-			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				Autoscaling: &nvidiacomv1alpha1.Autoscaling{
-					Enabled:     true,
-					MinReplicas: 0,
-					MaxReplicas: 10,
-				},
-			},
-			fieldPath: "spec",
-			wantErr:   true,
-			errMsg:    "spec.autoscaling.minReplicas must be >= 1",
-		},
-		{
-			name: "autoscaling maxReplicas less than minReplicas",
-			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				Autoscaling: &nvidiacomv1alpha1.Autoscaling{
-					Enabled:     true,
-					MinReplicas: 5,
-					MaxReplicas: 3,
-				},
-			},
-			fieldPath: "spec",
-			wantErr:   true,
-			errMsg:    "spec.autoscaling.maxReplicas must be > minReplicas",
-		},
-		{
-			name: "autoscaling disabled - no validation",
-			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				Autoscaling: &nvidiacomv1alpha1.Autoscaling{
-					Enabled:     false,
-					MinReplicas: 0,
-					MaxReplicas: 0,
-				},
-			},
-			fieldPath: "spec",
-			wantErr:   false,
 		},
 		{
 			name: "ingress enabled without host",

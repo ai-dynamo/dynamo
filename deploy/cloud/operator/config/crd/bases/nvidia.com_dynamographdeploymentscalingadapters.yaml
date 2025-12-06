@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.4
+    helm.sh/resource-policy: keep
+  name: dynamographdeploymentscalingadapters.nvidia.com
+spec:
+  group: nvidia.com
+  names:
+    kind: DynamoGraphDeploymentScalingAdapter
+    listKind: DynamoGraphDeploymentScalingAdapterList
+    plural: dynamographdeploymentscalingadapters
+    shortNames:
+      - dgdsa
+    singular: dynamographdeploymentscalingadapter
+  scope: Namespaced
+  versions:
+    - additionalPrinterColumns:
+        - description: DynamoGraphDeployment name
+          jsonPath: .spec.dgdRef.name
+          name: DGD
+          type: string
+        - description: Service name
+          jsonPath: .spec.dgdRef.serviceName
+          name: SERVICE
+          type: string
+        - description: Current replicas
+          jsonPath: .status.replicas
+          name: REPLICAS
+          type: integer
+        - jsonPath: .metadata.creationTimestamp
+          name: AGE
+          type: date
+      name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: |-
+            DynamoGraphDeploymentScalingAdapter provides a scaling interface for individual services
+            within a DynamoGraphDeployment. It implements the Kubernetes scale
+            subresource, enabling integration with HPA, KEDA, and custom autoscalers.
+
+            The adapter acts as an intermediary between autoscalers and the DGD,
+            ensuring that only the adapter controller modifies the DGD's service replicas.
+            This prevents conflicts when multiple autoscaling mechanisms are in play.
+          properties:
+            apiVersion:
+              description: |-
+                APIVersion defines the versioned schema of this representation of an object.
+                Servers should convert recognized schemas to the latest internal value, and
+                may reject unrecognized values.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+              type: string
+            kind:
+              description: |-
+                Kind is a string value representing the REST resource this object represents.
+                Servers may infer this from the endpoint the client submits requests to.
+                Cannot be updated.
+                In CamelCase.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: DynamoGraphDeploymentScalingAdapterSpec defines the desired state of DynamoGraphDeploymentScalingAdapter
+              properties:
+                dgdRef:
+                  description: DGDRef references the DynamoGraphDeployment and the specific service to scale.
+                  properties:
+                    name:
+                      description: Name of the DynamoGraphDeployment
+                      minLength: 1
+                      type: string
+                    serviceName:
+                      description: ServiceName is the key name of the service within the DGD's spec.services map to scale
+                      minLength: 1
+                      type: string
+                  required:
+                    - name
+                    - serviceName
+                  type: object
+                replicas:
+                  description: |-
+                    Replicas is the desired number of replicas for the target service.
+                    This field is modified by external autoscalers (HPA/KEDA/Planner) or manually by users.
+                  format: int32
+                  minimum: 0
+                  type: integer
+              required:
+                - dgdRef
+                - replicas
+              type: object
+            status:
+              description: DynamoGraphDeploymentScalingAdapterStatus defines the observed state of DynamoGraphDeploymentScalingAdapter
+              properties:
+                lastScaleTime:
+                  description: LastScaleTime is the last time the adapter scaled the target service.
+                  format: date-time
+                  type: string
+                replicas:
+                  description: |-
+                    Replicas is the current number of replicas for the target service.
+                    This is synced from the DGD's service replicas and is required for the scale subresource.
+                  format: int32
+                  type: integer
+                selector:
+                  description: |-
+                    Selector is a label selector string for the pods managed by this adapter.
+                    Required for HPA compatibility via the scale subresource.
+                  type: string
+              type: object
+          type: object
+      served: true
+      storage: true
+      subresources:
+        scale:
+          labelSelectorPath: .status.selector
+          specReplicasPath: .spec.replicas
+          statusReplicasPath: .status.replicas
+        status: {}

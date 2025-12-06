@@ -77,12 +77,13 @@ spec:
                     (such as Pod, Service, and Ingress when applicable).
                   type: object
                 autoscaling:
-                  description: Autoscaling config for this component (replica range, target utilization, etc.).
+                  description: |-
+                    Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
+                    with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+                    for migration guidance. This field will be removed in a future API version.
                   properties:
                     behavior:
-                      description: |-
-                        HorizontalPodAutoscalerBehavior configures the scaling behavior of the target
-                        in both Up and Down directions (scaleUp and scaleDown fields respectively).
+                      description: 'Deprecated: This field is ignored.'
                       properties:
                         scaleDown:
                           description: |-
@@ -231,10 +232,13 @@ spec:
                           type: object
                       type: object
                     enabled:
+                      description: 'Deprecated: This field is ignored.'
                       type: boolean
                     maxReplicas:
+                      description: 'Deprecated: This field is ignored.'
                       type: integer
                     metrics:
+                      description: 'Deprecated: This field is ignored.'
                       items:
                         description: |-
                           MetricSpec specifies how to scale based on a single metric
@@ -665,6 +669,7 @@ spec:
                         type: object
                       type: array
                     minReplicas:
+                      description: 'Deprecated: This field is ignored.'
                       type: integer
                   type: object
                 backendFramework:
