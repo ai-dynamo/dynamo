@@ -17,7 +17,7 @@ limitations under the License.
 
 # vLLM Multimodal Guide
 
-This document provides a comprehensive guide for multimodal inference using vLLM backend in Dynamo.
+This document provides a comprehensive guide for multimodal inference using vLLM backend in Dynamo. For more details on the multimodal examples, see [Multimodal Examples Documentation](./multimodal.md).
 
 ## Multimodal Support Matrix
 
@@ -197,15 +197,21 @@ await register_llm(
 | EP->D Disaggregated (Llama 4) | [`examples/backends/vllm/launch/disagg_multimodal_llama.sh`](../../../examples/backends/vllm/launch/disagg_multimodal_llama.sh) | ✅ Yes | Prefill → Decode (KV cache) |
 
 
-## **GAPS and Known Limitations**
+## Known Limitations
 
-### 1. Token-Based P->D Disaggregation Not Supported
+- **Disaggregated flows require Python Processor** - All multimodal disaggregation requires the Python Processor component (`ModelInput.Text`).
 
-**Current State:**
-- All disaggregated multimodal flows require the **Processor** component (which uses `ModelInput.Text`)
-- No support for pure token-based P->D disaggregation without multimodal processor
+## Supported Models
 
-### Key Files
+The following models have been tested with Dynamo's vLLM multimodal backend:
+
+- **Qwen2.5-VL** - `Qwen/Qwen2.5-VL-7B-Instruct`
+- **LLaVA 1.5** - `llava-hf/llava-1.5-7b-hf`
+- **Llama 4 Maverick** - `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8
+- **LLa Next Video** - `llava-hf/LLaVA-NeXT-Video-7B-hf`
+- **Qwen2-Audio** - `Qwen/Qwen2-Audio-7B-Instruct`
+
+## Key Files
 
 | File | Description |
 |------|-------------|

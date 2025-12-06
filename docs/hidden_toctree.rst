@@ -50,7 +50,6 @@
    backends/trtllm/llama4_plus_eagle.md
    backends/trtllm/kv-cache-transfer.md
    backends/trtllm/multimodal_support.md
-   backends/trtllm/multimodal_epd.md
    backends/trtllm/multimodal_trtllm_guide.md
    backends/trtllm/gemma3_sliding_window_attention.md
    backends/trtllm/gpt-oss.md
