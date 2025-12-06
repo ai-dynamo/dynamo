@@ -261,7 +261,7 @@ await register_llm(
 
 ## Supported Models
 
-Multimodal models listed in [TensorRT-LLM supported models](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/inputs/utils.py#L221) are supported by Dynamo.
+Multimodal models listed in [TensorRT-LLM supported models](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/models/supported-models.md) are supported by Dynamo.
 
 Common examples:
 - Llama 4 Vision models (Maverick, Scout)
