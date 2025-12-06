@@ -1,26 +1,136 @@
 ## Dynamo KV Block Manager Kernels
 
+### Overview
+
+In LLM inference, we cache attention keys and values (KV cache) to avoid
+recomputing them for each token. Different serving frameworks store this cache
+in different memory layouts, and converting between them on CPU is prohibitively
+slow for production workloads.
+
+This workspace provides high-performance CUDA kernels that convert KV cache data
+between three layouts **directly on the GPU**, enabling efficient interoperability
+between vLLM, TensorRT-LLM, and Dynamo's storage format.
+
+**The Problem**: vLLM generates cache as 64 separate GPU allocations (32 layers × 2 for K/V),
+TensorRT-LLM wants one flat buffer, and Dynamo's storage needs a format that works
+across different tensor parallelism configurations. Copying to CPU, rearranging in
+Python, and copying back would add seconds of latency per request.
+
+**The Solution**: These CUDA kernels perform all conversions directly in GPU memory,
+typically completing in microseconds instead of seconds.
+
+---
+
+### Dimension Reference
+
+Before diving into layouts, here's what each dimension represents:
+
+- **nl** = number of layers (e.g., 32 for Llama-70B)
+- **no** = number of outer chunks (typically 2: one for keys, one for values)
+- **nh** = number of attention heads (e.g., 32 or 64 heads)
+- **nt** = number of tokens per block (e.g., 128 or 256 tokens)
+- **hd** = head dimension (e.g., 128 for most models)
+
+For a 32-layer model with 32 heads and 128-element head dimension, a single
+128-token block contains: **32 layers × 2 (K/V) × 32 heads × 128 tokens × 128 dims
+= 33.5 million float16 values = 67 MB**.
+
+---
+
+### The Three Layouts
+
 This workspace houses CUDA + Rust + Python tooling for shuttling attention
 blocks between three commonly used layouts:
 
-1. **Stacked NHD / HND blocks** – `nl * no` tensors per block, each shaped
-   `[nt, nh, hd]` (NHD) or `[nh, nt, hd]` (HND).
-   - primarily used by vLLM
-2. **Operational blocks** – flattened buffers shaped `[nl, no, inner]`,
-   where `inner = nt * nh * hd`.
-   - primarily used by TensorRT LLM
-   - used by Dynamo's KVBM for non-device storage when no adjustments to
-     the layout is need to translate to/from different TP world sizes
-3. **Universal blocks** – contiguous buffers shaped `[nh, nl, no, nt, hd]`.
-   - move the head dimension to the front
-   - excellent format for storage blocks that can be used by different tp
-     world sizes by scattering/gathering on slices of the leading dimension
-     allowing for large contiguous transfers.
+#### 1. Stacked NHD / HND blocks (vLLM's format)
+
+**Structure**: `nl * no` separate GPU memory allocations per block
+**Each allocation**: `[nt, nh, hd]` (NHD) or `[nh, nt, hd]` (HND)
+
+**Example** (32 layers, 128 tokens, 32 heads, 128 head_dim):
+```
+64 separate pointers:
+  Layer 0, Keys   → GPU buffer at ptr[0]:  [128, 32, 128]
+  Layer 0, Values → GPU buffer at ptr[1]:  [128, 32, 128]
+  Layer 1, Keys   → GPU buffer at ptr[2]:  [128, 32, 128]
+  ...
+  Layer 31, Values → GPU buffer at ptr[63]: [128, 32, 128]
+```
+
+**Why?** vLLM processes attention layer-by-layer and benefits from having
+each layer's K/V in separate allocations for efficient memory management.
+
+#### 2. Operational blocks (TensorRT-LLM's format)
+
+**Structure**: Single contiguous GPU buffer per block
+**Shape**: `[nl, no, inner]` where `inner = nt * nh * hd`
+
+**Example** (same 32-layer model):
+```
+1 contiguous buffer: [32, 2, 524288]
+  where 524288 = 128 tokens × 32 heads × 128 head_dim
+
+All data packed: [L0_K | L0_V | L1_K | L1_V | ... | L31_V]
+```
+
+**Why?** TensorRT-LLM treats blocks as opaque blobs and doesn't need the
+internal structure exposed. Single contiguous buffers enable efficient bulk
+memory operations and DMA transfers. Also used by Dynamo when no TP
+resharding is needed.
+
+#### 3. Universal blocks (Dynamo's storage format)
+
+**Structure**: Single contiguous GPU buffer per block
+**Shape**: `[nh, nl, no, nt, hd]` (heads in the outermost dimension)
+
+**Example** (same 32-layer model):
+```
+1 contiguous buffer: [32, 32, 2, 128, 128]
+
+Data organized with heads first:
+  [Head_0 data | Head_1 data | ... | Head_31 data]
+```
+
+**Why?** The head dimension is outermost to support **tensor parallelism (TP)
+resharding**. With 32 heads:
+- TP=4 setup: slice `[0:8, ...]`, `[8:16, ...]`, `[16:24, ...]`, `[24:32, ...]`
+- TP=8 setup: slice `[0:4, ...]`, `[4:8, ...]`, etc.
+
+Cache saved from a TP=4 run can be loaded into a TP=8 deployment (or vice versa)
+by simply slicing the head dimension differently. This enables **efficient KV
+cache transfer between deployments with different parallelism configurations**.
 
 All kernels are batch aware: a single launch can process `nb` blocks by
 walking flattened pointer tables that the host code prepares ahead of time.
 Bindings are provided for both Rust and PyTorch so you can slot the kernels
 into existing pipelines without living in CUDA all day.
+
+---
+
+### Example: Cross-Framework KV Cache Transfer
+
+Here's how these kernels enable efficient KV cache sharing between frameworks:
+
+```
+1. vLLM generates KV cache during inference
+   Format: Stacked NHD (64 pointers per block)
+
+2. Save to Dynamo storage:
+   kernel: block_to_universal(NHD → Universal)
+   Result: Single buffer per block, head dimension first
+
+3. Later, load into TensorRT-LLM (different TP config):
+   kernel: universal_to_operational(Universal → Operational)
+   Result: Single flat buffer ready for TRT-LLM
+
+Alternative: Direct vLLM → TRT-LLM conversion
+   kernel: block_to_operational(NHD → Operational)
+   Bypasses storage format entirely
+```
+
+**Performance**: These conversions typically complete in **microseconds** on modern
+GPUs (A100/H100), compared to **seconds** for CPU-based approaches. For a 70B model
+with 128 blocks, that's the difference between 50μs and 5s of added latency per request.
 
 ---
 
@@ -48,12 +158,11 @@ into existing pipelines without living in CUDA all day.
 ├── Cargo.toml              # Rust lib/bin targets
 ├── build.rs                # NVCC build script (sm80+sm90 by default)
 ├── cuda/
-│   └── tensor_kernels.cu   # Batched CUDA kernels + memcpy fallback
+│   ├── tensor_kernels.cu   # Batched CUDA kernels + memcpy fallback
+│   └── prebuilt/           # Prebuilt .fatbin files with MD5 checksums
 ├── src/
 │   ├── lib.rs              # Rust facade for the kernels
-│   ├── main.rs             # Legacy cudaMemcpyBatchAsync demo (bin)
 │   └── tensor_kernels.rs   # FFI wrappers + integration tests
-└── run.sh / Dockerfile     # Optional CUDA 12.9 container harness
 ```
 
 > **Note:** Python bindings (`python.rs`) and tests have been moved to
@@ -61,17 +170,38 @@ into existing pipelines without living in CUDA all day.
 
 ---
 
-### Building the CUDA Library
+### Development Environment
 
-The CUDA code is compiled via `nvcc` in `build.rs`. Supported architectures
-default to `sm_80` (Ampere) and `sm_90` (Hopper). Override with `CUDA_ARCHS`
-for broader compatibility:
+The recommended way to develop the CUDA kernels is using the **Dynamo dev container**,
+which includes all necessary CUDA development tools (`nvcc`, `nvlink`, headers, etc.).
+
+#### Using the Dev Container
 
 ```bash
-# Default build (sm_80, sm_90)
+# From the repository root
+# Open in VS Code with Dev Container extension, or:
+cd .devcontainer/vllm
+# Follow instructions in .devcontainer/README.md
+```
+
+The dev container includes:
+- ✅ CUDA 12.9 toolkit with full development tools
+- ✅ Rust toolchain
+- ✅ Python + PyTorch + vLLM
+- ✅ All necessary build dependencies
+
+#### Building the CUDA Library
+
+From within the dev container (or with local CUDA toolkit installed):
+
+```bash
+# Navigate to kernels directory
+cd lib/kvbm-kernels
+
+# Default build (sm_80, sm_90) - uses prebuilt kernels if nvcc not found
 cargo build
 
-# Broader compatibility across GPU generations
+# Build from source with broader GPU compatibility
 CUDA_ARCHS="80,86,89,90,100" cargo build
 
 # Common architectures:
@@ -82,20 +212,40 @@ CUDA_ARCHS="80,86,89,90,100" cargo build
 # 100 = Blackwell (B100, B200, GB200)
 ```
 
-> **Prerequisites**
-> - CUDA 12.1+ toolkit on PATH
-> - `nvcc` and compatible driver
-> - Rust stable (1.70+) with `cargo`
-
-For rapid iteration without the Python bindings:
+#### Running Tests
 
 ```bash
+# Quick syntax check
 cargo check
+
+# Run integration tests
+cargo test
+
+# Run specific test with output
 cargo test fused_copy_roundtrip -- --nocapture
 ```
 
 The unit test synthesizes two blocks on-device, exercises every conversion
 path (block ⇄ universal ⇄ operational), and asserts lossless round-trips.
+
+#### Prebuilt Kernels
+
+By default, the build system uses prebuilt `.fatbin` files from `cuda/prebuilt/`
+if `nvcc` is not available. To force building from source:
+
+```bash
+# Disable prebuilt kernels
+export DYNAMO_USE_PREBUILT_KERNELS=false
+cargo build
+```
+
+After modifying CUDA source, regenerate prebuilt kernels and update checksums:
+
+```bash
+# This rebuilds tensor_kernels.cu and updates MD5 hashes
+cargo build --release
+# Commit the updated cuda/prebuilt/tensor_kernels.{fatbin,md5}
+```
 
 ---
 
@@ -146,24 +296,6 @@ shapes and be contiguous in those shapes. The bindings validate shapes/dtypes, s
 pointer tables on-device, and launch the appropriate CUDA kernel.
 
 ---
-
-### Docker Workflow (Optional)
-
-Need a reproducible environment? The repo includes a CUDA 12.9 container that
-installs Rust and builds the project.
-
-```bash
-# Build and run the demo binary inside the container
-./run.sh
-
-# Or build manually
-# Or build manually
-docker build -t kvbm-kernels .
-docker run --rm --gpus all kvbm-kernels
-```
-
-To develop interactively with Python, extend the Dockerfile with your preferred
-Python distribution and PyTorch wheel.
 
 ---
 
