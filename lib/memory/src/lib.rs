@@ -21,7 +21,7 @@ mod external;
 mod pinned;
 mod system;
 mod tensor;
-
+mod object;
 #[cfg(test)]
 mod tests;
 
@@ -33,6 +33,7 @@ pub use offset::OffsetBuffer;
 pub use pinned::PinnedStorage;
 pub use system::SystemStorage;
 pub use tensor::{TensorDescriptor, TensorDescriptorExt};
+pub use object::ObjectStorage;
 
 use serde::{Deserialize, Serialize};
 use std::any::Any;
@@ -90,6 +91,12 @@ pub enum StorageError {
     Nixl(#[from] nixl_sys::NixlError),
 }
 
+/// Object storage key type.
+///
+/// Uses u128 to accommodate PositionalSequenceHash (128-bit) identifiers
+/// that uniquely identify cached sequences in object storage.
+pub type ObjectKey = u128;
+
 /// Storage type classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StorageKind {
@@ -106,6 +113,9 @@ pub enum StorageKind {
 
     /// Disk-backed memory (mmap)
     Disk(u64),
+
+    /// Object Storage
+    Object(ObjectKey),
 }
 
 impl StorageKind {
@@ -135,6 +145,11 @@ impl StorageKind {
     /// Returns true if this is disk-backed memory.
     pub fn is_disk(&self) -> bool {
         matches!(self, StorageKind::Disk(_))
+    }
+
+    /// Returns true if this is object storage.
+    pub fn is_object(&self) -> bool {
+        matches!(self, StorageKind::Object(_))
     }
 }
 

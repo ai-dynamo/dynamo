@@ -6,6 +6,8 @@
 pub(super) mod cuda;
 mod memcpy;
 mod nixl;
+mod object_transfer;
+mod descriptors;
 
 use super::strategy::select_strategy;
 use super::validation::validate_block_transfer;
@@ -56,12 +58,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // Re-export the NIXL transfer builder for public use
 pub use nixl::NixlTransferBuilder;
 
+use super::options::BackendOptArgs;
+
 #[derive(Default)]
 #[expect(dead_code)]
 pub(crate) struct TransferOptionsInternal {
     layer_range: Option<Range<usize>>,
     nixl_write_notification: Option<u64>,
     bounce_buffer: Option<BounceBufferInternal>,
+    backend_opts: Option<Box<dyn BackendOptArgs>>,
 }
 
 impl TransferOptionsInternal {
@@ -75,6 +80,7 @@ pub(crate) struct TransferOptionsInternalBuilder {
     layer_range: Option<Range<usize>>,
     nixl_write_notification: Option<u64>,
     bounce_buffer: Option<BounceBufferInternal>,
+    backend_opts: Option<Box<dyn BackendOptArgs>>,
 }
 
 impl TransferOptionsInternalBuilder {
@@ -93,11 +99,17 @@ impl TransferOptionsInternalBuilder {
         self
     }
 
+    pub(crate) fn backend_opts(mut self, opts: Box<dyn BackendOptArgs>) -> Self {
+        self.backend_opts = Some(opts);
+        self
+    }
+
     pub(crate) fn build(self) -> Result<TransferOptionsInternal> {
         Ok(TransferOptionsInternal {
             layer_range: self.layer_range,
             nixl_write_notification: self.nixl_write_notification,
             bounce_buffer: self.bounce_buffer,
+            backend_opts: self.backend_opts,
         })
     }
 }
@@ -136,6 +148,7 @@ pub(crate) fn execute_transfer(
             src_block_ids,
             dst_block_ids,
             options.layer_range,
+            options.backend_opts,
             strategy,
             ctx,
         ),
@@ -164,6 +177,7 @@ fn execute_direct_transfer(
     src_block_ids: &[BlockId],
     dst_block_ids: &[BlockId],
     layer_range: Option<Range<usize>>,
+    backend_opts: Option<Box<dyn BackendOptArgs>>,
     strategy: TransferStrategy,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
@@ -204,6 +218,11 @@ fn execute_direct_transfer(
                 builder = builder.layer_range(range);
             }
 
+            if let Some(opts) = backend_opts {
+                // Re-box since backend_opts takes ownership via impl trait
+                builder = builder.backend_opts(ReBoxedOptArgs(opts));
+            }
+
             builder.execute(ctx)
         }
         TransferStrategy::Invalid => Err(anyhow::anyhow!(
@@ -211,6 +230,20 @@ fn execute_direct_transfer(
             src.location(),
             dst.location()
         )),
+    }
+}
+
+/// Wrapper to pass a boxed BackendOptArgs to the builder which expects impl BackendOptArgs.
+#[derive(Debug)]
+struct ReBoxedOptArgs(Box<dyn BackendOptArgs>);
+
+impl BackendOptArgs for ReBoxedOptArgs {
+    fn to_custom_param(&self) -> String {
+        self.0.to_custom_param()
+    }
+
+    fn clone_box(&self) -> Box<dyn BackendOptArgs> {
+        self.0.clone_box()
     }
 }
 
@@ -300,6 +333,7 @@ async fn handle_buffered_transfer(
                 &src_to_bounce.0,
                 &bounce_groups[src_to_bounce.1 as usize][0..src_to_bounce.0.len()],
                 layer_range.clone(),
+                None,
                 first_strategy,
                 ctx,
             )?;
@@ -313,6 +347,7 @@ async fn handle_buffered_transfer(
                 &bounce_groups[bounce_to_dst.1 as usize][0..bounce_to_dst.0.len()],
                 &bounce_to_dst.0,
                 layer_range.clone(),
+                None,
                 second_strategy,
                 ctx,
             )?;
@@ -350,6 +385,7 @@ async fn execute_two_hop_transfer_chunk(
         src_block_ids,
         bounce_ids_to_use,
         layer_range.clone(),
+        None,
         first_strategy,
         ctx,
     )?
@@ -361,6 +397,7 @@ async fn execute_two_hop_transfer_chunk(
         bounce_ids_to_use,
         dst_block_ids,
         layer_range.clone(),
+        None,
         second_strategy,
         ctx,
     )?

@@ -6,7 +6,7 @@ use std::sync::{OnceLock, RwLock};
 
 use crate::physical::{
     manager::{SerializedLayout, TransferManager},
-    transfer::{BounceBuffer, TransferOptions, context::TransferCompleteNotification},
+    transfer::{BounceBuffer, TransferOptions, context::TransferCompleteNotification, options::ObjectOptArgs},
 };
 
 use super::*;
@@ -53,6 +53,10 @@ pub struct DirectWorker {
     /// Required for Disk-to-Host transfers.
     g3_handle: OnceLock<LayoutHandle>,
 
+    /// G4 (Object storage) layout handle - set during initialization if object tier enabled.
+    /// Contains pre-registered bucket and keys.
+    g4_handle: OnceLock<LayoutHandle>,
+
     /// The transfer manager that executes actual data movement.
     manager: TransferManager,
 
@@ -75,6 +79,7 @@ impl DirectWorker {
             g1_handle: OnceLock::new(),
             g2_handle: OnceLock::new(),
             g3_handle: OnceLock::new(),
+            g4_handle: OnceLock::new(),
             manager,
             remote_handles: RwLock::new(HashMap::new()),
         }
@@ -107,6 +112,16 @@ impl DirectWorker {
             .map_err(|_| anyhow::anyhow!("G3 handle already set"))
     }
 
+    /// Set the G4 layout handle (once only).
+    ///
+    /// This is called during initialization when object storage tier is enabled.
+    /// The layout should be created with a configured bucket and optional initial keys.
+    pub fn set_g4_handle(&self, handle: LayoutHandle) -> Result<()> {
+        self.g4_handle
+            .set(handle)
+            .map_err(|_| anyhow::anyhow!("G4 handle already set"))
+    }
+
     /// Get the G1 layout handle (if set).
     pub fn g1_handle(&self) -> Option<LayoutHandle> {
         self.g1_handle.get().copied()
@@ -120,6 +135,11 @@ impl DirectWorker {
     /// Get the G3 layout handle (if set).
     pub fn g3_handle(&self) -> Option<LayoutHandle> {
         self.g3_handle.get().copied()
+    }
+
+    /// Get the G4 layout handle (if set).
+    pub fn g4_handle(&self) -> Option<LayoutHandle> {
+        self.g4_handle.get().copied()
     }
 
     /// Get a reference to the TransferManager.
@@ -317,7 +337,7 @@ impl WorkerTransfers for DirectWorker {
             G1 => self.g1_handle(),
             G2 => self.g2_handle(),
             G3 => self.g3_handle(),
-            G4 => return Err(anyhow::anyhow!("G4 is not supported for local transfers")),
+            G4 => self.g4_handle(),
         }
         .ok_or_else(|| anyhow::anyhow!("Source layout not registered: {:?}", src))?;
 
@@ -325,7 +345,7 @@ impl WorkerTransfers for DirectWorker {
             G1 => self.g1_handle(),
             G2 => self.g2_handle(),
             G3 => self.g3_handle(),
-            G4 => return Err(anyhow::anyhow!("G4 is not supported for local transfers")),
+            G4 => self.g4_handle(),
         }
         .ok_or_else(|| anyhow::anyhow!("Destination layout not registered: {:?}", dst))?;
 
@@ -351,7 +371,7 @@ impl WorkerTransfers for DirectWorker {
             G1 => self.g1_handle(),
             G2 => self.g2_handle(),
             G3 => self.g3_handle(),
-            G4 => return Err(anyhow::anyhow!("G4 is not supported for remote transfers")),
+            G4 => self.g4_handle(),
         }
         .ok_or_else(|| anyhow::anyhow!("Destination layout not registered: {:?}", dst))?;
 
@@ -366,13 +386,26 @@ impl WorkerTransfers for DirectWorker {
                     options,
                 )
             }
-            RemoteDescriptor::Object { keys: _ } => {
-                todo!("implement remote object transfer")
+            RemoteDescriptor::Object { keys } => {
+                let block_ids_arc: Arc<[BlockId]> = (0..keys.len()).collect();
+                // Convert PositionalSequenceHash (SequenceHash) to u128 for object keys
+                let object_keys: Vec<u128> = keys.iter().map(|k| k.as_u128()).collect();
+                let options = TransferOptions {
+                    backend_opts: Some(Box::new(ObjectOptArgs::new().with_keys(object_keys))),
+                    ..options
+                };
+
+                self.manager.execute_transfer(
+                    self.g4_handle().ok_or_else(|| anyhow::anyhow!("G4 layout not registered"))?,
+                    &block_ids_arc,
+                    dst_layout,
+                    &dst_block_ids,
+                    options,
+                )
             }
         }
     }
 
-    #[expect(unused_variables)]
     fn execute_remote_offload(
         &self,
         src: LogicalLayoutHandle,
@@ -380,7 +413,45 @@ impl WorkerTransfers for DirectWorker {
         dst: RemoteDescriptor,
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
-        todo!("implement remote offload")
+        use LogicalLayoutHandle::*;
+
+        let src_layout = match &src {
+            G1 => self.g1_handle(),
+            G2 => self.g2_handle(),
+            G3 => self.g3_handle(),
+            G4 => self.g4_handle(),
+        }
+        .ok_or_else(|| anyhow::anyhow!("Source layout not registered: {:?}", src))?;
+
+        match dst {
+            RemoteDescriptor::Layout { handle, block_ids } => {
+                let block_ids_arc: Arc<[BlockId]> = block_ids.into();
+                self.manager.execute_transfer(
+                    src_layout,
+                    &src_block_ids,
+                    handle,
+                    &block_ids_arc,
+                    options,
+                )
+            }
+            RemoteDescriptor::Object { keys } => {
+                let block_ids_arc: Arc<[BlockId]> = (0..keys.len()).collect();
+                // Convert PositionalSequenceHash (SequenceHash) to u128 for object keys
+                let object_keys: Vec<u128> = keys.iter().map(|k| k.as_u128()).collect();
+                let options = TransferOptions {
+                    backend_opts: Some(Box::new(ObjectOptArgs::new().with_keys(object_keys))),
+                    ..options
+                };
+
+                self.manager.execute_transfer(
+                    src_layout,
+                    &src_block_ids,
+                    self.g4_handle().ok_or_else(|| anyhow::anyhow!("G4 layout not registered"))?,
+                    &block_ids_arc,
+                    options,
+                )
+            }
+        }
     }
 
     fn connect_remote(

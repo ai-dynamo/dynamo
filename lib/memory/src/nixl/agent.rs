@@ -44,27 +44,52 @@ impl NixlAgent {
 
     pub fn from_nixl_backend_config(name: &str, config: NixlBackendConfig) -> Result<Self> {
         let mut agent = Self::new(name)?;
-        for backend in config.backends() {
-            agent.add_backend(&backend)?;
+        for (backend, custom_params) in config.iter() {
+            agent.add_backend_with_params(backend, Some(custom_params))?;
         }
         Ok(agent)
     }
 
-    /// Add a backend to the agent.
+    /// Add a backend to the agent with default parameters.
     pub fn add_backend(&mut self, backend: &str) -> Result<()> {
-        if self.available_backends.contains(&backend.to_uppercase()) {
+        self.add_backend_with_params(backend, None)
+    }
+
+    /// Add a backend to the agent with optional custom parameters.
+    ///
+    /// Custom parameters are merged with default plugin parameters,
+    /// with custom params taking precedence.
+    pub fn add_backend_with_params(
+        &mut self,
+        backend: &str,
+        custom_params: Option<&std::collections::HashMap<String, String>>,
+    ) -> Result<()> {
+        let backend_upper = backend.to_uppercase();
+        if self.available_backends.contains(&backend_upper) {
             return Ok(());
         }
-        let backend_upper = backend.to_uppercase();
+
         match self.agent.get_plugin_params(&backend_upper) {
-            Ok((_, params)) => match self.agent.create_backend(&backend_upper, &params) {
-                Ok(_) => {
-                    self.available_backends.insert(backend_upper);
+            Ok((_, mut params)) => {
+                // Merge custom params into default params (custom takes precedence)
+                if let Some(custom) = custom_params {
+                    for (key, value) in custom {
+                        // set() overwrites if exists, or adds new if not
+                        params
+                            .set(key, value)
+                            .map_err(|e| anyhow::anyhow!("Failed to set param: {:?}", e))?;
+                    }
                 }
-                Err(e) => {
-                    anyhow::bail!("Failed to create nixl backend: {}", e);
+
+                match self.agent.create_backend(&backend_upper, &params) {
+                    Ok(_) => {
+                        self.available_backends.insert(backend_upper);
+                    }
+                    Err(e) => {
+                        anyhow::bail!("Failed to create nixl backend: {}", e);
+                    }
                 }
-            },
+            }
             Err(_) => {
                 anyhow::bail!("No {} plugin found", backend_upper);
             }

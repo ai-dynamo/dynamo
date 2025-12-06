@@ -8,7 +8,7 @@
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dynamo_config::parse_bool;
 
@@ -63,34 +63,55 @@ impl NixlBackendConfig {
     /// - Custom parameters are detected (not yet supported)
     /// - Invalid boolean values are provided (must be truthy or falsey)
     pub fn from_env() -> Result<Self> {
-        let mut backends = HashMap::new();
+        let mut backends: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let mut explicitly_disabled = HashSet::new();
 
-        // Extract all environment variables that match our pattern
+        // First pass: collect all backend parameters (e.g., DYN_KVBM_NIXL_BACKEND_OBJ_BUCKET=value)
         for (key, value) in std::env::vars() {
             if let Some(remainder) = key.strip_prefix("DYN_KVBM_NIXL_BACKEND_") {
                 // Check if there's an underscore (indicating custom params)
+                if let Some(underscore_pos) = remainder.find('_') {
+                    // This is a custom parameter like DYN_KVBM_NIXL_BACKEND_OBJ_BUCKET
+                    // Extract the backend name (before the underscore) and param name (after)
+                    let backend_name = remainder[..underscore_pos].to_uppercase();
+                    let param_name = remainder[underscore_pos + 1..].to_lowercase();
+
+                    backends
+                        .entry(backend_name)
+                        .or_default()
+                        .insert(param_name, value);
+                }
+            }
+        }
+
+        // Second pass: extract simple backend enablement variables
+        for (key, value) in std::env::vars() {
+            if let Some(remainder) = key.strip_prefix("DYN_KVBM_NIXL_BACKEND_") {
+                // Skip if it contains underscore (custom param, not enablement)
                 if remainder.contains('_') {
-                    bail!(
-                        "Custom NIXL backend parameters are not yet supported. \
-                         Found: {}. Please use only DYN_KVBM_NIXL_BACKEND_<backend>=true \
-                         to enable backends with default parameters.",
-                        key
-                    );
+                    continue;
                 }
 
                 // Simple backend enablement (e.g., DYN_KVBM_NIXL_BACKEND_UCX=true)
                 let backend_name = remainder.to_uppercase();
                 match parse_bool(&value) {
                     Ok(true) => {
-                        backends.insert(backend_name, HashMap::new());
+                        // Enable backend with empty params (if not already present with params)
+                        backends.entry(backend_name).or_default();
                     }
                     Ok(false) => {
-                        // Explicitly disabled, don't add to backends
-                        continue;
+                        // Explicitly disabled, track it and remove if present
+                        explicitly_disabled.insert(backend_name.clone());
+                        backends.remove(&backend_name);
                     }
                     Err(e) => bail!("Invalid value for {}: {}", key, e),
                 }
             }
+        }
+
+        // Remove any backends that were explicitly disabled
+        for disabled in &explicitly_disabled {
+            backends.remove(disabled);
         }
 
         Ok(Self { backends })

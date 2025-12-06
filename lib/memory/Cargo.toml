@@ -26,7 +26,7 @@ dynamo-config = { workspace = true }
 
 anyhow = { workspace = true }
 cudarc = { workspace = true }
-nixl-sys = { version = "0.7" }
+nixl-sys = { path = "../../nixl/src/bindings/rust" }
 serde = { workspace = true}
 thiserror = { workspace = true }
 tracing = { workspace = true }

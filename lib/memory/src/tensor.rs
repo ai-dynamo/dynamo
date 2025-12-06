@@ -119,6 +119,7 @@ impl nixl::NixlCompatible for Arc<dyn TensorDescriptor> {
             StorageKind::System => (nixl::MemType::Dram, 0),
             StorageKind::Pinned => (nixl::MemType::Dram, 0),
             StorageKind::Disk(fd) => (nixl::MemType::File, fd),
+            StorageKind::Object(key) => (nixl::MemType::Object, key as u64),
         };
         (self.addr() as *const u8, self.size(), mem_type, device_id)
     }
@@ -172,6 +173,7 @@ impl nixl::NixlCompatible for Arc<dyn TensorDescriptor + Send + Sync> {
             StorageKind::System => (nixl::MemType::Dram, 0),
             StorageKind::Pinned => (nixl::MemType::Dram, 0),
             StorageKind::Disk(fd) => (nixl::MemType::File, fd),
+            StorageKind::Object(key) => (nixl::MemType::Object, key as u64),
         };
         (self.addr() as *const u8, self.size(), mem_type, device_id)
     }
