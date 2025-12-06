@@ -83,7 +83,7 @@ echo "   Docker: ${GAIE_DIR}/Dockerfile.epp"
 echo "Applying Dynamo patch..."
 cd "${GAIE_DIR}"
 
-PATCH_FILE="${DYNAMO_DIR}/deploy/inference-gateway/epp-patches/v0.5.1-2/epp-v0.5.1-dyn2.patch"
+PATCH_FILE="${DYNAMO_DIR}/deploy/inference-gateway/epp-patches/v0.8.0/gaie.patch"
 if [[ -f "${PATCH_FILE}" ]]; then
     if git apply --check "${PATCH_FILE}" 2>/dev/null; then
         git apply "${PATCH_FILE}"
