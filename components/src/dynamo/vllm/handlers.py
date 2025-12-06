@@ -12,7 +12,7 @@ from typing import Any, AsyncGenerator, Dict, Final
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo.llm import (
@@ -82,8 +82,22 @@ def build_sampling_params(
     sampling_params = SamplingParams(**default_sampling_params)
     sampling_params.detokenize = False
 
-    # Apply sampling_options
+    # Handle guided_decoding - convert to StructuredOutputsParams
+    guided_decoding = request["sampling_options"].get("guided_decoding")
+    if guided_decoding is not None and isinstance(guided_decoding, dict):
+        sampling_params.structured_outputs = StructuredOutputsParams(
+            json=guided_decoding.get("json"),
+            regex=guided_decoding.get("regex"),
+            choice=guided_decoding.get("choice"),
+            grammar=guided_decoding.get("grammar"),
+            whitespace_pattern=guided_decoding.get("whitespace_pattern"),
+        )
+
+    # Apply remaining sampling_options
     for key, value in request["sampling_options"].items():
+        # Skip guided_decoding - already handled above
+        if key == "guided_decoding":
+            continue
         if value is not None and hasattr(sampling_params, key):
             setattr(sampling_params, key, value)
 
