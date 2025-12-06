@@ -10,4 +10,4 @@ spec:
   resources:
     requests:
       storage: 100Gi
-  storageClassName: csi-mounted-fs-path-sc
+  storageClassName: nebius-shared-fs

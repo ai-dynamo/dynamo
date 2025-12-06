@@ -3,7 +3,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: llama3-70b-agg-perf
+  name: llama3-70b-agg-perf-no-gaie-full-test
 spec:
   backoffLimit: 1
   completions: 1
@@ -99,9 +99,21 @@ spec:
 
               # Run perf with multiple concurrency values
               for concurrency in 1 2 4 8 16 32 64 128 256; do
+              # for concurrency in 1; do
                 run_perf $concurrency $ISL $OSL
                 echo "done with concurrency $concurrency"
               done
+
+              # Print all results to stdout so they appear in kubectl logs
+              echo "========== RESULTS =========="
+              echo "Results directory: ${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+              echo ""
+              echo "=== input_config.json ==="
+              cat "${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}/input_config.json"
+              echo ""
+              echo "=== All result files ==="
+              find "${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}" -type f -name "*.json" -exec echo "--- {} ---" \; -exec cat {} \; -exec echo "" \;
+              echo "========== END RESULTS =========="
           env:
             - name: TARGET_MODEL
               value: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic

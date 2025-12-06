@@ -32,7 +32,7 @@ spec:
         - name: model-cache
           mountPoint: /opt/models
       sharedMemory:
-        size: 128Gi
+        size: 20Gi
       extraPodSpec:
         mainContainer:
           env:
@@ -50,32 +50,14 @@ spec:
           image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:a-gaie-test
           workingDir: /workspace/examples/backends/vllm
 
-          startupProbe:
-            httpGet:
-              path: /live
-              port: system
-            initialDelaySeconds: 600 # wait 10 min before probing
-            periodSeconds: 30
-            timeoutSeconds: 5
-            failureThreshold: 400 # allows 200 min to load weights
-
           livenessProbe:
             httpGet:
               path: /live
               port: system
-            initialDelaySeconds: 1800 # wait 30 min before liveness killing
+            initialDelaySeconds: 240
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
-
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: system
-            initialDelaySeconds: 1800
-            periodSeconds: 20
-            timeoutSeconds: 5
-
       replicas: 1
       resources:
         limits:
