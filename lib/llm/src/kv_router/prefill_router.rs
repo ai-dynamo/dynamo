@@ -4,7 +4,8 @@
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
-use futures::StreamExt;
+use futures::{StreamExt, stream};
+use serde_json::json;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -12,7 +13,7 @@ use dynamo_runtime::{
     component::Endpoint,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Context, ManyOut, Operator, PushRouter,
-        RouterMode, ServerStreamingEngine, SingleIn, async_trait,
+        ResponseStream, RouterMode, ServerStreamingEngine, SingleIn, async_trait,
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -39,6 +40,15 @@ pub enum PrefillError {
     /// Disaggregated params not found in prefill response
     #[error("No disaggregated params in prefill response: {0}")]
     NoDisaggregatedParams(String),
+}
+
+/// Result from calling the prefill router
+/// Either just a worker ID (query only) or full prefill result with worker ID
+enum PrefillCallResult {
+    /// Query only mode: just the selected worker ID
+    WorkerIdOnly(u64),
+    /// Full prefill mode: prefill result and optional worker ID
+    Full(PrefillResult, Option<u64>),
 }
 
 /// The inner router used by PrefillRouter
@@ -176,29 +186,73 @@ impl PrefillRouter {
         Ok(())
     }
 
-    /// Call the prefill router and extract structured prefill result and worker ID
+    /// Call the prefill router with optional query-only mode
+    ///
+    /// # Arguments
+    /// * `request` - The preprocessed request
+    /// * `request_id` - Request ID for context
+    /// * `query_only` - If true, only query worker selection without executing prefill
+    /// * `engine_ctx` - Optional engine context for linking child contexts (required for full prefill)
+    ///
+    /// # Returns
+    /// * `PrefillCallResult::WorkerIdOnly` - When query_only=true, returns just worker ID
+    /// * `PrefillCallResult::Full` - When query_only=false, returns PrefillResult + worker ID
     async fn call_prefill(
         &self,
-        request: SingleIn<PreprocessedRequest>,
-    ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
+        request: &PreprocessedRequest,
+        request_id: &str,
+        query_only: bool,
+        engine_ctx: Option<&Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>>,
+    ) -> Result<PrefillCallResult, PrefillError> {
         // Get the prefill router, error if not activated
         let Some(prefill_router) = self.prefill_router.get() else {
             return Err(PrefillError::NotActivated);
         };
 
-        // Call the appropriate router based on the type
-        let mut prefill_response = match prefill_router {
+        // Prepare request - add query_instance_id annotation if query_only
+        let mut req = request.clone();
+        if query_only {
+            req.annotations.push("query_instance_id".to_string());
+        }
+        let context = Context::with_id(req, request_id.to_string());
+
+        // Link context as child for cancellation propagation (only needed for full prefill)
+        if let Some(ctx) = engine_ctx {
+            ctx.link_child(context.context());
+        }
+
+        // Call the appropriate router
+        let mut response = match prefill_router {
             InnerPrefillRouter::KvRouter(router) => router
-                .generate(request)
+                .generate(context)
                 .await
                 .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
             InnerPrefillRouter::SimpleRouter(router) => router
-                .generate(request)
+                .generate(context)
                 .await
                 .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
         };
 
-        let Some(first_output) = prefill_response.next().await else {
+        // Query-only mode: extract worker_instance_id from annotation event
+        if query_only {
+            while let Some(item) = response.next().await {
+                if let Some(event) = item.event.as_ref()
+                    && event == "worker_instance_id"
+                    && let Some(comments) = item.comment.as_ref()
+                    && let Some(first_comment) = comments.first()
+                    && let Ok(id_str) = serde_json::from_str::<String>(first_comment)
+                    && let Ok(worker_id) = id_str.parse::<u64>()
+                {
+                    return Ok(PrefillCallResult::WorkerIdOnly(worker_id));
+                }
+            }
+            return Err(PrefillError::PrefillError(
+                "Failed to get prefill worker ID from query".to_string(),
+            ));
+        }
+
+        // Full prefill mode: extract PrefillResult from LLMEngineOutput
+        let Some(first_output) = response.next().await else {
             return Err(PrefillError::PrefillError(
                 "Prefill router returned no output (stream ended)".to_string(),
             ));
@@ -210,7 +264,7 @@ impl PrefillRouter {
             .and_then(|o| o.completion_usage.as_ref())
             .and_then(|u| u.prompt_tokens_details.clone());
 
-        while let Some(next) = prefill_response.next().await {
+        while let Some(next) = response.next().await {
             if let Some(o) = next.data.as_ref()
                 && prompt_tokens_details.is_none()
             {
@@ -247,7 +301,8 @@ impl PrefillRouter {
                     .get("prefill_worker_id")
                     .and_then(|v| v.as_u64())
             });
-        Ok((
+
+        Ok(PrefillCallResult::Full(
             PrefillResult {
                 disaggregated_params,
                 prompt_tokens_details,
@@ -283,21 +338,77 @@ impl
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
 
-        // Save original max_tokens for decode
-        let original_max_tokens = req.stop_conditions.max_tokens;
+        // ===== Stage 1: Query Workers Only =====
+        // If query_instance_id annotation is present, only return worker IDs without execution
+        if req.has_annotation("query_instance_id") {
+            tracing::debug!(
+                request_id = %request_id,
+                "Stage 1 (query_instance_id): Querying prefill and decode worker selection"
+            );
+            return self
+                .handle_query_stage(req, context, next, &request_id, &engine_ctx)
+                .await;
+        }
 
-        // Prepare prefill request with max_tokens = 1
+        // ===== Prefill + Decode Flow =====
+        // Works for both Stage 2 (with target workers) and normal flow (router decides)
+        let target_prefill_worker = req.target_prefill_worker_id;
+        let target_decode_worker = req.target_decode_worker_id;
+        let has_target_workers = target_prefill_worker.is_some() && target_decode_worker.is_some();
+
+        if has_target_workers {
+            tracing::debug!(
+                request_id = %request_id,
+                prefill_worker = ?target_prefill_worker,
+                decode_worker = ?target_decode_worker,
+                "Stage 2 (execute): Using provided worker IDs for disaggregated serving"
+            );
+        }
+
+        // Execute prefill and decode
+        self.execute_prefill_and_decode(
+            req,
+            context,
+            next,
+            &request_id,
+            &engine_ctx,
+            target_prefill_worker,
+            target_decode_worker,
+        )
+        .await
+    }
+}
+
+impl PrefillRouter {
+    /// Execute prefill and decode with optional target worker IDs
+    /// Unified function for both Stage 2 (with target workers) and normal flow (router decides)
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_prefill_and_decode(
+        &self,
+        req: PreprocessedRequest,
+        context: Context<()>,
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        request_id: &str,
+        engine_ctx: &Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>,
+        target_prefill_worker: Option<u64>,
+        target_decode_worker: Option<u64>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        let original_max_tokens = req.stop_conditions.max_tokens;
+        let has_target_workers = target_prefill_worker.is_some();
+
+        // Prepare prefill request
         let mut prefill_req = req.clone();
         prefill_req.stop_conditions.max_tokens = Some(1);
-        let prefill_context = Context::with_id(prefill_req, request_id.clone());
 
-        // Link the prefill context as a child so that kill signals propagate
-        engine_ctx.link_child(prefill_context.context());
+        // If target prefill worker specified, route directly to it
+        if let Some(prefill_worker_id) = target_prefill_worker {
+            prefill_req.backend_instance_id = Some(prefill_worker_id);
+        }
 
-        let prefill_request = prefill_context;
-
-        // Attempt prefill
-        let prefill_result = self.call_prefill(prefill_request).await;
+        // Execute prefill
+        let prefill_result = self
+            .call_prefill(&prefill_req, request_id, false, Some(engine_ctx))
+            .await;
 
         // Abort if cancelled during prefill
         if engine_ctx.is_stopped() || engine_ctx.is_killed() {
@@ -310,34 +421,30 @@ impl
 
         // Handle prefill result
         match prefill_result {
-            Ok((prefill_result, prefill_worker_id)) => {
+            Ok(PrefillCallResult::Full(prefill_result, prefill_worker_id)) => {
                 tracing::debug!("Prefill succeeded, using disaggregated params for decode");
-
-                let mut decode_req = req;
-                // Update request with prefill result
-                decode_req.prefill_result = Some(prefill_result.clone());
-                // Restore original max_tokens for decode
-                decode_req.stop_conditions.max_tokens = original_max_tokens;
-
-                // Set router_config_override for decode: overlap_score_weight = 0
-                let existing_override = decode_req.router_config_override.take();
-                decode_req.router_config_override = Some(RouterConfigOverride {
-                    overlap_score_weight: Some(0.0),
-                    ..existing_override.unwrap_or_default()
-                });
-
-                // Store prefill worker ID in context if available
-                let mut decode_context = context;
-                if let Some(worker_id) = prefill_worker_id {
-                    decode_context.insert("prefill_worker_id", worker_id);
+                Self::route_to_decode(
+                    req,
+                    context,
+                    next,
+                    prefill_result,
+                    prefill_worker_id.or(target_prefill_worker),
+                    original_max_tokens,
+                    target_decode_worker,
+                )
+                .await
+            }
+            Ok(PrefillCallResult::WorkerIdOnly(_)) => {
+                // This shouldn't happen with query_only=false
+                tracing::error!("Unexpected WorkerIdOnly result in prefill flow");
+                if has_target_workers {
+                    Err(anyhow::anyhow!("Unexpected WorkerIdOnly result"))
+                } else {
+                    next.generate(context.map(|_| req)).await
                 }
-
-                // Map the modified request through with preserved context
-                let decode_request = decode_context.map(|_| decode_req);
-                next.generate(decode_request).await
             }
             Err(PrefillError::NotActivated) => {
-                if self.enforce_disagg {
+                if self.enforce_disagg || has_target_workers {
                     tracing::error!(
                         "Prefill router not activated, but disaggregated mode is enforced. Failing request."
                     );
@@ -347,7 +454,7 @@ impl
                 next.generate(context.map(|_| req)).await
             }
             Err(e) => {
-                if self.enforce_disagg {
+                if self.enforce_disagg || has_target_workers {
                     tracing::error!(
                         error = %e,
                         "Remote prefill failed, but disaggregated mode is enforced. Failing request."
@@ -361,5 +468,130 @@ impl
                 next.generate(context.map(|_| req)).await
             }
         }
+    }
+
+    /// Route to decode worker after prefill completes
+    /// Common logic for both normal flow and Stage 2 execute flow
+    async fn route_to_decode(
+        req: PreprocessedRequest,
+        mut context: Context<()>,
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        prefill_result: PrefillResult,
+        prefill_worker_id: Option<u64>,
+        original_max_tokens: Option<u32>,
+        target_decode_worker_id: Option<u64>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        let mut decode_req = req;
+
+        // Update request with prefill result
+        decode_req.prefill_result = Some(prefill_result);
+        decode_req.stop_conditions.max_tokens = original_max_tokens;
+
+        // If target decode worker is specified, route directly to it
+        if let Some(decode_worker_id) = target_decode_worker_id {
+            decode_req.backend_instance_id = Some(decode_worker_id);
+        }
+
+        // Set router_config_override for decode: overlap_score_weight = 0
+        let existing_override = decode_req.router_config_override.take();
+        decode_req.router_config_override = Some(RouterConfigOverride {
+            overlap_score_weight: Some(0.0),
+            ..existing_override.unwrap_or_default()
+        });
+
+        // Store prefill worker ID in context if available
+        if let Some(worker_id) = prefill_worker_id {
+            context.insert("prefill_worker_id", worker_id);
+        }
+
+        // Route to decode
+        let decode_request = context.map(|_| decode_req);
+        next.generate(decode_request).await
+    }
+
+    /// Stage 1: Query worker selection without executing prefill/decode
+    /// Returns prefill_worker_id and decode_worker_id in the response
+    async fn handle_query_stage(
+        &self,
+        req: PreprocessedRequest,
+        _context: Context<()>,
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        request_id: &str,
+        engine_ctx: &Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        // Query prefill worker using KV-aware routing (query_only=true, no engine_ctx needed)
+        let prefill_worker_id = match self.call_prefill(&req, request_id, true, None).await {
+            Ok(PrefillCallResult::WorkerIdOnly(id)) => Some(id),
+            Ok(PrefillCallResult::Full(_, _)) => {
+                // Shouldn't happen with query_only=true
+                tracing::error!("Unexpected Full result in query-only mode");
+                None
+            }
+            Err(PrefillError::NotActivated) => {
+                if self.enforce_disagg {
+                    tracing::error!("Prefill router not activated for query stage");
+                    return Err(anyhow::anyhow!(PrefillError::NotActivated));
+                }
+                None
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to query prefill worker");
+                None
+            }
+        };
+
+        // Query decode worker using next stage's router (with query_instance_id annotation)
+        let mut query_req = req.clone();
+        query_req.annotations.push("query_instance_id".to_string());
+        let query_context = Context::with_id(query_req, request_id.to_string());
+        engine_ctx.link_child(query_context.context());
+
+        let mut decode_response = next.generate(query_context).await?;
+        let mut decode_worker_id: Option<u64> = None;
+
+        while let Some(item) = decode_response.next().await {
+            if let Some(event) = item.event.as_ref()
+                && event == "worker_instance_id"
+                && let Some(comments) = item.comment.as_ref()
+                && let Some(first_comment) = comments.first()
+            {
+                if let Ok(id_str) = serde_json::from_str::<String>(first_comment) {
+                    decode_worker_id = id_str.parse().ok();
+                }
+                break;
+            }
+        }
+
+        // Build query stage response with token_ids for Stage 2 optimization
+        let query_stage_response = LLMEngineOutput {
+            token_ids: vec![],
+            tokens: None,
+            text: None,
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: None,
+            index: None,
+            disaggregated_params: Some(json!({
+                "query_stage": {
+                    "query_complete": true,
+                    "prefill_worker_id": prefill_worker_id,
+                    "decode_worker_id": decode_worker_id,
+                    "token_ids": req.token_ids,  // Include tokens for Stage 2 to skip re-tokenization
+                }
+            })),
+            extra_args: None,
+            completion_usage: None,
+        };
+
+        tracing::debug!(
+            request_id = %request_id,
+            prefill_worker_id = ?prefill_worker_id,
+            decode_worker_id = ?decode_worker_id,
+            "Query stage complete, returning worker IDs"
+        );
+
+        let response_stream = stream::once(async { Annotated::from_data(query_stage_response) });
+        Ok(ResponseStream::new(Box::pin(response_stream), engine_ctx.clone()))
     }
 }

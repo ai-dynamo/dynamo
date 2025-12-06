@@ -579,7 +579,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
 
     let pl = unsafe { &*pipeline };
     let fut = async { query_worker_selection_and_annotate(&pl.engine, request).await };
-    let (worker_id, tokens, annotated_req) = match pl.wk.runtime().secondary().block_on(fut) {
+    let (result, annotated_req) = match pl.wk.runtime().secondary().block_on(fut) {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = ?e, "query_worker_selection_and_annotate failed");
@@ -587,10 +587,10 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         }
     };
 
-    let tokens_ptr = if tokens.is_empty() {
+    let tokens_ptr = if result.tokens.is_empty() {
         std::ptr::null_mut()
     } else {
-        let len = tokens.len();
+        let len = result.tokens.len();
         let layout = std::alloc::Layout::array::<u32>(len).unwrap();
         let ptr = unsafe { std::alloc::alloc(layout) as *mut u32 };
         if ptr.is_null() {
@@ -598,7 +598,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
             return DynamoLlmResult::ERR;
         }
         unsafe {
-            std::ptr::copy_nonoverlapping(tokens.as_ptr(), ptr, len);
+            std::ptr::copy_nonoverlapping(result.tokens.as_ptr(), ptr, len);
         }
         ptr
     };
@@ -606,7 +606,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     let annotated_json = match serde_json::to_string(&annotated_req) {
         Ok(s) => s,
         Err(e) => {
-            let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
+            let layout = std::alloc::Layout::array::<u32>(result.tokens.len()).unwrap();
             unsafe {
                 std::alloc::dealloc(tokens_ptr as *mut u8, layout);
             }
@@ -621,7 +621,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         Err(e) => {
             tracing::error!(error = ?e, "CString::new for annotated JSON failed");
             if !tokens_ptr.is_null() {
-                let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
+                let layout = std::alloc::Layout::array::<u32>(result.tokens.len()).unwrap();
                 unsafe {
                     std::alloc::dealloc(tokens_ptr as *mut u8, layout);
                 }
@@ -630,10 +630,97 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         }
     };
     unsafe {
-        *worker_instance_id_out = worker_id;
+        *worker_instance_id_out = result.worker_id;
         *token_ids_out = tokens_ptr;
-        *token_count_out = tokens.len();
+        *token_count_out = result.tokens.len();
         *annotated_request_json_out = cjson.into_raw();
+    }
+    DynamoLlmResult::OK
+}
+
+/// Query worker selection for disaggregated serving Stage 1 and return prefill/decode worker IDs
+///
+/// # Safety
+/// Same requirements as `dynamo_query_worker_selection_and_annotate`, plus:
+/// - `prefill_worker_id_out` and `decode_worker_id_out` must be non-null pointers
+/// - `query_complete_out` must be a non-null pointer
+///
+/// # Outputs
+/// - `query_complete_out`: Set to 1 if query stage completed successfully, 0 otherwise
+/// - `prefill_worker_id_out`: The selected prefill worker ID (only valid if query_complete_out is 1)
+/// - `decode_worker_id_out`: The selected decode worker ID (only valid if query_complete_out is 1)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dynamo_query_workers_for_disagg(
+    pipeline: *mut WorkerSelectionPipeline,
+    request_json_c_str: *const c_char,
+    query_complete_out: *mut i32,
+    prefill_worker_id_out: *mut i64,
+    decode_worker_id_out: *mut i64,
+    token_ids_out: *mut *mut u32,
+    token_count_out: *mut usize,
+) -> DynamoLlmResult {
+    if pipeline.is_null() {
+        tracing::error!("Pipeline pointer is null");
+        return DynamoLlmResult::ERR;
+    }
+    if query_complete_out.is_null()
+        || prefill_worker_id_out.is_null()
+        || decode_worker_id_out.is_null()
+        || token_ids_out.is_null()
+        || token_count_out.is_null()
+    {
+        tracing::error!("One or more output pointers are null");
+        return DynamoLlmResult::ERR;
+    }
+
+    let req_str = match unsafe { CStr::from_ptr(request_json_c_str) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = ?e, "bad request json");
+            return DynamoLlmResult::ERR;
+        }
+    };
+    let request: NvCreateChatCompletionRequest = match serde_json::from_str(req_str) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = ?e, "parse request failed");
+            return DynamoLlmResult::ERR;
+        }
+    };
+
+    let pl = unsafe { &*pipeline };
+    let fut = async { query_workers_for_disagg(&pl.engine, request).await };
+    let result = match pl.wk.runtime().secondary().block_on(fut) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = ?e, "query_workers_for_disagg failed");
+            return DynamoLlmResult::ERR;
+        }
+    };
+
+    // Allocate tokens buffer
+    let tokens_ptr = if result.tokens.is_empty() {
+        std::ptr::null_mut()
+    } else {
+        let len = result.tokens.len();
+        let layout = std::alloc::Layout::array::<u32>(len).unwrap();
+        let ptr = unsafe { std::alloc::alloc(layout) as *mut u32 };
+        if ptr.is_null() {
+            tracing::error!("alloc tokens failed");
+            return DynamoLlmResult::ERR;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(result.tokens.as_ptr(), ptr, len);
+        }
+        ptr
+    };
+
+    unsafe {
+        *query_complete_out = if result.query_stage_complete.unwrap_or(false) { 1 } else { 0 };
+        *prefill_worker_id_out = result.prefill_worker_id.unwrap_or(0);
+        *decode_worker_id_out = result.decode_worker_id.unwrap_or(0);
+        *token_ids_out = tokens_ptr;
+        *token_count_out = result.tokens.len();
     }
     DynamoLlmResult::OK
 }
@@ -724,18 +811,61 @@ pub unsafe extern "C" fn dynamo_free_worker_selection_result(
     DynamoLlmResult::OK
 }
 
+/// Result structure for worker selection including optional query stage data
+#[derive(Default, Debug)]
+pub struct WorkerSelectionResult {
+    pub worker_id: i64,
+    pub tokens: Vec<u32>,
+    // Query stage results (only populated when query_workers annotation is used)
+    pub query_stage_complete: Option<bool>,
+    pub prefill_worker_id: Option<i64>,
+    pub decode_worker_id: Option<i64>,
+}
+
 /// Helper function to extract worker selection information from the annotation stream
 pub async fn extract_worker_selection_from_stream(
     mut stream: Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
-) -> anyhow::Result<(i64, Vec<u32>)> {
+) -> anyhow::Result<WorkerSelectionResult> {
+    use dynamo_llm::protocols::openai::nvext::NvExtResponse;
     use futures::StreamExt;
 
-    let mut worker_id: i64 = 0;
-    let mut tokens: Vec<u32> = Vec::new();
+    let mut result = WorkerSelectionResult::default();
 
     while let Some(response) = stream.next().await {
+        // Check for query_stage data in nvext (from disaggregated serving Stage 1)
+        if let Some(data) = response.data.as_ref()
+            && let Some(nvext_value) = data.nvext.as_ref()
+                && let Ok(nvext_response) = serde_json::from_value::<NvExtResponse>(nvext_value.clone()) {
+                    // Extract query_stage data if present
+                    if let Some(query_stage) = nvext_response.query_stage {
+                        result.query_stage_complete = query_stage.query_complete;
+                        result.prefill_worker_id = query_stage.prefill_worker_id.map(|id| id as i64);
+                        result.decode_worker_id = query_stage.decode_worker_id.map(|id| id as i64);
+                        // Extract token_ids from query_stage for Stage 2 optimization
+                        if let Some(tokens) = query_stage.token_ids {
+                            result.tokens = tokens;
+                            tracing::debug!(
+                                "Extracted {} tokens from query_stage for Stage 2",
+                                result.tokens.len()
+                            );
+                        }
+                        tracing::debug!(
+                            "Extracted query_stage from nvext: complete={:?}, prefill_worker={:?}, decode_worker={:?}, tokens={}",
+                            result.query_stage_complete,
+                            result.prefill_worker_id,
+                            result.decode_worker_id,
+                            result.tokens.len()
+                        );
+                    }
+                    // Also extract worker_id from nvext if present
+                    if let Some(worker_id_info) = nvext_response.worker_id
+                        && let Some(decode_id) = worker_id_info.decode_worker_id {
+                            result.worker_id = decode_id as i64;
+                        }
+                }
+
         let Some(event) = &response.event else {
-            tracing::error!("Response has no event field");
+            // Not an event-based response, skip
             continue;
         };
 
@@ -752,8 +882,8 @@ pub async fn extract_worker_selection_from_stream(
                 if let Ok(id_string) = serde_json::from_str::<String>(first_comment) {
                     match id_string.parse::<i64>() {
                         Ok(parsed_id) => {
-                            worker_id = parsed_id;
-                            tracing::debug!("parsed worker_id from JSON string: {}", worker_id);
+                            result.worker_id = parsed_id;
+                            tracing::debug!("parsed worker_id from JSON string: {}", result.worker_id);
                         }
                         Err(_) => {
                             tracing::error!(
@@ -767,8 +897,8 @@ pub async fn extract_worker_selection_from_stream(
 
                 match first_comment.parse::<i64>() {
                     Ok(parsed_id) => {
-                        worker_id = parsed_id;
-                        tracing::debug!("parsed worker_id directly: {}", worker_id);
+                        result.worker_id = parsed_id;
+                        tracing::debug!("parsed worker_id directly: {}", result.worker_id);
                     }
                     Err(_) => {
                         tracing::error!("failed to parse worker_id from: '{}'", first_comment);
@@ -787,8 +917,8 @@ pub async fn extract_worker_selection_from_stream(
                 tracing::debug!("Token comment: '{}'", first_comment);
                 match serde_json::from_str::<Vec<u32>>(first_comment) {
                     Ok(parsed_tokens) => {
-                        tokens = parsed_tokens;
-                        tracing::debug!("Successfully parsed {} tokens", tokens.len());
+                        result.tokens = parsed_tokens;
+                        tracing::debug!("Successfully parsed {} tokens", result.tokens.len());
                     }
                     Err(e) => {
                         tracing::error!("Failed to parse tokens from '{}': {}", first_comment, e);
@@ -803,11 +933,12 @@ pub async fn extract_worker_selection_from_stream(
     }
 
     tracing::info!(
-        "Final worker_id={}, tokens.len()={}",
-        worker_id,
-        tokens.len()
+        "Final worker_id={}, tokens.len()={}, query_stage_complete={:?}",
+        result.worker_id,
+        result.tokens.len(),
+        result.query_stage_complete
     );
-    Ok((worker_id, tokens))
+    Ok(result)
 }
 
 /// Utility function to add the "query_instance_id" annotation to an OpenAI request
@@ -885,6 +1016,20 @@ fn set_kv_annotation(
     request
 }
 
+/// Utility function to add the "query_instance_id" annotation for Stage 1 (query only)
+///
+/// This annotation signals the PrefillRouter to perform KV-aware worker selection
+/// without actually executing prefill. The response will contain prefill_worker_id
+/// and decode_worker_id in the nvext.query_stage field.
+///
+/// Note: This is the same annotation used by KvPushRouter for decode worker selection.
+/// When used with PrefillRouter active, it triggers the full query stage flow.
+pub fn add_query_instance_id_for_disagg(
+    request: &mut NvCreateChatCompletionRequest,
+) -> &mut NvCreateChatCompletionRequest {
+    add_annotation_unique(request, "query_instance_id")
+}
+
 /// Wrapper function that queries worker selection and annotates the original request
 ///
 /// This function performs the complete flow:
@@ -892,14 +1037,14 @@ fn set_kv_annotation(
 /// 2. Calls engine.generate() with the modified request
 /// 3. Extracts worker_instance_id and tokens from the response stream
 /// 4. Adds worker_instance_id and token_data annotations to the original request
-/// 5. Returns (worker_id, tokens, annotated_original_request)
+/// 5. Returns WorkerSelectionResult with all data and annotated_original_request
 ///
 /// # Parameters
 /// - `engine`: The worker selection pipeline engine
 /// - `original_request`: The original OpenAI request to process
 ///
 /// # Returns
-/// A tuple containing (worker_instance_id, tokens, modified_original_request)
+/// A tuple containing (WorkerSelectionResult, modified_original_request)
 /// where the modified_original_request has worker_instance_id and token_data annotations added
 pub async fn query_worker_selection_and_annotate(
     engine: &ServiceEngine<
@@ -907,16 +1052,41 @@ pub async fn query_worker_selection_and_annotate(
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >,
     mut original_request: NvCreateChatCompletionRequest,
-) -> anyhow::Result<(i64, Vec<u32>, NvCreateChatCompletionRequest)> {
+) -> anyhow::Result<(WorkerSelectionResult, NvCreateChatCompletionRequest)> {
     let mut query_request = original_request.clone();
     add_query_instance_id(&mut query_request);
     let single_in = SingleIn::new(query_request);
     let response_stream = engine.generate(single_in).await?;
-    let (worker_id, tokens) = extract_worker_selection_from_stream(response_stream).await?;
-    add_worker_instance_id_annotation(&mut original_request, worker_id);
-    add_token_data_annotation(&mut original_request, &tokens);
+    let result = extract_worker_selection_from_stream(response_stream).await?;
+    add_worker_instance_id_annotation(&mut original_request, result.worker_id);
+    add_token_data_annotation(&mut original_request, &result.tokens);
 
-    Ok((worker_id, tokens, original_request))
+    Ok((result, original_request))
+}
+
+/// Query worker selection for disaggregated serving Stage 1
+///
+/// This function uses the "query_instance_id" annotation to get prefill and decode
+/// worker IDs without executing any actual work. This is for the split pipeline
+/// where Stage 1 only queries workers and Stage 2 does the actual execution.
+///
+/// # Parameters
+/// - `engine`: The worker selection pipeline engine
+/// - `request`: The original OpenAI request to process
+///
+/// # Returns
+/// WorkerSelectionResult containing prefill_worker_id and decode_worker_id
+pub async fn query_workers_for_disagg(
+    engine: &ServiceEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+    >,
+    mut request: NvCreateChatCompletionRequest,
+) -> anyhow::Result<WorkerSelectionResult> {
+    add_query_instance_id_for_disagg(&mut request);
+    let single_in = SingleIn::new(request);
+    let response_stream = engine.generate(single_in).await?;
+    extract_worker_selection_from_stream(response_stream).await
 }
 
 /// Create a worker selection pipeline for OpenAI Chat Completion requests
