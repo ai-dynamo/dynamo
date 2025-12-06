@@ -369,8 +369,12 @@ class HandlerBase:
 
         # 2. Per-request errors - send to client, don't shutdown
         except RequestError as e:
-            logging.warning(f"Request {request_id} error: {e}")
-            yield {"finish_reason": "error", "token_ids": []}
+            error_msg = str(e)
+            logging.warning(f"Request {request_id} error: {error_msg}")
+            yield {
+                "finish_reason": {"error": error_msg},
+                "token_ids": [],
+            }
 
         # 3. ALL OTHER ERRORS - graceful shutdown
         except Exception as e:
@@ -384,7 +388,7 @@ class HandlerBase:
             # Try to send error to client before shutdown
             try:
                 yield {
-                    "finish_reason": "error",
+                    "finish_reason": {"error": error_msg},
                     "token_ids": [],
                 }
             except Exception:
