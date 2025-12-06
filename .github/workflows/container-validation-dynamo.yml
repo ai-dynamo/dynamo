@@ -33,8 +33,9 @@ jobs:
         uses: docker/setup-buildx-action@v3
       - name: Login to NGC
         if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
-        run: |
-          echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
       - name: Define Image Tag
         id: define_image_tag
         run: |

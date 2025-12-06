@@ -376,6 +376,7 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
 USER dynamo
 
 # Copy tests, benchmarks, deploy and components for CI with correct ownership
+COPY --chown=dynamo: pyproject.toml /workspace/
 COPY --chown=dynamo: tests /workspace/tests
 COPY --chown=dynamo: examples /workspace/examples
 COPY --chown=dynamo: benchmarks /workspace/benchmarks
@@ -477,7 +478,7 @@ RUN curl --retry 3 --retry-delay 2 -LSso /usr/local/bin/clang-format https://git
     && rm -rf clangd_18.1.3 clangd.zip
 
 # Editable install of dynamo
-COPY pyproject.toml README.md hatch_build.py /workspace/
+COPY README.md hatch_build.py /workspace/
 RUN python3 -m pip install --no-deps -e .
 
 # Install Python development packages
