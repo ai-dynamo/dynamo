@@ -36,6 +36,7 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("deepseek_v3", ToolCallConfig::deepseek_v3());
         map.insert("deepseek_v3_1", ToolCallConfig::deepseek_v3_1());
         map.insert("qwen3_coder", ToolCallConfig::qwen3_coder());
+        map.insert("jamba", ToolCallConfig::jamba());
         map.insert("default", ToolCallConfig::default());
         map
     })
@@ -191,6 +192,7 @@ mod tests {
             "deepseek_v3",
             "deepseek_v3_1",
             "qwen3_coder",
+            "jamba",
         ];
         for parser in available_parsers {
             assert!(parsers.contains(&parser));
@@ -940,19 +942,11 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_ai21labs_ai21_jamba_15_mini_simple() {
-        let input = r#" [
-    {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
-]"#;
-        let config = ToolCallConfig {
-            parser_config: ParserConfig::Json(JsonParserConfig {
-                tool_call_start_tokens: vec![],
-                tool_call_end_tokens: vec![],
-                arguments_keys: vec!["arguments".to_string()],
-                ..Default::default()
-            }),
-        };
+        let input = r#"<tool_calls>[
+{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
+]</tool_calls>"#;
+        let config = ToolCallConfig::jamba();
         let (result, content) = try_tool_call_parse(input, &config).await.unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
@@ -961,6 +955,29 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[tokio::test]
+    async fn test_ai21labs_ai21_jamba_15_mini_multiple() {
+        let input = r#"<tool_calls>[
+{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}},
+{"name": "get_weather", "arguments": {"location": "New York, NY", "unit": "celsius"}}
+]</tool_calls>"#;
+        let config = ToolCallConfig::jamba();
+        let (result, content) = try_tool_call_parse(input, &config).await.unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 2);
+
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "New York, NY");
+        assert_eq!(args["unit"], "celsius");
     }
 
     #[tokio::test]
