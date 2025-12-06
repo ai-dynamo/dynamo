@@ -46,11 +46,12 @@ runs:
       env:
         LOCAL_IMAGE: ${{ inputs.local_image }}
         PUSH_TAG: ${{ inputs.push_tag }}
+        CONDITIONAL_TAG: ${{ inputs.conditional_tag }}
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
-        if [[ ${{ inputs.conditional_tag != '' }} ]]; then
-            docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${{ inputs.conditional_tag }}
-            docker push ${ECR_HOSTNAME}/${{ inputs.conditional_tag }}
+        if [[ ${CONDITIONAL_TAG} != '' ]]; then
+            docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${CONDITIONAL_TAG}
+            docker push ${ECR_HOSTNAME}/${CONDITIONAL_TAG}
         fi
         docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${PUSH_TAG}
         docker push ${ECR_HOSTNAME}/${PUSH_TAG}
