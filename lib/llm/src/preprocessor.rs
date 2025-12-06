@@ -237,10 +237,11 @@ impl OpenAIPreprocessor {
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
         builder.estimated_prefix_hit_num_blocks(None);
-        // Extract backend_instance_id and extra_fields from nvext if present
+        // Extract backend_instance_id, extra_fields, and request_received_seconds from nvext if present
         if let Some(nvext) = request.nvext() {
             builder.backend_instance_id(nvext.backend_instance_id);
             builder.extra_fields(nvext.extra_fields.clone());
+            builder.request_received_seconds(nvext.request_received_seconds);
         }
 
         Ok(builder)

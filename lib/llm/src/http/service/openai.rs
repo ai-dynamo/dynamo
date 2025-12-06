@@ -56,6 +56,27 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
+/// Injects `request_completed_seconds` into the nvext timing_metrics field.
+/// This captures the exact moment when the response is about to leave the server.
+/// Only injects if timing_metrics already exists (i.e., the user requested it via extra_fields).
+fn inject_request_completed_seconds(nvext: &mut Option<serde_json::Value>) {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f32())
+        .ok();
+
+    // Only inject if nvext and timing_metrics already exist (user requested timing_metrics)
+    if let Some(ts) = ts
+        && let Some(timing_obj) = nvext
+            .as_mut()
+            .and_then(|v| v.as_object_mut())
+            .and_then(|obj| obj.get_mut("timing_metrics"))
+            .and_then(|timing| timing.as_object_mut())
+    {
+        timing_obj.insert("request_completed_seconds".to_string(), ts.into());
+    }
+}
+
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
 /// Can be configured at compile time using the DYN_FRONTEND_BODY_LIMIT_MB environment variable
@@ -281,8 +302,23 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
 async fn handler_completions(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateCompletionRequest>,
+    Json(mut request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
+    // Capture received timestamp immediately when request arrives at the frontend
+    // NOTE: If frontend, prefill workers, and decode workers are running on different machines,
+    // there may be slight clock drifts between them. As a result, timing values recorded on
+    // different machines may not be perfectly synchronized and could show minor inconsistencies.
+    let request_received_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f32())
+        .ok();
+
+    // Set request_received_seconds in nvext for timing metrics
+    if request_received_seconds.is_some() {
+        let nvext = request.nvext.get_or_insert_with(Default::default);
+        nvext.request_received_seconds = request_received_seconds;
+    }
+
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
@@ -404,6 +440,23 @@ async fn completions_single(
 
     // apply any annotations to the front of the stream
     let stream = stream::iter(annotations).chain(stream);
+
+    // Inject request_completed_seconds into nvext when final content chunk is sent
+    // Only inject on the chunk with finish_reason (not the usage-only chunk)
+    // because timing_metrics is populated by the backend on the finish_reason chunk
+    let stream = stream.map(|mut annotated| {
+        if let Some(ref mut response) = annotated.data {
+            let has_finish_reason = response
+                .inner
+                .choices
+                .iter()
+                .any(|choice| choice.finish_reason.is_some());
+            if has_finish_reason {
+                inject_request_completed_seconds(&mut response.inner.nvext);
+            }
+        }
+        annotated
+    });
 
     if streaming {
         // For streaming, we'll drop the http_queue_guard on the first token
@@ -686,8 +739,23 @@ async fn embeddings(
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateChatCompletionRequest>,
+    Json(mut request): Json<NvCreateChatCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
+    // Capture received timestamp immediately when request arrives at the frontend
+    // NOTE: If frontend, prefill workers, and decode workers are running on different machines,
+    // there may be slight clock drifts between them. As a result, timing values recorded on
+    // different machines may not be perfectly synchronized and could show minor inconsistencies.
+    let request_received_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f32())
+        .ok();
+
+    // Set request_received_seconds in nvext for timing metrics
+    if request_received_seconds.is_some() {
+        let nvext = request.nvext.get_or_insert_with(Default::default);
+        nvext.request_received_seconds = request_received_seconds;
+    }
+
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
@@ -820,6 +888,22 @@ async fn chat_completions(
 
     // todo - tap the stream and propagate request level metrics
     // note - we might do this as part of the post processing set to make it more generic
+
+    // Inject request_completed_seconds into nvext when final content chunk is sent
+    // Only inject on the chunk with finish_reason (not the usage-only chunk)
+    // because timing_metrics is populated by the backend on the finish_reason chunk
+    let stream = stream.map(|mut annotated| {
+        if let Some(ref mut response) = annotated.data {
+            let has_finish_reason = response
+                .choices
+                .iter()
+                .any(|choice| choice.finish_reason.is_some());
+            if has_finish_reason {
+                inject_request_completed_seconds(&mut response.nvext);
+            }
+        }
+        annotated
+    });
 
     if streaming {
         stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
@@ -2054,5 +2138,60 @@ mod tests {
             assert!(msg.contains("add_special_tokens"));
             assert!(msg.contains("response_format"));
         }
+    }
+
+    // Tests for inject_request_completed_seconds function
+    #[test]
+    fn test_inject_request_completed_seconds_into_existing_timing_metrics() {
+        let mut nvext = Some(serde_json::json!({
+            "timing_metrics": {
+                "request_received_seconds": 1700000000.0,
+                "decode_end_seconds": 1700000001.5
+            }
+        }));
+
+        inject_request_completed_seconds(&mut nvext);
+
+        let nvext = nvext.unwrap();
+        let timing = nvext.get("timing_metrics").unwrap();
+        assert!(timing.get("request_completed_seconds").is_some());
+        // Verify existing fields are preserved
+        assert_eq!(
+            timing.get("request_received_seconds").unwrap().as_f64(),
+            Some(1700000000.0)
+        );
+        assert_eq!(
+            timing.get("decode_end_seconds").unwrap().as_f64(),
+            Some(1700000001.5)
+        );
+    }
+
+    #[test]
+    fn test_inject_request_completed_seconds_does_not_create_nvext_if_none() {
+        // If nvext is None (user didn't request timing_metrics), we should NOT create it
+        let mut nvext: Option<serde_json::Value> = None;
+
+        inject_request_completed_seconds(&mut nvext);
+
+        assert!(
+            nvext.is_none(),
+            "nvext should remain None when timing_metrics was not requested"
+        );
+    }
+
+    #[test]
+    fn test_inject_request_completed_seconds_does_not_create_timing_metrics_if_missing() {
+        // If nvext exists but timing_metrics is not present, we should NOT create it
+        let mut nvext = Some(serde_json::json!({
+            "worker_id": {"prefill_worker_id": 42}
+        }));
+
+        inject_request_completed_seconds(&mut nvext);
+
+        let nvext = nvext.unwrap();
+        assert!(
+            nvext.get("timing_metrics").is_none(),
+            "timing_metrics should not be created if not already present"
+        );
     }
 }
