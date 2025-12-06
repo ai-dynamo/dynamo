@@ -94,10 +94,6 @@ class DynamoWorkerProcess(ManagedProcess):
             log_dir=log_dir,
         )
 
-    def get_pid(self):
-        """Get the PID of the worker process"""
-        return self.proc.pid if self.proc else None
-
     def is_ready(self, response) -> bool:
         """Check the health of the worker process"""
         try:
@@ -124,6 +120,16 @@ def test_request_migration_sglang_worker_failure(
     the system can handle the failure gracefully and migrate the request to
     another worker.
     """
+
+    # Extract runtime service ports
+    nats_process, etcd_process = runtime_services
+    logger.info(
+        f"Using runtime services - NATS port: {nats_process.port}, Etcd port: {etcd_process.port}"
+    )
+
+    # Set environment variables for runtime services before starting workers
+    os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
+    os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
 
     # Step 1: Start the frontend
     with DynamoFrontendProcess(request) as frontend:
@@ -216,6 +222,16 @@ def test_no_request_migration_sglang_worker_failure(
     is killed during request processing, the request fails as expected without migration.
     This is the opposite behavior of test_request_migration_sglang_worker_failure.
     """
+
+    # Extract runtime service ports
+    nats_process, etcd_process = runtime_services
+    logger.info(
+        f"Using runtime services - NATS port: {nats_process.port}, Etcd port: {etcd_process.port}"
+    )
+
+    # Set environment variables for runtime services before starting workers
+    os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
+    os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
 
     # Step 1: Start the frontend
     with DynamoFrontendProcess(request) as frontend:

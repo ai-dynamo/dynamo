@@ -314,8 +314,17 @@ def test_vllm_kv_router_basic(
     """
 
     # runtime_services starts etcd and nats
+    nats_process, etcd_process = runtime_services
     N_VLLM_WORKERS = 2
     logger.info(f"Starting vLLM KV router test with {N_VLLM_WORKERS} workers")
+    logger.info(
+        f"Using runtime services - NATS port: {nats_process.port}, Etcd port: {etcd_process.port}"
+    )
+
+    # Set environment variables for runtime services before starting vLLM workers
+    # The workers need to know which ports to use when they initialize
+    os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
+    os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
 
     try:
         # Start vLLM workers
@@ -339,6 +348,8 @@ def test_vllm_kv_router_basic(
             num_requests=NUM_REQUESTS,
             frontend_timeout=180,  # 3 minutes should be plenty for TinyLlama
             store_backend="etcd",  # Explicit for clarity
+            nats_port=nats_process.port,
+            etcd_port=etcd_process.port,
         )
 
     finally:
@@ -352,8 +363,16 @@ def test_router_decisions_vllm_multiple_workers(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
     # runtime_services starts etcd and nats
+    nats_process, etcd_process = runtime_services
     logger.info("Starting vLLM router prefix reuse test with two workers")
+    logger.info(
+        f"Using runtime services - NATS port: {nats_process.port}, Etcd port: {etcd_process.port}"
+    )
     N_WORKERS = 2
+
+    # Set environment variables for runtime services before calling get_runtime()
+    os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
+    os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
 
     try:
         # Start 2 worker processes on the same GPU
@@ -396,8 +415,17 @@ def test_router_decisions_vllm_dp(
         * The (worker_id, dp_rank) with events should have exactly 4 events (one per request)
         * All events should be on the forced (worker_id, dp_rank=1) (verifying forced routing and prefix reuse)
     """
+    # runtime_services starts etcd and nats
+    nats_process, etcd_process = runtime_services
+    logger.info(
+        f"Using runtime services - NATS port: {nats_process.port}, Etcd port: {etcd_process.port}"
+    )
     N_WORKERS = 1
     DP_SIZE = 2
+
+    # Set environment variables for runtime services before calling get_runtime()
+    os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
+    os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
 
     try:
         logger.info("Starting 2 vLLM DP ranks (dp_size=2) (gpu_mem=0.4)")
@@ -437,8 +465,17 @@ def test_vllm_indexers_sync(
     Test that two KV routers have synchronized indexer states after processing requests
     with vLLM workers. This test verifies that both routers converge to the same internal state.
     """
+    # runtime_services starts etcd and nats
+    nats_process, etcd_process = runtime_services
     logger.info("Starting vLLM indexers sync test")
+    logger.info(
+        f"Using runtime services - NATS port: {nats_process.port}, Etcd port: {etcd_process.port}"
+    )
     N_VLLM_WORKERS = 2
+
+    # Set environment variables for runtime services before calling get_runtime() inside _test_router_indexers_sync
+    os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
+    os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
 
     try:
         # Start vLLM workers
@@ -460,6 +497,7 @@ def test_vllm_indexers_sync(
             model_name=MODEL_NAME,
             num_workers=N_VLLM_WORKERS,
             store_backend="etcd",
+            nats_port=nats_process.port,
         )
 
         logger.info("vLLM indexers sync test completed successfully")

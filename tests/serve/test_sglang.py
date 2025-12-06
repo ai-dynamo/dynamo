@@ -245,7 +245,7 @@ def test_sglang_deployment(
 ):
     """Test SGLang deployment scenarios using common helpers"""
     config = sglang_config_test
-    run_serve_deployment(config, request)
+    run_serve_deployment(config, request, runtime_services=runtime_services)
 
 
 @pytest.mark.e2e
