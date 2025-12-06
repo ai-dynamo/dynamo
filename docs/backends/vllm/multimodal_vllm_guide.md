@@ -211,6 +211,8 @@ The following models have been tested with Dynamo's vLLM multimodal backend:
 - **LLa Next Video** - `llava-hf/LLaVA-NeXT-Video-7B-hf`
 - **Qwen2-Audio** - `Qwen/Qwen2-Audio-7B-Instruct`
 
+For a complete list of multimodal models supported by vLLM, see [vLLM Supported Multimodal Models](https://docs.vllm.ai/en/latest/models/supported_models/#list-of-multimodal-language-models). Models listed there should work with Simple Aggregated Mode but may not be explicitly tested.
+
 ## Key Files
 
 | File | Description |
