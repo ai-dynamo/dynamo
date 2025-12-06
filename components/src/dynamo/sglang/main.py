@@ -10,6 +10,7 @@ import sys
 import sglang as sgl
 import uvloop
 
+from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType
@@ -33,6 +34,48 @@ from dynamo.sglang.request_handlers import (
 )
 
 configure_dynamo_logging()
+
+# Default histogram buckets for sequence lengths
+DEFAULT_ISL_BUCKETS = [
+    50.0,
+    100.0,
+    200.0,
+    500.0,
+    1000.0,
+    2000.0,
+    5000.0,
+    10000.0,
+    50000.0,
+    128000.0,
+]
+DEFAULT_OSL_BUCKETS = [
+    50.0,
+    100.0,
+    200.0,
+    500.0,
+    1000.0,
+    2000.0,
+    5000.0,
+    10000.0,
+    32000.0,
+]
+
+
+def create_sequence_length_metrics(endpoint):
+    """Create ISL and OSL histogram metrics on the endpoint."""
+    isl_histogram = endpoint.metrics.create_histogramvec(
+        f"worker_{prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS}",
+        "Input sequence length in tokens (worker-side)",
+        ["model"],
+        buckets=DEFAULT_ISL_BUCKETS,
+    )
+    osl_histogram = endpoint.metrics.create_histogramvec(
+        f"worker_{prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS}",
+        "Output sequence length in tokens (worker-side)",
+        ["model"],
+        buckets=DEFAULT_OSL_BUCKETS,
+    )
+    return isl_histogram, osl_histogram
 
 
 async def _handle_non_leader_node(
@@ -165,11 +208,21 @@ async def init(runtime: DistributedRuntime, config: Config):
     if engine.server_args.enable_metrics:
         setup_prometheus_registry(engine, generate_endpoint)
 
+    # Create ISL/OSL metrics
+    isl_histogram, osl_histogram = create_sequence_length_metrics(generate_endpoint)
+
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
     handler = DecodeWorkerHandler(
-        component, engine, config, publisher, prefill_client, prefill_router_client
+        component,
+        engine,
+        config,
+        publisher,
+        prefill_client,
+        prefill_router_client,
+        isl_histogram=isl_histogram,
+        osl_histogram=osl_histogram,
     )
 
     health_check_payload = SglangHealthCheckPayload(engine).to_dict()
@@ -272,7 +325,17 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     if engine.server_args.enable_metrics:
         setup_prometheus_registry(engine, generate_endpoint)
 
-    handler = PrefillWorkerHandler(component, engine, config, publisher)
+    # Create ISL/OSL metrics
+    isl_histogram, osl_histogram = create_sequence_length_metrics(generate_endpoint)
+
+    handler = PrefillWorkerHandler(
+        component,
+        engine,
+        config,
+        publisher,
+        isl_histogram=isl_histogram,
+        osl_histogram=osl_histogram,
+    )
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 

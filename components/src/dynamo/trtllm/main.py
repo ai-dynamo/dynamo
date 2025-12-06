@@ -36,6 +36,7 @@ from torch.cuda import device_count
 from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
@@ -67,6 +68,49 @@ from dynamo.trtllm.utils.trtllm_utils import (
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
+
+# Default histogram buckets for sequence lengths
+DEFAULT_ISL_BUCKETS = [
+    50.0,
+    100.0,
+    200.0,
+    500.0,
+    1000.0,
+    2000.0,
+    5000.0,
+    10000.0,
+    50000.0,
+    128000.0,
+]
+DEFAULT_OSL_BUCKETS = [
+    50.0,
+    100.0,
+    200.0,
+    500.0,
+    1000.0,
+    2000.0,
+    5000.0,
+    10000.0,
+    32000.0,
+]
+
+
+def create_sequence_length_metrics(endpoint):
+    """Create ISL and OSL histogram metrics on the endpoint."""
+    isl_histogram = endpoint.metrics.create_histogramvec(
+        f"worker_{prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS}",
+        "Input sequence length in tokens (worker-side)",
+        ["model"],
+        buckets=DEFAULT_ISL_BUCKETS,
+    )
+    osl_histogram = endpoint.metrics.create_histogramvec(
+        f"worker_{prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS}",
+        "Output sequence length in tokens (worker-side)",
+        ["model"],
+        buckets=DEFAULT_OSL_BUCKETS,
+    )
+    return isl_histogram, osl_histogram
+
 
 configure_dynamo_logging()
 
@@ -397,6 +441,10 @@ async def init(runtime: DistributedRuntime, config: Config):
                     f"Failed to initialize TensorRT-LLM Prometheus metrics: {e}"
                 )
 
+        # Create ISL/OSL metrics
+        isl_histogram, osl_histogram = create_sequence_length_metrics(endpoint)
+        model_name_for_metrics = config.served_model_name or config.model_path
+
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
             component=component,
@@ -410,6 +458,9 @@ async def init(runtime: DistributedRuntime, config: Config):
             runtime=runtime,  # Pass runtime for graceful shutdown
             metrics_collector=metrics_collector,
             kv_block_size=config.kv_block_size,
+            isl_histogram=isl_histogram,
+            osl_histogram=osl_histogram,
+            model_name=model_name_for_metrics,
         )
 
         # Register the model with runtime config

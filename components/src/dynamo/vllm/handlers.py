@@ -129,6 +129,8 @@ class BaseWorkerHandler(ABC):
         enable_multimodal: bool = False,
         generate_endpoint=None,
         config=None,
+        isl_histogram=None,
+        osl_histogram=None,
     ):
         self.runtime = runtime
         self.component = component
@@ -145,6 +147,10 @@ class BaseWorkerHandler(ABC):
         # LoRA tracking
         self.lora_id_for_name: dict[str, int] = {}
         self.lora_name_to_path: dict[str, str] = {}
+        # Metrics
+        self.isl_histogram = isl_histogram
+        self.osl_histogram = osl_histogram
+        self._model_name = config.served_model_name if config else None
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -563,6 +569,14 @@ class BaseWorkerHandler(ABC):
             ),
         }
 
+    def _observe_sequence_lengths(self, isl: int, osl: int) -> None:
+        """Record ISL and OSL metrics."""
+        labels = {"model": self._model_name or "unknown"}
+        if self.isl_histogram:
+            self.isl_histogram.observe(float(isl), labels)
+        if self.osl_histogram:
+            self.osl_histogram.observe(float(osl), labels)
+
     async def generate_tokens(
         self,
         prompt,
@@ -615,6 +629,10 @@ class BaseWorkerHandler(ABC):
                         ] = BaseWorkerHandler._build_completion_usage(
                             request_output=res
                         )
+                        # Record ISL/OSL metrics
+                        isl = len(res.prompt_token_ids) if res.prompt_token_ids else 0
+                        osl = len(output.token_ids)
+                        self._observe_sequence_lengths(isl, osl)
                         # Log completion with LoRA info (debug level to avoid log spam)
                         if lora_request:
                             logger.debug(
@@ -655,6 +673,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         enable_multimodal: bool = False,
         generate_endpoint=None,
         config=None,
+        isl_histogram=None,
+        osl_histogram=None,
     ):
         super().__init__(
             runtime,
@@ -665,6 +685,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             enable_multimodal,
             generate_endpoint,
             config,
+            isl_histogram,
+            osl_histogram,
         )
 
     async def generate(self, request, context):
@@ -757,6 +779,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         enable_multimodal: bool = False,
         generate_endpoint=None,
         config=None,
+        isl_histogram=None,
+        osl_histogram=None,
     ):
         super().__init__(
             runtime,
@@ -767,6 +791,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             enable_multimodal,
             generate_endpoint,
             config,
+            isl_histogram,
+            osl_histogram,
         )
 
     async def generate(self, request, context):
@@ -862,6 +888,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                             request_output=res
                         ),
                     }
+
+                    # Record ISL/OSL metrics
+                    isl = len(res.prompt_token_ids) if res.prompt_token_ids else 0
+                    osl = len(token_ids)
+                    self._observe_sequence_lengths(isl, osl)
 
                     # Log prefill completion with LoRA info
                     if lora_request:
