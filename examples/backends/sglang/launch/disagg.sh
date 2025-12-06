@@ -37,10 +37,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Enable tracing if requested
+TRACE_ARGS=()
 if [ "$ENABLE_OTEL" = true ]; then
     export DYN_LOGGING_JSONL=true
     export OTEL_EXPORT_ENABLED=1
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
+    TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
 
 # run ingress
@@ -61,7 +63,8 @@ python3 -m dynamo.sglang \
   --disaggregation-bootstrap-port 12345 \
   --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl \
-  --enable-metrics &
+  --enable-metrics \
+  "${TRACE_ARGS[@]}" &
 PREFILL_PID=$!
 
 # run decode worker
@@ -76,4 +79,5 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --disaggregation-bootstrap-port 12345 \
   --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl \
-  --enable-metrics
+  --enable-metrics \
+  "${TRACE_ARGS[@]}"
