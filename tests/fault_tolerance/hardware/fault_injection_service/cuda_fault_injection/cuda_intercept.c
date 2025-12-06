@@ -25,6 +25,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 typedef int cudaError_t;
 typedef struct cudaDeviceProp_st {
@@ -111,14 +113,134 @@ get_fault_config(int* inject, int* xid_type, cudaError_t* error_code)
   *error_code = cached_error;
 }
 
-// Check if fault should be injected
+// Global call counter and GPU tracking
+static volatile int cuda_call_count = 0;
+static int after_step_threshold = 0;
+static int after_step_initialized = 0;
+static int after_seconds_threshold = 0;
+static int after_seconds_initialized = 0;
+static time_t start_time = 0;
+static int target_gpu_id = -1;  // -1 = all GPUs, else specific GPU
+static int target_gpu_initialized = 0;
+static __thread int current_device = 0;  // Thread-local current GPU
+static int debug_logging = 0;
+static int debug_initialized = 0;
+
+// Check if fault should be injected (with call count and GPU check)
 static int
 should_inject_fault()
 {
   int inject, xid;
   cudaError_t error;
   get_fault_config(&inject, &xid, &error);
-  return inject;
+
+  // Initialize debug logging once
+  if (!debug_initialized) {
+    char* debug_env = getenv("CUDA_FAULT_DEBUG");
+    if (debug_env && strcmp(debug_env, "1") == 0) {
+      debug_logging = 1;
+      fprintf(stderr, "[CUDA FAULT DEBUG] Verbose logging ENABLED\n");
+    }
+    debug_initialized = 1;
+  }
+
+  if (!inject) {
+    if (debug_logging && cuda_call_count < 10) {
+      fprintf(stderr, "[CUDA FAULT DEBUG] Injection disabled (count=%d)\n", cuda_call_count);
+    }
+    return 0;  // Injection disabled
+  }
+
+  // Initialize target GPU once
+  if (!target_gpu_initialized) {
+    char* gpu_env = getenv("CUDA_FAULT_GPU_ID");
+    if (gpu_env) {
+      target_gpu_id = atoi(gpu_env);
+      fprintf(stderr, "[CUDA FAULT INJECTION] Targeting GPU %d only\n", target_gpu_id);
+    } else {
+      fprintf(stderr, "[CUDA FAULT INJECTION] Targeting ALL GPUs\n");
+    }
+    target_gpu_initialized = 1;
+  }
+
+  // Increment call count
+  int current_count = __sync_fetch_and_add(&cuda_call_count, 1);
+
+  // Debug logging for first few calls and around threshold
+  if (debug_logging) {
+    if (current_count < 10 || (after_step_threshold > 0 && current_count >= after_step_threshold - 5 &&
+                               current_count <= after_step_threshold + 5)) {
+      fprintf(
+          stderr, "[CUDA FAULT DEBUG] Call #%d: current_device=%d, target_gpu=%d, threshold=%d\n", current_count,
+          current_device, target_gpu_id, after_step_threshold);
+    }
+  }
+
+  // Check if this call is for the target GPU
+  if (target_gpu_id >= 0 && current_device != target_gpu_id) {
+    if (debug_logging && current_count < 10) {
+      fprintf(
+          stderr, "[CUDA FAULT DEBUG] Call #%d: Wrong GPU (current=%d, target=%d) - skip\n", current_count,
+          current_device, target_gpu_id);
+    }
+    return 0;  // Different GPU - don't inject
+  }
+
+  // Initialize time-based threshold once
+  if (!after_seconds_initialized) {
+    char* after_seconds_env = getenv("CUDA_FAULT_AFTER_SECONDS");
+    if (after_seconds_env) {
+      after_seconds_threshold = atoi(after_seconds_env);
+      start_time = time(NULL);
+      fprintf(stderr, "[CUDA FAULT INJECTION] Will inject after %d seconds from startup\n", after_seconds_threshold);
+    }
+    after_seconds_initialized = 1;
+  }
+
+  // Check time-based threshold first (more reliable than step count)
+  if (after_seconds_threshold > 0) {
+    time_t elapsed = time(NULL) - start_time;
+    if (elapsed < after_seconds_threshold) {
+      if (debug_logging && current_count < 10) {
+        fprintf(
+            stderr, "[CUDA FAULT DEBUG] Call #%d: %ld seconds elapsed, waiting for %d seconds\n", current_count,
+            (long)elapsed, after_seconds_threshold);
+      }
+      return 0;  // Not enough time elapsed
+    }
+    // Time threshold reached - log the step count for reference
+    if (current_count == after_seconds_threshold || (debug_logging && current_count % 100 == 0)) {
+      fprintf(
+          stderr, "[CUDA FAULT INFO] Time threshold reached at call #%d (after %ld seconds)\n", current_count,
+          (long)elapsed);
+    }
+  }
+
+  // Initialize after_step threshold once
+  if (!after_step_initialized) {
+    char* after_step_env = getenv("CUDA_FAULT_AFTER_STEP");
+    if (after_step_env) {
+      after_step_threshold = atoi(after_step_env);
+      fprintf(stderr, "[CUDA FAULT INJECTION] Will inject after %d CUDA calls\n", after_step_threshold);
+    }
+    after_step_initialized = 1;
+  }
+
+  // Check step-based threshold (if no time-based threshold)
+  if (after_step_threshold > 0 && after_seconds_threshold == 0 && current_count < after_step_threshold) {
+    if (debug_logging && current_count < 10) {
+      fprintf(
+          stderr, "[CUDA FAULT DEBUG] Call #%d: Before threshold (%d) - skip\n", current_count, after_step_threshold);
+    }
+    return 0;  // Not yet - pass through
+  }
+
+  // All checks passed - inject fault!
+  if (debug_logging || current_count == after_step_threshold) {
+    fprintf(stderr, "[CUDA FAULT] Call #%d: INJECTING FAULT on GPU %d (XID %d)\n", current_count, current_device, xid);
+  }
+
+  return 1;  // Inject fault on target GPU!
 }
 
 // Get the error code to return
@@ -164,20 +286,45 @@ cudaGetDeviceCount(int* count)
   return cudaErrorNoDevice;
 }
 
-// Intercept: Set device
+// Intercept: Set device (also track current device for GPU-specific targeting)
 cudaError_t
 cudaSetDevice(int device)
 {
   if (should_inject_fault()) {
+    // SIMULATING GPU FAILURE:
+    // Don't call real cudaSetDevice() because we're simulating that
+    // the GPU doesn't exist (XID 79 = "GPU fell off bus").
+    //
+    // If we called real cudaSetDevice(2), we'd actually switch to GPU 2,
+    // but we want to simulate GPU 2 is unavailable/broken.
+    //
+    // Returning error WITHOUT switching simulates:
+    // "Tried to use GPU 2, but it's not there / fell off bus"
+
     cudaError_t error = get_error_code();
     log_intercept("cudaSetDevice", error);
-    return error;
+    return error;  // Fail without switching device
   }
 
+  // NO FAULT - Normal operation: actually switch to requested GPU
   typedef cudaError_t (*real_func_t)(int);
   real_func_t real_func = (real_func_t)dlsym(RTLD_NEXT, "cudaSetDevice");
   if (real_func) {
-    return real_func(device);
+    cudaError_t result = real_func(device);
+
+    if (result == cudaSuccess) {
+      // GPU switch succeeded - track which device this thread is now using.
+      // This enables GPU-specific fault injection: we can inject faults only
+      // on calls targeting GPU 2, while letting GPU 0/1/3 work normally.
+      //
+      // Example: Thread calls cudaSetDevice(2), then later cudaMalloc().
+      // cudaMalloc() has no device parameter, but we know it's for GPU 2
+      // because we tracked the most recent cudaSetDevice(2) call.
+      current_device = device;
+    }
+    // If failed: don't update current_device (we're still on previous GPU)
+
+    return result;
   }
   return cudaErrorNoDevice;
 }
