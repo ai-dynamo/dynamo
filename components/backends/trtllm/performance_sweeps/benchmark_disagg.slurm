@@ -179,7 +179,7 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
       --ntasks $gen_tp_size \
       --oversubscribe \
       --overlap \
-      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/decode_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'decode' &> ${full_logdir}/output_decode_worker_${i}.log &
+      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/decode_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'decode' &> ${full_logdir}/output_decode_worker_${i}.log $gen_enable_attention_dp &
   echo "$!" >> "$PID_FILE"
 done
 
@@ -204,7 +204,7 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
         --overlap \
         --ntasks 1 \
         --nodes 1 \
-        bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'prefill' &> ${full_logdir}/output_prefill_worker_${i}.log &
+        bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'prefill'  &> ${full_logdir}/output_prefill_worker_${i}.log $ctx_enable_attention_dp &
   prefill_pids+=($!)
   echo "$!" >> "$PID_FILE"
 done

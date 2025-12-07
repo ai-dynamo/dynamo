@@ -112,13 +112,13 @@ for ((i=1; i<=50; i++)); do
     # https://github.com/ai-dynamo/dynamo/pull/2683
     if [[ "$http_code" == "200" ]] && echo "$body" | grep -q '"status":"healthy"' && echo "$body" | grep -q '"endpoints":\[[^]]*"dyn://dynamo.tensorrt_llm.generate"'; then
         if [[ "$kind" == *disagg* ]]; then
-            if echo "$body" | grep -q '"tensorrt_llm_next"'; then
+            if echo "$body" | grep -q '"dyn://dynamo.prefill.generate"'; then
                 echo "Health check succeeded on attempt $i"
                 echo "$body"
                 failed=false
                 break
             else
-                echo "Attempt $i: tensorrt_llm_next key not found in etcd."
+                echo "Attempt $i: prefill generate endpoint not found in etcd."
             fi
         else
             echo "Health check succeeded on attempt $i"

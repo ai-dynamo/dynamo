@@ -218,7 +218,7 @@ def gen_config_file(
         },
         "cuda_graph_config": {
             "enable_padding": True,
-            "max_batch_size": 30,
+            "max_batch_size": ctx_batch_size,
         },
         "num_postprocess_workers": 4,
         "cache_transceiver_config": {
@@ -231,10 +231,6 @@ def gen_config_file(
     }
 
     decode_config: Dict[str, Any] = {
-        "allreduce_strategy": "AUTO",
-        "attention_dp_config": {
-            "enable_balance": True
-        },
         "disable_overlap_scheduler": False,
         "tensor_parallel_size": gen_tp_size,
         "moe_expert_parallel_size": gen_ep_size,
