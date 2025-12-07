@@ -224,9 +224,10 @@ impl NetworkManager {
     async fn create_http_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
         use super::ingress::http_endpoint::SharedHttpServer;
 
-        let bind_addr = format!("{}:{}", self.config.http_host, self.config.http_port)
-            .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid HTTP bind address: {}", e))?;
+        let bind_addr =
+            crate::utils::format_socket_addr(&self.config.http_host, self.config.http_port)
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid HTTP bind address: {}", e))?;
 
         tracing::info!(
             bind_addr = %bind_addr,
@@ -250,9 +251,10 @@ impl NetworkManager {
     async fn create_tcp_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
         use super::ingress::shared_tcp_endpoint::SharedTcpServer;
 
-        let bind_addr = format!("{}:{}", self.config.tcp_host, self.config.tcp_port)
-            .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid TCP bind address: {}", e))?;
+        let bind_addr =
+            crate::utils::format_socket_addr(&self.config.tcp_host, self.config.tcp_port)
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid TCP bind address: {}", e))?;
 
         tracing::info!(
             bind_addr = %bind_addr,

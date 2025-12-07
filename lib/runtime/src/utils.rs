@@ -12,4 +12,7 @@ pub mod tasks;
 pub mod typed_prefix_watcher;
 
 pub use graceful_shutdown::GracefulShutdownTracker;
-pub use ip_resolver::{get_http_rpc_host_from_env, get_tcp_rpc_host_from_env};
+pub use ip_resolver::{
+    format_socket_addr, format_socket_addr_with_path, get_http_rpc_host_from_env,
+    get_tcp_rpc_host_from_env,
+};

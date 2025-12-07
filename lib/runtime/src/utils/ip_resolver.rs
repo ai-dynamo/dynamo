@@ -64,6 +64,59 @@ pub fn get_tcp_rpc_host_from_env() -> String {
     std::env::var("DYN_TCP_RPC_HOST").unwrap_or_else(|_| get_http_rpc_host())
 }
 
+/// Format a host and port into a valid socket address string
+///
+/// This function handles both IPv4 and IPv6 addresses correctly.
+/// IPv6 addresses are wrapped in brackets as required by the socket address syntax.
+///
+/// # Arguments
+/// * `host` - The host address (IPv4, IPv6, or hostname)
+/// * `port` - The port number
+///
+/// # Returns
+/// A properly formatted socket address string
+///
+/// # Examples
+/// ```
+/// use dynamo_runtime::utils::format_socket_addr;
+///
+/// assert_eq!(format_socket_addr("192.168.1.1", 8080), "192.168.1.1:8080");
+/// assert_eq!(format_socket_addr("::1", 8080), "[::1]:8080");
+/// assert_eq!(format_socket_addr("2001:db8::1", 9999), "[2001:db8::1]:9999");
+/// assert_eq!(format_socket_addr("localhost", 3000), "localhost:3000");
+/// ```
+pub fn format_socket_addr(host: &str, port: u16) -> String {
+    // Check if the host is an IPv6 address (contains colons but is not already bracketed)
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    }
+}
+
+/// Format a host and port with an optional path suffix
+///
+/// Similar to `format_socket_addr` but allows appending a path.
+/// Useful for TCP endpoints that include routing information.
+///
+/// # Arguments
+/// * `host` - The host address (IPv4, IPv6, or hostname)
+/// * `port` - The port number
+/// * `path` - Optional path to append (e.g., "/endpoint_name")
+///
+/// # Returns
+/// A properly formatted address string with optional path
+pub fn format_socket_addr_with_path(host: &str, port: u16, path: &str) -> String {
+    let base = format_socket_addr(host, port);
+    if path.is_empty() {
+        base
+    } else if path.starts_with('/') {
+        format!("{}{}", base, path)
+    } else {
+        format!("{}/{}", base, path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +206,85 @@ mod tests {
 
         // Should be a valid IP address
         let _: IpAddr = result.parse().expect("Should be a valid IP address");
+    }
+
+    #[test]
+    fn test_format_socket_addr_ipv4() {
+        assert_eq!(format_socket_addr("192.168.1.1", 8080), "192.168.1.1:8080");
+        assert_eq!(format_socket_addr("0.0.0.0", 9999), "0.0.0.0:9999");
+        assert_eq!(format_socket_addr("127.0.0.1", 3000), "127.0.0.1:3000");
+    }
+
+    #[test]
+    fn test_format_socket_addr_ipv6() {
+        assert_eq!(format_socket_addr("::1", 8080), "[::1]:8080");
+        assert_eq!(
+            format_socket_addr("2001:db8::1", 9999),
+            "[2001:db8::1]:9999"
+        );
+        assert_eq!(
+            format_socket_addr("fe80::1%eth0", 3000),
+            "[fe80::1%eth0]:3000"
+        );
+        assert_eq!(format_socket_addr("::", 8080), "[::]:8080");
+    }
+
+    #[test]
+    fn test_format_socket_addr_already_bracketed() {
+        // Should not double-bracket
+        assert_eq!(format_socket_addr("[::1]", 8080), "[::1]:8080");
+    }
+
+    #[test]
+    fn test_format_socket_addr_hostname() {
+        assert_eq!(format_socket_addr("localhost", 8080), "localhost:8080");
+        assert_eq!(
+            format_socket_addr("my-service.local", 9999),
+            "my-service.local:9999"
+        );
+    }
+
+    #[test]
+    fn test_format_socket_addr_with_path_ipv4() {
+        assert_eq!(
+            format_socket_addr_with_path("192.168.1.1", 8080, "endpoint"),
+            "192.168.1.1:8080/endpoint"
+        );
+        assert_eq!(
+            format_socket_addr_with_path("192.168.1.1", 8080, "/endpoint"),
+            "192.168.1.1:8080/endpoint"
+        );
+        assert_eq!(
+            format_socket_addr_with_path("192.168.1.1", 8080, ""),
+            "192.168.1.1:8080"
+        );
+    }
+
+    #[test]
+    fn test_format_socket_addr_with_path_ipv6() {
+        assert_eq!(
+            format_socket_addr_with_path("::1", 9999, "generate"),
+            "[::1]:9999/generate"
+        );
+        assert_eq!(
+            format_socket_addr_with_path("2001:db8::1", 9999, "/api/v1"),
+            "[2001:db8::1]:9999/api/v1"
+        );
+    }
+
+    #[test]
+    fn test_format_socket_addr_parseable() {
+        use std::net::SocketAddr;
+
+        // IPv4 addresses should be parseable
+        let addr: SocketAddr = format_socket_addr("192.168.1.1", 8080).parse().unwrap();
+        assert_eq!(addr.port(), 8080);
+
+        // IPv6 addresses should be parseable
+        let addr: SocketAddr = format_socket_addr("::1", 9999).parse().unwrap();
+        assert_eq!(addr.port(), 9999);
+
+        let addr: SocketAddr = format_socket_addr("2001:db8::1", 3000).parse().unwrap();
+        assert_eq!(addr.port(), 3000);
     }
 }
