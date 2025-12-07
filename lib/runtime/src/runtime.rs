@@ -56,6 +56,7 @@ impl Runtime {
 
         // worker id
         let id = Arc::new(uuid::Uuid::new_v4().to_string());
+        tracing::debug!(worker_id = %id, "Initializing Dynamo runtime");
 
         // create a cancellation token
         let cancellation_token = CancellationToken::new();

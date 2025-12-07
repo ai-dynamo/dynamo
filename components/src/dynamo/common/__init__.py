@@ -12,6 +12,8 @@ Main submodules:
     - utils: Common utilities including environment and prometheus helpers
 """
 
+import logging
+
 from dynamo.common import config_dump, constants, utils
 
 try:
@@ -23,5 +25,9 @@ except Exception:
         __version__ = _pkg_version("ai-dynamo")
     except Exception:
         __version__ = "0.0.0+unknown"
+
+logging.getLogger(__name__).debug(
+    "Dynamo common module loaded, version=%s", __version__
+)
 
 __all__ = ["__version__", "config_dump", "constants", "utils"]
