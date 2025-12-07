@@ -303,6 +303,11 @@ impl HealthCheckManager {
                             false
                         };
 
+                        tokio::spawn(async move {
+                            // We need to consume the rest of the stream to avoid warnings on the frontend.
+                            response_stream.for_each(|_| async {}).await;
+                        });
+
                         // Update health status based on response
                         system_health.lock().set_endpoint_health_status(
                             &endpoint_subject_owned,
