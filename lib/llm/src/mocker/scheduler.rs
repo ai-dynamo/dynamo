@@ -468,16 +468,14 @@ fn simulate_decode(
         let is_complete = sequence.generated_tokens() >= sequence.max_output_tokens();
         let should_output = sequence.generated_tokens() > sequence.already_generated_tokens();
 
-        let mut send_failed = false;
-        if should_output {
-            send_failed = output_tx.as_ref().is_some_and(|tx| {
+        let send_failed = should_output
+            && output_tx.as_ref().is_some_and(|tx| {
                 tx.send(OutputSignal {
                     uuid,
                     completed: is_complete,
                 })
                 .is_err()
             });
-        }
 
         if send_failed {
             for signal in &sequence.free_signal() {
@@ -487,7 +485,6 @@ fn simulate_decode(
 
         if send_failed || is_complete {
             state.complete(&uuid);
-            continue;
         }
     }
 
