@@ -46,7 +46,7 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
-            pytest.mark.timeout(140),  # 3x measured time (44.66s)
+            pytest.mark.timeout(220),  # 3x measured time (44.66s) + download time (80s)
         ],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
@@ -76,7 +76,9 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
-            pytest.mark.timeout(320),  # 3x measured time (103.66s)
+            pytest.mark.timeout(
+                400
+            ),  # 3x measured time (103.66s) + download time (80s)
         ],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
@@ -95,7 +97,7 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
-            pytest.mark.timeout(120),  # 3x measured time (37.91s)
+            pytest.mark.timeout(200),  # 3x measured time (37.91s) + download time (80s)
         ],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
@@ -141,7 +143,9 @@ trtllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
-            pytest.mark.timeout(260),  # 3x measured time (83.85s)
+            pytest.mark.timeout(
+                380
+            ),  # 3x measured time (83.85s) + download time (120s) for 7B model
         ],
         model="deepseek-ai/deepseek-llm-7b-base",
         script_args=["--dyn-endpoint-types", "completions"],
@@ -177,7 +181,7 @@ def test_deployment(trtllm_config_test, request, runtime_services, predownload_m
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
-@pytest.mark.timeout(480)  # 3x measured time (159.68s)
+@pytest.mark.timeout(560)  # 3x measured time (159.68s) + download time (80s)
 def test_chat_only_aggregated_with_test_logits_processor(
     request, runtime_services, predownload_models, monkeypatch
 ):
