@@ -23,6 +23,10 @@ spec:
       envs:
         - name: HF_HOME
           value: /opt/models
+        - name: DYN_ROUTER_MODE
+          value: kv
+        - name: DYN_ROUTER_REPLICA_SYNC
+          value: "true"
       replicas: 1
     VllmPrefillWorker:
       componentType: worker
