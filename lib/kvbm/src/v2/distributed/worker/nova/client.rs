@@ -28,8 +28,7 @@ impl WorkerTransfers for NovaWorkerClient {
     ) -> Result<TransferCompleteNotification> {
         // Create a single local event for this operation
         let event = self.nova.events().new_event()?;
-        let handle = event.handle();
-        let awaiter = self.nova.events().awaiter(handle)?;
+        let awaiter = self.nova.events().awaiter(event.handle())?;
 
         // Convert to serializable options
         // TODO: Extract bounce buffer handle if present in options.bounce_buffer
@@ -53,13 +52,13 @@ impl WorkerTransfers for NovaWorkerClient {
 
         // Spawn a task for the remote instance
         let nova = self.nova.clone();
-        let bytes = bytes.clone();
         let remote_instance = self.remote;
 
+        // Use unary (not am_sync) to wait for transfer completion
         self.nova.tracker().spawn_on(
             async move {
                 let result = nova
-                    .am_sync("kvbm.worker.local_transfer")?
+                    .unary("kvbm.worker.local_transfer")?
                     .raw_payload(bytes)
                     .instance(remote_instance)
                     .send()

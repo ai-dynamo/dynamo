@@ -36,7 +36,7 @@ use dashmap::DashMap;
 
 use crate::v2::distributed::leader::InstanceLeader;
 use crate::v2::logical::LogicalLayoutHandle;
-use crate::v2::logical::blocks::{BlockMetadata, BlockRegistry, ImmutableBlock};
+use crate::v2::logical::blocks::{BlockMetadata, BlockRegistry};
 use crate::v2::logical::manager::BlockManager;
 use crate::v2::{BlockId, G1, G2, G3, G4};
 
@@ -48,6 +48,7 @@ use super::source::SourceBlocks;
 ///
 /// The engine manages multiple pipelines (G1→G2, G2→G3, G2→G4) and provides
 /// a unified interface for enqueueing blocks for offload.
+#[allow(dead_code)]
 pub struct OffloadEngine {
     /// Reference to the instance leader for transfers
     leader: Arc<InstanceLeader>,
@@ -111,7 +112,7 @@ impl OffloadEngine {
         pipeline: &Pipeline<Src, Dst>,
         source: SourceBlocks<Src>,
     ) -> Result<TransferHandle> {
-        // Extract block IDs for state tracking
+        // Extract block IDs for state tracking (External/Strong only, Weak has None)
         let input_block_ids = self.extract_block_ids(&source);
 
         // Create transfer state and handle
@@ -122,63 +123,27 @@ impl OffloadEngine {
         // Store transfer state
         self.transfers.insert(transfer_id, state.clone());
 
-        // Convert source to ImmutableBlocks
-        let blocks = self.resolve_source_blocks(source)?;
-
-        // Enqueue to pipeline
-        let pipeline_clone = pipeline.input_tx.clone();
-        let input = super::pipeline::PipelineInput {
-            transfer_id,
-            blocks,
-            state,
-        };
-
-        // Spawn the send to avoid blocking
-        tokio::spawn(async move {
-            if let Err(e) = pipeline_clone.send(input).await {
-                tracing::error!("Failed to enqueue to pipeline: {}", e);
-            }
-        });
+        // Enqueue source blocks directly to pipeline
+        // PolicyEvaluator handles different source types
+        // TransferExecutor does upgrade stage just before transfer
+        let queued = pipeline.enqueue(transfer_id, source, state);
+        if !queued {
+            // Transfer was already cancelled before enqueueing
+            tracing::warn!("Transfer {} was cancelled before enqueueing", transfer_id);
+        }
 
         Ok(handle)
     }
 
     /// Extract block IDs from source blocks.
+    ///
+    /// For External/Strong blocks, returns the known block IDs.
+    /// For Weak blocks, returns empty vec (IDs determined at upgrade time).
     fn extract_block_ids<T: BlockMetadata>(&self, source: &SourceBlocks<T>) -> Vec<BlockId> {
         match source {
-            SourceBlocks::External(ids) => ids.clone(),
+            SourceBlocks::External(blocks) => blocks.iter().map(|b| b.block_id).collect(),
             SourceBlocks::Strong(blocks) => blocks.iter().map(|b| b.block_id()).collect(),
             SourceBlocks::Weak(_) => Vec::new(), // IDs not available without upgrade
-        }
-    }
-
-    /// Resolve source blocks to ImmutableBlocks.
-    fn resolve_source_blocks<T: BlockMetadata>(
-        &self,
-        source: SourceBlocks<T>,
-    ) -> Result<Vec<ImmutableBlock<T>>> {
-        match source {
-            SourceBlocks::External(_ids) => {
-                // For external blocks, caller is responsible for holding them
-                // We can't create ImmutableBlocks from just IDs
-                // This would need a BlockManager lookup
-                anyhow::bail!("External block IDs not yet supported - use Strong or Weak")
-            }
-            SourceBlocks::Strong(blocks) => Ok(blocks),
-            SourceBlocks::Weak(weak_blocks) => {
-                // Try to upgrade weak blocks
-                let mut blocks = Vec::with_capacity(weak_blocks.len());
-                for weak in weak_blocks {
-                    match weak.upgrade() {
-                        Some(block) => blocks.push(block),
-                        None => {
-                            // Block was evicted, skip it
-                            tracing::debug!("Weak block evicted, skipping");
-                        }
-                    }
-                }
-                Ok(blocks)
-            }
         }
     }
 
@@ -222,6 +187,8 @@ pub struct OffloadEngineBuilder {
     g1_to_g2_config: Option<PipelineConfig<G1, G2>>,
     g2_to_g3_config: Option<PipelineConfig<G2, G3>>,
     g2_to_g4_config: Option<PipelineConfig<G2, G4>>,
+    /// Optional runtime handle override (defaults to leader.runtime())
+    runtime: Option<tokio::runtime::Handle>,
 }
 
 impl OffloadEngineBuilder {
@@ -237,7 +204,17 @@ impl OffloadEngineBuilder {
             g1_to_g2_config: None,
             g2_to_g3_config: None,
             g2_to_g4_config: None,
+            runtime: None,
         }
+    }
+
+    /// Set an explicit runtime handle for spawning pipeline tasks.
+    ///
+    /// If not set, defaults to `leader.runtime()`. Use this when you need
+    /// pipeline tasks to run on a specific runtime (e.g., in tests).
+    pub fn with_runtime(mut self, runtime: tokio::runtime::Handle) -> Self {
+        self.runtime = Some(runtime);
+        self
     }
 
     /// Set the block registry.
@@ -294,6 +271,10 @@ impl OffloadEngineBuilder {
             .registry
             .ok_or_else(|| anyhow::anyhow!("Block registry required"))?;
 
+        // Get the runtime handle for spawning background tasks
+        // Use explicit override if provided, otherwise get from leader
+        let runtime = self.runtime.unwrap_or_else(|| self.leader.runtime());
+
         // Build G1→G2 pipeline if configured
         let g1_to_g2 = if let Some(config) = self.g1_to_g2_config {
             let g1_manager = self
@@ -312,6 +293,7 @@ impl OffloadEngineBuilder {
                 self.leader.clone(),
                 LogicalLayoutHandle::G1,
                 LogicalLayoutHandle::G2,
+                runtime.clone(),
             ))
         } else {
             None
@@ -335,6 +317,7 @@ impl OffloadEngineBuilder {
                 self.leader.clone(),
                 LogicalLayoutHandle::G2,
                 LogicalLayoutHandle::G3,
+                runtime.clone(),
             ))
         } else {
             None
@@ -357,6 +340,7 @@ impl OffloadEngineBuilder {
                 self.leader.clone(),
                 LogicalLayoutHandle::G2,
                 LogicalLayoutHandle::G4,
+                runtime.clone(),
             ))
         } else {
             None

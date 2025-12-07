@@ -213,8 +213,9 @@ impl ConnectorLeader {
     }
 
     /// Mark a request as finished, returning the status.
-    #[tracing::instrument(level = "debug", skip(self), fields(?request_id))]
+    #[tracing::instrument(level = "debug", skip(self), fields(?request_id), ret)]
     pub fn request_finished(&self, request_id: &str) -> FinishedStatus {
+        tracing::debug!("evaluating finished status");
         if let Some(shared_slot) = self.slots.get(request_id).map(|slot| slot.clone()) {
             let mut slot = shared_slot.lock();
             match slot.slot_mark_finished() {
@@ -239,7 +240,9 @@ impl ConnectorLeader {
         // recving ==> remote kv storage -> worker g1 memory
         for request_id in finished_recving {
             match self.process_finished_onboarding(&request_id) {
-                Ok(()) => (),
+                Ok(()) => {
+                    tracing::debug!("finished onboarding for request ID: {}", request_id);
+                }
                 Err(e) => {
                     tracing::error!(
                         "Failed to process finished onboarding for request ID: {}: {}",
@@ -256,7 +259,9 @@ impl ConnectorLeader {
         // to be complete. This is that signal.
         for request_id in finished_sending {
             match self.process_finished_offloading(&request_id) {
-                Ok(()) => (),
+                Ok(()) => {
+                    tracing::debug!("finished offloading for request ID: {}", request_id);
+                }
                 Err(e) => {
                     tracing::error!(
                         "Failed to process finished offloading for request ID: {}: {}",

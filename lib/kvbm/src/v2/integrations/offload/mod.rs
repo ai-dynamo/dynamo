@@ -12,11 +12,11 @@
 //! ┌─────────────────────────────────────────────────────────────────┐
 //! │                        OffloadEngine                            │
 //! │                                                                 │
-//! │  ┌───────────────┐    ┌───────────────┐    ┌───────────────┐  │
-//! │  │ G1→G2 Pipeline │────│ G2→G3 Pipeline │    │ G2→G4 Pipeline │  │
-//! │  └───────────────┘    └───────────────┘    └───────────────┘  │
-//! │         │                     │                     │          │
-//! │         └─────────auto_chain──┘                     │          │
+//! │  ┌───────────────┐    ┌───────────────┐    ┌───────────────┐    │
+//! │  │G1→G2 Pipeline │────│ G2→G3 Pipeline│    │ G2→G4 Pipeline│    │
+//! │  └───────────────┘    └───────────────┘    └───────────────┘    │
+//! │         │                     │                     │           │
+//! │         └─────────auto_chain──┘                     │           │
 //! │                                                                 │
 //! └─────────────────────────────────────────────────────────────────┘
 //!
@@ -81,6 +81,7 @@ mod engine;
 mod handle;
 mod pipeline;
 mod policy;
+mod queue;
 mod source;
 
 // Re-export public API
@@ -89,10 +90,12 @@ pub use engine::{OffloadEngine, OffloadEngineBuilder};
 pub use handle::{TransferHandle, TransferId, TransferResult, TransferStatus};
 pub use pipeline::{Pipeline, PipelineBuilder, PipelineConfig};
 pub use policy::{
-    AllOfPolicy, AnyOfPolicy, EvalContext, OffloadPolicy, PassAllPolicy, PresenceAndLFUFilter,
-    PresenceFilter,
+    AllOfPolicy, AnyOfPolicy, BoxFuture, EvalContext, OffloadPolicy, PassAllPolicy,
+    PolicyBatchFuture, PolicyFuture, PresenceAndLFUFilter, PresenceFilter, async_batch_result,
+    async_result, sync_batch_result, sync_result,
 };
-pub use source::{SourceBlock, SourceBlocks};
+pub use queue::CancellableQueue;
+pub use source::{ExternalBlock, SourceBlock, SourceBlocks};
 
 // Re-export batch config for advanced users
 pub use batch::BatchConfig;

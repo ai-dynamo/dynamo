@@ -10,6 +10,7 @@ mod cache;
 mod discovery;
 mod nixl;
 mod nova;
+mod offload;
 mod rayon;
 mod tokio;
 
@@ -19,6 +20,9 @@ pub use discovery::{
 };
 pub use nixl::NixlConfig;
 pub use nova::{NovaBackendConfig, NovaConfig};
+pub use offload::{
+    OffloadConfig, PolicyType, PresenceFilterConfig, PresenceLfuFilterConfig, TierOffloadConfig,
+};
 pub use rayon::RayonConfig;
 pub use tokio::TokioConfig;
 
@@ -69,6 +73,11 @@ pub struct KvbmConfig {
     #[validate(nested)]
     #[serde(default)]
     pub cache: CacheConfig,
+
+    /// Offload policy configuration (G1→G2, G2→G3 transitions).
+    #[validate(nested)]
+    #[serde(default)]
+    pub offload: OffloadConfig,
 }
 
 impl KvbmConfig {

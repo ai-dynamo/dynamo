@@ -36,6 +36,7 @@ aligned-vec = "0.6.4"
 bincode = { version = "2.0.1", features = ["serde", "derive"] }
 blake3 = { version = "1" }
 bytes = "1.10"
+crossbeam-queue = "0.3"
 derive-getters = "0.5"
 figment = { version = "0.10", features = ["env"] }
 lru = "0.16"

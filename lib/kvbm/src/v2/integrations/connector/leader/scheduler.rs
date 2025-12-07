@@ -92,6 +92,7 @@ impl SchedulerOutput {
     /// * `new_block_ids` - New block IDs allocated in this step
     /// * `num_computed_tokens` - Number of computed tokens
     /// * `num_output_tokens` - Number of output tokens generated
+    #[allow(clippy::too_many_arguments)]
     pub fn add_cached_request(
         &mut self,
         req_id: String,
@@ -177,17 +178,17 @@ impl ConnectorLeader {
         // - we will generate from this object a session and a metadata object
         // - the session we will register with the leader so the worker can interact with it via nova
         // - the metadata object will be serialized and sent to the workers so they know what actions to perform
-        let mut builder = ForwardPassBuilder::new(scheduler_output.iteration);
+        let _builder = ForwardPassBuilder::new(scheduler_output.iteration);
 
         for req in &scheduler_output.scheduled_new_reqs {
             match self.get_slot(&req.req_id) {
-                Ok(slot) => {
+                Ok(_slot) => {
                     // thompson sampling to determine if we should offload any blocks for this request
                     // - todo: need to consider the what variables we should sample on
                     // determine if we should offload any blocks for this request
                     // - if the request max_tokens is 1 or very small, we don't have a lot of time to offload
                     //   and not put memory pressure on the device memory pool (request may finish before offload finishes)
-                    match self.oracle.evaluate_new_request(&req) {
+                    match self.oracle.evaluate_new_request(req) {
                         Ok(_) => {
                             tracing::debug!("new_request_data: {:#?}", req);
                             // todo!("update fp builder")
@@ -250,7 +251,7 @@ pub trait Oracle: Send + Sync {
 pub struct DefaultOracle {}
 
 impl Oracle for DefaultOracle {
-    fn evaluate_new_request(&self, req: &NewRequestData) -> Result<()> {
+    fn evaluate_new_request(&self, _req: &NewRequestData) -> Result<()> {
         Ok(())
     }
 }

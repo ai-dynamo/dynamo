@@ -6,19 +6,77 @@
 //! Policies determine which blocks should be offloaded. They are evaluated
 //! as filters - blocks that fail any filter are removed from the transfer.
 //!
+//! # Performance Optimization
+//!
+//! This module uses `Either<Ready, BoxFuture>` instead of `#[async_trait]` to
+//! avoid heap allocations for synchronous policies. Policies that only perform
+//! local, synchronous operations (like `PresenceFilter`, `PassAllPolicy`) return
+//! `Either::Left(ready(...))` which requires zero heap allocation. Policies that
+//! need actual async operations return `Either::Right(Box::pin(...))`.
+//!
 //! # Built-in Policies
 //!
 //! - `PresenceFilter<Src, Dst>`: Skip blocks already present in destination tier
 //! - `PresenceAndLFUFilter<Src, Dst>`: Presence check + LFU count threshold
+//! - `PassAllPolicy`: No filtering (pass all blocks)
+//! - `AllOfPolicy`: Composite AND policy
+//! - `AnyOfPolicy`: Composite OR policy
 
+use std::future::{Future, Ready, ready};
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
-use async_trait::async_trait;
+use futures::future::Either;
 
 use crate::v2::logical::blocks::{BlockMetadata, BlockRegistry, ImmutableBlock};
 use crate::v2::{BlockId, SequenceHash};
+
+/// Boxed future type for async policy evaluation.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Future type for single-block policy evaluation.
+///
+/// - `Left(Ready<...>)`: Synchronous result, zero heap allocation
+/// - `Right(BoxFuture<...>)`: Async result, requires heap allocation
+pub type PolicyFuture<'a> = Either<Ready<Result<bool>>, BoxFuture<'a, Result<bool>>>;
+
+/// Future type for batch policy evaluation.
+///
+/// - `Left(Ready<...>)`: Synchronous result, zero heap allocation
+/// - `Right(BoxFuture<...>)`: Async result, requires heap allocation
+pub type PolicyBatchFuture<'a> = Either<Ready<Result<Vec<bool>>>, BoxFuture<'a, Result<Vec<bool>>>>;
+
+/// Create a synchronous policy result (zero allocation).
+#[inline]
+pub fn sync_result(result: Result<bool>) -> PolicyFuture<'static> {
+    Either::Left(ready(result))
+}
+
+/// Create a synchronous batch policy result (zero allocation).
+#[inline]
+pub fn sync_batch_result(result: Result<Vec<bool>>) -> PolicyBatchFuture<'static> {
+    Either::Left(ready(result))
+}
+
+/// Create an async policy result (boxes the future).
+#[inline]
+pub fn async_result<'a, F>(future: F) -> PolicyFuture<'a>
+where
+    F: Future<Output = Result<bool>> + Send + 'a,
+{
+    Either::Right(Box::pin(future))
+}
+
+/// Create an async batch policy result (boxes the future).
+#[inline]
+pub fn async_batch_result<'a, F>(future: F) -> PolicyBatchFuture<'a>
+where
+    F: Future<Output = Result<Vec<bool>>> + Send + 'a,
+{
+    Either::Right(Box::pin(future))
+}
 
 /// Context provided to policies for block evaluation.
 #[derive(Debug)]
@@ -27,17 +85,31 @@ pub struct EvalContext<T: BlockMetadata> {
     pub block_id: BlockId,
     /// Sequence hash for this block
     pub sequence_hash: SequenceHash,
-    /// Strong reference to the block (held during evaluation)
-    pub block: ImmutableBlock<T>,
+    /// Optional strong reference to the block.
+    /// - Some: Strong blocks (held during evaluation)
+    /// - None: Weak blocks (deferred upgrade)
+    pub block: Option<ImmutableBlock<T>>,
 }
 
 impl<T: BlockMetadata> EvalContext<T> {
-    /// Create a new evaluation context.
+    /// Create a new evaluation context from a strong block reference.
     pub fn new(block: ImmutableBlock<T>) -> Self {
         Self {
             block_id: block.block_id(),
             sequence_hash: block.sequence_hash(),
-            block,
+            block: Some(block),
+        }
+    }
+
+    /// Create a context for weak block evaluation (deferred upgrade).
+    ///
+    /// Used when evaluating weak blocks - we have the metadata
+    /// but defer the actual upgrade until just before transfer.
+    pub fn from_weak(block_id: BlockId, sequence_hash: SequenceHash) -> Self {
+        Self {
+            block_id,
+            sequence_hash,
+            block: None,
         }
     }
 }
@@ -48,18 +120,18 @@ impl<T: BlockMetadata> EvalContext<T> {
 /// Each policy receives an `EvalContext` with block information and returns
 /// `Ok(true)` to pass or `Ok(false)` to filter out.
 ///
-/// # Async Evaluation
+/// # Performance
 ///
-/// The `evaluate` method is async to support policies that need to make
-/// external calls (e.g., hub client for remote availability checks).
-/// For simple policies, implement synchronously and wrap in `async {}`.
+/// This trait uses `Either<Ready, BoxFuture>` instead of `#[async_trait]` to
+/// avoid heap allocations for synchronous policies. Implement using:
+/// - `sync_result(Ok(true))` for synchronous policies (zero allocation)
+/// - `async_result(async { ... })` for async policies (boxes the future)
 ///
 /// # Batch Evaluation
 ///
 /// The `evaluate_batch` method provides a default implementation that calls
 /// `evaluate` for each block. Override for efficiency when the policy can
 /// benefit from batching (e.g., batch registry lookups).
-#[async_trait]
 pub trait OffloadPolicy<T: BlockMetadata>: Send + Sync {
     /// Unique name for this policy (for logging/debugging).
     fn name(&self) -> &str;
@@ -70,18 +142,27 @@ pub trait OffloadPolicy<T: BlockMetadata>: Send + Sync {
     /// - `Ok(true)`: Block passes this filter, continue to next policy
     /// - `Ok(false)`: Block filtered out, remove from transfer
     /// - `Err(_)`: Fatal error, fail the entire transfer
-    async fn evaluate(&self, ctx: &EvalContext<T>) -> Result<bool>;
+    fn evaluate<'a>(&'a self, ctx: &'a EvalContext<T>) -> PolicyFuture<'a>;
 
     /// Batch evaluate multiple blocks.
     ///
     /// Default implementation calls `evaluate` for each block.
     /// Override for efficiency when batching is beneficial.
-    async fn evaluate_batch(&self, contexts: &[EvalContext<T>]) -> Result<Vec<bool>> {
-        let mut results = Vec::with_capacity(contexts.len());
-        for ctx in contexts {
-            results.push(self.evaluate(ctx).await?);
-        }
-        Ok(results)
+    fn evaluate_batch<'a>(&'a self, contexts: &'a [EvalContext<T>]) -> PolicyBatchFuture<'a> {
+        // Default: sequential evaluation
+        let contexts_clone: Vec<_> = contexts.iter().collect();
+        async_batch_result(async move {
+            let mut results = Vec::with_capacity(contexts_clone.len());
+            for ctx in contexts_clone {
+                // This calls the sync or async evaluate
+                let result = match self.evaluate(ctx) {
+                    Either::Left(ready) => ready.await,
+                    Either::Right(boxed) => boxed.await,
+                };
+                results.push(result?);
+            }
+            Ok(results)
+        })
     }
 }
 
@@ -90,6 +171,11 @@ pub trait OffloadPolicy<T: BlockMetadata>: Send + Sync {
 /// Uses `BlockRegistry::check_presence` to determine if a block exists
 /// in the destination tier without acquiring a full block reference.
 /// This is efficient because it only checks the registry metadata.
+///
+/// # Performance
+///
+/// This policy is fully synchronous and returns `Either::Left(Ready)`,
+/// avoiding any heap allocation per evaluation.
 ///
 /// # Example
 /// ```ignore
@@ -111,30 +197,33 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> PresenceFilter<Src, Dst> {
     }
 }
 
-#[async_trait]
 impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceFilter<Src, Dst> {
     fn name(&self) -> &str {
         "PresenceFilter"
     }
 
-    async fn evaluate(&self, ctx: &EvalContext<Src>) -> Result<bool> {
+    fn evaluate<'a>(&'a self, ctx: &'a EvalContext<Src>) -> PolicyFuture<'a> {
+        // Purely synchronous - uses Left(Ready), zero heap allocation
         let presence = self.registry.check_presence::<Dst>(&[ctx.sequence_hash]);
         // Return false (filter out) if already present in Dst
         // presence[0].1 is true if block exists in Dst
-        Ok(!presence[0].1)
+        sync_result(Ok(!presence[0].1))
     }
 
-    async fn evaluate_batch(&self, contexts: &[EvalContext<Src>]) -> Result<Vec<bool>> {
+    fn evaluate_batch<'a>(&'a self, contexts: &'a [EvalContext<Src>]) -> PolicyBatchFuture<'a> {
         if contexts.is_empty() {
-            return Ok(Vec::new());
+            return sync_batch_result(Ok(Vec::new()));
         }
 
-        // Batch lookup for efficiency
+        // Batch lookup for efficiency - still synchronous
         let hashes: Vec<SequenceHash> = contexts.iter().map(|ctx| ctx.sequence_hash).collect();
         let presence = self.registry.check_presence::<Dst>(&hashes);
 
         // Invert presence: true means "not present" (pass the filter)
-        Ok(presence.into_iter().map(|(_, present)| !present).collect())
+        sync_batch_result(Ok(presence
+            .into_iter()
+            .map(|(_, present)| !present)
+            .collect()))
     }
 }
 
@@ -146,6 +235,11 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceFilt
 ///
 /// The LFU threshold ensures we only offload "hot" blocks that have been
 /// accessed frequently, avoiding wasted transfers for rarely-used blocks.
+///
+/// # Performance
+///
+/// This policy is fully synchronous and returns `Either::Left(Ready)`,
+/// avoiding any heap allocation per evaluation.
 ///
 /// # Example
 /// ```ignore
@@ -174,33 +268,32 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> PresenceAndLFUFilter<Src, Dst> {
     }
 }
 
-#[async_trait]
 impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceAndLFUFilter<Src, Dst> {
     fn name(&self) -> &str {
         "PresenceAndLFUFilter"
     }
 
-    async fn evaluate(&self, ctx: &EvalContext<Src>) -> Result<bool> {
+    fn evaluate<'a>(&'a self, ctx: &'a EvalContext<Src>) -> PolicyFuture<'a> {
         // 1. Skip if already in Dst
         let presence = self.registry.check_presence::<Dst>(&[ctx.sequence_hash]);
         if presence[0].1 {
-            return Ok(false);
+            return sync_result(Ok(false));
         }
 
         // 2. Check LFU count > threshold
         if let Some(tracker) = self.registry.frequency_tracker() {
             // Convert SequenceHash to u128 for the tracker
             let count = tracker.count(ctx.sequence_hash.as_u128());
-            return Ok(count > self.min_lfu_count);
+            return sync_result(Ok(count > self.min_lfu_count));
         }
 
         // No frequency tracker = pass all (conservative default)
-        Ok(true)
+        sync_result(Ok(true))
     }
 
-    async fn evaluate_batch(&self, contexts: &[EvalContext<Src>]) -> Result<Vec<bool>> {
+    fn evaluate_batch<'a>(&'a self, contexts: &'a [EvalContext<Src>]) -> PolicyBatchFuture<'a> {
         if contexts.is_empty() {
-            return Ok(Vec::new());
+            return sync_batch_result(Ok(Vec::new()));
         }
 
         // Batch presence lookup
@@ -209,6 +302,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceAndL
 
         // Get tracker once
         let tracker = self.registry.frequency_tracker();
+        let min_lfu = self.min_lfu_count;
 
         let results: Vec<bool> = presence
             .into_iter()
@@ -222,14 +316,14 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceAndL
                 // Check LFU count
                 if let Some(ref t) = tracker {
                     let count = t.count(ctx.sequence_hash.as_u128());
-                    count > self.min_lfu_count
+                    count > min_lfu
                 } else {
                     true // No tracker = pass
                 }
             })
             .collect();
 
-        Ok(results)
+        sync_batch_result(Ok(results))
     }
 }
 
@@ -251,19 +345,26 @@ impl<T: BlockMetadata> AllOfPolicy<T> {
     }
 }
 
-#[async_trait]
 impl<T: BlockMetadata> OffloadPolicy<T> for AllOfPolicy<T> {
     fn name(&self) -> &str {
         "AllOfPolicy"
     }
 
-    async fn evaluate(&self, ctx: &EvalContext<T>) -> Result<bool> {
-        for policy in &self.policies {
-            if !policy.evaluate(ctx).await? {
-                return Ok(false);
+    fn evaluate<'a>(&'a self, ctx: &'a EvalContext<T>) -> PolicyFuture<'a> {
+        // Must use async because sub-policies might be async
+        let policies = &self.policies;
+        async_result(async move {
+            for policy in policies {
+                let result = match policy.evaluate(ctx) {
+                    Either::Left(ready) => ready.await,
+                    Either::Right(boxed) => boxed.await,
+                };
+                if !result? {
+                    return Ok(false);
+                }
             }
-        }
-        Ok(true)
+            Ok(true)
+        })
     }
 }
 
@@ -285,27 +386,39 @@ impl<T: BlockMetadata> AnyOfPolicy<T> {
     }
 }
 
-#[async_trait]
 impl<T: BlockMetadata> OffloadPolicy<T> for AnyOfPolicy<T> {
     fn name(&self) -> &str {
         "AnyOfPolicy"
     }
 
-    async fn evaluate(&self, ctx: &EvalContext<T>) -> Result<bool> {
+    fn evaluate<'a>(&'a self, ctx: &'a EvalContext<T>) -> PolicyFuture<'a> {
         if self.policies.is_empty() {
-            return Ok(true); // No policies = pass
+            return sync_result(Ok(true)); // No policies = pass
         }
 
-        for policy in &self.policies {
-            if policy.evaluate(ctx).await? {
-                return Ok(true);
+        // Must use async because sub-policies might be async
+        let policies = &self.policies;
+        async_result(async move {
+            for policy in policies {
+                let result = match policy.evaluate(ctx) {
+                    Either::Left(ready) => ready.await,
+                    Either::Right(boxed) => boxed.await,
+                };
+                if result? {
+                    return Ok(true);
+                }
             }
-        }
-        Ok(false)
+            Ok(false)
+        })
     }
 }
 
 /// A pass-all policy (no filtering).
+///
+/// # Performance
+///
+/// This policy is fully synchronous and returns `Either::Left(Ready)`,
+/// avoiding any heap allocation per evaluation.
 pub struct PassAllPolicy<T: BlockMetadata> {
     _marker: PhantomData<T>,
 }
@@ -325,18 +438,18 @@ impl<T: BlockMetadata> Default for PassAllPolicy<T> {
     }
 }
 
-#[async_trait]
 impl<T: BlockMetadata> OffloadPolicy<T> for PassAllPolicy<T> {
     fn name(&self) -> &str {
         "PassAllPolicy"
     }
 
-    async fn evaluate(&self, _ctx: &EvalContext<T>) -> Result<bool> {
-        Ok(true)
+    fn evaluate<'a>(&'a self, _ctx: &'a EvalContext<T>) -> PolicyFuture<'a> {
+        // Zero allocation - just returns ready(Ok(true))
+        sync_result(Ok(true))
     }
 
-    async fn evaluate_batch(&self, contexts: &[EvalContext<T>]) -> Result<Vec<bool>> {
-        Ok(vec![true; contexts.len()])
+    fn evaluate_batch<'a>(&'a self, contexts: &'a [EvalContext<T>]) -> PolicyBatchFuture<'a> {
+        sync_batch_result(Ok(vec![true; contexts.len()]))
     }
 }
 
@@ -365,5 +478,31 @@ mod tests {
         let policies: Vec<Arc<dyn OffloadPolicy<()>>> = vec![Arc::new(PassAllPolicy::new())];
         let composite = AnyOfPolicy::new(policies);
         assert_eq!(composite.name(), "AnyOfPolicy");
+    }
+
+    #[tokio::test]
+    async fn test_sync_result_zero_alloc() {
+        // Verify sync_result returns Left variant
+        let future = sync_result(Ok(true));
+        assert!(matches!(future, Either::Left(_)));
+
+        let result = match future {
+            Either::Left(ready) => ready.await,
+            Either::Right(_) => unreachable!(),
+        };
+        assert!(result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_async_result_boxes() {
+        // Verify async_result returns Right variant
+        let future = async_result(async { Ok(false) });
+        assert!(matches!(future, Either::Right(_)));
+
+        let result = match future {
+            Either::Left(_) => unreachable!(),
+            Either::Right(boxed) => boxed.await,
+        };
+        assert!(!result.unwrap());
     }
 }

@@ -1929,6 +1929,7 @@ dependencies = [
  "bincode 2.0.1",
  "blake3",
  "bytes",
+ "crossbeam-queue",
  "cudarc",
  "dashmap 6.1.0",
  "derive-getters",

@@ -136,7 +136,7 @@ mod tests {
         eprintln!("\n--- Phase 4: Verifying results ---");
 
         match result {
-            FindMatchesResult::AsyncSession(mut session) => {
+            FindMatchesResult::AsyncSession(session) => {
                 eprintln!("Got AsyncSession, waiting for completion...");
 
                 timeout(Duration::from_secs(10), session.wait_for_completion())
@@ -425,7 +425,7 @@ mod tests {
             .expect("querier remote find");
 
         match result {
-            FindMatchesResult::AsyncSession(mut session) => {
+            FindMatchesResult::AsyncSession(session) => {
                 eprintln!("Got AsyncSession, waiting for completion...");
 
                 // Use the tokio handle to run async operations in sync context
@@ -635,7 +635,7 @@ mod tests {
         eprintln!("\n--- Phase 3: Verifying Hold mode results ---");
 
         match result {
-            FindMatchesResult::AsyncSession(mut session) => {
+            FindMatchesResult::AsyncSession(session) => {
                 eprintln!("Got AsyncSession for Hold mode, waiting for completion...");
 
                 handle
@@ -831,7 +831,7 @@ mod tests {
         eprintln!("\n--- Phase 3: Verifying first-hole policy ---");
 
         match result {
-            FindMatchesResult::AsyncSession(mut session) => {
+            FindMatchesResult::AsyncSession(session) => {
                 eprintln!("Got AsyncSession, waiting for completion...");
 
                 handle

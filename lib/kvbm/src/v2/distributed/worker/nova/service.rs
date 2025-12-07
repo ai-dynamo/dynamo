@@ -60,7 +60,8 @@ impl NovaWorkerService {
     fn register_local_transfer_handler(&self) -> Result<()> {
         let worker = self.worker.clone();
 
-        let handler = NovaHandler::am_handler_async("kvbm.worker.local_transfer", move |ctx| {
+        // Use unary_handler_async for explicit response (client waits for transfer completion)
+        let handler = NovaHandler::unary_handler_async("kvbm.worker.local_transfer", move |ctx| {
             let worker = worker.clone();
 
             async move {
@@ -85,7 +86,8 @@ impl NovaWorkerService {
                 // Await the transfer completion
                 notification.await?;
 
-                Ok(())
+                // Return empty response to signal success
+                Ok(Some(Bytes::new()))
             }
         })
         .build();

@@ -210,6 +210,7 @@ impl std::fmt::Debug for TransferHandle {
 }
 
 /// Internal state for tracking a transfer through the pipeline.
+#[allow(dead_code)]
 pub(crate) struct TransferState {
     pub(crate) id: TransferId,
     /// Current phase
@@ -232,6 +233,7 @@ pub(crate) struct TransferState {
     pub(crate) cancel_updater: CancelStateUpdater,
 }
 
+#[allow(dead_code)]
 impl TransferState {
     /// Create transfer state and associated handle.
     pub(crate) fn new(id: TransferId, input_blocks: Vec<BlockId>) -> (Self, TransferHandle) {
@@ -376,6 +378,7 @@ impl TransferState {
 }
 
 /// Internal notification channels for transfer state updates.
+#[allow(dead_code)]
 pub(crate) struct TransferNotifiers {
     pub(crate) status_tx: watch::Sender<TransferStatus>,
     pub(crate) passed_tx: watch::Sender<Vec<BlockId>>,

@@ -309,6 +309,27 @@ impl InstanceLeader {
         self.g3_manager.as_ref()
     }
 
+    /// Get the block registry.
+    pub fn registry(&self) -> &BlockRegistry {
+        &self.registry
+    }
+
+    /// Get the tokio runtime handle from Nova.
+    ///
+    /// This handle should be used for spawning background tasks that need to
+    /// run on the KVBM runtime's executor (e.g., offload engine pipelines).
+    pub fn runtime(&self) -> tokio::runtime::Handle {
+        self.nova.runtime().clone()
+    }
+
+    /// Check if a parallel_worker is configured.
+    ///
+    /// The parallel_worker is required for local transfer operations
+    /// (e.g., offloading blocks between tiers).
+    pub fn has_parallel_worker(&self) -> bool {
+        self.parallel_worker.is_some()
+    }
+
     /// Add a remote leader to the search list.
     ///
     /// Remote leaders are queried during `find_matches_with_options` when
