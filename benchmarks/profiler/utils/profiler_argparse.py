@@ -245,8 +245,9 @@ def create_profiler_parser() -> argparse.Namespace:
     )
 
     default_webui_port = 8000
-    if os.environ.get("PROFILER_WEBUI_PORT"):
-        default_webui_port = int(os.environ.get("PROFILER_WEBUI_PORT"))
+    webui_port_env = os.environ.get("PROFILER_WEBUI_PORT")
+    if webui_port_env:
+        default_webui_port = int(webui_port_env)
     parser.add_argument(
         "--webui-port",
         type=int,

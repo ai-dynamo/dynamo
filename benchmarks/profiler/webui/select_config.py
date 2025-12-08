@@ -118,7 +118,7 @@ def generate_config_data(prefill_data, decode_data, args):
     # Populate decode data
     if decode_data.num_gpus:
         # Group by GPU count for multiple datasets
-        gpu_groups = {}
+        gpu_groups: dict[int, list[list[float]]] = {}
         for i, (gpu, itl, thpt, label) in enumerate(
             zip(
                 decode_data.num_gpus,
@@ -279,7 +279,7 @@ def pick_config_with_webui(prefill_data, decode_data, args):
     logger.info(f"Launching WebUI on port {args.webui_port}...")
 
     # Queue to communicate selection from UI to main thread
-    selection_queue = queue.Queue()
+    selection_queue: queue.Queue[tuple[int | None, int | None]] = queue.Queue()
 
     # Track individual selections
     prefill_selection = {"idx": None}
