@@ -821,10 +821,10 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Image: "another-image:latest",
 									},
 									{
-									Name:    commonconsts.MainContainerName,
-									Image:   "test-image:latest",
-									Command: []string{"/bin/sh", "-c"},
-									Args:    []string{"ray start --head --port=6379 && some dynamo command --tensor-parallel-size 4 --pipeline-parallel-size 1"},
+										Name:    commonconsts.MainContainerName,
+										Image:   "test-image:latest",
+										Command: []string{"/bin/sh", "-c"},
+										Args:    []string{"ray start --head --port=6379 && some dynamo command --tensor-parallel-size 4 --pipeline-parallel-size 1"},
 										Env: []corev1.EnvVar{
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
@@ -950,10 +950,10 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Image: "another-image:latest",
 									},
 									{
-									Name:    commonconsts.MainContainerName,
-									Image:   "test-image:latest",
-									Command: []string{"/bin/sh", "-c"},
-									Args:    []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
+										Name:    commonconsts.MainContainerName,
+										Image:   "test-image:latest",
+										Command: []string{"/bin/sh", "-c"},
+										Args:    []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
 										Env: []corev1.EnvVar{
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},

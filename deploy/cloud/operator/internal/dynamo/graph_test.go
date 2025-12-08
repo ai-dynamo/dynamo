@@ -2142,10 +2142,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
 													},
-												{
-													Name:  commonconsts.DynamoNamespaceEnvVar,
-													Value: "test-namespace-test-dynamo-graph-deployment",
-												},
+													{
+														Name:  commonconsts.DynamoNamespaceEnvVar,
+														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
 													{
 														Name:  commonconsts.DynamoComponentEnvVar,
 														Value: commonconsts.ComponentTypeWorker,
@@ -2867,10 +2867,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
 													},
-												{
-													Name:  commonconsts.DynamoNamespaceEnvVar,
-													Value: "test-namespace-test-dynamo-graph-deployment",
-												},
+													{
+														Name:  commonconsts.DynamoNamespaceEnvVar,
+														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
 													{
 														Name:  commonconsts.DynamoComponentEnvVar,
 														Value: commonconsts.ComponentTypeWorker,
@@ -3034,10 +3034,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
 													},
-												{
-													Name:  commonconsts.DynamoNamespaceEnvVar,
-													Value: "test-namespace-test-dynamo-graph-deployment",
-												},
+													{
+														Name:  commonconsts.DynamoNamespaceEnvVar,
+														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
 													{
 														Name:  commonconsts.DynamoComponentEnvVar,
 														Value: commonconsts.ComponentTypeWorker,
