@@ -39,12 +39,13 @@ fn run_official_test(input_file: &str, output_file: &str) {
 
     // Add tools to first message (system) if present
     if let Some(tools) = input_data.get("tools")
-        && let Some(first_msg) = messages.get_mut(0) {
-            first_msg
-                .as_object_mut()
-                .unwrap()
-                .insert("tools".to_string(), tools.clone());
-        }
+        && let Some(first_msg) = messages.get_mut(0)
+    {
+        first_msg
+            .as_object_mut()
+            .unwrap()
+            .insert("tools".to_string(), tools.clone());
+    }
 
     // Encode messages
     let result = encode_messages(
