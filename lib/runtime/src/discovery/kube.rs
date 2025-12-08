@@ -69,14 +69,29 @@ impl KubeDiscoveryClient {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create Kubernetes client: {}", e))?;
 
-        Ok(Self {
+        let client = Self {
             instance_id,
             metadata,
             kube_client,
             pod_info,
             cancel_token,
             daemon_state: Arc::new(OnceCell::new()),
-        })
+        };
+
+        // Check if eager daemon start is requested (for frontends that need discovery clients)
+        let eager_start = std::env::var(
+            crate::config::environment_names::runtime::discovery::DYN_DISCOVERY_EAGER_START,
+        )
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+
+        if eager_start {
+            tracing::info!("Eager discovery daemon start requested via DYN_DISCOVERY_EAGER_START");
+            // Start the daemon now by calling metadata_watch()
+            let _ = client.metadata_watch().await;
+        }
+
+        Ok(client)
     }
 
     async fn metadata_watch(&self) -> Result<tokio::sync::watch::Receiver<Arc<MetadataSnapshot>>> {

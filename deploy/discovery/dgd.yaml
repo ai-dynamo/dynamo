@@ -1,4 +1,3 @@
-
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -10,8 +9,8 @@ metadata:
     nvidia.com/dynamo-discovery-backend: kubernetes
 spec:
   envs:
-  - name: DYN_LOG
-    value: "debug"
+    - name: DYN_LOG
+      value: "debug"
   services:
     Frontend:
       dynamoNamespace: dynamo
@@ -20,6 +19,9 @@ spec:
       extraPodSpec:
         mainContainer:
           image: ${IMAGE}
+      env:
+        - name: DYN_DISCOVERY_EAGER_START
+          value: "true"
     VllmDecodeWorker:
       dynamoNamespace: vllm-disagg
       componentType: decode
@@ -33,9 +35,9 @@ spec:
           image: ${IMAGE}
           workingDir: /workspace/components/backends/vllm
           command:
-          - python3
-          - -m
-          - dynamo.vllm
+            - python3
+            - -m
+            - dynamo.vllm
           args:
             - --model
             - Qwen/Qwen3-0.6B
@@ -52,9 +54,9 @@ spec:
           image: ${IMAGE}
           workingDir: /workspace/components/backends/vllm
           command:
-          - python3
-          - -m
-          - dynamo.vllm
+            - python3
+            - -m
+            - dynamo.vllm
           args:
             - --model
             - Qwen/Qwen3-0.6B
