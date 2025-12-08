@@ -10,6 +10,7 @@ Provides tools to inject CUDA faults that simulate GPU hardware failures
 (like XID 79 - GPU falls off the bus).
 """
 
+import os
 import subprocess
 import sys
 import time
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from kubernetes import client
+from kubernetes import config as k8s_config
 from kubernetes.client.rest import ApiException
 
 
@@ -29,16 +31,35 @@ class CUDAFaultInjector:
         """
         Initialize CUDA fault injector.
 
+        Loads Kubernetes configuration to enable ConfigMap creation and deployment patching.
+        Follows pattern from fault tolerance test fixtures (PR #4690).
+
         Args:
             lib_dir: Directory containing CUDA fault injection library.
                     If None, uses default relative to this module.
         """
         if lib_dir is None:
-            lib_dir = Path(__file__).parent.parent / "cuda_fault_injection"
+            lib_dir = Path(__file__).parent.parent / "cuda-fault-injection"
 
         self.lib_dir = lib_dir
         self.lib_path = lib_dir / "fake_cuda_xid79.so"
         self.lib_built = False
+
+        # Load Kubernetes config (only when CUDA fault injection is needed)
+        # Detect if running in-cluster or locally
+        self.in_cluster = os.getenv("KUBERNETES_SERVICE_HOST") is not None
+
+        try:
+            if self.in_cluster:
+                k8s_config.load_incluster_config()
+            else:
+                k8s_config.load_kube_config()
+        except Exception as e:
+            # Config might already be loaded
+            print(f"Note: Could not load k8s config (may already be loaded): {e}")
+
+        # Initialize Kubernetes client for ConfigMap/Deployment operations
+        self.k8s_core = client.CoreV1Api()
 
     def build_library(self) -> bool:
         """
@@ -107,6 +128,9 @@ class CUDAFaultInjector:
         namespace: str,
         target_node: Optional[str] = None,
         xid_type: int = 79,
+        after_step: Optional[int] = None,
+        after_seconds: Optional[int] = 90,
+        target_gpu: Optional[int] = None,
     ) -> bool:
         """
         Patch deployment to enable CUDA fault injection.
@@ -116,6 +140,7 @@ class CUDAFaultInjector:
         - Init container to compile library
         - LD_PRELOAD environment variable
         - CUDA_XID_TYPE environment variable
+        - CUDA_FAULT_AFTER_STEP (delays injection until after N CUDA calls)
         - Node affinity (if target_node specified)
 
         Args:
@@ -123,6 +148,9 @@ class CUDAFaultInjector:
             namespace: Kubernetes namespace
             target_node: Node to pin pods to (simulates real XID behavior)
             xid_type: XID error type to simulate (79, 48, 94, 95, 43, 74). Default: 79
+            after_step: Delay injection until after N CUDA calls. If None, uses time-based delay.
+            after_seconds: Delay injection until N seconds after pod startup. Default: 90 (allows full engine initialization for MoE models)
+            target_gpu: Specific GPU ID to inject on (0, 1, 2...). If None, injects on all GPUs.
 
         Returns:
             True if patch succeeded
@@ -149,6 +177,9 @@ class CUDAFaultInjector:
                 use_configmap=True,
                 target_node=target_node,
                 xid_type=xid_type,
+                after_step=after_step,
+                after_seconds=after_seconds,
+                target_gpu=target_gpu,
             )
 
         except Exception as e:

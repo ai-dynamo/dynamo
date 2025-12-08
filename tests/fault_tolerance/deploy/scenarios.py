@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -21,6 +22,8 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Pattern
 from typing_extensions import TypedDict
 
 from tests.utils.managed_deployment import DeploymentSpec
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from tests.fault_tolerance.deploy.base_checker import BaseChecker
@@ -188,6 +191,65 @@ class TokenOverflowFailure(Failure):
         self.max_seq_len = max_seq_len
         self.overflow_multiplier = overflow_multiplier
         self.overflow_token_count = int(max_seq_len * overflow_multiplier)
+
+
+@dataclass
+class HardwareFault(Failure):
+    """
+    Hardware fault injection (GPU XID errors).
+
+    Injects GPU hardware faults via fault injection API service.
+    Supports process-level targeting by matching process command patterns.
+
+    Example:
+        # Inject XID 79 to a specific GPU worker process
+        HardwareFault(
+            time=30,
+            pod_name="VllmDecodeWorker",
+            command="VLLM::EngineCore_DP1",  # Target specific process
+            xid_type=79,
+            replicas=1
+        )
+    """
+
+    xid_type: int = 79  # XID error code (79, 48, 74, etc.)
+    target_node: Optional[str] = None  # If None, auto-discovered from pod
+    api_url: str = (
+        "http://localhost:8080"  # Default to localhost (requires port-forward)
+    )
+
+    def __init__(
+        self,
+        time: int,
+        pod_name: str,
+        command: str,
+        xid_type: int,
+        replicas: int = 1,
+        target_node: Optional[str] = None,
+        api_url: str = "http://localhost:8080",  # Default to localhost (requires port-forward)
+    ):
+        """
+        Initialize hardware fault.
+
+        Args:
+            time: Seconds after test start to inject fault
+            pod_name: Pod name pattern to target (e.g., "VllmDecodeWorker")
+            command: Process command pattern to match (e.g., "VLLM::EngineCore_DP1")
+            xid_type: XID error code (79 = GPU fell off bus)
+            replicas: Number of replicas to affect
+            target_node: Target node name (auto-discovered if None)
+            api_url: Fault injection API service URL (default: localhost for local testing)
+        """
+        super().__init__(
+            time=time,
+            pod_name=pod_name,
+            command=command,
+            signal="XID",  # Marker for hardware fault
+            replicas=replicas,
+        )
+        self.xid_type = xid_type
+        self.target_node = target_node
+        self.api_url = api_url
 
 
 @dataclass
@@ -731,3 +793,87 @@ def add_token_overflow_scenarios():
 
 # Add the token overflow scenarios
 add_token_overflow_scenarios()
+
+
+# Add hardware fault test scenarios (XID errors)
+def add_hardware_fault_scenarios(xid_type=79, target_process="VLLM::EngineCore_DP2"):
+    """
+    Add test scenarios for GPU hardware fault injection (XID errors).
+
+    These scenarios test the system's resilience to GPU hardware failures
+    by injecting XID errors (e.g., XID 79 - GPU fell off bus) and validating
+    that the system detects, recovers, and maintains availability.
+
+    Args:
+        xid_type: The XID error type to inject (default: 79 - GPU fell off bus)
+        target_process: The process name to target for fault injection (default: "VLLM::EngineCore_DP2")
+    """
+    hardware_fault_configs = [
+        # XID Fault - vLLM MoE Aggregated
+        {
+            "name": f"vllm-moe-agg-tp-1-dp-2-xid-{xid_type}",
+            "deployment_key": "vllm-moe-agg-tp-1-dp-2",
+            "backend": "vllm",
+            "xid_type": xid_type,
+            "target_process": target_process,
+            "description": f"Test XID {xid_type} (GPU hardware fault) on MoE aggregated deployment",
+        },
+        # XID Fault - vLLM MoE Disaggregated
+        {
+            "name": f"vllm-moe-disagg-tp-1-dp-2-xid-{xid_type}",
+            "deployment_key": "vllm-moe-disagg-tp-1-dp-2",
+            "backend": "vllm",
+            "xid_type": xid_type,
+            "target_process": target_process,
+            "description": f"Test XID {xid_type} (GPU hardware fault) on MoE disaggregated deployment",
+        },
+    ]
+
+    for config in hardware_fault_configs:
+        deployment_key = config["deployment_key"]
+
+        # Get deployment spec
+        if deployment_key not in DEPLOYMENT_SPECS:
+            logger.warning(
+                f"Deployment {deployment_key} not found for hardware fault scenario {config['name']}"
+            )
+            continue
+
+        deployment_info = DEPLOYMENT_SPECS[deployment_key]
+        backend = config["backend"]
+
+        # Create hardware fault
+        hardware_fault = HardwareFault(
+            time=30,  # Inject 30 seconds after test starts
+            pod_name="VllmDecodeWorker",  # Target decode worker pod
+            command=config["target_process"],  # Process to target
+            xid_type=config["xid_type"],
+            replicas=1,  # Affect one replica
+        )
+
+        # Get model from deployment info
+        scenario_model = deployment_info.get("model", model)
+
+        # Create scenario
+        scenario = Scenario(
+            deployment=deployment_info["spec"],
+            load=moe_load,
+            failures=[hardware_fault],
+            model=scenario_model,
+            backend=backend,
+            checkers=None,  # Will be populated by factory
+            requires_custom_build=True,  # MoE models require custom builds
+        )
+
+        # Generate checkers for this scenario
+        scenario.checkers = _get_checkers_for_scenario(config["name"], scenario)
+
+        scenarios[config["name"]] = scenario
+
+        logger.info(
+            f"Added hardware fault scenario: {config['name']} - {config['description']}"
+        )
+
+
+# Add hardware fault scenarios
+add_hardware_fault_scenarios()

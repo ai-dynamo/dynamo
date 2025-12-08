@@ -17,9 +17,16 @@ from tests.fault_tolerance.deploy.parse_results import process_overflow_recovery
 from tests.fault_tolerance.deploy.scenarios import (
     OVERFLOW_SUFFIX,
     RECOVERY_SUFFIX,
+    HardwareFault,
     Load,
     TokenOverflowFailure,
     scenarios,
+)
+from tests.fault_tolerance.hardware.fault_injection_service.helpers import (
+    get_gpu_id_for_process,
+)
+from tests.fault_tolerance.hardware.fault_injection_service.helpers.cuda_fault_injection import (
+    CUDAFaultInjector,
 )
 from tests.utils.managed_deployment import ManagedDeployment
 
@@ -182,6 +189,105 @@ def _clients(
         logger.debug(f"{proc} joined")
 
 
+def _inject_cuda_fault(
+    failure: HardwareFault, logger, deployment: ManagedDeployment
+) -> dict:
+    """
+    Inject CUDA fault using LD_PRELOAD intercept library.
+
+    This method patches the deployment to inject a CUDA intercept library
+    that makes CUDA calls return errors, simulating GPU hardware failures
+    at the application level. This triggers exception handling in vLLM.
+
+    Uses CUDAFaultInjector class which:
+    - Creates ConfigMap with CUDA intercept library source
+    - Patches deployment with LD_PRELOAD and environment variables
+    - Triggers pod restart to apply changes
+
+    Args:
+        failure: HardwareFault instance with injection parameters
+        logger: Logger instance
+        deployment: ManagedDeployment instance
+
+    Returns:
+        Dict with fault injection results
+    """
+    results = {
+        "fault_ids": [],
+        "affected_pods": [],
+        "affected_processes": [],
+    }
+
+    # Get pods matching the name filter
+    pods = deployment.get_pods(failure.pod_name)[failure.pod_name]
+
+    if not pods:
+        logger.warning(f"No pods found matching: {failure.pod_name}")
+        return results
+
+    # Get target pod and node
+    pod = pods[0]
+    target_node = failure.target_node or pod.spec.nodeName
+
+    # Get target process
+    processes = deployment.get_processes(pod)
+    target_processes = [p for p in processes if failure.command in p.command]
+
+    if not target_processes:
+        logger.warning(f"No processes found matching '{failure.command}'")
+        return results
+
+    # Discover GPU ID for the target process
+    try:
+        gpu_id = get_gpu_id_for_process(pod, target_processes[0].pid)
+        logger.info(f"Target process PID {target_processes[0].pid} uses GPU {gpu_id}")
+    except Exception as e:
+        logger.error(f"Failed to discover GPU: {e}. Defaulting to GPU 0")
+        gpu_id = 0
+
+    # Use CUDAFaultInjector class
+    try:
+        injector = CUDAFaultInjector()
+
+        # Step 1: Create ConfigMap with library source
+        logger.info(
+            f"Creating CUDA fault injection ConfigMap for XID {failure.xid_type}"
+        )
+        if not injector.create_configmap_with_library(deployment.namespace):
+            raise RuntimeError("Failed to create CUDA fault injection ConfigMap")
+
+        # Step 2: Patch deployment to use the library
+        logger.info(
+            f"Patching deployment to inject XID {failure.xid_type} on GPU {gpu_id}, Node: {target_node}"
+        )
+        if not injector.patch_deployment_for_cuda_fault(
+            deployment_name=deployment.deployment_spec.name,
+            namespace=deployment.namespace,
+            target_node=target_node,
+            xid_type=failure.xid_type,
+            target_gpu=gpu_id,  # Inject only on this specific GPU!
+        ):
+            raise RuntimeError("Failed to patch deployment for CUDA fault injection")
+
+        logger.info(
+            f"✓ CUDA fault injection configured. Pods will restart and next CUDA call on GPU {gpu_id} "
+            f"will return error code for XID {failure.xid_type} (CUDA_ERROR_NO_DEVICE)"
+        )
+
+        results["fault_ids"].append(f"cuda_xid_{failure.xid_type}_gpu{gpu_id}")
+        results["affected_pods"] = [p.name for p in pods]
+        results["affected_processes"] = [
+            {"pid": proc.pid, "command": proc.command, "gpu_id": gpu_id}
+            for proc in target_processes
+        ]
+
+    except Exception as e:
+        logger.error(f"Failed to inject CUDA fault: {e}")
+        raise
+
+    return results
+
+
 def _inject_failures(failures, logger, deployment: ManagedDeployment):  # noqa: F811
     """Inject failures and return info about affected pods.
 
@@ -199,6 +305,18 @@ def _inject_failures(failures, logger, deployment: ManagedDeployment):  # noqa: 
             # The actual overflow is handled by the client configuration
             # which uses the input_token_length from the Load config
             # This is just logging for visibility
+            continue
+
+        # Handle HardwareFault - GPU/XID error injection via CUDA interception
+        if isinstance(failure, HardwareFault):
+            logger.info(
+                f"Injecting CUDA fault (XID {failure.xid_type}) via LD_PRELOAD intercept"
+            )
+            hw_results = _inject_cuda_fault(failure, logger, deployment)
+            # Track affected pods for validation
+            failure_key = f"{failure.pod_name}:xid_{failure.xid_type}"
+            affected_pods[failure_key] = hw_results.get("affected_pods", [])
+            logger.info(f"CUDA fault injection results: {hw_results}")
             continue
 
         pods = deployment.get_pods(failure.pod_name)[failure.pod_name]
