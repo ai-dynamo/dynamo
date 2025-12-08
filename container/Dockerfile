@@ -235,11 +235,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
-    export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-    export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-    export RUSTC_WRAPPER="sccache" && \
-    export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-    export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export MESON_SCCACHE="-wrapper=sccache"; \
+    fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
     git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
@@ -247,7 +245,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
     -Dcudapath_lib="/usr/local/cuda/lib64" \
     -Dcudapath_inc="/usr/local/cuda/include" \
-    -Ducx_path="/usr/local/ucx" && \
+    -Ducx_path="/usr/local/ucx" ${MESON_SCCACHE} && \
     cd build && \
     ninja && \
     ninja install && \
