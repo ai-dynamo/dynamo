@@ -455,11 +455,11 @@ jobs:
             --client-type legacy \
             --junitxml=test-results/pytest_ft_report.xml \
             --tb=short
-          
+
           TEST_EXIT_CODE=$?
           echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
           echo "🧪 Fault tolerance tests completed with exit code: ${TEST_EXIT_CODE}"
-          
+
           exit ${TEST_EXIT_CODE}
         continue-on-error: true
 
@@ -467,7 +467,7 @@ jobs:
         if: always()
         run: |
           set -x
-          
+
           # Rename JUnit XML with unique naming if it exists
           if [ -f "test-results/pytest_ft_report.xml" ]; then
             mv "test-results/pytest_ft_report.xml" "test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml"
@@ -785,10 +785,10 @@ jobs:
       if: always()
       run: |
         set -x
-        
+
         # Create test-results directory
         mkdir -p test-results
-        
+
         # Copy and rename the test output log with unique naming
         if [ -f "test-output.log" ]; then
           cp test-output.log "test-results/deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log"
