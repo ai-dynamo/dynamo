@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from dynamo.sglang.args import parse_args
+# Runs into segfaults, uncomment when resolved and enable tests
+# from dynamo.sglang.args import parse_args
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
