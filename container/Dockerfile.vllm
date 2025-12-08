@@ -217,7 +217,6 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
     export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
     export CMAKE_CUDA_COMPILER_LAUNCHER="sccache" && \
-    export RUSTC_WRAPPER="sccache" && \
     cd /usr/local/src && \
      git clone https://github.com/openucx/ucx.git && \
      cd ucx && 			     \
@@ -248,6 +247,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+    export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
     source ${VIRTUAL_ENV}/bin/activate && \
     git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
@@ -287,6 +288,9 @@ ARG ENABLE_KVBM
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+    export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+    export RUSTC_WRAPPER="sccache" && \
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
@@ -393,15 +397,16 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 # Set environment variables - they'll be empty strings if USE_SCCACHE=false
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
-    CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
-    CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
+
 # Install VLLM and related dependencies
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
     --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+    export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+    export CMAKE_CUDA_COMPILER_LAUNCHER="sccache" && \
         cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
         chmod +x /tmp/install_vllm.sh && \
         /tmp/install_vllm.sh --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} ${LMCACHE_REF:+--lmcache-ref "$LMCACHE_REF"} --cuda-version $CUDA_VERSION && \
