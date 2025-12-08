@@ -35,9 +35,9 @@ spec:
           image: ${IMAGE}
           workingDir: /workspace/components/backends/vllm
           command:
-            - python3
-            - -m
-            - dynamo.vllm
+          - python3
+          - -m
+          - dynamo.vllm
           args:
             - --model
             - Qwen/Qwen3-0.6B
@@ -54,9 +54,9 @@ spec:
           image: ${IMAGE}
           workingDir: /workspace/components/backends/vllm
           command:
-            - python3
-            - -m
-            - dynamo.vllm
+          - python3
+          - -m
+          - dynamo.vllm
           args:
             - --model
             - Qwen/Qwen3-0.6B
