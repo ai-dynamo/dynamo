@@ -56,7 +56,7 @@ spec:
             echo "ARTIFACT_DIR: $ARTIFACT_DIR"
             aiperf profile --artifact-dir $ARTIFACT_DIR \
                 --model $TARGET_MODEL \
-                --tokenizer /model-cache/deepseek-r1-fp4  \
+                --tokenizer nvidia/DeepSeek-R1-FP4  \
                 --endpoint-type chat  \
                 --endpoint /v1/chat/completions \
                 --streaming \
@@ -109,7 +109,7 @@ spec:
           echo "done with concurrency $TOTAL_CONCURRENCY"
         env:
         - name: TARGET_MODEL
-          value: deepseek-ai/DeepSeek-R1
+          value: nvidia/DeepSeek-R1-FP4
         - name: ENDPOINT
           value: trtllm-disagg-multinode-frontend:8000
         - name: CONCURRENCY_PER_GPU
