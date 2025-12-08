@@ -1407,9 +1407,9 @@ class PassiveOperation(AbstractOperation):
             # When we've not yet cached the serialized request, we need to generate one before returning it.
             # Handle both cases: multiple and single descriptors.
             if isinstance(self._local_desc_list, list):
-                descriptors = [desc.metadata() for desc in self._local_desc_list]
+                descriptors = [desc.metadata for desc in self._local_desc_list]
             else:
-                descriptors = [self._local_desc_list.metadata()]
+                descriptors = [self._local_desc_list.metadata]
 
             original_len = len(self._connection.metadata)
             nixl_metadata = self._connection.metadata
