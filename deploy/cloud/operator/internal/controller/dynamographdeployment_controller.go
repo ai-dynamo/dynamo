@@ -616,19 +616,24 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVCs(ctx context.Context, dyn
 }
 
 // reconcileScalingAdapters ensures a DynamoGraphDeploymentScalingAdapter exists for each service in the DGD
-// This enables pluggable autoscaling via HPA, KEDA, or Planner
+// that has scaling adapter enabled (default). Services with scalingAdapter.disable=true will not have a DGDSA.
+// This enables pluggable autoscaling via HPA, KEDA, or Planner.
 func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
 	logger := log.FromContext(ctx)
 
-	// Create or update an adapter for each service using SyncResource pattern
+	// Process each service - SyncResource handles create, update, and delete via toDelete flag
 	for serviceName, component := range dynamoDeployment.Spec.Services {
+		// Check if scaling adapter is disabled for this service
+		scalingAdapterDisabled := component.ScalingAdapter != nil && component.ScalingAdapter.Disable
+
 		// Get current replicas (default to 1 if not set)
 		currentReplicas := int32(1)
 		if component.Replicas != nil {
 			currentReplicas = *component.Replicas
 		}
 
-		// Use SyncResource to handle creation/updates
+		// Use SyncResource to handle creation/updates/deletion
+		// When toDelete=true, SyncResource will delete the existing resource if it exists
 		_, _, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter, bool, error) {
 			adapterName := generateAdapterName(dynamoDeployment.Name, serviceName)
 			adapter := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{
@@ -648,7 +653,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 					},
 				},
 			}
-			return adapter, false, nil
+			// Return toDelete=true if scaling adapter is disabled
+			return adapter, scalingAdapterDisabled, nil
 		})
 
 		if err != nil {
@@ -657,7 +663,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 		}
 	}
 
-	// Clean up orphaned adapters (services that no longer exist in DGD)
+	// Clean up adapters for services that were removed from DGD entirely
 	adapterList := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapterList{}
 	if err := r.List(ctx, adapterList,
 		client.InNamespace(dynamoDeployment.Namespace),
@@ -671,7 +677,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 		adapter := &adapterList.Items[i]
 		serviceName := adapter.Spec.DGDRef.ServiceName
 
-		// Check if service still exists in DGD
+		// Delete adapter if service no longer exists in DGD
 		if _, exists := dynamoDeployment.Spec.Services[serviceName]; !exists {
 			logger.Info("Deleting orphaned DynamoGraphDeploymentScalingAdapter", "adapter", adapter.Name, "service", serviceName)
 			if err := r.Delete(ctx, adapter); err != nil && !errors.IsNotFound(err) {

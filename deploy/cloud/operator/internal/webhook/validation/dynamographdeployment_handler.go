@@ -91,9 +91,23 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 		return warnings, err
 	}
 
-	// Validate stateful rules (immutability)
-	updateWarnings, err := validator.ValidateUpdate(oldDeployment)
+	// Get user info from admission request context for identity-based validation
+	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
+		logger.Error(err, "failed to get admission request from context, skipping user-based validation")
+		// Fall back to basic validation without user info
+		updateWarnings, err := validator.ValidateUpdate(oldDeployment)
+		if err != nil {
+			return updateWarnings, err
+		}
+		warnings = append(warnings, updateWarnings...)
+		return warnings, nil
+	}
+
+	// Validate stateful rules (immutability + replicas protection)
+	updateWarnings, err := validator.ValidateUpdateWithUserInfo(oldDeployment, &req.UserInfo)
+	if err != nil {
+		logger.Info("validation failed", "error", err.Error(), "user", req.UserInfo.Username)
 		return updateWarnings, err
 	}
 

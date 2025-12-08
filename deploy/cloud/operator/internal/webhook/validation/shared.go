@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 // SharedSpecValidator validates DynamoComponentDeploymentSharedSpec fields.
@@ -41,33 +42,45 @@ func NewSharedSpecValidator(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSha
 }
 
 // Validate performs validation on the shared spec fields.
-// Returns an error if validation fails.
-func (v *SharedSpecValidator) Validate() error {
+// Returns warnings (e.g., deprecation notices) and error if validation fails.
+func (v *SharedSpecValidator) Validate() (admission.Warnings, error) {
 	// Validate replicas if specified
 	if v.spec.Replicas != nil && *v.spec.Replicas < 0 {
-		return fmt.Errorf("%s.replicas must be non-negative", v.fieldPath)
+		return nil, fmt.Errorf("%s.replicas must be non-negative", v.fieldPath)
 	}
 
 	// Validate ingress configuration if enabled
 	if v.spec.Ingress != nil && v.spec.Ingress.Enabled {
 		if err := v.validateIngress(); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	// Validate volume mounts
 	if err := v.validateVolumeMounts(); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Validate shared memory
 	if v.spec.SharedMemory != nil {
 		if err := v.validateSharedMemory(); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	return nil
+	// Collect warnings (e.g., deprecation notices)
+	var warnings admission.Warnings
+
+	// Check for deprecated autoscaling field
+	//nolint:staticcheck // SA1019: Intentionally checking deprecated field to warn users
+	if v.spec.Autoscaling != nil {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s.autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter "+
+				"with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md",
+			v.fieldPath))
+	}
+
+	return warnings, nil
 }
 
 // validateIngress validates the ingress configuration.
@@ -104,21 +117,4 @@ func (v *SharedSpecValidator) validateSharedMemory() error {
 		return fmt.Errorf("%s.sharedMemory.size is required when disabled is false", v.fieldPath)
 	}
 	return nil
-}
-
-// GetWarnings returns deprecation warnings for the spec.
-// This should be called after Validate() to collect any deprecation notices.
-func (v *SharedSpecValidator) GetWarnings() []string {
-	var warnings []string
-
-	// Check for deprecated autoscaling field
-	//nolint:staticcheck // SA1019: Intentionally checking deprecated field to warn users
-	if v.spec.Autoscaling != nil {
-		warnings = append(warnings, fmt.Sprintf(
-			"%s.autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter "+
-				"with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md",
-			v.fieldPath))
-	}
-
-	return warnings
 }

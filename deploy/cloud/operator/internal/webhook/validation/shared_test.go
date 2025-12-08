@@ -184,7 +184,7 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath)
-			err := validator.Validate()
+			_, err := validator.Validate()
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("SharedSpecValidator.Validate() error = %v, wantErr %v", err, tt.wantErr)

@@ -86,7 +86,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 
 	// 3. Find the target service in DGD's spec.services map
 	component, exists := dgd.Spec.Services[adapter.Spec.DGDRef.ServiceName]
-	if !exists {
+	if !exists || component == nil {
 		logger.Error(nil, "Service not found in DGD",
 			"service", adapter.Spec.DGDRef.ServiceName,
 			"dgd", dgd.Name,
