@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import sys
+from typing import Optional
 
 import sglang as sgl
 import uvloop
@@ -32,6 +33,50 @@ from dynamo.sglang.request_handlers import (
 )
 
 configure_dynamo_logging()
+
+# Global event for checkpoint proceed signal (SIGUSR1)
+_checkpoint_proceed_event: Optional[asyncio.Event] = None
+
+
+def _handle_checkpoint_proceed(signum, frame):
+    """Handle SIGUSR1 signal to proceed after checkpoint restore."""
+    logging.info("Received SIGUSR1 signal, proceeding with endpoint registration")
+    if _checkpoint_proceed_event is not None:
+        # Set the event in a thread-safe way
+        loop = asyncio.get_event_loop()
+        loop.call_soon_threadsafe(_checkpoint_proceed_event.set)
+
+
+async def wait_for_checkpoint(config: Config):
+    """
+    Wait for checkpoint/restore cycle in checkpoint mode.
+
+    When --checkpoint-mode is enabled:
+    1. Logs CHECKPOINT_READY message (external script can grep for this)
+    2. Waits for SIGUSR1 signal before proceeding with endpoint registration
+
+    This allows container checkpointing after model load but before network
+    connections (ETCD/NATS) are established.
+    """
+    global _checkpoint_proceed_event
+
+    if not config.dynamo_args.checkpoint_mode:
+        return
+
+    # Create the event for this checkpoint wait
+    _checkpoint_proceed_event = asyncio.Event()
+
+    # Register signal handler for proceed signal
+    signal.signal(signal.SIGUSR1, _handle_checkpoint_proceed)
+
+    # Log the ready message (external script can grep for this)
+    logging.info("CHECKPOINT_READY: Model loaded, ready for container checkpoint")
+    logging.info("CHECKPOINT_READY: Send SIGUSR1 to proceed after restore (e.g., podman kill -s SIGUSR1 <container>)")
+
+    # Wait for SIGUSR1 signal
+    await _checkpoint_proceed_event.wait()
+
+    logging.info("Proceeding with endpoint registration after checkpoint restore")
 
 
 async def _handle_non_leader_node(
@@ -69,6 +114,25 @@ async def worker():
     dump_config(config.dynamo_args.dump_config_to, config)
 
     loop = asyncio.get_running_loop()
+
+    # CHECKPOINT MODE: Load model BEFORE runtime creation
+    # This allows checkpointing GPU state before ETCD/NATS connections are established
+    pre_created_engine = None
+    if config.dynamo_args.checkpoint_mode:
+        server_args = config.server_args
+
+        # Prevent SGLang from blocking on non-leader nodes
+        if server_args.node_rank >= 1:
+            os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
+
+        # Create engine (loads model into GPU)
+        pre_created_engine = sgl.Engine(server_args=server_args)
+        logging.info("SGLang Engine created for checkpoint mode")
+
+        # Wait for checkpoint signal BEFORE creating runtime
+        await wait_for_checkpoint(config)
+
+    # Create runtime (fresh ETCD/NATS connections in checkpoint mode)
     runtime = DistributedRuntime(
         loop, config.dynamo_args.store_kv, config.dynamo_args.request_plane
     )
@@ -82,33 +146,37 @@ async def worker():
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
     if config.dynamo_args.embedding_worker:
-        await init_embedding(runtime, config)
+        await init_embedding(runtime, config, pre_created_engine=pre_created_engine)
     elif config.dynamo_args.multimodal_processor:
         await init_multimodal_processor(runtime, config)
     elif config.dynamo_args.multimodal_encode_worker:
         await init_multimodal_encode_worker(runtime, config)
     elif config.dynamo_args.multimodal_worker:
         if config.serving_mode != DisaggregationMode.PREFILL:
-            await init_multimodal_worker(runtime, config)
+            await init_multimodal_worker(runtime, config, pre_created_engine=pre_created_engine)
         else:
-            await init_multimodal_prefill_worker(runtime, config)
+            await init_multimodal_prefill_worker(runtime, config, pre_created_engine=pre_created_engine)
     elif config.serving_mode != DisaggregationMode.PREFILL:
-        await init(runtime, config)
+        await init(runtime, config, pre_created_engine=pre_created_engine)
     else:
-        await init_prefill(runtime, config)
+        await init_prefill(runtime, config, pre_created_engine=pre_created_engine)
 
 
-async def init(runtime: DistributedRuntime, config: Config):
+async def init(runtime: DistributedRuntime, config: Config, pre_created_engine=None):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
-    # Prevent SGLang from blocking on non-leader nodes
-    # We can switch this to 0 and leverage our own metrics
-    # after https://github.com/sgl-project/sglang/pull/13686
-    # is merged in
-    if server_args.node_rank >= 1:
-        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        engine = pre_created_engine
+    else:
+        # Prevent SGLang from blocking on non-leader nodes
+        # We can switch this to 0 and leverage our own metrics
+        # after https://github.com/sgl-project/sglang/pull/13686
+        # is merged in
+        if server_args.node_rank >= 1:
+            os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
 
-    engine = sgl.Engine(server_args=server_args)
+        engine = sgl.Engine(server_args=server_args)
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -187,17 +255,21 @@ async def init(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init_prefill(runtime: DistributedRuntime, config: Config):
+async def init_prefill(runtime: DistributedRuntime, config: Config, pre_created_engine=None):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
-    # Prevent SGLang from blocking on non-leader nodes
-    # We can switch this to 0 and leverage our own metrics
-    # after https://github.com/sgl-project/sglang/pull/13686
-    # is merged in
-    if server_args.node_rank >= 1:
-        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        engine = pre_created_engine
+    else:
+        # Prevent SGLang from blocking on non-leader nodes
+        # We can switch this to 0 and leverage our own metrics
+        # after https://github.com/sgl-project/sglang/pull/13686
+        # is merged in
+        if server_args.node_rank >= 1:
+            os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
 
-    engine = sgl.Engine(server_args=server_args)
+        engine = sgl.Engine(server_args=server_args)
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -252,11 +324,15 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init_embedding(runtime: DistributedRuntime, config: Config):
+async def init_embedding(runtime: DistributedRuntime, config: Config, pre_created_engine=None):
     """Initialize embedding worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
-    engine = sgl.Engine(server_args=server_args)
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        engine = pre_created_engine
+    else:
+        engine = sgl.Engine(server_args=server_args)
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -399,7 +475,7 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
         handler.cleanup()
 
 
-async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_worker(runtime: DistributedRuntime, config: Config, pre_created_engine=None):
     """Initialize multimodal worker component for aggregated or decode mode"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -409,7 +485,11 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    engine = sgl.Engine(server_args=server_args)
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        engine = pre_created_engine
+    else:
+        engine = sgl.Engine(server_args=server_args)
 
     if config.serving_mode == DisaggregationMode.DECODE:
         logging.info("Initializing prefill client for multimodal decode worker")
@@ -438,11 +518,15 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Config, pre_created_engine=None):
     """Initialize multimodal prefill worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
-    engine = sgl.Engine(server_args=server_args)
+    # Use pre-created engine if provided (checkpoint mode), otherwise create new
+    if pre_created_engine is not None:
+        engine = pre_created_engine
+    else:
+        engine = sgl.Engine(server_args=server_args)
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component

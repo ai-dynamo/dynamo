@@ -110,6 +110,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": os.environ.get("DYN_REQUEST_PLANE", "nats"),
         "help": "Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     },
+    "checkpoint-mode": {
+        "flags": ["--checkpoint-mode"],
+        "action": "store_true",
+        "default": False,
+        "help": "Enable checkpoint mode: pause after model load to allow container checkpointing before registering endpoints. Send SIGUSR1 to proceed after restore.",
+    },
 }
 
 
@@ -139,6 +145,9 @@ class DynamoArgs:
     embedding_worker: bool = False
     # config dump options
     dump_config_to: Optional[str] = None
+
+    # checkpoint support
+    checkpoint_mode: bool = False
 
 
 class DisaggregationMode(Enum):
@@ -467,6 +476,7 @@ async def parse_args(args: list[str]) -> Config:
         multimodal_worker=parsed_args.multimodal_worker,
         embedding_worker=parsed_args.embedding_worker,
         dump_config_to=parsed_args.dump_config_to,
+        checkpoint_mode=parsed_args.checkpoint_mode,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 
