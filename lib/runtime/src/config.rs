@@ -475,6 +475,7 @@ pub fn use_local_timezone() -> bool {
 /// - `Nats`: Use NATS for request distribution (default, legacy)
 /// - `Http`: Use HTTP/2 for request distribution
 /// - `Tcp`: Use raw TCP for request distribution with msgpack support
+/// - `Unix`: Use Unix domain sockets for request distribution with msgpack support
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RequestPlaneMode {
@@ -484,6 +485,8 @@ pub enum RequestPlaneMode {
     Http,
     /// Use raw TCP for request plane with msgpack support
     Tcp,
+    /// Use Unix domain sockets for request plane with msgpack support
+    Unix,
 }
 
 impl Default for RequestPlaneMode {
@@ -498,6 +501,7 @@ impl fmt::Display for RequestPlaneMode {
             Self::Nats => write!(f, "nats"),
             Self::Http => write!(f, "http"),
             Self::Tcp => write!(f, "tcp"),
+            Self::Unix => write!(f, "unix"),
         }
     }
 }
@@ -510,8 +514,9 @@ impl std::str::FromStr for RequestPlaneMode {
             "nats" => Ok(Self::Nats),
             "http" => Ok(Self::Http),
             "tcp" => Ok(Self::Tcp),
+            "unix" => Ok(Self::Unix),
             _ => Err(anyhow::anyhow!(
-                "Invalid request plane mode: '{}'. Valid options are: 'nats', 'http', 'tcp'",
+                "Invalid request plane mode: '{}'. Valid options are: 'nats', 'http', 'tcp', 'unix'",
                 s
             )),
         }

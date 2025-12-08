@@ -34,6 +34,7 @@ pub mod metrics;
 pub mod pipeline;
 pub mod prelude;
 pub mod protocols;
+pub mod socket_address;
 pub mod runnable;
 pub mod runtime;
 pub mod service;

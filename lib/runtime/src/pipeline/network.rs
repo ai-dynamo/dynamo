@@ -157,24 +157,50 @@ impl StreamSender {
     }
 
     pub async fn send_control(&self, control: ControlMessage) -> Result<()> {
-        let bytes = serde_json::to_vec(&control)?;
-        Ok(self
-            .tx
-            .send(TwoPartMessage::from_header(bytes.into()))
-            .await?)
+        let serialize_span = tracing::trace_span!("serialize_control", size_bytes = tracing::field::Empty);
+        let bytes = serialize_span.in_scope(|| {
+            let start = std::time::Instant::now();
+            let result = serde_json::to_vec(&control);
+            let duration = start.elapsed();
+            if let Ok(ref bytes) = result {
+                serialize_span.record("size_bytes", bytes.len());
+                tracing::trace!(duration_us = duration.as_micros() as u64, size_bytes = bytes.len(), "control_serialization_complete");
+            }
+            result
+        })?;
+
+        let transport_span = tracing::trace_span!("transport_send", payload_bytes = bytes.len());
+        transport_span.in_scope(|| async {
+            let start = std::time::Instant::now();
+            let result = self.tx.send(TwoPartMessage::from_header(bytes.into())).await;
+            let duration = start.elapsed();
+            tracing::trace!(duration_us = duration.as_micros() as u64, "transport_send_complete");
+            result
+        }).await?;
+
+        Ok(())
     }
 
     #[allow(clippy::needless_update)]
     pub async fn send_prologue(&mut self, error: Option<String>) -> Result<(), String> {
         if let Some(prologue) = self.prologue.take() {
             let prologue = ResponseStreamPrologue { error, ..prologue };
-            let header_bytes: Bytes = match serde_json::to_vec(&prologue) {
-                Ok(b) => b.into(),
-                Err(err) => {
-                    tracing::error!(%err, "send_prologue: ResponseStreamPrologue did not serialize to a JSON array");
-                    return Err("Invalid prologue".to_string());
+            let serialize_span = tracing::trace_span!("serialize_prologue", size_bytes = tracing::field::Empty);
+            let header_bytes: Bytes = serialize_span.in_scope(|| {
+                let start = std::time::Instant::now();
+                match serde_json::to_vec(&prologue) {
+                    Ok(b) => {
+                        let duration = start.elapsed();
+                        serialize_span.record("size_bytes", b.len());
+                        tracing::trace!(duration_us = duration.as_micros() as u64, size_bytes = b.len(), "prologue_serialization_complete");
+                        Ok(b.into())
+                    },
+                    Err(err) => {
+                        tracing::error!(%err, "send_prologue: ResponseStreamPrologue did not serialize to a JSON array");
+                        Err("Invalid prologue".to_string())
+                    }
                 }
-            };
+            })?;
             self.tx
                 .send(TwoPartMessage::from_header(header_bytes))
                 .await

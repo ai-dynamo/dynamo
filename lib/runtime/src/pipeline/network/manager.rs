@@ -16,6 +16,7 @@
 use super::egress::unified_client::RequestPlaneClient;
 use super::ingress::unified_server::RequestPlaneServer;
 use crate::config::RequestPlaneMode;
+use crate::socket_address::SocketAddress;
 use anyhow::Result;
 use async_once_cell::OnceCell;
 use std::sync::Arc;
@@ -32,6 +33,9 @@ struct NetworkConfig {
     // TCP server configuration
     tcp_host: String,
     tcp_port: u16,
+
+    // Unix socket configuration
+    unix_socket_path: std::path::PathBuf,
 
     // HTTP client configuration
     http_client_config: super::egress::http_router::Http2Config,
@@ -66,6 +70,11 @@ impl NetworkConfig {
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(9999),
+
+            // Unix socket configuration
+            unix_socket_path: std::env::var("DYN_UNIX_SOCKET_PATH")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/dynamo.sock")),
 
             // HTTP client configuration (reads DYN_HTTP2_* env vars)
             http_client_config: super::egress::http_router::Http2Config::from_env(),
@@ -197,6 +206,7 @@ impl NetworkManager {
         match self.mode {
             RequestPlaneMode::Http => self.create_http_client(),
             RequestPlaneMode::Tcp => self.create_tcp_client(),
+            RequestPlaneMode::Unix => self.create_unix_client(),
             RequestPlaneMode::Nats => self.create_nats_client(),
         }
     }
@@ -217,6 +227,7 @@ impl NetworkManager {
         match self.mode {
             RequestPlaneMode::Http => self.create_http_server().await,
             RequestPlaneMode::Tcp => self.create_tcp_server().await,
+            RequestPlaneMode::Unix => self.create_unix_server().await,
             RequestPlaneMode::Nats => self.create_nats_server().await,
         }
     }
@@ -272,6 +283,29 @@ impl NetworkManager {
         Ok(server as Arc<dyn RequestPlaneServer>)
     }
 
+    async fn create_unix_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
+        use super::ingress::shared_tcp_endpoint::SharedTcpServer;
+
+        let bind_addr = SocketAddress::Unix(self.config.unix_socket_path.clone());
+
+        tracing::info!(
+            bind_addr = %bind_addr,
+            "Creating Unix socket request plane server"
+        );
+
+        let server = SharedTcpServer::new(bind_addr, self.cancellation_token.clone());
+
+        // Start server in background
+        let server_clone = server.clone();
+        tokio::spawn(async move {
+            if let Err(e) = server_clone.start().await {
+                tracing::error!("Unix socket request plane server error: {}", e);
+            }
+        });
+
+        Ok(server as Arc<dyn RequestPlaneServer>)
+    }
+
     async fn create_nats_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
         use super::ingress::nats_server::NatsMultiplexedServer;
 
@@ -310,6 +344,13 @@ impl NetworkManager {
         Ok(Arc::new(TcpRequestClient::with_config(
             self.config.tcp_client_config.clone(),
         )?))
+    }
+
+    fn create_unix_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
+        use super::egress::unix_client::UnixRequestClient;
+
+        tracing::debug!("Creating Unix socket request plane client with config from NetworkManager");
+        Ok(Arc::new(UnixRequestClient::new()?))
     }
 
     fn create_nats_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {

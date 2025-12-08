@@ -9,5 +9,6 @@ pub mod push_router;
 // Unified request plane interface and implementations
 pub mod tcp_client;
 pub mod unified_client;
+pub mod unix_client;
 
 use super::*;

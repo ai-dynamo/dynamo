@@ -32,6 +32,7 @@ impl NatsRequestClient {
 
 #[async_trait]
 impl RequestPlaneClient for NatsRequestClient {
+    #[tracing::instrument(level = "trace", skip(self, payload, headers), fields(payload_size = payload.len(), address = %address))]
     async fn send_request(
         &self,
         address: String,
@@ -39,19 +40,49 @@ impl RequestPlaneClient for NatsRequestClient {
         headers: Headers,
     ) -> Result<Bytes> {
         // Convert generic headers to NATS headers
-        let mut nats_headers = async_nats::HeaderMap::new();
-        for (key, value) in headers {
-            nats_headers.insert(key.as_str(), value.as_str());
-        }
+        let header_span = tracing::trace_span!("nats_serialize_headers", header_count = headers.len());
+        let nats_headers = header_span.in_scope(|| {
+            let start = std::time::Instant::now();
+            let mut nats_headers = async_nats::HeaderMap::new();
+            for (key, value) in headers {
+                nats_headers.insert(key.as_str(), value.as_str());
+            }
+            let duration = start.elapsed();
+            tracing::trace!(duration_us = duration.as_micros() as u64, "nats_serialize_headers_complete");
+            nats_headers
+        });
 
         // Send request with headers
-        let response = self
-            .client
-            .request_with_headers(address, nats_headers, payload)
-            .await
-            .map_err(|e| anyhow::anyhow!("NATS request failed: {}", e))?;
+        let publish_span = tracing::trace_span!("nats_request", subject = %address, payload_bytes = payload.len());
+        let response = publish_span.in_scope(|| async {
+            let start = std::time::Instant::now();
+            let result = self
+                .client
+                .request_with_headers(address, nats_headers, payload)
+                .await
+                .map_err(|e| anyhow::anyhow!("NATS request failed: {}", e));
+            let duration = start.elapsed();
+            match &result {
+                Ok(response) => {
+                    tracing::trace!(duration_us = duration.as_micros() as u64, response_bytes = response.payload.len(), "nats_request_complete");
+                }
+                Err(_) => {
+                    tracing::trace!(duration_us = duration.as_micros() as u64, "nats_request_failed");
+                }
+            }
+            result
+        }).await?;
 
-        Ok(response.payload)
+        let deserialize_span = tracing::trace_span!("nats_deserialize_response", response_bytes = response.payload.len());
+        let payload = deserialize_span.in_scope(|| {
+            let start = std::time::Instant::now();
+            let payload = response.payload;
+            let duration = start.elapsed();
+            tracing::trace!(duration_us = duration.as_micros() as u64, "nats_deserialize_response_complete");
+            payload
+        });
+
+        Ok(payload)
     }
 
     fn transport_name(&self) -> &'static str {
