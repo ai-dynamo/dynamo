@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 use super::common::EncodedMediaData;
 use super::rdma::DecodedMediaData;
 pub mod image;
+pub mod video;
 
 pub use image::{ImageDecoder, ImageMetadata};
+pub use video::{VideoDecoder, VideoMetadata};
 
 #[async_trait::async_trait]
 pub trait Decoder: Clone + Send + 'static {
@@ -27,10 +29,13 @@ pub trait Decoder: Clone + Send + 'static {
 pub struct MediaDecoder {
     #[serde(default)]
     pub image_decoder: ImageDecoder,
-    // TODO: video, audio decoders
+    #[serde(default)]
+    pub video_decoder: VideoDecoder,
+    // TODO: audio decoder
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum DecodedMediaMetadata {
     Image(ImageMetadata),
+    Video(VideoMetadata),
 }
