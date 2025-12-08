@@ -525,7 +525,7 @@ def _test_router_basic(
     Always waits for workers to be properly registered before sending requests to avoid flakiness.
 
     Args:
-        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
+        engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
         block_size: Block size for KV cache
         request: Pytest request fixture for managing resources
         frontend_port: Port to start the frontend HTTP server on
@@ -1239,7 +1239,7 @@ def _test_router_indexers_sync(
     This validates that the snapshot mechanism works and routers can sync state from NATS.
 
     Args:
-        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
+        engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
         block_size: Block size for KV cache
         model_name: Model name to use for requests
         num_workers: Expected number of workers
@@ -1698,7 +1698,7 @@ def _test_router_decisions(
     dp_rank), and subsequent requests should naturally route to the same worker due to prefix reuse.
 
     Args:
-        engine_workers: MockerProcess or VLLMProcess instance (already initialized with __enter__())
+        engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
         endpoint: Endpoint of the engine workers
         model_name: Name of the model
         request: Pytest request fixture
@@ -1902,7 +1902,7 @@ def _test_busy_threshold_endpoint(
     For now, this test only verifies the endpoint is accessible and returns valid responses.
 
     Args:
-        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
+        engine_workers: MockerProcess instance (already initialized with __enter__())
         block_size: Block size for KV cache
         request: Pytest request fixture for managing resources
         frontend_port: Port for the frontend HTTP server
