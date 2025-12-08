@@ -995,7 +995,7 @@ class Descriptor:
 
     def __del__(self) -> None:
         if not (self._nixl_hndl is None or self._connection is None):
-            # Unregister the memory with NIXL.
+            # Deregister the memory with NIXL.
             self._connection._nixl.deregister_memory(self._nixl_hndl)
             self._nixl_hndl = None
 
@@ -1090,11 +1090,11 @@ class Descriptor:
             )
             return
 
-        connection._nixl.unregister_memory(self._nixl_hndl)
+        connection._nixl.deregister_memory(self._nixl_hndl)
         self._nixl_hndl = None
         self._connection = None
         logger.debug(
-            f"dynamo.nixl_connect.{self.__class__.__name__}: Unregistered {self.__repr__()} with NIXL."
+            f"dynamo.nixl_connect.{self.__class__.__name__}: Deregistered {self.__repr__()} with NIXL."
         )
 
     def register_memory(
@@ -1737,11 +1737,11 @@ class Remote:
         """
         Private method for releasing NIXL resources. Not intended for public use.
         """
-        # We have to unregister the remote agent from NIXL because we cannot know if the remote worker has updated its descriptors or not, and
+        # We have to deregister the remote agent from NIXL because we cannot know if the remote worker has updated its descriptors or not, and
         # NIXL will return an error if we attempt to register a remote agent with the same name but different descriptors (aka conn_info).
         self._connection._nixl.remove_remote_agent(self._name)
         logger.debug(
-            f'dynamo.nixl_connect.{self.__class__.__name__}: Unregistered NIXL remote {{ name: "{self._name}" }}.'
+            f'dynamo.nixl_connect.{self.__class__.__name__}: Deregistered NIXL remote {{ name: "{self._name}" }}.'
         )
 
     @property
