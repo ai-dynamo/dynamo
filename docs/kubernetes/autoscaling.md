@@ -37,7 +37,7 @@ spec:
 
 ## Overview
 
-Dynamo provides flexible autoscaling through the `DynamoGraphDeploymentScalingAdapter` (DGDSA) resource. When you deploy a DGD, the operator automatically creates one adapter per service. These adapters implement the Kubernetes [Scale subresource](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#scale-subresource), enabling integration with:
+Dynamo provides flexible autoscaling through the `DynamoGraphDeploymentScalingAdapter` (DGDSA) resource. When you deploy a DGD, the operator automatically creates one adapter per service (unless explicitly disabled). These adapters implement the Kubernetes [Scale subresource](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#scale-subresource), enabling integration with:
 
 | Autoscaler | Description | Best For |
 |------------|-------------|----------|
@@ -45,6 +45,8 @@ Dynamo provides flexible autoscaling through the `DynamoGraphDeploymentScalingAd
 | **Kubernetes HPA** | Native horizontal pod autoscaling | Simple CPU/memory-based scaling |
 | **Dynamo Planner** | LLM-aware autoscaling with SLA optimization | Production LLM workloads |
 | **Custom Controllers** | Any scale-subresource-compatible controller | Custom requirements |
+
+> **⚠️ Deprecation Notice**: The `spec.services[X].autoscaling` field in DGD is **deprecated and ignored**. Use DGDSA with HPA, KEDA, or Planner instead. If you have existing DGDs with `autoscaling` configured, you'll see a warning. Remove the field to silence the warning.
 
 ## Architecture
 
@@ -87,6 +89,61 @@ kubectl get dgdsa -n default
 # sglang-agg-frontend   sglang-agg  Frontend   1          5m
 # sglang-agg-decode     sglang-agg  decode     1          5m
 ```
+
+## Replica Ownership Model
+
+When DGDSA is enabled (the default), it becomes the **source of truth** for replica counts. This follows the same pattern as Kubernetes Deployments owning ReplicaSets.
+
+### How It Works
+
+1. **DGDSA owns replicas**: Autoscalers (HPA, KEDA, Planner) update the DGDSA's `spec.replicas`
+2. **DGDSA syncs to DGD**: The DGDSA controller writes the replica count to the DGD's service
+3. **Direct DGD edits blocked**: A validating webhook prevents users from directly editing `spec.services[X].replicas` in the DGD
+4. **Controllers allowed**: Only authorized controllers (operator, Planner) can modify DGD replicas
+
+### Manual Scaling with DGDSA Enabled
+
+When DGDSA is enabled, use `kubectl scale` on the adapter (not the DGD):
+
+```bash
+# ✅ Correct - scale via DGDSA
+kubectl scale dgdsa sglang-agg-decode --replicas=3
+
+# ❌ Blocked - direct DGD edit rejected by webhook
+kubectl patch dgd sglang-agg --type=merge -p '{"spec":{"services":{"decode":{"replicas":3}}}}'
+# Error: spec.services[decode].replicas cannot be modified directly when scaling adapter is enabled;
+#        use 'kubectl scale dgdsa/sglang-agg-decode --replicas=3' or update the DynamoGraphDeploymentScalingAdapter instead
+```
+
+## Disabling DGDSA for a Service
+
+If you want to manage replicas directly in the DGD (without autoscaling), you can disable the scaling adapter per service:
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-agg
+spec:
+  services:
+    Frontend:
+      replicas: 2
+      scalingAdapter:
+        disable: true    # ← No DGDSA created, direct edits allowed
+
+    decode:
+      replicas: 1        # ← DGDSA created by default, managed via adapter
+```
+
+**When to disable DGDSA:**
+- You want simple, manual replica management
+- You don't need autoscaling for that service
+- You prefer direct DGD edits over adapter-based scaling
+
+**When to keep DGDSA enabled (default):**
+- You want to use HPA, KEDA, or Planner for autoscaling
+- You want a clear separation between "desired scale" (adapter) and "deployment config" (DGD)
+- You want protection against accidental direct replica edits
 
 ## Autoscaling with Dynamo Planner
 
@@ -527,7 +584,9 @@ spec:
 
 ## Manual Scaling
 
-You can manually scale a service using the scale subresource:
+### With DGDSA Enabled (Default)
+
+When DGDSA is enabled (the default), scale via the adapter:
 
 ```bash
 kubectl scale dgdsa sglang-agg-decode -n default --replicas=3
@@ -544,6 +603,25 @@ kubectl get dgdsa sglang-agg-decode -n default
 ```
 
 > **Note**: If an autoscaler (KEDA, HPA, Planner) is managing the adapter, your change will be overwritten on the next evaluation cycle.
+
+### With DGDSA Disabled
+
+If you've disabled the scaling adapter for a service, edit the DGD directly:
+
+```bash
+kubectl patch dgd sglang-agg --type=merge -p '{"spec":{"services":{"decode":{"replicas":3}}}}'
+```
+
+Or edit the YAML:
+
+```yaml
+spec:
+  services:
+    decode:
+      replicas: 3
+      scalingAdapter:
+        disable: true
+```
 
 ## Best Practices
 
