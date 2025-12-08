@@ -37,6 +37,9 @@ sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/sglang"
 )
 
+# SGLang test configurations
+# NOTE: pytest.mark.gpu_1 tests take ~167s (2m 47s) total to run sequentially (with models pre-cached)
+# TODO: Parallelize these tests to reduce total execution time
 sglang_configs = {
     "aggregated": SGLangConfig(
         # Uses backend agg.sh (with metrics enabled) for testing standard
@@ -44,7 +47,11 @@ sglang_configs = {
         name="aggregated",
         directory=sglang_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(120),  # 3x measured time (39s)
+        ],
         model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
@@ -120,7 +127,12 @@ sglang_configs = {
         name="template_verification",
         directory=SERVE_TEST_DIR,  # special directory for test-specific scripts
         script_name="template_verifier.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge, pytest.mark.nightly],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.nightly,
+            pytest.mark.timeout(60),  # 3x measured time (20s)
+        ],
         model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
@@ -163,10 +175,14 @@ sglang_configs = {
         name="embedding_agg",
         directory=sglang_dir,
         script_name="agg_embed.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge, pytest.mark.nightly],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.nightly,
+            pytest.mark.timeout(90),  # 3x measured time (29s)
+        ],
         model="Qwen/Qwen3-Embedding-4B",
         delayed_start=0,
-        timeout=180,
         models_port=8000,
         request_payloads=[
             # Test default payload with multiple inputs
@@ -196,7 +212,12 @@ sglang_configs = {
         name="completions_only",
         directory=sglang_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.timeout(
+                160
+            ),  # Total test timeout: 2x measured average (79.36s)
+        ],
         model="deepseek-ai/deepseek-llm-7b-base",
         script_args=[
             "--model-path",
