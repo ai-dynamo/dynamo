@@ -296,7 +296,8 @@ runs:
         python3 .github/scripts/parse_buildkit_output.py \
           "$COMPREHENSIVE_JSON" \
           "${STAGE_ARGS[@]}" \
-          "--metadata=${CONTAINER_METADATA}"
+          "--metadata=${CONTAINER_METADATA}" \
+          --debug
         PARSER_EXIT_CODE=$?
         set -e
 
