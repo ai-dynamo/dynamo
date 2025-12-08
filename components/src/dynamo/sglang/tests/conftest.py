@@ -11,6 +11,9 @@ import sys
 
 import pytest
 
+def pytest_configure(config):
+    # Override asyncio_mode for tests in this directory
+    config.inicfg["asyncio_mode"] = "strict"
 
 def pytest_ignore_collect(collection_path, config):
     """Skip collecting sglang test files if sglang module isn't installed.

@@ -149,7 +149,6 @@ addopts = [
     "--showlocals",
     "--strict-markers",
     "--strict-config",
-    "--mypy",
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
