@@ -118,7 +118,7 @@ def generate_config_data(prefill_data, decode_data, args):
     # Populate decode data
     if decode_data.num_gpus:
         # Group by GPU count for multiple datasets
-        gpu_groups: dict[int, list[list[float]]] = {}
+        gpu_groups: dict[int, list[dict[str, float | int]]] = {}
         for i, (gpu, itl, thpt, label) in enumerate(
             zip(
                 decode_data.num_gpus,
