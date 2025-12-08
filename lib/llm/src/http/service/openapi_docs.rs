@@ -59,7 +59,11 @@ use crate::http::service::RouteDoc;
 struct ApiDoc;
 
 /// Generate OpenAPI specification from route documentation
-fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenApi {
+///
+/// This is the core helper used both by the embedded Swagger UI and by
+/// external tools (for example CI or NIM) which need to materialize the
+/// same frontend OpenAPI specification without running the HTTP service.
+pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenApi {
     let mut openapi = ApiDoc::openapi();
 
     // Build paths from route documentation
@@ -255,15 +259,194 @@ fn create_chat_completion_schema() -> RefOr<utoipa::openapi::schema::Schema> {
                     .build(),
             )
             .property(
+                "top_p",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Nucleus sampling parameter. The model considers only the tokens with top_p probability mass.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "n",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "How many chat completion choices to generate for each input message.",
+                    ))
+                    .build(),
+            )
+            .property(
                 "max_tokens",
                 ObjectBuilder::new()
                     .description(Some("Maximum number of tokens to generate"))
                     .build(),
             )
             .property(
+                "stop",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Up to 4 sequences where the API will stop generating further tokens. Can be a string or array of strings.",
+                    ))
+                    .build(),
+            )
+            .property(
                 "stream",
                 ObjectBuilder::new()
                     .description(Some("Whether to stream back partial progress"))
+                    .build(),
+            )
+            .property(
+                "frequency_penalty",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Penalizes new tokens based on their frequency so far. Typical range is [-2.0, 2.0].",
+                    ))
+                    .build(),
+            )
+            .property(
+                "presence_penalty",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Penalizes new tokens based on whether they appear in the text so far. Typical range is [-2.0, 2.0].",
+                    ))
+                    .build(),
+            )
+            .property(
+                "logprobs",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "If true, returns log probabilities of output tokens. Combined with top_logprobs.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "top_logprobs",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Number of top logprobs to return for each token when logprobs=true.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "seed",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Seed for deterministic sampling where supported. If not set, sampling is random.",
+                    ))
+                    .build(),
+            )
+            // CommonExt fields (flattened at the root of the request)
+            .property(
+                "ignore_eos",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "If true, ignore end-of-sequence tokens and continue generating up to max_tokens.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "min_tokens",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Minimum number of tokens to generate in the response. NVIDIA extension.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "top_k",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Integer that controls the number of top tokens to consider. Set to -1 to consider all tokens.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "min_p",
+                ObjectBuilder::new()
+                    .description(Some("Relative probability floor used for sampling. NVIDIA extension."))
+                    .build(),
+            )
+            .property(
+                "repetition_penalty",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "How much to penalize tokens based on how frequently they occur in the text.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "include_stop_str_in_output",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Whether to include the stop string in the generated output when a stop condition is hit.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "skip_special_tokens",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Whether to skip special tokens (e.g. EOS, BOS, PAD) when decoding output text.",
+                    ))
+                    .build(),
+            )
+            // Guided decoding extensions
+            .property(
+                "guided_json",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "If specified, constrains the output to be valid JSON matching the provided schema/value.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "guided_regex",
+                ObjectBuilder::new()
+                    .description(Some("If specified, constrains the output to match the given regular expression."))
+                    .build(),
+            )
+            .property(
+                "guided_grammar",
+                ObjectBuilder::new()
+                    .description(Some("If specified, constrains the output to follow a context-free grammar."))
+                    .build(),
+            )
+            .property(
+                "guided_choice",
+                ArrayBuilder::new()
+                    .description(Some(
+                        "If specified, constrains the output to be exactly one of the provided choices.",
+                    ))
+                    .items(
+                        ObjectBuilder::new()
+                            .description(Some("One of the allowed output choices."))
+                            .build(),
+                    )
+                    .build(),
+            )
+            .property(
+                "guided_decoding_backend",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Backend to use for guided decoding (for example, xgrammar or a custom guided backend).",
+                    ))
+                    .build(),
+            )
+            // NVIDIA nvext block – high-level description only
+            .property(
+                "nvext",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "NVIDIA-specific extensions such as greedy sampling, raw prompt mode, annotations, and routing hints.",
+                    ))
+                    .build(),
+            )
+            // Chat template args used by the preprocessor
+            .property(
+                "chat_template_args",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Extra arguments to pass to the chat template rendering context as a JSON object.",
+                    ))
                     .build(),
             )
             .required("model")
@@ -317,15 +500,180 @@ fn create_completion_schema() -> RefOr<utoipa::openapi::schema::Schema> {
                     .build(),
             )
             .property(
+                "top_p",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Nucleus sampling parameter. The model considers only the tokens with top_p probability mass.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "n",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "How many completion choices to generate for each input prompt.",
+                    ))
+                    .build(),
+            )
+            .property(
                 "max_tokens",
                 ObjectBuilder::new()
                     .description(Some("Maximum number of tokens to generate"))
                     .build(),
             )
             .property(
+                "stop",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Up to 4 sequences where the API will stop generating further tokens. Can be a string or array of strings.",
+                    ))
+                    .build(),
+            )
+            .property(
                 "stream",
                 ObjectBuilder::new()
                     .description(Some("Whether to stream back partial progress"))
+                    .build(),
+            )
+            .property(
+                "frequency_penalty",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Penalizes new tokens based on their frequency so far. Typical range is [-2.0, 2.0].",
+                    ))
+                    .build(),
+            )
+            .property(
+                "presence_penalty",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Penalizes new tokens based on whether they appear in the text so far. Typical range is [-2.0, 2.0].",
+                    ))
+                    .build(),
+            )
+            .property(
+                "logprobs",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "If true, returns log probabilities of output tokens. Combined with top_logprobs.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "top_logprobs",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Number of top logprobs to return for each token when logprobs=true.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "seed",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Seed for deterministic sampling where supported. If not set, sampling is random.",
+                    ))
+                    .build(),
+            )
+            // CommonExt fields (flattened at the root of the request)
+            .property(
+                "ignore_eos",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "If true, ignore end-of-sequence tokens and continue generating up to max_tokens.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "min_tokens",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Minimum number of tokens to generate in the response. NVIDIA extension.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "top_k",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Integer that controls the number of top tokens to consider. Set to -1 to consider all tokens.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "min_p",
+                ObjectBuilder::new()
+                    .description(Some("Relative probability floor used for sampling. NVIDIA extension."))
+                    .build(),
+            )
+            .property(
+                "repetition_penalty",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "How much to penalize tokens based on how frequently they occur in the text.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "include_stop_str_in_output",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Whether to include the stop string in the generated output when a stop condition is hit.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "skip_special_tokens",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Whether to skip special tokens (e.g. EOS, BOS, PAD) when decoding output text.",
+                    ))
+                    .build(),
+            )
+            // Guided decoding extensions
+            .property(
+                "guided_json",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "If specified, constrains the output to be valid JSON matching the provided schema/value.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "guided_regex",
+                ObjectBuilder::new()
+                    .description(Some("If specified, constrains the output to match the given regular expression."))
+                    .build(),
+            )
+            .property(
+                "guided_grammar",
+                ObjectBuilder::new()
+                    .description(Some("If specified, constrains the output to follow a context-free grammar."))
+                    .build(),
+            )
+            .property(
+                "guided_choice",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "If specified, constrains the output to be exactly one of the provided choices.",
+                    ))
+                    .build(),
+            )
+            .property(
+                "guided_decoding_backend",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "Backend to use for guided decoding (for example, xgrammar or a custom guided backend).",
+                    ))
+                    .build(),
+            )
+            // NVIDIA nvext block – high-level description only
+            .property(
+                "nvext",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "NVIDIA-specific extensions such as greedy sampling, raw prompt mode, annotations, and routing hints.",
+                    ))
                     .build(),
             )
             .required("model")
