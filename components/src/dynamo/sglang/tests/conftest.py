@@ -7,13 +7,30 @@ framework is not installed in the current container.
 """
 
 import importlib.util
+import os
 import sys
 
 import pytest
 
-def pytest_configure(config):
-    # Override asyncio_mode for tests in this directory
-    config.inicfg["asyncio_mode"] = "strict"
+# Store exit status for use in pytest_unconfigure
+_pytest_exit_status = 0
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Capture exit status for later use."""
+    global _pytest_exit_status
+    _pytest_exit_status = exitstatus
+
+
+def pytest_unconfigure(config):
+    """Force clean exit after pytest is completely done.
+
+    This hook runs AFTER all output is printed. Some C extensions
+    (sentencepiece, pyarrow, scipy, etc.) segfault during Python
+    interpreter shutdown. Using os._exit() bypasses that cleanup.
+    """
+    os._exit(_pytest_exit_status)
+
 
 def pytest_ignore_collect(collection_path, config):
     """Skip collecting sglang test files if sglang module isn't installed.
