@@ -50,7 +50,9 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
-            pytest.mark.timeout(120),  # 3x measured time (39s)
+            pytest.mark.timeout(
+                180
+            ),  # ~5x measured time (39s), can take longer on HF donwload
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
