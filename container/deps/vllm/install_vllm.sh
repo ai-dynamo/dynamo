@@ -110,9 +110,11 @@ echo "  TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST | INSTALLATION_DIR=$INSTALLAT
 echo "\n=== Cloning vLLM repository ==="
 # Clone needed for DeepGEMM and EP kernels install scripts and to build from source on ARM64
 cd $INSTALLATION_DIR
-git clone https://github.com/dmitry-tokarev-nv/vllm vllm # TODO: switch to official repo when the nvshmem fix is merged
+git clone https://github.com/vllm-project/vllm vllm
 cd vllm
-git checkout nvshmem-3.3.24-cuda-13
+git checkout ${VLLM_REF}
+# TODO: remove this cherry-pick when vllm is upgraded to > 0.12.0 (when the fix is shipped)
+git cherry-pick --no-commit 799804d140fc99ce3964648ba91aaa810cf28fef # nvshmem fix for CUDA 13.0
 echo "✓ vLLM repository cloned"
 
 
