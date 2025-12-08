@@ -26,6 +26,7 @@ block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicat
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
 media-nixl = ["dep:nixl-sys", "dep:dynamo-memory"]
+media-ffmpeg-build = ["ffmpeg-next/build"]
 
 [[bench]]
 name = "tokenizer"
@@ -157,6 +158,8 @@ json-five = { version = "0.3" }
 reqwest = { workspace = true }
 base64 = { version = "0.22" }
 image = { version = "0.25", features = ["serde"] }
+video-rs = { version = "0.10.5", features = ["ndarray"] }
+ffmpeg-next = { version = "7.1" }
 tokio-rayon = {version = "2" }
 ndarray = { version = "0.16" }
 ndarray-npy = { version = "0.9" }

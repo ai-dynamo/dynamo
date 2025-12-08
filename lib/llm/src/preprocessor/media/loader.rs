@@ -124,8 +124,8 @@ impl MediaLoader {
                 ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
                     let url = &video_part.video_url.url;
                     self.check_if_url_allowed(url)?;
-                    EncodedMediaData::from_url(url, &self.http_client).await?;
-                    anyhow::bail!("Video decoding is not supported yet");
+                    let data = EncodedMediaData::from_url(url, &self.http_client).await?;
+                    self.media_decoder.video_decoder.decode_async(data).await?
                 }
                 ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
                     anyhow::bail!("Audio decoding is not supported yet");
