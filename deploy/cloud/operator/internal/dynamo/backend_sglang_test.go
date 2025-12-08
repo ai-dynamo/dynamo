@@ -28,6 +28,10 @@ func (m *MockSimpleDeployer) GetNodeRank() (string, bool) {
 	return "1", false // simple rank, no shell interpretation needed
 }
 
+func (m *MockSimpleDeployer) NeedsDNSWait() bool {
+	return false
+}
+
 // Mock MultinodeDeployer for testing with shell interpretation needed
 type MockShellDeployer struct{}
 
@@ -46,6 +50,10 @@ func (m *MockShellDeployer) GetHostNames(serviceName string, numberOfNodes int32
 
 func (m *MockShellDeployer) GetNodeRank() (string, bool) {
 	return "$(WORKER_INDEX)", true // needs shell interpretation
+}
+
+func (m *MockShellDeployer) NeedsDNSWait() bool {
+	return true
 }
 
 func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
@@ -265,7 +273,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			multinodeDeployer: &LWSMultinodeDeployer{},
 			initialCommand:    []string{"sh", "-c"},
 			initialArgs:       []string{"python -m dynamo.sglang"},
-			expectedArgs:      []string{"python -m dynamo.sglang --dist-init-addr $(LWS_LEADER_ADDRESS):29500 --nnodes 2 --node-rank 0"},
+			expectedArgs:      []string{"python -m dynamo.sglang --dist-init-addr $LWS_LEADER_ADDRESS:29500 --nnodes 2 --node-rank 0"},
 			description:       "LWS shell commands should use LWS variables",
 		},
 		{

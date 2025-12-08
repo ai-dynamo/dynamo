@@ -33,6 +33,11 @@ func (d *GroveMultinodeDeployer) GetNodeRank() (string, bool) {
 	return "$((GROVE_PCLQ_POD_INDEX + 1))", true
 }
 
+func (d *GroveMultinodeDeployer) NeedsDNSWait() bool {
+	// Grove doesn't need DNS wait - it handles startup coordination differently
+	return false
+}
+
 func (d *GroveMultinodeDeployer) GetHostNames(serviceName string, numberOfNodes int32) []string {
 	hostnames := make([]string, 0, numberOfNodes)
 	leaderHostname := d.GetLeaderHostname(serviceName)
