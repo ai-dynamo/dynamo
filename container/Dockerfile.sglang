@@ -333,10 +333,6 @@ ${NIXL_PLUGIN_DIR}:\
 /usr/local/nvidia/lib64:\
 ${LD_LIBRARY_PATH}
 
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
-
-
 # Copy NATS and ETCD from dynamo_base, and UCX/NIXL
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
@@ -380,12 +376,16 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
 USER dynamo
 
 # Copy tests, benchmarks, deploy and components for CI with correct ownership
+COPY --chown=dynamo: pyproject.toml /workspace/
 COPY --chown=dynamo: tests /workspace/tests
 COPY --chown=dynamo: examples /workspace/examples
 COPY --chown=dynamo: benchmarks /workspace/benchmarks
 COPY --chown=dynamo: deploy /workspace/deploy
 COPY --chown=dynamo: components/ /workspace/components/
 COPY --chown=dynamo: recipes/ /workspace/recipes/
+
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
@@ -407,9 +407,6 @@ FROM runtime AS dev
 
 ARG WORKSPACE_DIR=/sgl-workspace/dynamo
 ARG PYTHON_VERSION
-
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 # NOTE: SGLang uses system Python (not a virtualenv in framework/runtime stages) to align with
 # upstream SGLang Dockerfile: https://github.com/sgl-project/sglang/blob/main/docker/Dockerfile
@@ -481,7 +478,7 @@ RUN curl --retry 3 --retry-delay 2 -LSso /usr/local/bin/clang-format https://git
     && rm -rf clangd_18.1.3 clangd.zip
 
 # Editable install of dynamo
-COPY pyproject.toml README.md hatch_build.py /workspace/
+COPY README.md hatch_build.py /workspace/
 RUN python3 -m pip install --no-deps -e .
 
 # Install Python development packages

@@ -34,13 +34,20 @@ trtllm_dir = os.environ.get("TRTLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/trtllm"
 )
 
-# trtllm test configurations
+# TensorRT-LLM test configurations
+# NOTE: pytest.mark.gpu_1 tests take ~442s (7m 22s) total to run sequentially (with models pre-cached)
+# TODO: Parallelize these tests to reduce total execution time
 trtllm_configs = {
     "aggregated": TRTLLMConfig(
         name="aggregated",
         directory=trtllm_dir,
         script_name="agg_metrics.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.trtllm, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.trtllm,
+            pytest.mark.timeout(140),  # 3x measured time (44.66s)
+        ],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -65,7 +72,12 @@ trtllm_configs = {
         name="disaggregated_same_gpu",
         directory=trtllm_dir,
         script_name="disagg_same_gpu.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.trtllm],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.trtllm,
+            pytest.mark.timeout(320),  # 3x measured time (103.66s)
+        ],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -79,7 +91,12 @@ trtllm_configs = {
         name="aggregated_router",
         directory=trtllm_dir,
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.trtllm, pytest.mark.post_merge],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.trtllm,
+            pytest.mark.timeout(120),  # 3x measured time (37.91s)
+        ],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -117,13 +134,32 @@ trtllm_configs = {
         delayed_start=60,
         request_payloads=[multimodal_payload_default()],
     ),
+    "completions_only": TRTLLMConfig(
+        name="completions_only",
+        directory=trtllm_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.timeout(260),  # 3x measured time (83.85s)
+        ],
+        model="deepseek-ai/deepseek-llm-7b-base",
+        script_args=["--dyn-endpoint-types", "completions"],
+        env={
+            "MODEL_PATH": "deepseek-ai/deepseek-llm-7b-base",
+            "SERVED_MODEL_NAME": "deepseek-ai/deepseek-llm-7b-base",
+        },
+        request_payloads=[
+            completion_payload_default(),
+        ],
+    ),
 }
 
 
 @pytest.fixture(params=params_with_model_mark(trtllm_configs))
 def trtllm_config_test(request):
     """Fixture that provides different trtllm test configurations"""
-    return request.param
+    return trtllm_configs[request.param]
 
 
 @pytest.mark.trtllm
@@ -140,8 +176,8 @@ def test_deployment(trtllm_config_test, request, runtime_services, predownload_m
 # TODO make this a normal guy
 @pytest.mark.e2e
 @pytest.mark.gpu_1
-@pytest.mark.pre_merge
 @pytest.mark.trtllm
+@pytest.mark.timeout(480)  # 3x measured time (159.68s)
 def test_chat_only_aggregated_with_test_logits_processor(
     request, runtime_services, predownload_models, monkeypatch
 ):
