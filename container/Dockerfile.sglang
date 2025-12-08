@@ -437,7 +437,7 @@ fi
 # Set environment variables - they'll be empty strings if USE_SCCACHE=false
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
+    SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}}
 
 WORKDIR /sgl-workspace
 
