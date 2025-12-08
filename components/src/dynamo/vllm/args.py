@@ -371,24 +371,6 @@ def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
         logger.info("No kv_events_config required: prefix caching is disabled")
         return None
 
-    # There is a bug with KV events publishing when LORA is enabled.
-    # This is fixed in https://github.com/vllm-project/vllm/pull/27728 but not released yet.
-    # remove below check once new vLLM version is released with the fix.
-    if config.engine_args.enable_lora:
-        if config.engine_args.kv_events_config is None:
-            # No explicit kv events config provided by user, we'll disable kv cache because LoRA is enabled and its not supported yet.
-            return None
-        else:
-            # User provided their own kv events config and it'll not work when LoRA is enabled.
-            message = (
-                "KV events doesn't work when LoRA is enabled due to upstream vLLM bug. "
-                "Please see https://github.com/vllm-project/vllm/pull/27728."
-                "For now, either disable lora or dont use explicit kv envents config."
-                "Dont set both --kv-events-config and --enable-lora in vllm command line args."
-            )
-            logger.error(message)
-            raise ValueError(message)
-
     # If user provided their own config, use that
     if c := getattr(config.engine_args, "kv_events_config"):
         # Warn user that enable_kv_cache_events probably should be True (user may have omitted it from JSON)
