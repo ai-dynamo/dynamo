@@ -507,56 +507,6 @@ jobs:
           kubectl delete namespace $NAMESPACE || true
           echo "Namespace $NAMESPACE completed."
 
-  # Upload metrics for this workflow and all its jobs
-  upload-workflow-metrics:
-    name: Upload Workflow Metrics
-    runs-on: gitlab
-    if: always()  # Always run, even if other jobs fail
-    needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-
-      - name: Download build metrics
-        uses: actions/download-artifact@v4
-        with:
-          pattern: build-metrics-*
-          path: build-metrics/
-          merge-multiple: true
-        continue-on-error: true  # Don't fail if artifacts don't exist
-
-      - name: Download test results
-        uses: actions/download-artifact@v4
-        with:
-          pattern: test-results-*
-          path: test-results/
-          merge-multiple: true
-        continue-on-error: true  # Don't fail if artifacts don't exist
-
-      - name: Upload Complete Workflow Metrics
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WORKFLOW_INDEX: ${{ secrets.WORKFLOW_INDEX }}
-          JOB_INDEX: ${{ secrets.JOB_INDEX }}
-          STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
-          # Container and test index configuration
-          CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
-          TEST_INDEX: ${{ secrets.TEST_INDEX }}
-        run: |
-          # Upload complete workflow metrics including container metrics
-          python3 .github/workflows/upload_complete_workflow_metrics.py
-
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
     # TODO: Uncomment this when we have a way to test the deploy-operator job in CI.
