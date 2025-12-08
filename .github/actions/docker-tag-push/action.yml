@@ -46,7 +46,7 @@ runs:
       if: ${{ inputs.aws_push == 'true' }}
       env:
         LOCAL_IMAGE: ${{ inputs.local_image }}
-        PUSH_TAG: ${{ inputs.push_tags }}
+        PUSH_TAGS: ${{ inputs.push_tags }}
         CONDITIONAL_TAG: ${{ inputs.conditional_tag }}
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
