@@ -50,7 +50,7 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
-            pytest.mark.timeout(210),  # 3x measured time (43s) + download time (80s)
+            pytest.mark.timeout(300),  # 3x measured time (43s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -66,7 +66,7 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
-            pytest.mark.timeout(290),  # 3x estimated time (70s) + download time (80s)
+            pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -82,7 +82,7 @@ vllm_configs = {
         script_name="agg_lmcache_multiproc.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.timeout(290),  # 3x estimated time (70s) + download time (80s)
+            pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
         env={
@@ -102,7 +102,7 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
-            pytest.mark.timeout(210),  # 3x measured time (43s) + download time (80s)
+            pytest.mark.timeout(300),  # 3x measured time (43s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
         script_args=["--tcp"],
@@ -118,7 +118,7 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
-            pytest.mark.timeout(210),  # 3x measured time (43s) + download time (80s)
+            pytest.mark.timeout(300),  # 3x measured time (43s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
         script_args=["--http"],
@@ -440,8 +440,8 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.timeout(
-                300
-            ),  # 3x estimated time (60s) + download time (120s) for 7B model
+                420
+            ),  # 3x estimated time (60s) + download time (240s) for 7B model
         ],
         model="deepseek-ai/deepseek-llm-7b-base",
         script_args=[
