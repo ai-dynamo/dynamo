@@ -334,12 +334,17 @@ RUN uv pip install \
       --no-cache \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-      /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-    && if [ "${ENABLE_KVBM}" = "true" ]; then \
-        uv pip install --no-cache /opt/dynamo/wheelhouse/kvbm*.whl; \
-       fi \
-    && cd /workspace/benchmarks \
-    && UV_GIT_LFS=1 uv pip install --no-cache .
+      /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "${ENABLE_KVBM}" = "true" ]; then \
+        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
+        if [ -z "$KVBM_WHEEL" ]; then \
+            echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
+            exit 1; \
+        fi; \
+        uv pip install --no-cache "$KVBM_WHEEL"; \
+    fi && \
+    cd /workspace/benchmarks && \
+    UV_GIT_LFS=1 uv pip install --no-cache .
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
@@ -352,7 +357,8 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.test.txt \
         cupy-cuda13x
 
-# Copy tests, benchmarks, deploy and components for CI
+# Copy tests, benchmarks, deploy and components for CI with correct ownership
+COPY --chown=dynamo: pyproject.toml /workspace/
 COPY --chown=dynamo: tests /workspace/tests
 COPY --chown=dynamo: examples /workspace/examples
 COPY --chown=dynamo: deploy /workspace/deploy
@@ -442,7 +448,7 @@ COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
 RUN uv pip install --no-cache maturin[patchelf]
 
 # Editable install of dynamo
-COPY pyproject.toml README.md hatch_build.py /workspace/
+COPY README.md hatch_build.py /workspace/
 RUN uv pip install --no-cache --no-deps -e .
 
 CMD []
