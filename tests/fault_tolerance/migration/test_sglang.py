@@ -28,7 +28,7 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.pre_merge,  # can be moved to nightly once stable for a week
+    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
 ]
 
 
@@ -59,6 +59,11 @@ class DynamoWorkerProcess(ManagedProcess):
         # Set debug logging environment
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
+        # Disable canary health check - these tests expect full control over requests
+        # sent to the workers where canary health check intermittently sends dummy
+        # requests to workers interfering with the test process which may cause
+        # intermittent failures
+        env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = f"808{worker_id[-1]}"
 
@@ -109,10 +114,6 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.timeout(235)  # 3x average
-@pytest.mark.xfail(
-    reason="For some reason both replicas received the request where only one should",
-    strict=False,
-)
 def test_request_migration_sglang_worker_failure(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -205,10 +206,6 @@ def test_request_migration_sglang_graceful_shutdown(
 
 
 @pytest.mark.timeout(135)  # 3x average
-@pytest.mark.xfail(
-    reason="For some reason both replicas received the request where only one should",
-    strict=False,
-)
 def test_no_request_migration_sglang_worker_failure(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):

@@ -77,6 +77,7 @@
    backends/vllm/multi-node.md
    backends/vllm/multimodal.md
    backends/vllm/prometheus.md
+   backends/vllm/speculative_decoding.md
 
    benchmarks/kv-router-ab-testing.md
 

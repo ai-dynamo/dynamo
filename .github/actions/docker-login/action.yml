@@ -1,5 +1,6 @@
-name: 'Docker Build'
-description: 'Build Dynamo container images'
+name: 'Docker Login'
+description: 'Login to multiple container registries (ECR, NGC, ACR)'
+
 inputs:
   ngc_ci_access_token:
     description: 'NGC CI Access Token'
@@ -20,12 +21,6 @@ inputs:
     description: 'Azure ACR password'
     required: false
 
-
-outputs:
-  image_tag:
-    description: 'Image Tag'
-    value: ${{ steps.build.outputs.image_tag }}
-
 runs:
   using: "composite"
   steps:
@@ -35,14 +30,17 @@ runs:
       env:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
-        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+        set -euo pipefail
+        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
     - name: NGC Login
       if: ${{ inputs.ngc_ci_access_token != '' }}
       shell: bash
       run: |
+        set -euo pipefail
         echo "${{ inputs.ngc_ci_access_token }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
     - name: ACR Login
       shell: bash
       if: ${{ inputs.azure_acr_hostname != '' && inputs.azure_acr_user != '' && inputs.azure_acr_password != '' }}
       run: |
-        echo "${{ inputs.azure_acr_password }}" | docker login ${{ inputs.azure_acr_hostname }} --username ${{ inputs.azure_acr_user }} --password-stdin
+        set -euo pipefail
+        echo "${{ inputs.azure_acr_password }}" | docker login "${{ inputs.azure_acr_hostname }}" --username "${{ inputs.azure_acr_user }}" --password-stdin

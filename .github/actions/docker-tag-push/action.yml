@@ -1,11 +1,12 @@
+name: 'Docker Tag and Push'
 description: 'Tag and Push Docker Images'
 
 inputs:
   local_image:
     description: 'Local Image Name:Tag'
     required: true
-  push_tag:
-    description: 'Target Name:Tag'
+  push_tags:
+    description: 'Target Name:Tag (newline-separated list for multiple tags)'
     required: true
   # There isn't a clean way to have an additional tag that is conditional
   # Adding this to handle this use-case (we want multiple tags for main builds)
@@ -31,9 +32,9 @@ inputs:
     required: false
 
 outputs:
-  image_tag:
-    description: 'Image Tag'
-    value: ${{ inputs.push_tag }}
+  image_tags:
+    description: 'Image Tags'
+    value: ${{ inputs.push_tags }}
 
 runs:
   using: "composite"
@@ -45,23 +46,37 @@ runs:
       if: ${{ inputs.aws_push == 'true' }}
       env:
         LOCAL_IMAGE: ${{ inputs.local_image }}
-        PUSH_TAG: ${{ inputs.push_tag }}
+        PUSH_TAG: ${{ inputs.push_tags }}
         CONDITIONAL_TAG: ${{ inputs.conditional_tag }}
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
+        set -euo pipefail
         if [[ ${CONDITIONAL_TAG} != '' ]]; then
             docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${CONDITIONAL_TAG}
             docker push ${ECR_HOSTNAME}/${CONDITIONAL_TAG}
         fi
-        docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${PUSH_TAG}
-        docker push ${ECR_HOSTNAME}/${PUSH_TAG}
+        while IFS= read -r TAG; do
+          if [ -z "$TAG" ]; then
+            continue
+          fi
+          echo "Tagging and pushing: ${ECR_HOSTNAME}/${TAG}"
+          docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${TAG}"
+          docker push "${ECR_HOSTNAME}/${TAG}"
+        done <<< "$PUSH_TAGS"
     - name: ACR Tag and Push
       shell: bash
       if: ${{ inputs.azure_push == 'true' }}
       env:
         LOCAL_IMAGE: ${{ inputs.local_image }}
-        PUSH_TAG: ${{ inputs.push_tag }}
+        PUSH_TAGS: ${{ inputs.push_tags }}
         AZURE_ACR_HOSTNAME: ${{ inputs.azure_acr_hostname }}
       run: |
-        docker tag ${LOCAL_IMAGE} ${AZURE_ACR_HOSTNAME}/${PUSH_TAG}
-        docker push ${AZURE_ACR_HOSTNAME}/${PUSH_TAG}
+        set -euo pipefail
+        while IFS= read -r TAG; do
+          if [ -z "$TAG" ]; then
+            continue
+          fi
+          echo "Tagging and pushing: ${AZURE_ACR_HOSTNAME}/${TAG}"
+          docker tag "${LOCAL_IMAGE}" "${AZURE_ACR_HOSTNAME}/${TAG}"
+          docker push "${AZURE_ACR_HOSTNAME}/${TAG}"
+        done <<< "$PUSH_TAGS"

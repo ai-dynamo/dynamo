@@ -46,6 +46,12 @@ inputs:
   torch_backend:
     description: 'Optional override for TORCH_BACKEND build-arg (e.g., cu129)'
     required: false
+  enable_kvbm:
+    description: 'Enable KVBM support (optional)'
+    required: false
+  dynamo_base_image:
+    description: 'Pre-built Dynamo base image to use instead of building from scratch'
+    required: false
 
 outputs:
   image_tag:
@@ -59,6 +65,8 @@ runs:
       uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
       with:
         driver: docker-container
+        # Enable BuildKit for enhanced metadata
+        buildkitd-flags: --debug
     - name: Cleanup
       if: always()
       shell: bash
@@ -121,6 +129,12 @@ runs:
         fi
         if [ -n "${{ inputs.torch_backend }}" ]; then
           EXTRA_ARGS+="--build-arg TORCH_BACKEND=${{ inputs.torch_backend }} "
+        fi
+        if [ -n "${{ inputs.dynamo_base_image }}" ]; then
+          EXTRA_ARGS+=" --dynamo-base-image ${{ inputs.dynamo_base_image }}"
+        fi
+        if [ -n "${{ inputs.enable_kvbm }}" ]; then
+          EXTRA_ARGS+=" --build-arg ENABLE_KVBM=${{ inputs.enable_kvbm }}"
         fi
 
         # Execute build and capture output (show on console AND save to file)
@@ -286,7 +300,7 @@ runs:
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        name: build-metrics-${{ inputs.framework }}-${{ inputs.target }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: build-metrics/build-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
         retention-days: 7
 

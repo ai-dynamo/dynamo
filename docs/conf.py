@@ -115,7 +115,7 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "build"]
 # -- Options for HTML output -------------------------------------------------
 html_theme = "nvidia_sphinx_theme"
 html_static_path = ["_static"]
-html_extra_path = ["project.json", "versions1.json"]
+html_extra_path = ["project.json"]
 html_theme_options = {
     "collapse_navigation": False,
     "icon_links": [
@@ -126,7 +126,9 @@ html_theme_options = {
         }
     ],
     "switcher": {
-        "json_url": "versions1.json",
+        # Use single shared URL so all versions see the same switcher list
+        # When a new version is added, all old docs automatically see it
+        "json_url": "https://docs.nvidia.com/dynamo/versions1.json",
         "version_match": release,
     },
     "extra_head": {
