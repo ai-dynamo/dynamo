@@ -52,7 +52,7 @@ sglang_configs = {
             pytest.mark.pre_merge,
             pytest.mark.timeout(
                 180
-            ), # ~5x measured time (39s), can take longer on HF donwload
+            ),  # ~5x measured time (39s), can take longer on HF donwload
         ],
         model="Qwen/Qwen3-0.6B",
         env={},

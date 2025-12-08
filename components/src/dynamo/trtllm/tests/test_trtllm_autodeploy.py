@@ -5,14 +5,6 @@
 
 import contextlib
 from unittest import mock
-import warnings
-
-# Filter pydantic warning about "schema" field shadowing parent attribute in tensorrt_llm
-warnings.filterwarnings(
-    "ignore",
-    message='Field name "schema" in "ResponseFormat" shadows an attribute in parent',
-    category=UserWarning,
-)
 
 import pydantic
 import pytest
