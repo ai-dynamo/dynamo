@@ -25,6 +25,7 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
+    pytest.mark.post_merge,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
 ]
 

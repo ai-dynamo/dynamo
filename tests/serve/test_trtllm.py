@@ -110,7 +110,12 @@ trtllm_configs = {
         name="disaggregated_multimodal",
         directory=trtllm_dir,
         script_name="disagg_multimodal.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.multimodal],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.nightly,
+        ],
         model="Qwen/Qwen2-VL-7B-Instruct",
         models_port=8000,
         timeout=900,
@@ -121,7 +126,7 @@ trtllm_configs = {
         name="completions_only",
         directory=trtllm_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.trtllm],
+        marks=[pytest.mark.gpu_1, pytest.mark.trtllm, pytest.mark.post_merge],
         model="deepseek-ai/deepseek-llm-7b-base",
         script_args=["--dyn-endpoint-types", "completions"],
         env={
@@ -156,6 +161,7 @@ def test_deployment(trtllm_config_test, request, runtime_services, predownload_m
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
+@pytest.mark.pre_merge
 def test_chat_only_aggregated_with_test_logits_processor(
     request, runtime_services, predownload_models, monkeypatch
 ):

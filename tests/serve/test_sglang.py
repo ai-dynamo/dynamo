@@ -94,7 +94,7 @@ sglang_configs = {
         name="kv_events",
         directory=sglang_dir,
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         env={
             "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
@@ -120,7 +120,7 @@ sglang_configs = {
         name="template_verification",
         directory=SERVE_TEST_DIR,  # special directory for test-specific scripts
         script_name="template_verifier.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge, pytest.mark.nightly],
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
@@ -163,7 +163,7 @@ sglang_configs = {
         name="embedding_agg",
         directory=sglang_dir,
         script_name="agg_embed.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge, pytest.mark.nightly],
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen3-Embedding-4B",
         delayed_start=0,
         timeout=180,
@@ -196,7 +196,7 @@ sglang_configs = {
         name="completions_only",
         directory=sglang_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[pytest.mark.gpu_1, pytest.mark.post_merge],
         model="deepseek-ai/deepseek-llm-7b-base",
         script_args=[
             "--model-path",
@@ -229,7 +229,7 @@ def test_sglang_deployment(
 
 @pytest.mark.e2e
 @pytest.mark.sglang
-@pytest.mark.gpu_1
+@pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.skip(
     reason="Requires 4 GPUs - enable when hardware is consistently available"
