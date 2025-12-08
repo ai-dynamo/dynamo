@@ -624,6 +624,84 @@ impl DistributedRuntime {
         CancellationToken { inner }
     }
 
+    /// Register an async Python callback for /engine/{route_name}
+    ///
+    /// Args:
+    ///     route_name: Route path (e.g., "start_profile" → /engine/start_profile)
+    ///     callback: Async function with signature: async def(body: dict) -> dict
+    ///
+    /// Example:
+    /// ```python
+    /// async def start_profile(body: dict) -> dict:
+    ///     await engine.start_profile(**body)
+    ///     return {"status": "ok"}
+    ///
+    /// runtime.register_engine_route("start_profile", start_profile)
+    /// ```
+    #[pyo3(signature = (route_name, callback))]
+    fn register_engine_route(
+        &self,
+        py: Python<'_>,
+        route_name: String,
+        callback: PyObject,
+    ) -> PyResult<()> {
+        // Capture TaskLocals at registration time when Python's event loop is running.
+        // This is needed because later, when the callback is invoked from an HTTP request,
+        // we'll be on a Rust thread without a running Python event loop.
+        let locals =
+            Arc::new(pyo3_async_runtimes::tokio::get_current_locals(py).map_err(to_pyerr)?);
+        let callback = Arc::new(callback);
+
+        // Wrap Python async callback in Rust async closure
+        let rust_callback: rs::engine_routes::EngineRouteCallback =
+            Arc::new(move |body: serde_json::Value| {
+                let callback = callback.clone();
+                let locals = locals.clone();
+
+                // Return a boxed future
+                Box::pin(async move {
+                    // Acquire GIL to call Python callback and convert coroutine to future
+                    let py_future = Python::with_gil(|py| {
+                        // Convert body to Python dict
+                        let py_body = pythonize::pythonize(py, &body).map_err(|e| {
+                            anyhow::anyhow!("Failed to convert request body to Python: {}", e)
+                        })?;
+
+                        // Call Python async function to get a coroutine
+                        let coroutine = callback.call1(py, (py_body,)).map_err(|e| {
+                            anyhow::anyhow!("Failed to call Python callback: {}", e)
+                        })?;
+
+                        // Use the TaskLocals captured at registration time
+                        pyo3_async_runtimes::into_future_with_locals(
+                            &locals,
+                            coroutine.into_bound(py),
+                        )
+                        .map_err(|e| {
+                            anyhow::anyhow!("Failed to convert coroutine to future: {}", e)
+                        })
+                    })?;
+
+                    // Await the Python coroutine (GIL is released during await)
+                    let py_result = py_future
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Python callback failed: {}", e))?;
+
+                    // Convert result back to serde_json::Value
+                    Python::with_gil(|py| {
+                        pythonize::depythonize::<serde_json::Value>(py_result.bind(py))
+                            .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))
+                    })
+                })
+            });
+
+        self.inner
+            .engine_routes()
+            .register(&route_name, rust_callback);
+        tracing::debug!("Registered engine route: /engine/{}", route_name);
+        Ok(())
+    }
+
     // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
     // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
     // TODO: Create a separate crate "dynamo-python" so that all binding crates can import

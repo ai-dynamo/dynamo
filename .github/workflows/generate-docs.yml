@@ -21,13 +21,15 @@
 #
 # Publish:
 # - Main branch: publish to S3 under 'dev' (development docs)
-# - Tagged commits: publish to S3 under 'archive/vX.Y[.Z][suffix]' AND update 'latest' to match the release
+# - Tagged commits: publish to S3 under 'archive/X.Y.Z' AND update 'latest' to match the release
 # - Manual dispatch: publish specified version to archive (does NOT update 'latest')
 # - PRs: no S3 publish (only internal preview deployment if targeting release branch)
+# - Version manifest: automatically updated in S3 when publishing new versions (versions1.json)
 # - Akamai: flushes cache for the target path after publish (when DOCS_AKAMAI_ENABLED=true)
 #
 # Required Configuration:
-# - Repository variable: DOCS_PUBLISH_S3_TARGET_PATH (prefix under S3 bucket)
+# - Repository variable: DOCS_PUBLISH_S3_TARGET_PATH (prefix under S3 bucket, e.g., "dynamo")
+# - Repository variable: DOCS_BASE_URL (base URL for docs site, e.g., "https://docs.nvidia.com/dynamo")
 # - Secrets: AWS credentials (DOCS_AWS_ACCESS_KEY_ID, DOCS_AWS_SECRET_ACCESS_KEY, DOCS_AWS_S3_BUCKET, DOCS_AWS_REGION)
 # - Secrets: DOCS_TOKEN (GitHub PAT for PR preview deployment to external repo)
 # - Secrets (optional): DOCS_AWS_IAM_STS_ROLE (for OIDC authentication instead of IAM keys)
@@ -377,18 +379,42 @@ jobs:
           set -euo pipefail
           echo "Publishing version ${VERSION} to ${S3_ROOT}/${S3_PATH}/archive/${VERSION}"
           aws s3 sync . "${S3_ROOT}/${S3_PATH}/archive/${VERSION}" --exclude .buildinfo --exclude .doctrees --delete
-
-          # Copy version manifest files if they exist
-          for file in versions.json versions1.json; do
-            if [[ -f "${file}" ]]; then
-              echo "Copying ${file} to ${S3_ROOT}/${S3_PATH}/"
-              aws s3 cp "${file}" "${S3_ROOT}/${S3_PATH}/" || {
-                echo "::warning::Failed to copy ${file} to S3"
-              }
-            fi
-          done
-
           echo "published=true" >> "$GITHUB_OUTPUT"
+
+      - name: Update versions manifest in S3
+        if: ${{ steps.publish_version.outputs.published == 'true' }}
+        env:
+          DOCS_BASE_URL: ${{ vars.DOCS_BASE_URL }}
+          S3_ROOT: ${{ steps.paths.outputs.s3_root }}
+          S3_PATH: ${{ steps.paths.outputs.s3_path }}
+          VERSION: ${{ steps.vars.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MANIFEST_URL="${S3_ROOT}/${S3_PATH}/versions1.json"
+          LOCAL_MANIFEST="/tmp/versions1.json"
+
+          # Download existing manifest from S3
+          aws s3 cp "${MANIFEST_URL}" "${LOCAL_MANIFEST}"
+
+          # Check if version already exists in manifest
+          if jq -e ".[] | select(.version == \"${VERSION}\")" "${LOCAL_MANIFEST}" > /dev/null 2>&1; then
+            echo "Version ${VERSION} already exists in manifest, skipping update"
+          else
+            echo "Adding version ${VERSION} to manifest"
+
+            # Create new version entry and insert after "dev" and "latest" (index 2)
+            jq --arg version "${VERSION}" \
+               --arg url "${DOCS_BASE_URL}/archive/${VERSION}/" \
+               '.[0:2] + [{version: $version, url: $url}] + .[2:]' \
+               "${LOCAL_MANIFEST}" > "${LOCAL_MANIFEST}.tmp"
+            mv "${LOCAL_MANIFEST}.tmp" "${LOCAL_MANIFEST}"
+
+            # Upload updated manifest to S3
+            aws s3 cp "${LOCAL_MANIFEST}" "${MANIFEST_URL}"
+            echo "✅ Added ${VERSION} to versions1.json"
+          fi
 
       - name: Publish latest
         if: ${{ steps.publish_version.outputs.published == 'true' && steps.vars.outputs.publish_to_latest == 'true' }}

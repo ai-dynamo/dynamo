@@ -165,6 +165,13 @@ bash launch/dep.sh
 
 Below we provide a selected list of advanced deployments. Please open up an issue if you'd like to see a specific example!
 
+### Speculative Decoding with Aggregated Serving (Meta-Llama-3.1-8B-Instruct + Eagle3)
+
+Run **Meta-Llama-3.1-8B-Instruct** with **Eagle3** as a draft model using **aggregated speculative decoding** on a single node.
+This setup demonstrates how to use Dynamo to create an instance using Eagle-based speculative decoding under the **VLLM aggregated serving framework** for faster inference while maintaining accuracy.
+
+**Guide:** [Speculative Decoding Quickstart](./speculative_decoding.md)
+
 ### Kubernetes Deployment
 
 For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../examples/backends/vllm/deploy/README.md)

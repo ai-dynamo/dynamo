@@ -74,6 +74,9 @@ pub struct DistributedRuntime {
 
     // This hierarchy's own metrics registry
     metrics_registry: MetricsRegistry,
+
+    // Registry for /engine/* route callbacks
+    engine_routes: crate::engine_routes::EngineRouteRegistry,
 }
 
 impl MetricsHierarchy for DistributedRuntime {
@@ -197,6 +200,7 @@ impl DistributedRuntime {
             system_health,
             request_plane,
             local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry::new(),
+            engine_routes: crate::engine_routes::EngineRouteRegistry::new(),
         };
 
         // Initialize the uptime gauge in SystemHealth
@@ -307,6 +311,11 @@ impl DistributedRuntime {
         &self.local_endpoint_registry
     }
 
+    /// Get the engine route registry for registering custom /engine/* routes
+    pub fn engine_routes(&self) -> &crate::engine_routes::EngineRouteRegistry {
+        &self.engine_routes
+    }
+
     pub fn connection_id(&self) -> u64 {
         self.discovery_client.instance_id()
     }
@@ -414,7 +423,16 @@ impl DistributedRuntime {
     /// DEPRECATED: This method exists only for NATS request plane support.
     /// Once everything uses the TCP request plane, this can be removed along with
     /// the NATS service registration infrastructure.
-    pub fn register_nats_service(&self, component: Component) {
+    ///
+    /// Returns a receiver that signals when the NATS service registration is complete.
+    /// The caller should use `blocking_recv()` to wait for completion.
+    pub fn register_nats_service(
+        &self,
+        component: Component,
+    ) -> tokio::sync::mpsc::Receiver<Result<(), String>> {
+        // Create a oneshot-style channel (capacity 1) to signal completion
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<(), String>>(1);
+
         let drt = self.clone();
         self.runtime().secondary().spawn(async move {
             let service_name = component.service_name();
@@ -431,11 +449,16 @@ impl DistributedRuntime {
                 // The NATS service is per component, but it is called from `serve_endpoint`, and there
                 // are often multiple endpoints for a component (e.g. `clear_kv_blocks` and `generate`).
                 tracing::trace!("Service {service_name} already exists");
+                // Signal success - service already exists
+                let _ = tx.send(Ok(())).await;
                 return;
             }
 
             let Some(nats_client) = drt.nats_client.as_ref() else {
                 tracing::error!("Cannot create NATS service without NATS.");
+                let _ = tx
+                    .send(Err("Cannot create NATS service without NATS".to_string()))
+                    .await;
                 return;
             };
             let description = None;
@@ -449,6 +472,7 @@ impl DistributedRuntime {
                 Ok(service) => service,
                 Err(err) => {
                     tracing::error!(error = %err, component = service_name, "Failed to build NATS service");
+                    let _ = tx.send(Err(format!("Failed to build NATS service: {err}"))).await;
                     return;
                 }
             };
@@ -468,7 +492,12 @@ impl DistributedRuntime {
                 // are often multiple endpoints for a component (e.g. `clear_kv_blocks` and `generate`).
                 // TODO: Is this still true?
             }
+
+            // Signal completion - service registered successfully
+            let _ = tx.send(Ok(())).await;
         });
+
+        rx
     }
 }
 
