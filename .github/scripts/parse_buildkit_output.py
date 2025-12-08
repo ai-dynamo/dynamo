@@ -5,6 +5,8 @@
 Parse BuildKit output to extract detailed step-by-step metadata.
 BuildKit provides rich information about each build step including timing,
 cache status, sizes, and layer IDs.
+
+Also parses sccache statistics from the build log output.
 """
 
 import json
@@ -12,6 +14,78 @@ import re
 import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+
+
+def parse_sccache_from_log(log_content: str) -> Dict[str, Any]:
+    """
+    Parse sccache statistics from build log output.
+
+    Looks for output from 'use-sccache.sh show-stats' which produces:
+    === sccache statistics AFTER BuildName ===
+    Compile requests                    180
+    Compile requests executed           180
+    Cache hits                          177
+    Cache hits (C/C++)                  116
+    Cache hits (CUDA)                    61
+    ...
+    """
+    sccache_data = {}
+
+    # Find sccache statistics section(s) - get the last one
+    sections = re.findall(
+        r"=== sccache statistics AFTER ([^=]+) ===(.*?)(?====|$)",
+        log_content,
+        re.DOTALL,
+    )
+
+    if not sections:
+        return {}
+
+    # Use the last sccache section (final stats)
+    build_name, stats_block = sections[-1]
+    sccache_data["build_name"] = build_name.strip()
+
+    # Parse each statistic line
+    for line in stats_block.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+
+        # Match pattern: "Key Name    Value" or "Key Name    Value unit"
+        # Examples:
+        #   Compile requests                    180
+        #   Cache hits (C/C++)                  116
+        #   Average cache read hit time   0.00 s
+
+        # Find the last numeric value in the line
+        match = re.match(r"^([A-Za-z][A-Za-z0-9() /]+?)\s{2,}([\d.]+)\s*(%|s)?$", line)
+        if match:
+            key_raw = match.group(1).strip()
+            value_str = match.group(2)
+            unit = match.group(3)
+
+            # Convert key to snake_case
+            key = key_raw.lower()
+            key = re.sub(r"[()]", "", key)  # Remove parentheses
+            key = re.sub(r"/", "_", key)  # Replace / with _
+            key = re.sub(r"\s+", "_", key)  # Replace spaces with _
+
+            # Add unit suffix
+            if unit == "%":
+                key = key + "_percent"
+            elif unit == "s":
+                key = key + "_seconds"
+
+            # Convert value to number
+            try:
+                if "." in value_str:
+                    sccache_data[key] = float(value_str)
+                else:
+                    sccache_data[key] = int(value_str)
+            except ValueError:
+                sccache_data[key] = value_str
+
+    return sccache_data
 
 
 class BuildKitParser:
@@ -173,11 +247,11 @@ def main():
     """Main entry point"""
     if len(sys.argv) < 3:
         print(
-            "Usage: parse_buildkit_output.py <output_json> <stage1_name:log_file> [stage2_name:log_file] ... [--metadata=<container_metadata_json>] [--sccache=<sccache_json>]",
+            "Usage: parse_buildkit_output.py <output_json> <stage1_name:log_file> [stage2_name:log_file] ... [--metadata=<container_metadata_json>]",
             file=sys.stderr,
         )
         print(
-            "Example: parse_buildkit_output.py output.json base:base.log runtime:framework.log --metadata=meta.json --sccache=sccache.json",
+            "Example: parse_buildkit_output.py output.json base:base.log runtime:framework.log --metadata=meta.json",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -187,13 +261,10 @@ def main():
     # Parse arguments to find stage logs and metadata
     stage_logs = []  # List of (stage_name, log_file) tuples
     container_metadata_file = None
-    sccache_file = None
 
     for arg in sys.argv[2:]:
         if arg.startswith("--metadata="):
             container_metadata_file = arg.split("=", 1)[1]
-        elif arg.startswith("--sccache="):
-            sccache_file = arg.split("=", 1)[1]
         elif ":" in arg:
             stage_name, log_file = arg.split(":", 1)
             stage_logs.append((stage_name, log_file))
@@ -212,6 +283,7 @@ def main():
     total_steps = 0
     total_cached = 0
     total_size = 0
+    sccache_data = {}
 
     # Parse each stage log
     for stage_name, log_file in stage_logs:
@@ -237,6 +309,15 @@ def main():
             total_steps += stage_data["container"]["total_steps"]
             total_cached += stage_data["container"]["cached_steps"]
             total_size += stage_data["container"]["total_size_transferred_bytes"]
+
+            # Extract sccache stats from the log (last one wins)
+            log_sccache = parse_sccache_from_log(log_content)
+            if log_sccache:
+                sccache_data = log_sccache
+                print(
+                    f"✅ Found sccache stats in {stage_name} log: {len(log_sccache)} metrics",
+                    file=sys.stderr,
+                )
 
             print(
                 f"✅ Parsed {stage_name} stage: {stage_data['container']['total_steps']} steps",
@@ -277,24 +358,15 @@ def main():
         except Exception as e:
             print(f"Warning: Could not read container metadata: {e}", file=sys.stderr)
 
-    # Merge sccache statistics if provided
-    if sccache_file:
-        try:
-            with open(sccache_file, "r") as f:
-                sccache_data = json.load(f)
-                # Only add if there's actual data
-                if sccache_data and len(sccache_data) > 0:
-                    build_data["container"]["sccache"] = sccache_data
-                    print(
-                        f"✅ sccache metrics added to container: {len(sccache_data)} metrics",
-                        file=sys.stderr,
-                    )
-                else:
-                    print("ℹ️  No sccache metrics found", file=sys.stderr)
-        except FileNotFoundError:
-            print(f"⚠️  sccache stats file not found: {sccache_file}", file=sys.stderr)
-        except Exception as e:
-            print(f"Warning: Could not read sccache stats: {e}", file=sys.stderr)
+    # Add sccache statistics (parsed from build logs)
+    if sccache_data:
+        build_data["container"]["sccache"] = sccache_data
+        print(
+            f"✅ sccache metrics added to container: {len(sccache_data)} metrics",
+            file=sys.stderr,
+        )
+    else:
+        print("ℹ️  No sccache stats found in build logs", file=sys.stderr)
 
     # Output JSON
     try:

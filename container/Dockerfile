@@ -323,8 +323,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \
     fi && \
-    /tmp/use-sccache.sh show-stats "Dynamo" && \
-    /tmp/use-sccache.sh export-stats-json "/tmp/sccache-stats.json" "Dynamo"
+    /tmp/use-sccache.sh show-stats "Dynamo"
 
 ##############################################
 ########## Dev entrypoint image ##############
@@ -403,9 +402,6 @@ COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/pyt
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 COPY --chown=dynamo: --from=wheel_builder $CARGO_HOME $CARGO_HOME
-
-# Copy sccache statistics for metrics collection
-COPY --chown=dynamo: --from=wheel_builder /tmp/sccache-stats.json /tmp/sccache-stats.json
 
 COPY --chown=dynamo: ./ /workspace/
 

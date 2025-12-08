@@ -143,8 +143,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
         cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
         chmod +x /tmp/install_vllm.sh && \
         /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} --torch-backend $TORCH_BACKEND --cuda-version $CUDA_VERSION && \
-        /tmp/use-sccache.sh show-stats "vLLM" && \
-        /tmp/use-sccache.sh export-stats-json "/tmp/sccache-stats.json" "vLLM"
+        /tmp/use-sccache.sh show-stats "vLLM"
 
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
@@ -265,9 +264,6 @@ COPY --chown=dynamo: --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 # Copy vllm with correct ownership
 COPY --chown=dynamo: --from=framework /opt/vllm /opt/vllm
-
-# Copy sccache statistics for metrics collection
-COPY --chown=dynamo: --from=framework /tmp/sccache-stats.json /tmp/sccache-stats.json
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
 COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
