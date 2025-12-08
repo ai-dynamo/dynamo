@@ -582,8 +582,18 @@ func (in *DynamoGraphDeploymentRequestStatus) DeepCopyInto(out *DynamoGraphDeplo
 		*out = new(runtime.RawExtension)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.GeneratedMockerDeployment != nil {
+		in, out := &in.GeneratedMockerDeployment, &out.GeneratedMockerDeployment
+		*out = new(runtime.RawExtension)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.Deployment != nil {
 		in, out := &in.Deployment, &out.Deployment
+		*out = new(DeploymentStatus)
+		**out = **in
+	}
+	if in.MockerDeployment != nil {
+		in, out := &in.MockerDeployment, &out.MockerDeployment
 		*out = new(DeploymentStatus)
 		**out = **in
 	}

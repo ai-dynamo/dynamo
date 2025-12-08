@@ -103,6 +103,15 @@ spec:
                     - sglang
                     - trtllm
                   type: string
+                deployMocker:
+                  default: false
+                  description: |-
+                    DeployMocker indicates whether to automatically create a mocker DynamoGraphDeployment
+                    after profiling completes. The mocker deployment uses simulated engines that don't require
+                    GPUs, making it useful for testing planner behavior and infrastructure without GPU resources.
+                    When true, a mocker DGD named "<dgdr-name>-mocker" is created. The mocker DGD uses
+                    profiling data for realistic timing simulation.
+                  type: boolean
                 deploymentOverrides:
                   description: |-
                     DeploymentOverrides allows customizing metadata for the auto-created DGD.
@@ -407,6 +416,37 @@ spec:
                   type: object
                   x-kubernetes-embedded-resource: true
                   x-kubernetes-preserve-unknown-fields: true
+                generatedMockerDeployment:
+                  description: |-
+                    GeneratedMockerDeployment contains the generated mocker DynamoGraphDeployment
+                    specification for testing purposes. The mocker uses simulated engines that don't
+                    require GPUs, using profiling data for realistic timing simulation.
+                    Created automatically when deployMocker is true.
+                  type: object
+                  x-kubernetes-embedded-resource: true
+                  x-kubernetes-preserve-unknown-fields: true
+                mockerDeployment:
+                  description: |-
+                    MockerDeployment tracks the auto-created mocker DGD when DeployMocker is true.
+                    The mocker deployment uses simulated engines that don't require GPUs.
+                  properties:
+                    created:
+                      description: |-
+                        Created indicates whether the DGD has been successfully created.
+                        Used to prevent recreation if the DGD is manually deleted by users.
+                      type: boolean
+                    name:
+                      description: Name is the name of the created DynamoGraphDeployment.
+                      type: string
+                    namespace:
+                      description: Namespace is the namespace of the created DynamoGraphDeployment.
+                      type: string
+                    state:
+                      description: |-
+                        State is the current state of the DynamoGraphDeployment.
+                        This value is mirrored from the DGD's status.state field.
+                      type: string
+                  type: object
                 observedGeneration:
                   description: |-
                     ObservedGeneration reflects the generation of the most recently observed spec.

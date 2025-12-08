@@ -118,10 +118,11 @@ const (
 	VolumeNameProfilingOutput = "profiling-output"
 
 	// Volume paths
-	ProfilingOutputPath = "/data"
-	ProfilingOutputFile = "config_with_planner.yaml"
-	ProfilingConfigPath = "/config"
-	ProfilingConfigFile = "disagg.yaml"
+	ProfilingOutputPath       = "/data"
+	ProfilingOutputFile       = "config_with_planner.yaml"
+	ProfilingOutputFileMocker = "mocker_config_with_planner.yaml"
+	ProfilingConfigPath       = "/config"
+	ProfilingConfigFile       = "disagg.yaml"
 
 	// Command line arguments
 	ArgModel   = "--model"
@@ -138,7 +139,7 @@ const (
 	MessageSpecGenerated             = "DynamoGraphDeployment spec generated successfully"
 	MessageSpecAvailable             = "Generated spec is available in status.generatedDeployment"
 	MessageDeploymentCreated         = "DynamoGraphDeployment %s created successfully"
-	MessageDeploymentReady           = "DynamoGraphDeployment %s is ready"
+	MessageDeploymentReady           = "All deployments are ready"
 	MessageDeploymentDegraded        = "DynamoGraphDeployment %s degraded from Ready to %s"
 	MessageDeploymentDeleted         = "DGD %s was deleted. DGDR will not recreate it. Delete this DGDR and create a new one to redeploy."
 	MessageInvalidState              = "Invalid state"
@@ -201,6 +202,13 @@ data:
   {{.OutputFile}}: |
 EOF
 sed 's/^/    /' {{.OutputPath}}/{{.OutputFile}} >> /tmp/cm.yaml
+
+# Add mocker config
+if [ -f {{.OutputPath}}/{{.MockerOutputFile}} ]; then
+  echo "  {{.MockerOutputFile}}: |" >> /tmp/cm.yaml
+  sed 's/^/    /' {{.OutputPath}}/{{.MockerOutputFile}} >> /tmp/cm.yaml
+  echo "Found mocker config, adding to ConfigMap..."
+fi
 
 # Note: Profiling data (raw_data.npz converted to JSON) is included in the
 # generated DGD YAML as a separate ConfigMap by the profiler, no need to add it here
@@ -409,9 +417,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 			fmt.Sprintf("Failed to create ConfigMaps from profiling output: %v", err))
 	}
 
-	// If autoApply is enabled, transition to Deploying state
-	if dgdr.Spec.AutoApply {
-		logger.Info("AutoApply enabled, transitioning to Deploying state")
+	// If autoApply or deployMocker is enabled, transition to Deploying state
+	if dgdr.Spec.AutoApply || dgdr.Spec.DeployMocker {
+		logger.Info("Transitioning to Deploying state",
+			"autoApply", dgdr.Spec.AutoApply, "deployMocker", dgdr.Spec.DeployMocker)
 		return r.updateStateWithCondition(ctx, dgdr, StateDeploying, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecGenerated)
 	}
 
@@ -424,45 +433,74 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleReadyState(ctx context.Co
 	logger := log.FromContext(ctx)
 	logger.Info("DGDR is ready", "name", dgdr.Name)
 
-	// If autoApply is not enabled, nothing to monitor
-	if !dgdr.Spec.AutoApply {
+	// If neither autoApply nor deployMocker is enabled, nothing to monitor
+	if !dgdr.Spec.AutoApply && !dgdr.Spec.DeployMocker {
 		return ctrl.Result{}, nil
 	}
 
-	// Check if DGD still exists and monitor its status
-	dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{}
-	err := r.Get(ctx, types.NamespacedName{
-		Name:      dgdr.Status.Deployment.Name,
-		Namespace: dgdr.Status.Deployment.Namespace,
-	}, dgd)
+	anyDegraded := false
+	anyDeleted := false
 
-	if apierrors.IsNotFound(err) {
-		// DGD was deleted by user
+	// Monitor real DGD if autoApply is enabled
+	if dgdr.Spec.AutoApply && dgdr.Status.Deployment != nil && dgdr.Status.Deployment.Created {
+		dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      dgdr.Status.Deployment.Name,
+			Namespace: dgdr.Status.Deployment.Namespace,
+		}, dgd)
+
+		if apierrors.IsNotFound(err) {
+			anyDeleted = true
+		} else if err != nil {
+			return ctrl.Result{}, err
+		} else {
+			dgdr.Status.Deployment.State = dgd.Status.State
+			if dgd.Status.State != "Ready" {
+				anyDegraded = true
+				logger.Info("DGD degraded", "name", dgd.Name, "state", dgd.Status.State)
+			}
+		}
+	}
+
+	// Monitor mocker DGD if deployMocker is enabled
+	if dgdr.Spec.DeployMocker && dgdr.Status.MockerDeployment != nil && dgdr.Status.MockerDeployment.Created {
+		mockerDGD := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      dgdr.Status.MockerDeployment.Name,
+			Namespace: dgdr.Status.MockerDeployment.Namespace,
+		}, mockerDGD)
+
+		if apierrors.IsNotFound(err) {
+			anyDeleted = true
+		} else if err != nil {
+			return ctrl.Result{}, err
+		} else {
+			dgdr.Status.MockerDeployment.State = mockerDGD.Status.State
+			if mockerDGD.Status.State != "Ready" {
+				anyDegraded = true
+				logger.Info("Mocker DGD degraded", "name", mockerDGD.Name, "state", mockerDGD.Status.State)
+			}
+		}
+	}
+
+	// Handle deletion
+	if anyDeleted {
 		return r.handleDGDDeleted(ctx, dgdr)
 	}
 
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Update deployment status
-	dgdr.Status.Deployment.State = dgd.Status.State
-
-	// Check if DGD degraded from Ready
-	if dgd.Status.State != "Ready" {
-		logger.Info("DGD degraded, transitioning back to Deploying",
-			"dgdState", dgd.Status.State)
-
+	// Handle degradation
+	if anyDegraded {
+		logger.Info("One or more deployments degraded, transitioning back to Deploying")
 		dgdr.Status.State = StateDeploying
 
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonDeploymentDegraded,
-			fmt.Sprintf(MessageDeploymentDegraded, dgd.Name, dgd.Status.State))
+			"One or more deployments degraded from Ready state")
 
 		meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
 			Type:    ConditionTypeDeploymentReady,
 			Status:  metav1.ConditionFalse,
 			Reason:  EventReasonDeploymentDegraded,
-			Message: fmt.Sprintf("Deployment degraded to %s", dgd.Status.State),
+			Message: "One or more deployments degraded from Ready state",
 		})
 	}
 
@@ -472,52 +510,100 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleReadyState(ctx context.Co
 // handleDeployingState handles DGD creation and monitors deployment
 func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingState(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Handling deploying state", "name", dgdr.Name)
+	logger.Info("Handling deploying state", "name", dgdr.Name,
+		"autoApply", dgdr.Spec.AutoApply, "deployMocker", dgdr.Spec.DeployMocker)
 
-	if !dgdr.Spec.AutoApply {
-		// Shouldn't be in this state without autoApply
-		logger.Info("AutoApply not enabled, transitioning to Ready")
+	if !dgdr.Spec.AutoApply && !dgdr.Spec.DeployMocker {
+		// Shouldn't be in this state without autoApply or deployMocker
+		logger.Info("Neither AutoApply nor DeployMocker enabled, transitioning to Ready")
 		dgdr.Status.State = StateReady
 		return ctrl.Result{}, r.Status().Update(ctx, dgdr)
 	}
 
-	// Check if we need to create DGD
-	if dgdr.Status.Deployment == nil || !dgdr.Status.Deployment.Created {
-		return r.createDGD(ctx, dgdr)
+	// Track whether all deployments are ready
+	allReady := true
+	anyDeleted := false
+
+	// Handle real DGD if autoApply is enabled
+	if dgdr.Spec.AutoApply {
+		// Check if we need to create DGD
+		if dgdr.Status.Deployment == nil || !dgdr.Status.Deployment.Created {
+			return r.createDGD(ctx, dgdr, false)
+		}
+
+		// DGD was already created, check its status
+		dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      dgdr.Status.Deployment.Name,
+			Namespace: dgdr.Status.Deployment.Namespace,
+		}, dgd)
+
+		if apierrors.IsNotFound(err) {
+			// DGD was deleted by user
+			anyDeleted = true
+		} else if err != nil {
+			return ctrl.Result{}, err
+		} else {
+			// Update deployment status
+			dgdr.Status.Deployment.State = dgd.Status.State
+			if dgd.Status.State == "Ready" {
+				logger.Info("Deployment ready", "name", dgd.Name)
+			} else {
+				allReady = false
+			}
+		}
 	}
 
-	// DGD was already created, check its status
-	dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{}
-	err := r.Get(ctx, types.NamespacedName{
-		Name:      dgdr.Status.Deployment.Name,
-		Namespace: dgdr.Status.Deployment.Namespace,
-	}, dgd)
+	// Handle mocker DGD if deployMocker is enabled
+	if dgdr.Spec.DeployMocker {
+		// Check if mocker DGD spec is available
+		if dgdr.Status.GeneratedMockerDeployment == nil {
+			logger.Info("Mocker deployment requested but no mocker spec available, skipping")
+		} else if dgdr.Status.MockerDeployment == nil || !dgdr.Status.MockerDeployment.Created {
+			return r.createDGD(ctx, dgdr, true)
+		} else {
+			// Mocker DGD was already created, check its status
+			mockerDGD := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+			err := r.Get(ctx, types.NamespacedName{
+				Name:      dgdr.Status.MockerDeployment.Name,
+				Namespace: dgdr.Status.MockerDeployment.Namespace,
+			}, mockerDGD)
 
-	if apierrors.IsNotFound(err) {
-		// DGD was deleted by user
+			if apierrors.IsNotFound(err) {
+				// Mocker DGD was deleted by user
+				anyDeleted = true
+			} else if err != nil {
+				return ctrl.Result{}, err
+			} else {
+				// Update mocker deployment status
+				dgdr.Status.MockerDeployment.State = mockerDGD.Status.State
+				if mockerDGD.Status.State == "Ready" {
+					logger.Info("Mocker deployment ready", "name", mockerDGD.Name)
+				} else {
+					allReady = false
+				}
+			}
+		}
+	}
+
+	// Handle deletion case
+	if anyDeleted {
 		return r.handleDGDDeleted(ctx, dgdr)
 	}
 
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Update deployment status
-	dgdr.Status.Deployment.State = dgd.Status.State
-
-	// Check if DGD is Ready
-	if dgd.Status.State == "Ready" {
-		logger.Info("DGD is Ready, transitioning to Ready state")
+	// Check if all expected deployments are Ready
+	if allReady {
+		logger.Info("All deployments are Ready, transitioning to Ready state")
 		dgdr.Status.State = StateReady
 
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonDeploymentReady,
-			fmt.Sprintf(MessageDeploymentReady, dgd.Name))
+			MessageDeploymentReady)
 
 		meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
 			Type:    ConditionTypeDeploymentReady,
 			Status:  metav1.ConditionTrue,
 			Reason:  EventReasonDeploymentReady,
-			Message: fmt.Sprintf(MessageDeploymentReady, dgd.Name),
+			Message: MessageDeploymentReady,
 		})
 	}
 
@@ -552,42 +638,71 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDGDDeleted(ctx context.Co
 	return ctrl.Result{}, r.Status().Update(ctx, dgdr)
 }
 
-// createDGD creates a DynamoGraphDeployment with the generated spec
-func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) (ctrl.Result, error) {
+// createDGD creates a DynamoGraphDeployment with the generated spec.
+// If isMocker is true, creates the mocker DGD.
+func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, isMocker bool) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	// Determine which generated deployment to use
+	var rawDeployment *runtime.RawExtension
+	var deploymentType string
+	if isMocker {
+		rawDeployment = dgdr.Status.GeneratedMockerDeployment
+		deploymentType = "mocker"
+	} else {
+		rawDeployment = dgdr.Status.GeneratedDeployment
+		deploymentType = ""
+	}
+
 	// Extract DGD from RawExtension
-	if dgdr.Status.GeneratedDeployment == nil {
-		return ctrl.Result{}, fmt.Errorf("generatedDeployment is not set")
+	if rawDeployment == nil {
+		return ctrl.Result{}, fmt.Errorf("generated%sDeployment is not set", deploymentType)
 	}
 
 	generatedDGD := &nvidiacomv1alpha1.DynamoGraphDeployment{}
 
 	// RawExtension can have either Object (already decoded) or Raw (JSON bytes)
-	if dgdr.Status.GeneratedDeployment.Object != nil {
+	if rawDeployment.Object != nil {
 		var ok bool
-		generatedDGD, ok = dgdr.Status.GeneratedDeployment.Object.(*nvidiacomv1alpha1.DynamoGraphDeployment)
+		generatedDGD, ok = rawDeployment.Object.(*nvidiacomv1alpha1.DynamoGraphDeployment)
 		if !ok {
-			return ctrl.Result{}, fmt.Errorf("generatedDeployment.Object is not a DynamoGraphDeployment")
+			return ctrl.Result{}, fmt.Errorf("generated%sDeployment.Object is not a DynamoGraphDeployment", deploymentType)
 		}
-	} else if dgdr.Status.GeneratedDeployment.Raw != nil {
-		if err := yaml.Unmarshal(dgdr.Status.GeneratedDeployment.Raw, generatedDGD); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to unmarshal generated deployment: %w", err)
+	} else if rawDeployment.Raw != nil {
+		if err := yaml.Unmarshal(rawDeployment.Raw, generatedDGD); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to unmarshal generated %s deployment: %w", deploymentType, err)
 		}
 	} else {
-		return ctrl.Result{}, fmt.Errorf("generatedDeployment has neither Object nor Raw set")
+		return ctrl.Result{}, fmt.Errorf("generated%sDeployment has neither Object nor Raw set", deploymentType)
 	}
 
 	// Determine DGD name and namespace
 	dgdName := generatedDGD.Name
 	dgdNamespace := dgdr.Namespace
 
-	if dgdr.Spec.DeploymentOverrides != nil {
-		if dgdr.Spec.DeploymentOverrides.Name != "" {
-			dgdName = dgdr.Spec.DeploymentOverrides.Name
+	// For mocker, use the generated name (e.g., "mocker-disagg") or append "-mocker" suffix
+	if isMocker {
+		// If the generated mocker DGD name is the same as the real DGD, add "-mocker" suffix
+		if dgdr.Status.GeneratedDeployment != nil {
+			realDGD := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+			if dgdr.Status.GeneratedDeployment.Object != nil {
+				realDGD, _ = dgdr.Status.GeneratedDeployment.Object.(*nvidiacomv1alpha1.DynamoGraphDeployment)
+			} else if dgdr.Status.GeneratedDeployment.Raw != nil {
+				yaml.Unmarshal(dgdr.Status.GeneratedDeployment.Raw, realDGD)
+			}
+			if realDGD.Name == dgdName {
+				dgdName = dgdr.Name + "-mocker"
+			}
 		}
-		if dgdr.Spec.DeploymentOverrides.Namespace != "" {
-			dgdNamespace = dgdr.Spec.DeploymentOverrides.Namespace
+	} else {
+		// Apply deployment overrides for real DGD only
+		if dgdr.Spec.DeploymentOverrides != nil {
+			if dgdr.Spec.DeploymentOverrides.Name != "" {
+				dgdName = dgdr.Spec.DeploymentOverrides.Name
+			}
+			if dgdr.Spec.DeploymentOverrides.Namespace != "" {
+				dgdNamespace = dgdr.Spec.DeploymentOverrides.Namespace
+			}
 		}
 	}
 
@@ -602,9 +717,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	labels[LabelDGDRName] = dgdr.Name
 	labels[LabelDGDRNamespace] = dgdr.Namespace
 	labels[LabelManagedBy] = LabelValueDynamoOperator
+	if isMocker {
+		labels["dgdr.nvidia.com/type"] = "mocker"
+	}
 
-	// Merge custom labels from overrides
-	if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.Labels != nil {
+	// Merge custom labels from overrides (only for real DGD)
+	if !isMocker && dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.Labels != nil {
 		for k, v := range dgdr.Spec.DeploymentOverrides.Labels {
 			labels[k] = v
 		}
@@ -617,8 +735,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 			annotations[k] = v
 		}
 	}
-	// Merge custom annotations from overrides
-	if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.Annotations != nil {
+	// Merge custom annotations from overrides (only for real DGD)
+	if !isMocker && dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.Annotations != nil {
 		for k, v := range dgdr.Spec.DeploymentOverrides.Annotations {
 			annotations[k] = v
 		}
@@ -645,11 +763,16 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 		if apierrors.IsAlreadyExists(err) {
 			// DGD already exists, just update status
 			logger.Info("DGD already exists, updating status")
-			dgdr.Status.Deployment = &nvidiacomv1alpha1.DeploymentStatus{
+			deploymentStatus := &nvidiacomv1alpha1.DeploymentStatus{
 				Name:      dgdName,
 				Namespace: dgdNamespace,
 				State:     "Pending",
 				Created:   true,
+			}
+			if isMocker {
+				dgdr.Status.MockerDeployment = deploymentStatus
+			} else {
+				dgdr.Status.Deployment = deploymentStatus
 			}
 			return ctrl.Result{}, r.Status().Update(ctx, dgdr)
 		}
@@ -658,11 +781,16 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	}
 
 	// Update status
-	dgdr.Status.Deployment = &nvidiacomv1alpha1.DeploymentStatus{
+	deploymentStatus := &nvidiacomv1alpha1.DeploymentStatus{
 		Name:      dgdName,
 		Namespace: dgdNamespace,
 		State:     "Pending",
 		Created:   true,
+	}
+	if isMocker {
+		dgdr.Status.MockerDeployment = deploymentStatus
+	} else {
+		dgdr.Status.Deployment = deploymentStatus
 	}
 
 	r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonDeploymentCreated,
@@ -987,11 +1115,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 
 		var scriptBuf bytes.Buffer
 		err = tmpl.Execute(&scriptBuf, map[string]string{
-			"OutputPath":    ProfilingOutputPath,
-			"OutputFile":    ProfilingOutputFile,
-			"ConfigMapName": outputConfigMapName,
-			"Namespace":     dgdr.Namespace,
-			"DGDRName":      dgdr.Name,
+			"OutputPath":       ProfilingOutputPath,
+			"OutputFile":       ProfilingOutputFile,
+			"MockerOutputFile": ProfilingOutputFileMocker,
+			"ConfigMapName":    outputConfigMapName,
+			"Namespace":        dgdr.Namespace,
+			"DGDRName":         dgdr.Name,
 		})
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to execute sidecar script template: %w", err)
@@ -1315,6 +1444,25 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 		Object: dgd,
 	}
 	dgdr.Status.ProfilingResults = fmt.Sprintf("configmap/%s", outputConfigMapName)
+
+	// Extract and store mocker config if present
+	mockerYamlContent, mockerExists := cm.Data[ProfilingOutputFileMocker]
+	if mockerExists && len(mockerYamlContent) > 0 {
+		logger.Info("Found mocker config in ConfigMap", "configMap", outputConfigMapName, "size", len(mockerYamlContent))
+
+		mockerDGD, _, err := r.extractResourcesFromYAML([]byte(mockerYamlContent))
+		if err != nil {
+			// Log warning but don't fail - mocker is optional
+			logger.Error(err, "Failed to extract mocker DGD, mocker deployment will be skipped")
+		} else {
+			dgdr.Status.GeneratedMockerDeployment = &runtime.RawExtension{
+				Object: mockerDGD,
+			}
+			logger.Info("Stored mocker deployment spec", "mockerDGDName", mockerDGD.Name)
+		}
+	} else {
+		logger.Info("No mocker config found in ConfigMap, mocker deployment will not be available")
+	}
 
 	return r.Status().Update(ctx, dgdr)
 }

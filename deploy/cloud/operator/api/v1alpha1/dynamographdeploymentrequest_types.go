@@ -158,6 +158,14 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:default=false
 	AutoApply bool `json:"autoApply,omitempty"`
 
+	// DeployMocker indicates whether to automatically create a mocker DynamoGraphDeployment
+	// after profiling completes. The mocker deployment uses simulated engines that don't require
+	// GPUs, making it useful for testing planner behavior and infrastructure without GPU resources.
+	// When true, a mocker DGD named "<dgdr-name>-mocker" is created. The mocker DGD uses
+	// profiling data for realistic timing simulation.
+	// +kubebuilder:default=false
+	DeployMocker bool `json:"deployMocker,omitempty"`
+
 	// DeploymentOverrides allows customizing metadata for the auto-created DGD.
 	// Only applicable when AutoApply is true.
 	// +kubebuilder:validation:Optional
@@ -218,10 +226,24 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// +kubebuilder:validation:EmbeddedResource
 	GeneratedDeployment *runtime.RawExtension `json:"generatedDeployment,omitempty"`
 
+	// GeneratedMockerDeployment contains the generated mocker DynamoGraphDeployment
+	// specification for testing purposes. The mocker uses simulated engines that don't
+	// require GPUs, using profiling data for realistic timing simulation.
+	// Created automatically when deployMocker is true.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:EmbeddedResource
+	GeneratedMockerDeployment *runtime.RawExtension `json:"generatedMockerDeployment,omitempty"`
+
 	// Deployment tracks the auto-created DGD when AutoApply is true.
 	// Contains name, namespace, state, and creation status of the managed DGD.
 	// +kubebuilder:validation:Optional
 	Deployment *DeploymentStatus `json:"deployment,omitempty"`
+
+	// MockerDeployment tracks the auto-created mocker DGD when DeployMocker is true.
+	// The mocker deployment uses simulated engines that don't require GPUs.
+	// +kubebuilder:validation:Optional
+	MockerDeployment *DeploymentStatus `json:"mockerDeployment,omitempty"`
 }
 
 // DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.

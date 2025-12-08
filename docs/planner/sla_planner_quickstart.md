@@ -196,6 +196,7 @@ curl http://localhost:8000/v1/models
 |-------|------|-------------|
 | `spec.deploymentOverrides.workersImage` | string | Container image for DGD worker components. If omitted, uses image from base config file. |
 | `spec.autoApply` | boolean | Automatically deploy DGD after profiling (default: false) |
+| `spec.deployMocker` | boolean | Deploy a mocker DGD (no GPU required) for testing planner behavior (default: false) |
 | `spec.deploymentOverrides` | object | Customize metadata (name, namespace, labels, annotations) and image for auto-created DGD |
 
 ### SLA Configuration
@@ -335,6 +336,19 @@ profilingConfig:
 For details about the profiling process, performance plots, and interpolation data, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla_driven_profiling.md#profiling-process-details).
 
 ## Advanced Topics
+
+### Mocker Deployment
+
+The `deployMocker` option enables deploying a mocker DGD alongside (or instead of) the real deployment. The mocker uses simulated engines that don't require GPUs.
+
+**Enable mocker deployment:**
+
+```yaml
+spec:
+  deployMocker: true
+```
+
+The mocker DGD uses profiling data for realistic timing simulation. It's created with the name `<dgdr-name>-mocker` and can run alongside the real deployment since they use different resources.
 
 ### DGDR Immutability
 
