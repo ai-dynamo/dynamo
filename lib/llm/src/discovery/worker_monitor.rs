@@ -55,11 +55,11 @@ impl WorkerLoadState {
 
 /// Worker monitor for tracking KV cache usage and busy states.
 ///
-/// All fields are `Arc`, so cloning shares state. This allows multiple pipelines
+/// Cloning shares state via internal Arc-wrapped fields. This allows multiple pipelines
 /// (e.g., chat and completions) to share the same monitor instance.
 #[derive(Clone)]
 pub struct KvWorkerMonitor {
-    client: Arc<Client>,
+    client: Client,
     worker_load_states: Arc<RwLock<HashMap<u64, WorkerLoadState>>>,
     /// Threshold stored as parts-per-10000 (e.g., 8500 = 0.85)
     busy_threshold: Arc<AtomicU32>,
@@ -72,7 +72,7 @@ impl KvWorkerMonitor {
     ///
     /// The threshold (0.0-1.0) controls when workers are considered busy based on
     /// KV cache utilization. It can be dynamically updated via `set_threshold()`.
-    pub fn new(client: Arc<Client>, threshold: f64) -> Self {
+    pub fn new(client: Client, threshold: f64) -> Self {
         Self {
             client,
             worker_load_states: Arc::new(RwLock::new(HashMap::new())),

@@ -166,7 +166,7 @@ mod tests {
             ..Default::default()
         };
 
-        let loader: MediaLoader = MediaLoader::new(media_decoder, fetcher).unwrap();
+        let loader: MediaLoader = MediaLoader::new(media_decoder, Some(fetcher)).unwrap();
 
         let image_url = ImageUrl::from(format!("{}/llm-optimize-deploy-graphic.png", server.url()));
         let content_part = ChatCompletionRequestUserMessageContentPart::ImageUrl(

@@ -230,6 +230,7 @@ Follow the instructions in [`deploy/inference-gateway/README.md`](../deploy/infe
 The base image contains the core Dynamo runtime components, NATS server, etcd, and Python dependencies:
 ```bash
 # Build the base dev image (framework=none for frontend-only deployment)
+# Note: --framework none defaults ENABLE_MEDIA_NIXL=false
 ./build.sh --framework none --target dev
 ```
 

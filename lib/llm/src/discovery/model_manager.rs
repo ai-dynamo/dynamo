@@ -531,7 +531,7 @@ impl ModelManager {
     pub fn get_or_create_worker_monitor(
         &self,
         model: &str,
-        client: Arc<Client>,
+        client: Client,
         threshold: f64,
     ) -> KvWorkerMonitor {
         let mut monitors = self.worker_monitors.write();
