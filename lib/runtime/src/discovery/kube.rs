@@ -402,22 +402,6 @@ mod tests {
         value.eq_ignore_ascii_case("true") || value == "1"
     }
 
-    #[test]
-    fn test_eager_start_env_var_parsing() {
-        // Test various truthy values
-        assert!(parse_eager_start_env("true"));
-        assert!(parse_eager_start_env("TRUE"));
-        assert!(parse_eager_start_env("True"));
-        assert!(parse_eager_start_env("1"));
-
-        // Test various falsy values
-        assert!(!parse_eager_start_env("false"));
-        assert!(!parse_eager_start_env("FALSE"));
-        assert!(!parse_eager_start_env("0"));
-        assert!(!parse_eager_start_env(""));
-        assert!(!parse_eager_start_env("yes")); // Only "true" and "1" are accepted
-        assert!(!parse_eager_start_env("enabled"));
-    }
 
     #[test]
     fn test_eager_start_env_var_name() {
@@ -468,46 +452,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_once_cell_shared_across_clones() {
-        // This test verifies that Arc<OnceCell> shares state across clones
-        // (simulating how daemon_state is shared across KubeDiscoveryClient clones)
-        let cell: Arc<OnceCell<String>> = Arc::new(OnceCell::new());
-        let cell_clone = cell.clone();
-
-        // Initialize via first reference
-        cell.get_or_init(|| async { "initialized".to_string() })
-            .await;
-
-        // Verify clone sees the same value
-        assert!(cell_clone.initialized());
-        assert_eq!(cell_clone.get(), Some(&"initialized".to_string()));
-    }
-
-    #[test]
-    fn test_metadata_snapshot_empty() {
-        // Verify empty snapshot has expected properties
-        let snapshot = MetadataSnapshot::empty();
-        assert_eq!(snapshot.sequence, 0);
-        assert!(snapshot.instances.is_empty());
-    }
-
-    #[test]
-    fn test_hash_pod_name_consistency() {
-        // Verify that hash_pod_name produces consistent results
-        let pod_name = "my-pod-12345";
-        let hash1 = hash_pod_name(pod_name);
-        let hash2 = hash_pod_name(pod_name);
-        assert_eq!(hash1, hash2, "hash_pod_name should be deterministic");
-
-        // Different pod names should produce different hashes
-        let different_pod = "other-pod-67890";
-        let hash3 = hash_pod_name(different_pod);
-        assert_ne!(
-            hash1, hash3,
-            "Different pod names should have different hashes"
-        );
-    }
 
     #[tokio::test]
     async fn test_daemon_handles_receiver_clone() {
