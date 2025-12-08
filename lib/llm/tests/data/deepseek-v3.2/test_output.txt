@@ -30,83 +30,83 @@ If the thinking_mode is enabled, then after function results you should strongly
 
 Here are the functions available in JSONSchema format:
 <functions>
-{"name": "get_datetime", "description": "Get the current date and time", "parameters": {"type": "object", "properties": {"timezone": {"type": "string", "description": "The timezone, e.g. America/New_York, UTC"}}, "required": ["timezone"]}}
-{"name": "get_weather", "description": "Get the weather for a specific date and location", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The city name, e.g. New York, San Francisco"}, "date": {"type": "string", "description": "The date in YYYY-MM-DD format"}}, "required": ["location", "date"]}}
+{"name": "get_datetime", "description": "Get the current date and time", "parameters": {"type": "object", "properties": {"timezone": {"type": "string", "description": "The timezone, e.g. Asia/Shanghai, UTC"}}, "required": ["timezone"]}}
+{"name": "get_weather", "description": "Get the weather for a specific date and location", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The city name, e.g. Beijing, Hangzhou"}, "date": {"type": "string", "description": "The date in YYYY-MM-DD format"}}, "required": ["location", "date"]}}
 </functions>
-<｜User｜>What's the weather tomorrow in San Francisco and New York?<｜Assistant｜></think>
+<｜User｜>明天杭州和北京的天气怎么样？<｜Assistant｜></think>
 
 <｜DSML｜function_calls>
 <｜DSML｜invoke name="get_datetime">
-<｜DSML｜parameter name="timezone" string="true">America/New_York</｜DSML｜parameter>
+<｜DSML｜parameter name="timezone" string="true">Asia/Shanghai</｜DSML｜parameter>
 </｜DSML｜invoke>
 </｜DSML｜function_calls><｜end▁of▁sentence｜>
 
 <function_results>
-<result>{"current_date": "2024-01-15", "current_time": "14:30:00", "timezone": "America/New_York"}</result>
+<result>{"current_date": "2024-01-15", "current_time": "14:30:00", "timezone": "Asia/Shanghai"}</result>
 </function_results>
 
 </think>
 
 <｜DSML｜function_calls>
 <｜DSML｜invoke name="get_weather">
-<｜DSML｜parameter name="location" string="true">San Francisco</｜DSML｜parameter>
+<｜DSML｜parameter name="location" string="true">Hangzhou</｜DSML｜parameter>
 <｜DSML｜parameter name="date" string="true">2024-01-16</｜DSML｜parameter>
 </｜DSML｜invoke>
 <｜DSML｜invoke name="get_weather">
-<｜DSML｜parameter name="location" string="true">New York</｜DSML｜parameter>
+<｜DSML｜parameter name="location" string="true">Beijing</｜DSML｜parameter>
 <｜DSML｜parameter name="date" string="true">2024-01-16</｜DSML｜parameter>
 </｜DSML｜invoke>
 </｜DSML｜function_calls><｜end▁of▁sentence｜>
 
 <function_results>
-<result>{"location": "San Francisco", "date": "2024-01-16", "temperature_high": "65", "temperature_low": "55", "weather": "partly cloudy", "humidity": "70%"}</result>
-<result>{"location": "New York", "date": "2024-01-16", "temperature_high": "28", "temperature_low": "15", "weather": "sunny", "humidity": "35%"}</result>
+<result>{"location": "Hangzhou", "date": "2024-01-16", "temperature_high": "12", "temperature_low": "5", "weather": "多云", "humidity": "65%"}</result>
+<result>{"location": "Beijing", "date": "2024-01-16", "temperature_high": "-2", "temperature_low": "-8", "weather": "晴", "humidity": "30%"}</result>
 </function_results>
 
-</think>Based on the forecast, here's tomorrow's weather (January 16, 2024):
+</think>根据查询结果，明天（2024年1月16日）的天气情况如下：
 
-**San Francisco**:
-- Weather: Partly cloudy
-- High: 65°F
-- Low: 55°F
-- Humidity: 70%
+**杭州**：
+- 天气：多云
+- 最高温度：12°C
+- 最低温度：5°C
+- 湿度：65%
 
-**New York**:
-- Weather: Sunny
-- High: 28°F
-- Low: 15°F
-- Humidity: 35%
+**北京**：
+- 天气：晴
+- 最高温度：-2°C
+- 最低温度：-8°C
+- 湿度：30%
 
-San Francisco will be mild and partly cloudy, while New York will be cold but sunny. If you're in New York, dress warmly!<｜end▁of▁sentence｜><｜User｜>Thanks! What about the day after tomorrow?<｜Assistant｜><think>User is now asking about the day after tomorrow, which is 2024-01-17. I can query directly since I already know today's date.</think>
+杭州明天会比较温暖但有些多云，而北京会很冷但是晴天。建议在北京的朋友要注意保暖！<｜end▁of▁sentence｜><｜User｜>谢谢！那后天呢？<｜Assistant｜><think>用户现在问后天的天气，后天是2024-01-17，我可以直接查询（因为已知今天日期）🗓️</think>
 
 <｜DSML｜function_calls>
 <｜DSML｜invoke name="get_weather">
-<｜DSML｜parameter name="location" string="true">San Francisco</｜DSML｜parameter>
+<｜DSML｜parameter name="location" string="true">Hangzhou</｜DSML｜parameter>
 <｜DSML｜parameter name="date" string="true">2024-01-17</｜DSML｜parameter>
 </｜DSML｜invoke>
 <｜DSML｜invoke name="get_weather">
-<｜DSML｜parameter name="location" string="true">New York</｜DSML｜parameter>
+<｜DSML｜parameter name="location" string="true">Beijing</｜DSML｜parameter>
 <｜DSML｜parameter name="date" string="true">2024-01-17</｜DSML｜parameter>
 </｜DSML｜invoke>
 </｜DSML｜function_calls><｜end▁of▁sentence｜>
 
 <function_results>
-<result>{"location": "San Francisco", "date": "2024-01-17", "temperature_high": "68", "temperature_low": "58", "weather": "light rain", "humidity": "85%"}</result>
-<result>{"location": "New York", "date": "2024-01-17", "temperature_high": "32", "temperature_low": "22", "weather": "cloudy", "humidity": "50%"}</result>
+<result>{"location": "Hangzhou", "date": "2024-01-17", "temperature_high": "15", "temperature_low": "8", "weather": "小雨", "humidity": "80%"}</result>
+<result>{"location": "Beijing", "date": "2024-01-17", "temperature_high": "0", "temperature_low": "-6", "weather": "多云", "humidity": "45%"}</result>
 </function_results>
 
-<think>Got the weather data for the day after tomorrow. Let me format this for the user.</think>Here's the forecast for the day after tomorrow (January 17, 2024):
+<think>获取到后天的天气数据，整理回复给用户📝</think>后天（2024年1月17日）的天气情况：
 
-**San Francisco**:
-- Weather: Light rain
-- High: 68°F
-- Low: 58°F
-- Humidity: 85%
+**杭州**：
+- 天气：小雨
+- 最高温度：15°C
+- 最低温度：8°C
+- 湿度：80%
 
-**New York**:
-- Weather: Cloudy
-- High: 32°F
-- Low: 22°F
-- Humidity: 50%
+**北京**：
+- 天气：多云
+- 最高温度：0°C
+- 最低温度：-6°C
+- 湿度：45%
 
-San Francisco will have light rain with temperatures rising slightly, so bring an umbrella. New York will be a bit warmer but still cold and cloudy, so continue to bundle up.<｜end▁of▁sentence｜>
+杭州后天会有小雨，温度略有回升，记得带伞。北京会稍微暖和一点，但依然很冷，请继续做好保暖措施。<｜end▁of▁sentence｜>
