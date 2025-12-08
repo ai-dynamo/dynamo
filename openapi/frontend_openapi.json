@@ -1,0 +1,599 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "NVIDIA Dynamo OpenAI Frontend",
+    "description": "OpenAI-compatible HTTP API for NVIDIA Dynamo.",
+    "contact": {
+      "name": "NVIDIA Dynamo",
+      "url": "https://github.com/ai-dynamo/dynamo"
+    },
+    "license": {
+      "name": "Apache-2.0"
+    },
+    "version": "0.7.0"
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "Current server"
+    }
+  ],
+  "paths": {
+    "/busy_threshold": {
+      "get": {
+        "summary": "Endpoint: /busy_threshold",
+        "description": "Endpoint for path: /busy_threshold",
+        "operationId": "get_busy_threshold",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/docs": {
+      "get": {
+        "summary": "API documentation",
+        "description": "Interactive API documentation powered by Swagger UI.",
+        "operationId": "get_docs",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "description": "Returns the health status of the service. Used for readiness probes.",
+        "operationId": "get_health",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/live": {
+      "get": {
+        "summary": "Liveness check",
+        "description": "Returns the liveness status of the service. Used for liveness probes.",
+        "operationId": "get_live",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "summary": "Prometheus metrics",
+        "description": "Returns Prometheus metrics for monitoring the service.",
+        "operationId": "get_metrics",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "OpenAPI specification",
+        "description": "Returns the OpenAPI 3.0 specification for this API in JSON format.",
+        "operationId": "get_openapi.json",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "summary": "Create chat completion",
+        "description": "Creates a completion for a chat conversation. Supports both streaming and non-streaming modes. Compatible with OpenAI's chat completions API.",
+        "operationId": "post_v1_chat_completions",
+        "requestBody": {
+          "description": "Chat completion request with model, messages, and optional parameters",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "model",
+                  "messages"
+                ],
+                "properties": {
+                  "chat_template_args": {
+                    "type": "object",
+                    "description": "Extra arguments to pass to the chat template rendering context as a JSON object."
+                  },
+                  "frequency_penalty": {
+                    "type": "object",
+                    "description": "Penalizes new tokens based on their frequency so far. Typical range is [-2.0, 2.0]."
+                  },
+                  "guided_choice": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "description": "One of the allowed output choices."
+                    },
+                    "description": "If specified, constrains the output to be exactly one of the provided choices."
+                  },
+                  "guided_decoding_backend": {
+                    "type": "object",
+                    "description": "Backend to use for guided decoding (for example, xgrammar or a custom guided backend)."
+                  },
+                  "guided_grammar": {
+                    "type": "object",
+                    "description": "If specified, constrains the output to follow a context-free grammar."
+                  },
+                  "guided_json": {
+                    "type": "object",
+                    "description": "If specified, constrains the output to be valid JSON matching the provided schema/value."
+                  },
+                  "guided_regex": {
+                    "type": "object",
+                    "description": "If specified, constrains the output to match the given regular expression."
+                  },
+                  "ignore_eos": {
+                    "type": "object",
+                    "description": "If true, ignore end-of-sequence tokens and continue generating up to max_tokens."
+                  },
+                  "include_stop_str_in_output": {
+                    "type": "object",
+                    "description": "Whether to include the stop string in the generated output when a stop condition is hit."
+                  },
+                  "logprobs": {
+                    "type": "object",
+                    "description": "If true, returns log probabilities of output tokens. Combined with top_logprobs."
+                  },
+                  "max_tokens": {
+                    "type": "object",
+                    "description": "Maximum number of tokens to generate"
+                  },
+                  "messages": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "content": {
+                          "type": "object",
+                          "description": "The contents of the message"
+                        },
+                        "role": {
+                          "type": "object",
+                          "description": "The role of the message author (system, user, assistant)"
+                        }
+                      }
+                    },
+                    "description": "A list of messages comprising the conversation so far"
+                  },
+                  "min_p": {
+                    "type": "object",
+                    "description": "Relative probability floor used for sampling. NVIDIA extension."
+                  },
+                  "min_tokens": {
+                    "type": "object",
+                    "description": "Minimum number of tokens to generate in the response. NVIDIA extension."
+                  },
+                  "model": {
+                    "type": "object",
+                    "description": "ID of the model to use"
+                  },
+                  "n": {
+                    "type": "object",
+                    "description": "How many chat completion choices to generate for each input message."
+                  },
+                  "nvext": {
+                    "type": "object",
+                    "description": "NVIDIA-specific extensions such as greedy sampling, raw prompt mode, annotations, and routing hints."
+                  },
+                  "presence_penalty": {
+                    "type": "object",
+                    "description": "Penalizes new tokens based on whether they appear in the text so far. Typical range is [-2.0, 2.0]."
+                  },
+                  "repetition_penalty": {
+                    "type": "object",
+                    "description": "How much to penalize tokens based on how frequently they occur in the text."
+                  },
+                  "seed": {
+                    "type": "object",
+                    "description": "Seed for deterministic sampling where supported. If not set, sampling is random."
+                  },
+                  "skip_special_tokens": {
+                    "type": "object",
+                    "description": "Whether to skip special tokens (e.g. EOS, BOS, PAD) when decoding output text."
+                  },
+                  "stop": {
+                    "type": "object",
+                    "description": "Up to 4 sequences where the API will stop generating further tokens. Can be a string or array of strings."
+                  },
+                  "stream": {
+                    "type": "object",
+                    "description": "Whether to stream back partial progress"
+                  },
+                  "temperature": {
+                    "type": "object",
+                    "description": "Sampling temperature between 0 and 2. Higher values make output more random"
+                  },
+                  "top_k": {
+                    "type": "object",
+                    "description": "Integer that controls the number of top tokens to consider. Set to -1 to consider all tokens."
+                  },
+                  "top_logprobs": {
+                    "type": "object",
+                    "description": "Number of top logprobs to return for each token when logprobs=true."
+                  },
+                  "top_p": {
+                    "type": "object",
+                    "description": "Nucleus sampling parameter. The model considers only the tokens with top_p probability mass."
+                  }
+                }
+              },
+              "example": {
+                "model": "Qwen/Qwen3-0.6B",
+                "messages": [
+                  {
+                    "role": "system",
+                    "content": "You are a helpful assistant."
+                  },
+                  {
+                    "role": "user",
+                    "content": "Hello! Can you help me understand what this API does?"
+                  }
+                ],
+                "temperature": 0.7,
+                "max_tokens": 50,
+                "stream": false
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/v1/completions": {
+      "post": {
+        "summary": "Create text completion",
+        "description": "Creates a completion for a given prompt. Supports both streaming and non-streaming modes. Compatible with OpenAI's completions API.",
+        "operationId": "post_v1_completions",
+        "requestBody": {
+          "description": "Text completion request with model, prompt, and optional parameters",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "model",
+                  "prompt"
+                ],
+                "properties": {
+                  "frequency_penalty": {
+                    "type": "object",
+                    "description": "Penalizes new tokens based on their frequency so far. Typical range is [-2.0, 2.0]."
+                  },
+                  "guided_choice": {
+                    "type": "object",
+                    "description": "If specified, constrains the output to be exactly one of the provided choices."
+                  },
+                  "guided_decoding_backend": {
+                    "type": "object",
+                    "description": "Backend to use for guided decoding (for example, xgrammar or a custom guided backend)."
+                  },
+                  "guided_grammar": {
+                    "type": "object",
+                    "description": "If specified, constrains the output to follow a context-free grammar."
+                  },
+                  "guided_json": {
+                    "type": "object",
+                    "description": "If specified, constrains the output to be valid JSON matching the provided schema/value."
+                  },
+                  "guided_regex": {
+                    "type": "object",
+                    "description": "If specified, constrains the output to match the given regular expression."
+                  },
+                  "ignore_eos": {
+                    "type": "object",
+                    "description": "If true, ignore end-of-sequence tokens and continue generating up to max_tokens."
+                  },
+                  "include_stop_str_in_output": {
+                    "type": "object",
+                    "description": "Whether to include the stop string in the generated output when a stop condition is hit."
+                  },
+                  "logprobs": {
+                    "type": "object",
+                    "description": "If true, returns log probabilities of output tokens. Combined with top_logprobs."
+                  },
+                  "max_tokens": {
+                    "type": "object",
+                    "description": "Maximum number of tokens to generate"
+                  },
+                  "min_p": {
+                    "type": "object",
+                    "description": "Relative probability floor used for sampling. NVIDIA extension."
+                  },
+                  "min_tokens": {
+                    "type": "object",
+                    "description": "Minimum number of tokens to generate in the response. NVIDIA extension."
+                  },
+                  "model": {
+                    "type": "object",
+                    "description": "ID of the model to use"
+                  },
+                  "n": {
+                    "type": "object",
+                    "description": "How many completion choices to generate for each input prompt."
+                  },
+                  "nvext": {
+                    "type": "object",
+                    "description": "NVIDIA-specific extensions such as greedy sampling, raw prompt mode, annotations, and routing hints."
+                  },
+                  "presence_penalty": {
+                    "type": "object",
+                    "description": "Penalizes new tokens based on whether they appear in the text so far. Typical range is [-2.0, 2.0]."
+                  },
+                  "prompt": {
+                    "type": "object",
+                    "description": "The prompt to generate completions for"
+                  },
+                  "repetition_penalty": {
+                    "type": "object",
+                    "description": "How much to penalize tokens based on how frequently they occur in the text."
+                  },
+                  "seed": {
+                    "type": "object",
+                    "description": "Seed for deterministic sampling where supported. If not set, sampling is random."
+                  },
+                  "skip_special_tokens": {
+                    "type": "object",
+                    "description": "Whether to skip special tokens (e.g. EOS, BOS, PAD) when decoding output text."
+                  },
+                  "stop": {
+                    "type": "object",
+                    "description": "Up to 4 sequences where the API will stop generating further tokens. Can be a string or array of strings."
+                  },
+                  "stream": {
+                    "type": "object",
+                    "description": "Whether to stream back partial progress"
+                  },
+                  "temperature": {
+                    "type": "object",
+                    "description": "Sampling temperature between 0 and 2"
+                  },
+                  "top_k": {
+                    "type": "object",
+                    "description": "Integer that controls the number of top tokens to consider. Set to -1 to consider all tokens."
+                  },
+                  "top_logprobs": {
+                    "type": "object",
+                    "description": "Number of top logprobs to return for each token when logprobs=true."
+                  },
+                  "top_p": {
+                    "type": "object",
+                    "description": "Nucleus sampling parameter. The model considers only the tokens with top_p probability mass."
+                  }
+                }
+              },
+              "example": {
+                "model": "Qwen/Qwen3-0.6B",
+                "prompt": "Once upon a time",
+                "temperature": 0.7,
+                "max_tokens": 50,
+                "stream": false
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/v1/embeddings": {
+      "post": {
+        "summary": "Create embeddings",
+        "description": "Creates an embedding vector representing the input text. Compatible with OpenAI's embeddings API.",
+        "operationId": "post_v1_embeddings",
+        "requestBody": {
+          "description": "Embedding request with model and input text",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "model",
+                  "input"
+                ],
+                "properties": {
+                  "input": {
+                    "type": "object",
+                    "description": "Input text to embed, encoded as a string or array of strings"
+                  },
+                  "model": {
+                    "type": "object",
+                    "description": "ID of the model to use"
+                  }
+                }
+              },
+              "example": {
+                "model": "Qwen/Qwen3-Embedding-4B",
+                "input": "The quick brown fox jumps over the lazy dog"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "summary": "List available models",
+        "description": "Lists the currently available models and provides basic information about each.",
+        "operationId": "get_v1_models",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    },
+    "/v1/responses": {
+      "post": {
+        "summary": "Create response",
+        "description": "Creates a response for a given input. Compatible with OpenAI's responses API.",
+        "operationId": "post_v1_responses",
+        "requestBody": {
+          "description": "Response request with model and input",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "model",
+                  "input"
+                ],
+                "properties": {
+                  "input": {
+                    "type": "object",
+                    "description": "The input text"
+                  },
+                  "model": {
+                    "type": "object",
+                    "description": "ID of the model to use"
+                  }
+                }
+              },
+              "example": {
+                "model": "Qwen/Qwen3-0.6B",
+                "input": "What is the capital of France?"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Bad request - invalid input"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {}
+}
