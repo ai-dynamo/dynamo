@@ -95,11 +95,11 @@ run_single() {
     # TODO: expose kind to the command line
     local kind="dynamo_disagg"
 
-    gen_nodes=$(((gen_tp_size + 3)/4 * gen_num))
+    gen_nodes=$(((gen_tp_size + NTASKS_PER_NODE - 1)/NTASKS_PER_NODE * gen_num))
     total_nodes=$((ctx_num + gen_nodes))
-    total_tasks=$((total_nodes * 4))
+    total_tasks=$((total_nodes * NTASKS_PER_NODE))
     set -x
-    sbatch --nodes=${total_nodes} --ntasks=${total_tasks} --ntasks-per-node=${NTASKS_PER_NODE} --segment=${total_nodes} ${slurm_args} benchmark_disagg.slurm ${ctx_num} ${ctx_tp_size} ${ctx_ep_size} ${ctx_enable_attention_dp} 30 20000 ${gen_num} ${gen_tp_size} ${gen_ep_size} ${gen_batch_size} ${gen_max_num_tokens} ${gen_enable_attention_dp} ${gen_gpu_memory_fraction} ${gen_eplb_num_slots} ${gen_mtp_size} "${gen_concurrency_list}" ${gen_nodes} ${kind} ${MODEL_PATH} ${SERVED_MODEL_NAME} ${IMAGE} ${ISL} ${OSL} ${BENCHMARK_KIND}
+    sbatch --nodes=${total_nodes} --gpus-per-node ${NTASKS_PER_NODE} --ntasks=${total_tasks} --ntasks-per-node=${NTASKS_PER_NODE} --segment=${total_nodes} ${slurm_args} benchmark_disagg.slurm ${ctx_num} ${ctx_tp_size} ${ctx_ep_size} ${ctx_enable_attention_dp} 30 20000 ${gen_num} ${gen_tp_size} ${gen_ep_size} ${gen_batch_size} ${gen_max_num_tokens} ${gen_enable_attention_dp} ${gen_gpu_memory_fraction} ${gen_eplb_num_slots} ${gen_mtp_size} "${gen_concurrency_list}" ${gen_nodes} ${kind} ${MODEL_PATH} ${SERVED_MODEL_NAME} ${IMAGE} ${ISL} ${OSL} ${BENCHMARK_KIND} ${NTASKS_PER_NODE}
     set +x
 }
 

@@ -5,8 +5,7 @@ MULTI_ROUND="${MULTI_ROUND:-8}"
 
 # set MOUNT_DIR
 MOUNT_DIR="${MOUNT_DIR:-${PWD}}"
-CONTAINER_NAME=disaggr-test
-
+CONTAINER_NAME=disaggr-test-$(date +%s)-$$
 
 STREAMING=true
 CTX_GPU_FRAC=0.85
@@ -35,6 +34,7 @@ image=${21}
 isl=${22}
 osl=${23}
 benchmark_kind=${24}
+ntasks_per_node=${25}
 
 CACHE_TRANSCEIVER_MAX_NUM_TOKENS=${CACHE_TRANSCEIVER_MAX_NUM_TOKENS:-$((${isl} + ${osl} + 512))}
 
@@ -179,7 +179,9 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
       --nodes ${num_gen_nodes} \
       --ntasks $gen_tp_size \
       --oversubscribe \
+      --gpus-per-node $ntasks_per_node \
       --overlap \
+      -e UCX_NET_DEVICES,TRTLLM_UCX_INTERFACE \
       bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/decode_config.yaml ${ctx_gpus} ${served_model_name} ${model_path} 'decode' $gen_enable_attention_dp &> ${full_logdir}/output_decode_worker_${i}.log &
   echo "$!" >> "$PID_FILE"
 done
@@ -203,8 +205,10 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
         --mpi=pmix --overlap -w ${nodes[node_idx]} \
         --oversubscribe \
         --overlap \
-        --ntasks $(( ctx_tp_size < 4 ? ctx_tp_size : 4 )) \
+        --ntasks $(( ctx_tp_size < ntasks_per_node ? ctx_tp_size : ntasks_per_node )) \
+        --gpus-per-node $ntasks_per_node \
         --nodes 1 \
+        -e UCX_NET_DEVICES,TRTLLM_UCX_INTERFACE \
         bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/prefill_config.yaml ${ctx_gpus} ${served_model_name} ${model_path} 'prefill' $ctx_enable_attention_dp &> ${full_logdir}/output_prefill_worker_${i}.log &
   prefill_pids+=($!)
   echo "$!" >> "$PID_FILE"
