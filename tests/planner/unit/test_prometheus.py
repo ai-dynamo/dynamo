@@ -20,8 +20,10 @@ import pytest
 
 from dynamo import prometheus_names
 from dynamo.planner.utils.prometheus import (
+    METRIC_SOURCE_MAP,
     FrontendMetric,
     FrontendMetricContainer,
+    MetricSource,
     PrometheusAPIClient,
 )
 
@@ -244,6 +246,21 @@ def test_get_average_metric_one_matching_container(
             interval="60s",
             operation_name="test operation",
             model_name="target_model",
+        )
+
+        # Verify the correct queries were made
+        assert mock_query.call_count == 2
+
+        sum_call = mock_query.call_args_list[0]
+        assert (
+            sum_call.kwargs["query"]
+            == f"increase({METRIC_SOURCE_MAP[MetricSource.FRONTEND][prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS]}_sum[60s])"
+        )
+
+        count_call = mock_query.call_args_list[1]
+        assert (
+            count_call.kwargs["query"]
+            == f"increase({METRIC_SOURCE_MAP[MetricSource.FRONTEND][prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS]}_count[60s])"
         )
 
         assert result == 42.7
