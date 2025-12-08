@@ -25,7 +25,7 @@ pytestmark = [
     pytest.mark.sglang,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
-    pytest.mark.skip(reason="Running into segfaults in CI")
+    pytest.mark.skip(reason="Running into segfaults in CI"),
 ]
 
 # Create SGLang-specific CLI args fixture
