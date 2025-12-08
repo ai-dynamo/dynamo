@@ -1,0 +1,150 @@
+{
+    "tools": [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_datetime",
+                "description": "Get the current date and time",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "timezone": {
+                            "type": "string",
+                            "description": "The timezone, e.g. America/New_York, UTC"
+                        }
+                    },
+                    "required": ["timezone"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the weather for a specific date and location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The city name, e.g. New York, San Francisco"
+                        },
+                        "date": {
+                            "type": "string",
+                            "description": "The date in YYYY-MM-DD format"
+                        }
+                    },
+                    "required": ["location", "date"]
+                }
+            }
+        }
+    ],
+    "messages": [
+        {
+            "role": "system",
+            "content": "You are a helpful Assistant."
+        },
+        {
+            "role": "user",
+            "content": "What's the weather tomorrow in San Francisco and New York?"
+        },
+        {
+            "role": "assistant",
+            "reasoning_content": "User is asking about tomorrow's weather. I need to first get the current date to calculate tomorrow's date.",
+            "tool_calls": [
+                {
+                    "id": "call_xK9mN3pL2qR8vT5wY6hZ1aB4",
+                    "type": "function",
+                    "function": {
+                        "arguments": "{\"timezone\": \"America/New_York\"}",
+                        "name": "get_datetime"
+                    }
+                }
+            ]
+        },
+        {
+            "tool_call_id": "call_xK9mN3pL2qR8vT5wY6hZ1aB4",
+            "role": "tool",
+            "content": "{\"current_date\": \"2024-01-15\", \"current_time\": \"14:30:00\", \"timezone\": \"America/New_York\"}"
+        },
+        {
+            "role": "assistant",
+            "reasoning_content": "Now I know today is 2024-01-15, so tomorrow is 2024-01-16. Let me query the weather for San Francisco and New York.",
+            "tool_calls": [
+                {
+                    "id": "call_bN7kR9mX3pQ2wL5vY8jZ4cD6",
+                    "type": "function",
+                    "function": {
+                        "arguments": "{\"location\": \"San Francisco\", \"date\": \"2024-01-16\"}",
+                        "name": "get_weather"
+                    }
+                },
+                {
+                    "id": "call_dP9mL7kX5rT4yN3wZ2hV8eF1",
+                    "type": "function",
+                    "function": {
+                        "arguments": "{\"location\": \"New York\", \"date\": \"2024-01-16\"}",
+                        "name": "get_weather"
+                    }
+                }
+            ]
+        },
+        {
+            "tool_call_id": "call_bN7kR9mX3pQ2wL5vY8jZ4cD6",
+            "role": "tool",
+            "content": "{\"location\": \"San Francisco\", \"date\": \"2024-01-16\", \"temperature_high\": \"65\", \"temperature_low\": \"55\", \"weather\": \"partly cloudy\", \"humidity\": \"70%\"}"
+        },
+        {
+            "tool_call_id": "call_dP9mL7kX5rT4yN3wZ2hV8eF1",
+            "role": "tool",
+            "content": "{\"location\": \"New York\", \"date\": \"2024-01-16\", \"temperature_high\": \"28\", \"temperature_low\": \"15\", \"weather\": \"sunny\", \"humidity\": \"35%\"}"
+        },
+        {
+            "role": "assistant",
+            "reasoning_content": "Retrieved weather data for both cities. Now I'll format a nice response for the user.",
+            "content": "Based on the forecast, here's tomorrow's weather (January 16, 2024):\n\n**San Francisco**:\n- Weather: Partly cloudy\n- High: 65°F\n- Low: 55°F\n- Humidity: 70%\n\n**New York**:\n- Weather: Sunny\n- High: 28°F\n- Low: 15°F\n- Humidity: 35%\n\nSan Francisco will be mild and partly cloudy, while New York will be cold but sunny. If you're in New York, dress warmly!"
+        },
+        {
+            "role": "user",
+            "content": "Thanks! What about the day after tomorrow?"
+        },
+        {
+            "role": "assistant",
+            "reasoning_content": "User is now asking about the day after tomorrow, which is 2024-01-17. I can query directly since I already know today's date.",
+            "tool_calls": [
+                {
+                    "id": "call_fR3nK8mV7pL4xT2yW9jB5gH3",
+                    "type": "function",
+                    "function": {
+                        "arguments": "{\"location\": \"San Francisco\", \"date\": \"2024-01-17\"}",
+                        "name": "get_weather"
+                    }
+                },
+                {
+                    "id": "call_hT5pN2kY9rV6zL3wX1mD7jK8",
+                    "type": "function",
+                    "function": {
+                        "arguments": "{\"location\": \"New York\", \"date\": \"2024-01-17\"}",
+                        "name": "get_weather"
+                    }
+                }
+            ]
+        },
+        {
+            "tool_call_id": "call_fR3nK8mV7pL4xT2yW9jB5gH3",
+            "role": "tool",
+            "content": "{\"location\": \"San Francisco\", \"date\": \"2024-01-17\", \"temperature_high\": \"68\", \"temperature_low\": \"58\", \"weather\": \"light rain\", \"humidity\": \"85%\"}"
+        },
+        {
+            "tool_call_id": "call_hT5pN2kY9rV6zL3wX1mD7jK8",
+            "role": "tool",
+            "content": "{\"location\": \"New York\", \"date\": \"2024-01-17\", \"temperature_high\": \"32\", \"temperature_low\": \"22\", \"weather\": \"cloudy\", \"humidity\": \"50%\"}"
+        },
+        {
+            "role": "assistant",
+            "reasoning_content": "Got the weather data for the day after tomorrow. Let me format this for the user.",
+            "content": "Here's the forecast for the day after tomorrow (January 17, 2024):\n\n**San Francisco**:\n- Weather: Light rain\n- High: 68°F\n- Low: 58°F\n- Humidity: 85%\n\n**New York**:\n- Weather: Cloudy\n- High: 32°F\n- Low: 22°F\n- Humidity: 50%\n\nSan Francisco will have light rain with temperatures rising slightly, so bring an umbrella. New York will be a bit warmer but still cold and cloudy, so continue to bundle up."
+        }
+    ]
+}
+
