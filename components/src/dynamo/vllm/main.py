@@ -432,7 +432,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             migration_limit=0,  # Prefill doesn't support migration
         )
 
-    health_check_payload = VllmPrefillHealthCheckPayload(engine_client).to_dict()
+    health_check_payload = VllmPrefillHealthCheckPayload(engine_client, use_text_input=config.use_vllm_tokenizer).to_dict()
 
     try:
         logger.debug("Starting serve_endpoint for prefill worker")
@@ -562,7 +562,9 @@ async def init(runtime: DistributedRuntime, config: Config):
             migration_limit=config.migration_limit,
         )
 
-    health_check_payload = VllmHealthCheckPayload(engine_client).to_dict()
+    health_check_payload = VllmHealthCheckPayload(
+        engine_client, use_text_input=config.use_vllm_tokenizer
+    ).to_dict()
 
     try:
         logger.debug("Starting serve_endpoint for decode worker")
