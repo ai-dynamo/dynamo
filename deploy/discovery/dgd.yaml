@@ -9,8 +9,8 @@ metadata:
     nvidia.com/dynamo-discovery-backend: kubernetes
 spec:
   envs:
-    - name: DYN_LOG
-      value: "debug"
+  - name: DYN_LOG
+    value: "debug"
   services:
     Frontend:
       dynamoNamespace: dynamo

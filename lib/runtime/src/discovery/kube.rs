@@ -390,3 +390,149 @@ impl Discovery for KubeDiscoveryClient {
         Ok(Box::pin(stream))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::environment_names::runtime::discovery::DYN_DISCOVERY_EAGER_START;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Helper to parse eager start env var the same way as production code
+    fn parse_eager_start_env(value: &str) -> bool {
+        value.eq_ignore_ascii_case("true") || value == "1"
+    }
+
+    #[test]
+    fn test_eager_start_env_var_parsing() {
+        // Test various truthy values
+        assert!(parse_eager_start_env("true"));
+        assert!(parse_eager_start_env("TRUE"));
+        assert!(parse_eager_start_env("True"));
+        assert!(parse_eager_start_env("1"));
+
+        // Test various falsy values
+        assert!(!parse_eager_start_env("false"));
+        assert!(!parse_eager_start_env("FALSE"));
+        assert!(!parse_eager_start_env("0"));
+        assert!(!parse_eager_start_env(""));
+        assert!(!parse_eager_start_env("yes")); // Only "true" and "1" are accepted
+        assert!(!parse_eager_start_env("enabled"));
+    }
+
+    #[test]
+    fn test_eager_start_env_var_name() {
+        // Verify the env var name is correct
+        assert_eq!(DYN_DISCOVERY_EAGER_START, "DYN_DISCOVERY_EAGER_START");
+    }
+
+    #[tokio::test]
+    async fn test_once_cell_lazy_initialization() {
+        // This test verifies that OnceCell only initializes once
+        // even when called concurrently
+        let init_count = Arc::new(AtomicUsize::new(0));
+        let cell: Arc<OnceCell<u64>> = Arc::new(OnceCell::new());
+
+        let mut handles = vec![];
+
+        // Spawn multiple tasks that all try to initialize the cell
+        for i in 0..10 {
+            let cell_clone = cell.clone();
+            let count_clone = init_count.clone();
+            handles.push(tokio::spawn(async move {
+                // Use get_or_try_init which is what we use in production code
+                let _ = cell_clone
+                    .get_or_try_init(|| {
+                        let count_for_init = count_clone.clone();
+                        let value = i as u64;
+                        async move {
+                            count_for_init.fetch_add(1, Ordering::SeqCst);
+                            // Small delay to increase chance of race
+                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                            Ok::<u64, std::convert::Infallible>(value)
+                        }
+                    })
+                    .await;
+            }));
+        }
+
+        // Wait for all tasks
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify initialization happened exactly once
+        assert_eq!(
+            init_count.load(Ordering::SeqCst),
+            1,
+            "OnceCell should only initialize once"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_once_cell_shared_across_clones() {
+        // This test verifies that Arc<OnceCell> shares state across clones
+        // (simulating how daemon_state is shared across KubeDiscoveryClient clones)
+        let cell: Arc<OnceCell<String>> = Arc::new(OnceCell::new());
+        let cell_clone = cell.clone();
+
+        // Initialize via first reference
+        cell.get_or_init(|| async { "initialized".to_string() })
+            .await;
+
+        // Verify clone sees the same value
+        assert!(cell_clone.initialized());
+        assert_eq!(cell_clone.get(), Some(&"initialized".to_string()));
+    }
+
+    #[test]
+    fn test_metadata_snapshot_empty() {
+        // Verify empty snapshot has expected properties
+        let snapshot = MetadataSnapshot::empty();
+        assert_eq!(snapshot.sequence, 0);
+        assert!(snapshot.instances.is_empty());
+    }
+
+    #[test]
+    fn test_hash_pod_name_consistency() {
+        // Verify that hash_pod_name produces consistent results
+        let pod_name = "my-pod-12345";
+        let hash1 = hash_pod_name(pod_name);
+        let hash2 = hash_pod_name(pod_name);
+        assert_eq!(hash1, hash2, "hash_pod_name should be deterministic");
+
+        // Different pod names should produce different hashes
+        let different_pod = "other-pod-67890";
+        let hash3 = hash_pod_name(different_pod);
+        assert_ne!(
+            hash1, hash3,
+            "Different pod names should have different hashes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_daemon_handles_receiver_clone() {
+        // Test that DaemonHandles::receiver() returns working clones
+        let (tx, rx) = tokio::sync::watch::channel(Arc::new(MetadataSnapshot::empty()));
+
+        // Create a dummy JoinHandle (the task immediately completes)
+        let dummy_handle = tokio::spawn(async {});
+
+        let handles = DaemonHandles {
+            metadata_watch: rx,
+            daemon_handle: dummy_handle,
+        };
+
+        // Get two receivers
+        let rx1 = handles.receiver();
+        let rx2 = handles.receiver();
+
+        // Send an update
+        let mut updated_snapshot = MetadataSnapshot::empty();
+        updated_snapshot.sequence = 42;
+        tx.send(Arc::new(updated_snapshot)).unwrap();
+
+        // Both receivers should see the update
+        assert_eq!(rx1.borrow().sequence, 42);
+        assert_eq!(rx2.borrow().sequence, 42);
+    }
+}
