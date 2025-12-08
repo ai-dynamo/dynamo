@@ -1,13 +1,52 @@
 #!/usr/bin/env python3
+"""
+Pytest Marker Report (Production Grade)
+
+- Collects pytest tests without executing them
+- Prints markers and validates category coverage
+- Optionally mocks unavailable dependencies so tests in import paths do
+  not fail collection
+- Provides structured output suitable for CI (text, JSON)
+"""
+
+from __future__ import annotations
+
+import argparse
+import configparser
+import importlib
+import json
+import logging
 import os
+import re
 import sys
-import types
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from types import ModuleType
+from typing import Dict, List, Optional, Set
 from unittest.mock import MagicMock
 
 import pytest
 
-# --- Configuration ---
-REQUIRED_CATEGORIES = {
+try:
+    import tomllib  # Python >=3.11
+except ImportError:
+    import tomli as tomllib  # type: ignore
+
+# --------------------------------------------------------------------------- #
+# Logging
+# --------------------------------------------------------------------------- #
+
+LOG = logging.getLogger("pytest-marker-report")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
+
+REQUIRED_CATEGORIES: Dict[str, Set[str]] = {
     "Lifecycle": {"pre_merge", "post_merge", "nightly", "weekly", "release"},
     "Test Type": {
         "unit",
@@ -21,189 +60,345 @@ REQUIRED_CATEGORIES = {
     "Hardware": {"gpu_0", "gpu_1", "gpu_2", "gpu_4", "gpu_8", "h100", "k8s"},
 }
 
-# Add current directory to sys.path to ensure local modules are found
-cwd = os.path.abspath(os.getcwd())
-sys.path.insert(0, cwd)
-sys.path.insert(0, os.path.join(cwd, "components", "src"))
-sys.path.insert(0, os.path.join(cwd, "lib", "bindings", "python", "src"))
+DEFAULT_MOCK_TARGETS = [
+    "pytest_httpserver",
+    "pytest_httpserver.HTTPServer",
+    "pytest_benchmark",
+    "pytest_benchmark.logger",
+    "pytest_benchmark.plugin",
+    "kubernetes",
+    "kubernetes_asyncio",
+    "kubernetes.client",
+    "kubernetes.config",
+    "kubernetes.config.config_exception",
+    "kr8s",
+    "kr8s.objects",
+    "tritonclient",
+    "tritonclient.grpc",
+    "aiohttp",
+    "aiofiles",
+    "httpx",
+    "tabulate",
+    "prometheus_api_client",
+    "huggingface_hub",
+    "huggingface_hub.model_info",
+    "transformers",
+    "pandas",
+    "matplotlib",
+    "matplotlib.pyplot",
+    "pmdarima",
+    "prophet",
+    "scipy",
+    "scipy.interpolate",
+    "nats",
+    "dynamo._core",
+]
+
+# Project paths for local imports
+PROJECT_PATHS = [
+    os.getcwd(),
+    os.path.join(os.getcwd(), "components", "src"),
+    os.path.join(os.getcwd(), "lib", "bindings", "python", "src"),
+]
+sys.path[:0] = PROJECT_PATHS  # prepend to sys.path
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
 
 
-# --- Mocking Helper ---
-def mock_package(name):
-    m = types.ModuleType(name)
-    m.__path__ = []
-    sys.modules[name] = m
-    return m
+def sanitize(s: str, max_len: int = 200) -> str:
+    """Safe, trimmed string for output."""
+    s = re.sub(r"[^\x20-\x7E\n\t]", "", str(s))
+    return s if len(s) <= max_len else s[: max_len - 3] + "..."
 
 
-# --- Mock missing modules ---
-sys.modules["pytest_httpserver"] = MagicMock()
-sys.modules["pytest_httpserver.HTTPServer"] = MagicMock()
-
-# pytest_benchmark (required for parsing filterwarnings in pyproject.toml)
-mock_package("pytest_benchmark")
-m_pb_logger = mock_package("pytest_benchmark.logger")
-# Mock the plugin module explicitly so pytest can 'load' it if it tries
-mock_package("pytest_benchmark.plugin")
+def missing_categories(markers: Set[str]) -> List[str]:
+    """Return required categories missing in a test's markers."""
+    return [
+        cat for cat, allowed in REQUIRED_CATEGORIES.items() if not (markers & allowed)
+    ]
 
 
-# Define a real class inheriting from Warning so issubclass(cat, Warning) works
-class PytestBenchmarkWarning(Warning):
-    pass
+# --------------------------------------------------------------------------- #
+# Dependency Mocking
+# --------------------------------------------------------------------------- #
 
 
-m_pb_logger.PytestBenchmarkWarning = PytestBenchmarkWarning
+class ModuleMocker:
+    """Mock modules safely to allow test collection without real dependencies."""
 
-# kr8s
-m_kr8s = mock_package("kr8s")
-m_kr8s.objects = MagicMock()
-sys.modules["kr8s.objects"] = m_kr8s.objects
+    def __init__(self):
+        self.mocked: Set[str] = set()
 
-# aiohttp
-sys.modules["aiohttp"] = MagicMock()
+    def ensure_mock(self, mod: str) -> ModuleType:
+        if mod in sys.modules:
+            return sys.modules[mod]
 
-# aiofiles
-sys.modules["aiofiles"] = MagicMock()
+        # Check if any parent is already mocked - skip real import attempt
+        parts = mod.split(".")
+        parent_mocked = any(
+            ".".join(parts[:i]) in self.mocked for i in range(1, len(parts))
+        )
 
-# httpx
-sys.modules["httpx"] = MagicMock()
+        if not parent_mocked:
+            try:
+                return importlib.import_module(mod)
+            except (ImportError, AttributeError):
+                pass
 
-# tabulate
-sys.modules["tabulate"] = MagicMock()
+        # Create parent packages if needed
+        for i in range(1, len(parts)):
+            sub = ".".join(parts[:i])
+            if sub not in sys.modules:
+                pkg = ModuleType(sub)
+                pkg.__path__ = []
+                sys.modules[sub] = pkg
+                self.mocked.add(sub)
 
-# tritonclient
-mock_package("tritonclient")
-sys.modules["tritonclient.grpc"] = MagicMock()
+        # Mock leaf module
+        leaf = MagicMock()
+        leaf.__path__ = []
+        sys.modules[mod] = leaf
+        self.mocked.add(mod)
+        return leaf
 
-# kubernetes
-mock_package("kubernetes")
-m_k8s_client = mock_package("kubernetes.client")
-m_k8s_client.V1Node = MagicMock()
-mock_package("kubernetes.config")
-m_k8s_config_exc = mock_package("kubernetes.config.config_exception")
-m_k8s_config_exc.ConfigException = MagicMock()
 
-# kubernetes_asyncio
-m_k8s_asyncio = mock_package("kubernetes_asyncio")
-m_k8s_asyncio.client = MagicMock()
-m_k8s_asyncio.config = MagicMock()
+# --------------------------------------------------------------------------- #
+# Data Structures
+# --------------------------------------------------------------------------- #
 
-# prometheus_api_client
-sys.modules["prometheus_api_client"] = MagicMock()
 
-# huggingface_hub
-m_hfh = mock_package("huggingface_hub")
-sys.modules["huggingface_hub.model_info"] = MagicMock()
+@dataclass
+class TestRecord:
+    nodeid: str
+    markers: List[str]
+    missing: List[str]
 
-# transformers
-m_transformers = mock_package("transformers")
-m_transformers.AutoConfig = MagicMock()
 
-# pandas
-sys.modules["pandas"] = MagicMock()
+@dataclass
+class Report:
+    total_checked: int
+    total_skipped_mypy: int
+    total_missing: int
+    tests: List[TestRecord]
+    undeclared_markers: Optional[List[str]] = None
+    missing_in_project_config: Optional[List[str]] = None
 
-# matplotlib
-m_mpl = mock_package("matplotlib")
-m_mpl.pyplot = MagicMock()
-m_mpl.cm = MagicMock()
-sys.modules["matplotlib.pyplot"] = m_mpl.pyplot
 
-# pmdarima
-sys.modules["pmdarima"] = MagicMock()
-
-# prophet
-sys.modules["prophet"] = MagicMock()
-
-# scipy
-m_scipy = mock_package("scipy")
-m_scipy.interpolate = MagicMock()
-sys.modules["scipy.interpolate"] = m_scipy.interpolate
-
-# nats
-sys.modules["nats"] = MagicMock()
-
-# dynamo._core (binary extension)
-sys.modules["dynamo._core"] = MagicMock()
+# --------------------------------------------------------------------------- #
+# Pytest Plugin
+# --------------------------------------------------------------------------- #
 
 
 class MarkerReportPlugin:
     def __init__(self):
-        self.count = 0
-        self.errors = []
+        self.records: List[TestRecord] = []
+        self.checked = 0
+        self.skipped_mypy = 0
 
     def pytest_collection_modifyitems(self, session, config, items):
-        """
-        Hook called after collection has been performed.
-        We report the markers for each item here.
-        """
-        print(f"\nGenerating marker report for {len(items)} collected tests...\n")
-        print("=" * 80)
-        print(f"{'TEST ID':<60} | {'MARKERS'}")
-        print("=" * 80)
-
         for item in items:
-            # item.iter_markers() includes markers from classes, modules, etc. (inherited)
-            # We sort them for consistent output
-            marker_names = {m.name for m in item.iter_markers()}
-
-            if "mypy" in marker_names:
+            markers = {m.name for m in item.iter_markers()}
+            if "mypy" in markers:
+                self.skipped_mypy += 1
                 continue
 
-            markers = sorted(marker_names)
-            marker_str = ", ".join(markers)
-            print(f"{item.nodeid:<60} | {marker_str}")
-            self.count += 1
+            record = TestRecord(
+                nodeid=sanitize(item.nodeid),
+                markers=sorted(markers),
+                missing=missing_categories(markers),
+            )
+            self.records.append(record)
+            self.checked += 1
 
-            # Check for required categories
-            missing = []
-            for category, allowed in REQUIRED_CATEGORIES.items():
-                if not marker_names.intersection(allowed):
-                    missing.append(category)
+    def build_report(self) -> Report:
+        return Report(
+            total_checked=self.checked,
+            total_skipped_mypy=self.skipped_mypy,
+            total_missing=sum(bool(r.missing) for r in self.records),
+            tests=self.records,
+        )
 
-            if missing:
-                self.errors.append(
-                    f"FAIL: {item.nodeid}\n      Missing: {', '.join(missing)}"
-                )
 
-        print("-" * 80)
+# --------------------------------------------------------------------------- #
+# Marker Validation
+# --------------------------------------------------------------------------- #
 
-        if self.errors:
-            print("\n" + "=" * 80)
-            print("VALIDATION ERRORS")
-            print("=" * 80)
-            for err in self.errors:
-                print(err)
-            print("=" * 80)
-            print(
-                f"FAILED. Found {len(self.errors)} tests with missing required markers."
+
+def load_declared_markers(project_root: Path = Path(".")) -> Set[str]:
+    """Load declared pytest markers from pytest.ini and pyproject.toml."""
+    declared: Set[str] = set()
+
+    # pytest.ini
+    ini_path = project_root / "pytest.ini"
+    if ini_path.exists():
+        cfg = configparser.ConfigParser()
+        cfg.read(str(ini_path))
+        markers = cfg.get("pytest", "markers", fallback="")
+        declared.update(
+            line.split(":", 1)[0].strip()
+            for line in markers.splitlines()
+            if line.strip()
+        )
+
+    # pyproject.toml
+    toml_path = project_root / "pyproject.toml"
+    if toml_path.exists():
+        try:
+            with toml_path.open("rb") as f:
+                data = tomllib.load(f)
+            markers_list = (
+                data.get("tool", {})
+                .get("pytest", {})
+                .get("ini_options", {})
+                .get("markers", [])
+            )
+            declared.update(
+                line.split(":", 1)[0].strip() for line in markers_list if line.strip()
+            )
+        except Exception as e:
+            LOG.warning("Failed reading pyproject.toml markers: %s", e)
+
+    return declared
+
+
+def validate_marker_definitions(report: Report, declared: Set[str]) -> None:
+    """Fill report with metadata about declared/undeclared markers."""
+    used = {m for t in report.tests for m in t.markers}
+    required = {m for s in REQUIRED_CATEGORIES.values() for m in s}
+
+    report.undeclared_markers = sorted(used - declared) or None
+    report.missing_in_project_config = sorted(required - declared) or None
+
+
+class MarkerStrictValidator:
+    """Strict validation for marker definitions and naming conventions."""
+
+    NAME_PATTERN = re.compile(r"^[a-z0-9_]+$")
+
+    @staticmethod
+    def validate(report: Report, declared: Set[str]) -> List[str]:
+        """Return list of validation errors (empty if valid)."""
+        errors: List[str] = []
+
+        if report.undeclared_markers:
+            errors.append(
+                "Undeclared markers used: " + ", ".join(report.undeclared_markers)
             )
 
-    def pytest_sessionfinish(self, session, exitstatus):
-        """
-        Called after the whole session finishes.
-        """
-        print(f"\nReport generated for {self.count} tests.")
-        if self.errors:
-            session.exitstatus = 1
-        else:
-            session.exitstatus = 0
+        if report.missing_in_project_config:
+            errors.append(
+                "Required markers missing in pytest.ini/pyproject.toml: "
+                + ", ".join(report.missing_in_project_config)
+            )
+
+        bad_names = sorted(
+            m for m in declared if not MarkerStrictValidator.NAME_PATTERN.fullmatch(m)
+        )
+        if bad_names:
+            errors.append(
+                "Invalid marker names (must match [a-z0-9_]+): " + ", ".join(bad_names)
+            )
+
+        return errors
 
 
-def run_report():
-    # Arguments for pytest
-    args = [
-        "--collect-only",
-        "-q",
-        "--disable-warnings",
-        "-W ignore::pytest.PytestAssertRewriteWarning",  # Ignore assertion rewrite warnings for mocked modules
-        "tests",  # Target tests directory
-    ]
+# --------------------------------------------------------------------------- #
+# CLI & Runner
+# --------------------------------------------------------------------------- #
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="pytest marker validator")
+    parser.add_argument("--json", help="Write JSON report to file")
+    parser.add_argument(
+        "--no-mock", action="store_true", help="Disable dependency mocking"
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Enable strict validation (undeclared markers, missing config, naming)",
+    )
+    parser.add_argument(
+        "--tests", default="tests", help="Path to test directory (default: tests)"
+    )
+    return parser.parse_args()
+
+
+def run_collection(test_path: str, use_mocking: bool) -> tuple[int, Report]:
+    """Run pytest collection and return exit code and report."""
+    if use_mocking:
+        mocker = ModuleMocker()
+        for mod in DEFAULT_MOCK_TARGETS:
+            mocker.ensure_mock(mod)
+
+        # Special case: pytest-benchmark needs a real Warning subclass
+        try:
+            sys.modules["pytest_benchmark.logger"].PytestBenchmarkWarning = type(
+                "PytestBenchmarkWarning", (Warning,), {}
+            )
+        except (KeyError, AttributeError):
+            pass
+
+        LOG.info("Mocked %d modules", len(mocker.mocked))
 
     plugin = MarkerReportPlugin()
+    exitcode = pytest.main(
+        ["--collect-only", "-qq", "--disable-warnings", test_path],
+        plugins=[plugin],
+    )
+    return exitcode, plugin.build_report()
 
-    # Run pytest programmatically
-    return pytest.main(args, plugins=[plugin])
+
+def print_human_report(report: Report) -> None:
+    """Print human-readable report to stdout."""
+    print("\n" + "=" * 80)
+    print(f"{'TEST ID':<60} | MARKERS")
+    print("=" * 80)
+
+    for rec in report.tests:
+        print(f"{rec.nodeid:<60} | {', '.join(rec.markers)}")
+        if rec.missing:
+            print(f"  -> Missing: {', '.join(rec.missing)}")
+
+    print("=" * 80)
+    print("SUMMARY")
+    print("=" * 80)
+    print(f"  Tests checked: {report.total_checked}")
+    print(f"  Mypy skipped:  {report.total_skipped_mypy}")
+    print(f"  Missing sets:  {report.total_missing}")
+    print("=" * 80)
+
+
+def main() -> int:
+    """Main entry point."""
+    args = parse_args()
+    exitcode, report = run_collection(args.tests, not args.no_mock)
+
+    # Load and validate marker definitions
+    declared = load_declared_markers(Path("."))
+    validate_marker_definitions(report, declared)
+
+    print_human_report(report)
+
+    # Strict mode validation
+    if args.strict:
+        strict_errors = MarkerStrictValidator.validate(report, declared)
+        if strict_errors:
+            for e in strict_errors:
+                LOG.error("[STRICT] %s", e)
+            return 1
+
+    # Write JSON report if requested
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump(asdict(report), f, indent=2)
+        LOG.info("Wrote JSON report to %s", args.json)
+
+    # Fail if any tests are missing required markers
+    return 1 if report.total_missing > 0 else exitcode
 
 
 if __name__ == "__main__":
-    sys.exit(run_report())
+    raise SystemExit(main())
