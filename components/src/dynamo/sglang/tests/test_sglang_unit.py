@@ -31,7 +31,7 @@ pytestmark = [
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(mode="strict")
 async def test_custom_jinja_template_invalid_path(mock_sglang_cli):
     """Test that invalid file path raises FileNotFoundError."""
     invalid_path = "/nonexistent/path/to/template.jinja"
@@ -46,7 +46,7 @@ async def test_custom_jinja_template_invalid_path(mock_sglang_cli):
         await parse_args(sys.argv[1:])
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(mode="strict")
 async def test_custom_jinja_template_valid_path(mock_sglang_cli):
     """Test that valid absolute path is stored correctly."""
     mock_sglang_cli(model="Qwen/Qwen3-0.6B", custom_jinja_template=JINJA_TEMPLATE_PATH)
@@ -59,7 +59,7 @@ async def test_custom_jinja_template_valid_path(mock_sglang_cli):
     )
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(mode="strict")
 async def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_sglang_cli):
     """Test that environment variables in paths are expanded by Python code."""
     jinja_dir = str(TEST_DIR / "serve" / "fixtures")

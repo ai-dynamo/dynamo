@@ -188,6 +188,8 @@ filterwarnings = [
 ]
 
 
+# NOTE: Can also manually mark tests with @pytest.mark.asyncio
+asyncio_mode = "auto"
 # IMPORTANT: tests/conftest.py also registers a subset of these markers for
 # environments where pyproject.toml is not available (e.g. some CI containers).
 # Keep the marker definitions here and in tests/conftest.py synchronized.
