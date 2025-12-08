@@ -161,15 +161,16 @@ index 670d922..0cf04cb 100644
  }
 diff --git a/pkg/epp/requestcontrol/plugins/dynamo_inject_workerid/plugin.go b/pkg/epp/requestcontrol/plugins/dynamo_inject_workerid/plugin.go
 new file mode 100644
-index 0000000..9a5191e
+index 0000000..cd9a0b5
 --- /dev/null
 +++ b/pkg/epp/requestcontrol/plugins/dynamo_inject_workerid/plugin.go
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,119 @@
 +package dynamo_inject_workerid
 +
 +import (
 +	"context"
 +	"encoding/json"
++	"strconv"
 +	"strings"
 +
 +	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
@@ -252,7 +253,9 @@ index 0000000..9a5191e
 +		nvext = map[string]any{}
 +		body["nvext"] = nvext
 +	}
-+	nvext["backend_instance_id"] = wid
++	if widUint, err := strconv.ParseUint(wid, 10, 64); err == nil {
++		nvext["backend_instance_id"] = widUint
++	}
 +
 +	if tokens, ok := req.Annotations[tokenDataAnnotationKey]; ok {
 +		switch v := tokens.(type) {

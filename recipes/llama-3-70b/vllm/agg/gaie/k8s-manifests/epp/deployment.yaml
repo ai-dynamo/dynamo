@@ -38,7 +38,7 @@ spec:
 
       containers:
         - name: epp
-          image: nvcr.io/nvstaging/ai-dynamo/epp-inference-extension-dynamo:0-8-0
+          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:a-gaie-test-2
           imagePullPolicy: IfNotPresent
           resources:
             requests:
