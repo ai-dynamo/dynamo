@@ -37,10 +37,11 @@ model_path=${9}
 isl=${10}
 osl=${11}
 kind=${12}
+benchmark_kind=${13}
 
-if [ "$#" -ne 12 ]; then
-    echo "Error: Expected 12 arguments, got $#"
-    echo "Usage: $0 <model> <multi_round> <num_gen_servers> <concurrency_list> <streaming> <log_path> <prefill_gpus> <decode_gpus> <model_path> <isl> <osl> <kind>"
+if [ "$#" -ne 13 ]; then
+    echo "Error: Expected 13 arguments, got $#"
+    echo "Usage: $0 <model> <multi_round> <num_gen_servers> <concurrency_list> <streaming> <log_path> <prefill_gpus> <decode_gpus> <model_path> <isl> <osl> <kind> <benchmark_kind>"
     exit 1
 fi
 
@@ -58,8 +59,12 @@ echo "  model_path: $model_path"
 echo "  isl: $isl"
 echo "  osl: $osl"
 echo "  kind: $kind"
+echo "  benchmark_kind: $benchmark_kind"
 
-
+if ! ( [[ "$benchmark_kind" == "sa" || "$benchmark_kind" == "aiperf" ]] ); then
+    echo "Invalid benchmark kind! Expected 'sa' or 'aiperf'"
+    exit 0
+fi
 
 # check process id is not 0
 if [[ ${SLURM_PROCID} != "0" ]]; then
@@ -112,13 +117,13 @@ for ((i=1; i<=50; i++)); do
     # https://github.com/ai-dynamo/dynamo/pull/2683
     if [[ "$http_code" == "200" ]] && echo "$body" | grep -q '"status":"healthy"' && echo "$body" | grep -q '"endpoints":\[[^]]*"dyn://dynamo.tensorrt_llm.generate"'; then
         if [[ "$kind" == *disagg* ]]; then
-            if echo "$body" | grep -q '"tensorrt_llm_next"'; then
+            if echo "$body" | grep -q '"dyn://dynamo.prefill.generate"'; then
                 echo "Health check succeeded on attempt $i"
                 echo "$body"
                 failed=false
                 break
             else
-                echo "Attempt $i: tensorrt_llm_next key not found in etcd."
+                echo "Attempt $i: prefill generate endpoint not found in etcd."
             fi
         else
             echo "Health check succeeded on attempt $i"
@@ -150,7 +155,9 @@ curl -v  -w "%{http_code}" "${hostname}:${port}/v1/chat/completions" \
   "max_tokens": 30
 }'
 
-python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
+# aiperf already does a warmup
+if [[ "$benchmark_kind" == "sa" ]]; then
+    python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
         --served-model-name ${model} \
         --model ${model_path} \
         --dataset-name random \
@@ -166,6 +173,7 @@ python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
         --max-concurrency "1" \
         --host ${hostname} \
         --port ${port}
+fi
 
 mkdir -p ${log_path}/results
 echo "Starting benchmark..."
@@ -175,7 +183,55 @@ for concurrency in ${concurrency_list}; do
     num_prompts=$((concurrency * multi_round))
     echo "Benchmarking with concurrency ${concurrency} ... ${num_prompts} prompts"
     mkdir -p ${log_path}/concurrency_${concurrency}
-
+    
+    if [[ "$benchmark_kind" == "sa" ]]; then
+        python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
+            --served-model-name ${model} \
+            --model ${model_path} \
+            --dataset-name random \
+            --num-prompts "$num_prompts" \
+            --random-input-len ${isl} \
+            --random-output-len ${osl} \
+            --random-range-ratio 0.8 \
+            --use-chat-template \
+            --ignore-eos \
+            --use-chat-template \
+            --backend "dynamo" \
+            --endpoint "/v1/completions" \
+            --percentile-metrics ttft,tpot,itl,e2el \
+            --max-concurrency "$concurrency" \
+            --host ${hostname} \
+            --port ${port} \
+            --save-result \
+            --result-dir "${log_path}/results" \
+            --result-filename "results_concurrency_${original_concurrency}_gpus_${total_gpus}_ctx_${prefill_gpus}_gen_${decode_gpus}.json"
+    else
+        aiperf profile \
+    	    --model ${model} \
+    	    --tokenizer ${model_path} \
+    	    --endpoint-type completions \
+    	    --endpoint /v1/completions \
+    	    --streaming \
+    	    --url ${hostname}:${port} \
+    	    --synthetic-input-tokens-mean ${isl} \
+    	    --synthetic-input-tokens-stddev 0 \
+    	    --output-tokens-mean ${osl} \
+    	    --output-tokens-stddev 0 \
+    	    --extra-inputs max_tokens:${osl} \
+    	    --extra-inputs min_tokens:${osl} \
+    	    --extra-inputs ignore_eos:true \
+	    --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
+    	    --concurrency $concurrency \
+    	    --request-count $num_prompts \
+    	    --warmup-request-count $(($concurrency*2)) \
+	    --num-dataset-entries ${num_prompts} \
+    	    --random-seed 100 \
+    	    --artifact-dir "${log_path}/results/concurrency_${original_concurrency}" \
+    	    --ui simple \
+	    -v \
+    	    -H 'Authorization: Bearer NOT USED' \
+    	    -H 'Accept: text/event-stream'    
+    fi
     python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
         --served-model-name ${model} \
         --model ${model_path} \

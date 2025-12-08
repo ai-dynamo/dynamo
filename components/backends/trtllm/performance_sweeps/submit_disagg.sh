@@ -22,6 +22,7 @@ NTASKS_PER_NODE="${NTASKS_PER_NODE:-4}"
 
 ISL="${ISL:-8150}"
 OSL="${OSL:-1024}"
+BENCHMARK_KIND="${BENCHMARK_KIND:-sa}"
 
 # Build slurm_args step-by-step with validation and defaults
 slurm_args="--time=04:00:00"
@@ -98,7 +99,7 @@ run_single() {
     total_nodes=$((ctx_num + gen_nodes))
     total_tasks=$((total_nodes * 4))
     set -x
-    sbatch --nodes=${total_nodes} --ntasks=${total_tasks} --ntasks-per-node=${NTASKS_PER_NODE} --segment=${total_nodes} ${slurm_args} benchmark_disagg.slurm ${ctx_num} ${ctx_tp_size} ${ctx_ep_size} ${ctx_enable_attention_dp} 30 20000 ${gen_num} ${gen_tp_size} ${gen_ep_size} ${gen_batch_size} ${gen_max_num_tokens} ${gen_enable_attention_dp} ${gen_gpu_memory_fraction} ${gen_eplb_num_slots} ${gen_mtp_size} "${gen_concurrency_list}" ${gen_nodes} ${kind} ${MODEL_PATH} ${SERVED_MODEL_NAME} ${IMAGE} ${ISL} ${OSL}
+    sbatch --nodes=${total_nodes} --ntasks=${total_tasks} --ntasks-per-node=${NTASKS_PER_NODE} --segment=${total_nodes} ${slurm_args} benchmark_disagg.slurm ${ctx_num} ${ctx_tp_size} ${ctx_ep_size} ${ctx_enable_attention_dp} 30 20000 ${gen_num} ${gen_tp_size} ${gen_ep_size} ${gen_batch_size} ${gen_max_num_tokens} ${gen_enable_attention_dp} ${gen_gpu_memory_fraction} ${gen_eplb_num_slots} ${gen_mtp_size} "${gen_concurrency_list}" ${gen_nodes} ${kind} ${MODEL_PATH} ${SERVED_MODEL_NAME} ${IMAGE} ${ISL} ${OSL} ${BENCHMARK_KIND}
     set +x
 }
 

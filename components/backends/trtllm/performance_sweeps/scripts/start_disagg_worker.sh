@@ -7,8 +7,10 @@ ctx_gpus=$2
 model_name=$3
 model_path=$4
 disaggregation_mode=$5
+is_dep=$6
+
 unset UCX_TLS
-echo "config_file: ${config_file}, ctx_gpus: ${ctx_gpus}, disaggregation_mode: ${disaggregation_mode}"
+echo "config_file: ${config_file}, ctx_gpus: ${ctx_gpus}, disaggregation_mode: ${disaggregation_mode}, is_dep: ${is_dep}"
 
 # Read configuration values from the YAML config file
 if [ ! -f "${config_file}" ]; then
@@ -39,15 +41,14 @@ echo "  max_batch_size: ${max_batch_size}"
 echo "  max_seq_len: ${max_seq_len}"
 
 export TLLM_LOG_LEVEL=INFO
-# NOTE: This var is default behavior in recent trtllm commits, and can
-# be removed. Keeping it here in case the script is ran with older commits.
-export TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER=1
-# NOTE: This var was replaced with an LLM API / yaml engine config field
-# "moe_backend.use_low_precision_combine: true" in recent trtllm commits, and
-# can be removed. Keeping it here in case the script is ran with older commits.
-export TRTLLM_MOE_USE_LOW_PRECISION_COMBINE=1
-# TODO: Is there ever a case where we don't want this enabled?
 export TRTLLM_ENABLE_PDL=1
+
+if [ "$is_dep" = "true" ]; then
+    echo "Using DEP. Setting env vars."
+    export TRTLLM_MOE_ALLTOALL_BACKEND="mnnvlthroughput"
+    export TRTLLM_FORCE_ALLTOALL_METHOD="MNNVL"
+    export TRTLLM_MOE_A2A_WORKSPACE_MB="2048"
+fi 
 
 if [[ "${model_path,,}" != *r1* ]]; then
     echo "Inferred gpt-oss style model. Setting OVERRIDE_QUANT_ALGO to W4A8_MXFP4_MXFP8"

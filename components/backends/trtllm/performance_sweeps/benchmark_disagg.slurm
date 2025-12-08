@@ -20,7 +20,7 @@ ctx_max_num_tokens=$6
 num_gen_servers=$7
 gen_tp_size=$8
 gen_ep_size=$9
-gen_batch_size=$10
+gen_batch_size=${10}
 gen_max_num_tokens=${11}
 gen_enable_attention_dp=${12}
 gen_gpu_memory_fraction=${13}
@@ -34,6 +34,7 @@ served_model_name=${20}
 image=${21}
 isl=${22}
 osl=${23}
+benchmark_kind=${24}
 
 CACHE_TRANSCEIVER_MAX_NUM_TOKENS=${CACHE_TRANSCEIVER_MAX_NUM_TOKENS:-$((${isl} + ${osl} + 512))}
 
@@ -179,7 +180,7 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
       --ntasks $gen_tp_size \
       --oversubscribe \
       --overlap \
-      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/decode_config.yaml ${ctx_gpus} ${served_model_name} ${model_path} 'decode' &> ${full_logdir}/output_decode_worker_${i}.log &
+      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/decode_config.yaml ${ctx_gpus} ${served_model_name} ${model_path} 'decode' $gen_enable_attention_dp &> ${full_logdir}/output_decode_worker_${i}.log &
   echo "$!" >> "$PID_FILE"
 done
 
@@ -204,7 +205,7 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
         --overlap \
         --ntasks $(( ctx_tp_size < 4 ? ctx_tp_size : 4 )) \
         --nodes 1 \
-        bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/prefill_config.yaml ${ctx_gpus} ${served_model_name} ${model_path} 'prefill' &> ${full_logdir}/output_prefill_worker_${i}.log &
+        bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/prefill_config.yaml ${ctx_gpus} ${served_model_name} ${model_path} 'prefill' $ctx_enable_attention_dp &> ${full_logdir}/output_prefill_worker_${i}.log &
   prefill_pids+=($!)
   echo "$!" >> "$PID_FILE"
 done
@@ -216,7 +217,7 @@ srun -l --container-name=${CONTAINER_NAME} \
         --container-env HEAD_NODE_IP,HEAD_NODE,SCRIPTS_DIR \
         --mpi=pmix --overlap -N 1 -n 1 \
 	    -w ${nodes[0]} \
-        bash ${SCRIPTS_DIR}/scripts/bench.sh ${served_model_name} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${ctx_gpus} ${gen_gpus} ${model_path} ${isl} ${osl} ${kind} > ${full_logdir}/bench.log 2>&1
+        bash ${SCRIPTS_DIR}/scripts/bench.sh ${served_model_name} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${ctx_gpus} ${gen_gpus} ${model_path} ${isl} ${osl} ${kind} ${benchmark_kind} > ${full_logdir}/bench.log 2>&1
 
 
 # Cleanup will be handled by the EXIT trap
