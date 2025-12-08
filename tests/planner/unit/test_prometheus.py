@@ -27,6 +27,13 @@ from dynamo.planner.utils.prometheus import (
     PrometheusAPIClient,
 )
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
+
 
 @pytest.fixture
 def mock_prometheus_sum_result():

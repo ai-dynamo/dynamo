@@ -20,6 +20,14 @@ from tests.utils.payloads import check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
 
+pytestmark = [
+    pytest.mark.vllm,
+    pytest.mark.gpu_1,
+    pytest.mark.e2e,
+    pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
+    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
+]
+
 
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with vLLM backend"""
@@ -35,7 +43,7 @@ class DynamoWorkerProcess(ManagedProcess):
             "--gpu-memory-utilization",
             "0.45",
             "--max-model-len",
-            "8192",
+            "16384",
             "--migration-limit",
             "3",
         ]
@@ -60,6 +68,11 @@ class DynamoWorkerProcess(ManagedProcess):
         # Set debug logging environment
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
+        # Disable canary health check - these tests expect full control over requests
+        # sent to the workers where canary health check intermittently sends dummy
+        # requests to workers interfering with the test process which may cause
+        # intermittent failures
+        env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
 
@@ -120,10 +133,7 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(110)  # 3x average
 def test_request_cancellation_vllm_aggregated(
     request, runtime_services, predownload_models
 ):
@@ -197,10 +207,7 @@ def test_request_cancellation_vllm_aggregated(
                 logger.info(f"{description} detected successfully")
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(150)  # 3x average
 def test_request_cancellation_vllm_decode_cancel(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -270,10 +277,7 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(150)  # 3x average
 def test_request_cancellation_vllm_prefill_cancel(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):

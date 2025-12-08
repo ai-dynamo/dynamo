@@ -13,43 +13,56 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import json
-from typing import Optional
+import os
+from typing import Any, Optional
 
 import numpy as np
 import yaml
 
-from benchmarks.profiler.utils.config import Config, DgdPlannerServiceConfig
+from benchmarks.profiler.utils.config import (
+    Config,
+    DgdPlannerServiceConfig,
+    set_argument_value,
+)
+from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
+    ParallelizationMapping,
+)
 from benchmarks.profiler.utils.planner_utils import build_planner_args_from_namespace
 from dynamo.common.utils.paths import get_workspace_dir
-from dynamo.planner.defaults import SubComponentType
+from dynamo.planner.defaults import MockerComponentName, SubComponentType
+
+# Path to mocker disagg config relative to workspace
+MOCKER_DISAGG_CONFIG_PATH = "examples/backends/mocker/deploy/disagg.yaml"
 
 
 def generate_dgd_config_with_planner(
     config_path: str,
     config_modifier,
-    best_prefill_gpus: int,
-    best_decode_gpus: int,
     output_dir: str,
     args,
-    is_moe_model: bool = False,
+    best_prefill_mapping: ParallelizationMapping,
+    best_decode_mapping: ParallelizationMapping,
     num_gpus_per_node: int = 8,
-):
+) -> tuple[list[dict] | dict, list[dict] | dict]:
     """Generate DGD config with planner based on profiling results.
 
     Args:
         config_path: Path to the YAML config file
         config_modifier: Config modifier instance (e.g., SGLangConfigModifier)
-        best_prefill_gpus: Number of GPUs for prefill engine
-        best_decode_gpus: Number of GPUs for decode engine
         output_dir: Output directory for profile results
         args: Parsed arguments namespace from profile_sla
-        is_moe_model: Whether this is an MoE model
-        num_gpus_per_node: Number of GPUs per node (for MoE models)
+        best_prefill_mapping: Parallel mapping for prefill (TP/TEP/DEP)
+        best_decode_mapping: Parallel mapping for decode (TP/TEP/DEP)
+        num_gpus_per_node: Number of GPUs per node (for TEP/DEP models)
 
     Returns:
-        list[dict] | dict: If a ConfigMap is generated for planner data, returns a list
-        of two YAML documents [ConfigMap, DGD]; otherwise returns a single DGD dict.
+        tuple: (dgd_config, mocker_config) where:
+            - dgd_config: list[dict] | dict - If a ConfigMap is generated for planner data,
+              returns a list of two YAML documents [ConfigMap, DGD]; otherwise returns a single DGD dict.
+            - mocker_config: list[dict] | dict - Mocker DGD config with planner for testing purposes.
+              If a ConfigMap is generated, returns [ConfigMap, DGD]; otherwise returns a single DGD dict.
     """
 
     # Load config from file
@@ -61,34 +74,59 @@ def generate_dgd_config_with_planner(
     if args.dgd_image:
         config = config_modifier.update_image(config, args.dgd_image)
 
-    if not is_moe_model:
-        # dense model, use TP for both prefill and decode
+    # Apply prefill parallelization based on the actual mapping used in profiling
+    if best_prefill_mapping.tp is not None:
+        # Dense model or TP for prefill
         config = config_modifier.set_config_tp_size(
-            config, best_prefill_gpus, SubComponentType.PREFILL
+            config, best_prefill_mapping.tp, SubComponentType.PREFILL
         )
-        config = config_modifier.set_config_tp_size(
-            config, best_decode_gpus, SubComponentType.DECODE
-        )
-    else:
-        # MoE model, use TEP for prefill and DEP for decode
+    elif best_prefill_mapping.tep is not None:
+        # MoE model with TEP for prefill
         config = config_modifier.set_config_tep_size(
             config,
-            best_prefill_gpus,
+            best_prefill_mapping.tep,
             num_gpus_per_node,
             SubComponentType.PREFILL,
         )
+    elif best_prefill_mapping.dep is not None:
+        # MoE model with DEP for prefill
         config = config_modifier.set_config_dep_size(
             config,
-            best_decode_gpus,
+            best_prefill_mapping.dep,
+            num_gpus_per_node,
+            SubComponentType.PREFILL,
+        )
+
+    # Apply decode parallelization based on the actual mapping used in profiling
+    if best_decode_mapping.tp is not None:
+        # Dense model or TP for decode
+        config = config_modifier.set_config_tp_size(
+            config, best_decode_mapping.tp, SubComponentType.DECODE
+        )
+    elif best_decode_mapping.tep is not None:
+        # MoE model with TEP for decode
+        config = config_modifier.set_config_tep_size(
+            config,
+            best_decode_mapping.tep,
             num_gpus_per_node,
             SubComponentType.DECODE,
         )
+    elif best_decode_mapping.dep is not None:
+        # MoE model with DEP for decode
+        config = config_modifier.set_config_dep_size(
+            config,
+            best_decode_mapping.dep,
+            num_gpus_per_node,
+            SubComponentType.DECODE,
+        )
+
     config = Config.model_validate(config)
 
     # add the planner service
     planner_config = DgdPlannerServiceConfig()
     frontend_service = config.spec.services["Frontend"]
     planner_config.dynamoNamespace = getattr(frontend_service, "dynamoNamespace", "dynamo")  # type: ignore[attr-defined]
+    frontend_image: Optional[str] = None
     if frontend_service.extraPodSpec and frontend_service.extraPodSpec.mainContainer:
         frontend_image = frontend_service.extraPodSpec.mainContainer.image
         if frontend_image and planner_config.extraPodSpec.mainContainer:
@@ -101,6 +139,8 @@ def generate_dgd_config_with_planner(
 
     # Override profiling-specific arguments with results from profiling
     # Remove and re-add to ensure correct values from profiling context
+    # Note: --namespace is NOT added here; planner gets it from DYN_NAMESPACE env var
+    # which is automatically injected by the operator based on dynamoNamespace
     planner_args = [
         arg
         for arg in planner_args
@@ -116,13 +156,11 @@ def generate_dgd_config_with_planner(
     ]
 
     # Add arguments determined by profiling results
-    frontend_namespace = getattr(config.spec.services["Frontend"], "dynamoNamespace", "dynamo")  # type: ignore[attr-defined]
     cm_mount_path = f"{get_workspace_dir()}/profiling_results"
     planner_args.extend(
         [
-            f"--namespace={frontend_namespace}",
-            f"--prefill-engine-num-gpu={best_prefill_gpus}",
-            f"--decode-engine-num-gpu={best_decode_gpus}",
+            f"--prefill-engine-num-gpu={best_prefill_mapping.get_num_gpus()}",
+            f"--decode-engine-num-gpu={best_decode_mapping.get_num_gpus()}",
             f"--profile-results-dir={cm_mount_path}",
         ]
     )
@@ -214,7 +252,145 @@ def generate_dgd_config_with_planner(
     # Finalize DGD services
     config_dict["spec"]["services"]["Planner"] = planner_dict
 
+    # Generate mocker config with planner for testing purposes
+    mocker_config = _generate_mocker_config_with_planner(
+        args=args,
+        cm_mount_path=cm_mount_path,
+        config_map_obj=config_map_obj,
+        planner_dict=planner_dict,
+    )
+
+    # Return multi-doc YAML (ConfigMap + DGD) when ConfigMap is created; else DGD only
+    dgd_config: list[dict[str, Any]] | dict[str, Any]
+    if config_map_obj is not None:
+        dgd_config = [config_map_obj, config_dict]
+    else:
+        dgd_config = config_dict
+
+    return dgd_config, mocker_config
+
+
+def _generate_mocker_config_with_planner(
+    args,
+    cm_mount_path: str,
+    config_map_obj: Optional[dict],
+    planner_dict: dict,
+) -> list[dict] | dict:
+    """Generate mocker DGD config with planner for testing purposes.
+
+    This loads the mocker disagg.yaml, updates the worker image, mounts the
+    profiling ConfigMap, sets --planner-profile-data for workers, and adds the planner service.
+
+    Args:
+        args: Parsed arguments namespace from profile_sla
+        cm_mount_path: Mount path for the ConfigMap containing profiling data
+        config_map_obj: The ConfigMap object (if created)
+        planner_dict: The planner service dict to reuse (includes planner image)
+
+    Returns:
+        list[dict] | dict: If a ConfigMap is generated, returns [ConfigMap, DGD];
+            otherwise returns a single DGD dict.
+    """
+    # Load mocker disagg config
+    workspace_dir = get_workspace_dir()
+    mocker_config_path = os.path.join(workspace_dir, MOCKER_DISAGG_CONFIG_PATH)
+
+    with open(mocker_config_path, "r") as f:
+        mocker_config = yaml.safe_load(f)
+
+    # Update worker image if provided
+    if args.dgd_image:
+        for service_name, service_config in (
+            mocker_config.get("spec", {}).get("services", {}).items()
+        ):
+            if service_config.get("extraPodSpec") and service_config[
+                "extraPodSpec"
+            ].get("mainContainer"):
+                service_config["extraPodSpec"]["mainContainer"][
+                    "image"
+                ] = args.dgd_image
+
+    # Update worker args: --planner-profile-data, --model-path, --model-name
+    mocker_worker_names = [
+        MockerComponentName.prefill_worker_k8s_name,
+        MockerComponentName.decode_worker_k8s_name,
+    ]
+    for worker_name in mocker_worker_names:
+        service_config = (
+            mocker_config.get("spec", {}).get("services", {}).get(worker_name)
+        )
+        if service_config:
+            main_container = service_config.get("extraPodSpec", {}).get(
+                "mainContainer", {}
+            )
+            args_list = main_container.get("args", [])
+            args_list = set_argument_value(
+                args_list, "--planner-profile-data", cm_mount_path
+            )
+            # Update model path and name if available in args
+            args_list = set_argument_value(args_list, "--model-path", args.model)
+            args_list = set_argument_value(args_list, "--model-name", args.model)
+            main_container["args"] = args_list
+
+    # Mount the ConfigMap if it exists
+    if config_map_obj is not None:
+        for worker_name in mocker_worker_names:
+            service_config = (
+                mocker_config.get("spec", {}).get("services", {}).get(worker_name)
+            )
+            if service_config:
+                extra_pod_spec = service_config.setdefault("extraPodSpec", {})
+
+                # Add volume
+                volumes = extra_pod_spec.setdefault("volumes", [])
+                volumes.append(
+                    {
+                        "name": "planner-profile-data",
+                        "configMap": {"name": "planner-profile-data"},
+                    }
+                )
+
+                # Add volume mount
+                main_container = extra_pod_spec.setdefault("mainContainer", {})
+                volume_mounts = main_container.setdefault("volumeMounts", [])
+                volume_mounts.append(
+                    {
+                        "name": "planner-profile-data",
+                        "mountPath": cm_mount_path,
+                        "readOnly": True,
+                    }
+                )
+
+    # Add planner service (reuse the same planner config but with mocker backend)
+    mocker_planner_dict = copy.deepcopy(planner_dict)
+
+    # Get the mocker's dynamoNamespace from Frontend service
+    mocker_namespace = (
+        mocker_config.get("spec", {})
+        .get("services", {})
+        .get("Frontend", {})
+        .get("dynamoNamespace", "mocker-disagg")
+    )
+
+    # Update planner's dynamoNamespace to match mocker's namespace
+    mocker_planner_dict["dynamoNamespace"] = mocker_namespace
+
+    # Planner args use --key=value format, so we need to find and replace
+    planner_main_container = mocker_planner_dict.get("extraPodSpec", {}).get(
+        "mainContainer", {}
+    )
+    planner_args = planner_main_container.get("args", [])
+    updated_planner_args = []
+    for arg in planner_args:
+        if arg.startswith("--backend="):
+            updated_planner_args.append("--backend=mocker")
+        else:
+            updated_planner_args.append(arg)
+    planner_main_container["args"] = updated_planner_args
+
+    mocker_config["spec"]["services"]["Planner"] = mocker_planner_dict
+
     # Return multi-doc YAML (ConfigMap + DGD) when ConfigMap is created; else DGD only
     if config_map_obj is not None:
-        return [config_map_obj, config_dict]
-    return config_dict
+        return [config_map_obj, mocker_config]
+    return mocker_config
