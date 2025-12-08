@@ -25,7 +25,7 @@ pytestmark = [
     pytest.mark.sglang,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
+    pytest.mark.pre_merge,  # post_merge to pinpoint failure commit
 ]
 
 
