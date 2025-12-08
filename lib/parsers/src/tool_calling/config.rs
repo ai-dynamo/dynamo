@@ -239,4 +239,14 @@ impl ToolCallConfig {
             parser_config: ParserConfig::Xml(XmlParserConfig::default()),
         }
     }
+
+    pub fn jamba() -> Self {
+        Self {
+            parser_config: ParserConfig::Json(JsonParserConfig {
+                tool_call_start_tokens: vec!["<tool_calls>".to_string()],
+                tool_call_end_tokens: vec!["</tool_calls>".to_string()],
+                ..Default::default()
+            }),
+        }
+    }
 }
