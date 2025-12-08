@@ -220,6 +220,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     export CC=${CC} && \
     export CXX=${CXX} && \
     which gcc && which sccache && sccache --version && \
+    sccache gcc -v && sccache --status && \
     cd /usr/local/src && \
      git clone https://github.com/openucx/ucx.git && \
      cd ucx && 			     \
