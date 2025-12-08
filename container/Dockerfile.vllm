@@ -275,12 +275,17 @@ COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/whee
 RUN uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-      /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-    && if [ "${ENABLE_KVBM}" = "true" ]; then \
-        uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
-       fi \
-    && cd /workspace/benchmarks \
-    && UV_GIT_LFS=1 uv pip install --no-cache .
+      /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "${ENABLE_KVBM}" = "true" ]; then \
+        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
+        if [ -z "$KVBM_WHEEL" ]; then \
+            echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
+            exit 1; \
+        fi; \
+        uv pip install "$KVBM_WHEEL"; \
+    fi && \
+    cd /workspace/benchmarks && \
+    UV_GIT_LFS=1 uv pip install --no-cache .
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \

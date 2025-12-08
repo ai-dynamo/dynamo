@@ -30,6 +30,7 @@ msgspec==0.19.0
 mypy==1.18.2
 nvidia-ml-py<=13.580.65  # NVIDIA/CUDA related, may vary by driver version
 opentelemetry-api<=1.38.0  # May need to stay in sync with other components
+opentelemetry-exporter-otlp<=1.38.0  # May need to stay in sync with other components
 opentelemetry-sdk<=1.38.0  # May need to stay in sync with other components
 pip<=25.0.1  # System pip, varies by platform
 pmdarima==2.1.1
