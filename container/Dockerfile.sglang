@@ -198,8 +198,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     NVSHMEM_USE_GDRCOPY=1 \
     cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} -DNVSHMEM_BUILD_PYTHON_LIB=ON && \
     cmake --build build --target build_nvshmem4py_wheel_cu12_${PYTHON_VERSION} -j${CMAKE_BUILD_PARALLEL_LEVEL} && \
-    /tmp/use-sccache.sh show-stats "NVSHMEM4PY" && \
-    /tmp/use-sccache.sh export-stats-json "/tmp/sccache-stats.json" "SGLang"
+    /tmp/use-sccache.sh show-stats "NVSHMEM4PY"
 
 # Install DeepEP
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \

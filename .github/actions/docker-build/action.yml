@@ -235,38 +235,6 @@ runs:
 
         cat "$METRICS_FILE"
 
-    # Extract sccache stats from the built image
-    - name: Extract sccache Statistics
-      if: always()
-      shell: bash
-      run: |
-        echo "📊 Extracting sccache statistics from image..."
-        IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
-
-        if [ -n "$IMAGE_TAG" ]; then
-          # Create a temporary container from the image
-          CONTAINER_ID=$(docker create "$IMAGE_TAG")
-
-          # Extract the sccache stats JSON file if it exists
-          mkdir -p build-metrics
-          SCCACHE_JSON="build-metrics/sccache-stats.json"
-
-          if docker cp "${CONTAINER_ID}:/tmp/sccache-stats.json" "$SCCACHE_JSON" 2>/dev/null; then
-            echo "✅ sccache stats extracted successfully"
-            echo "📄 Contents:"
-            cat "$SCCACHE_JSON"
-          else
-            echo "⚠️  No sccache stats found in image (file may not exist)"
-            echo '{}' > "$SCCACHE_JSON"
-          fi
-
-          # Clean up the temporary container
-          docker rm "$CONTAINER_ID" >/dev/null 2>&1 || true
-        else
-          echo "⚠️  No image tag available, skipping sccache extraction"
-          echo '{}' > "build-metrics/sccache-stats.json"
-        fi
-
     - name: Generate Comprehensive Build Metrics
       id: comprehensive-metrics
       if: always()
@@ -317,21 +285,18 @@ runs:
           fi
         done
 
-        SCCACHE_STATS="build-metrics/sccache-stats.json"
-
         echo "Container Metadata: ${CONTAINER_METADATA}"
-        echo "sccache Stats: ${SCCACHE_STATS}"
         echo "Output: ${COMPREHENSIVE_JSON}"
         echo ""
 
         # Run parser with all discovered stages
-        # Usage: parse_buildkit_output.py <output_json> <stage1_name:log_file> [stage2_name:log_file] ... [--metadata=<file>] [--sccache=<file>]
+        # Usage: parse_buildkit_output.py <output_json> <stage1_name:log_file> [stage2_name:log_file] ... [--metadata=<file>]
+        # Note: sccache stats are parsed directly from the build logs (from 'use-sccache.sh show-stats' output)
         set +e
         python3 .github/scripts/parse_buildkit_output.py \
           "$COMPREHENSIVE_JSON" \
           "${STAGE_ARGS[@]}" \
-          "--metadata=${CONTAINER_METADATA}" \
-          "--sccache=${SCCACHE_STATS}"
+          "--metadata=${CONTAINER_METADATA}"
         PARSER_EXIT_CODE=$?
         set -e
 
