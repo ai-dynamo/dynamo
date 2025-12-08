@@ -336,6 +336,23 @@ fn build_transport_type(
 
             TransportType::Tcp(tcp_endpoint)
         }
+        RequestPlaneMode::Unix => {
+            let unix_socket_path = std::env::var("DYN_UNIX_SOCKET_PATH")
+                .unwrap_or_else(|_| "/tmp/dynamo.sock".to_string());
+
+            let unix_endpoint = match context {
+                TransportContext::HealthCheck => {
+                    // Health check uses simple Unix socket path
+                    unix_socket_path
+                }
+                TransportContext::Discovery => {
+                    // Discovery includes endpoint name for routing
+                    format!("{}/{}", unix_socket_path, endpoint_name)
+                }
+            };
+
+            TransportType::Unix(unix_endpoint)
+        }
         RequestPlaneMode::Nats => TransportType::Nats(subject.to_string()),
     }
 }

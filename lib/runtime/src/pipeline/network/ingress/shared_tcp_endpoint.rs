@@ -1,28 +1,28 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared TCP Server with Endpoint Multiplexing
+//! Shared Socket Server with Endpoint Multiplexing
 //!
-//! Provides a shared TCP server that can handle multiple endpoints on a single port
-//! by adding endpoint routing to the TCP wire protocol.
+//! Provides a shared socket server that can handle multiple endpoints on a single port/path
+//! by adding endpoint routing to the wire protocol. Supports both TCP and Unix domain sockets.
 
 use crate::SystemHealth;
 use crate::pipeline::network::PushWorkHandler;
+use crate::socket_address::SocketAddress;
 use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::Notify;
 use tokio_util::bytes::BytesMut;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-/// Default maximum message size for TCP server (32 MB)
+/// Default maximum message size for socket server (32 MB)
 const DEFAULT_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
 /// Get maximum message size from environment or use default
@@ -33,10 +33,81 @@ fn get_max_message_size() -> usize {
         .unwrap_or(DEFAULT_MAX_MESSAGE_SIZE)
 }
 
-/// Shared TCP server that handles multiple endpoints on a single port
+/// Listener enum for both TCP and Unix sockets
+enum SocketListener {
+    Tcp(TcpListener),
+    Unix(UnixListener),
+}
+
+/// Stream enum for both TCP and Unix sockets
+enum StreamType {
+    Tcp(TcpStream),
+    Unix(UnixStream),
+}
+
+/// Read half enum for both TCP and Unix sockets
+enum ReadHalf {
+    Tcp(tokio::io::ReadHalf<TcpStream>),
+    Unix(tokio::io::ReadHalf<UnixStream>),
+}
+
+/// Write half enum for both TCP and Unix sockets
+enum WriteHalf {
+    Tcp(tokio::io::WriteHalf<TcpStream>),
+    Unix(tokio::io::WriteHalf<UnixStream>),
+}
+
+
+impl tokio::io::AsyncWrite for WriteHalf {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        match &mut *self {
+            WriteHalf::Tcp(w) => std::pin::Pin::new(w).poll_write(cx, buf),
+            WriteHalf::Unix(w) => std::pin::Pin::new(w).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        match &mut *self {
+            WriteHalf::Tcp(w) => std::pin::Pin::new(w).poll_flush(cx),
+            WriteHalf::Unix(w) => std::pin::Pin::new(w).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        match &mut *self {
+            WriteHalf::Tcp(w) => std::pin::Pin::new(w).poll_shutdown(cx),
+            WriteHalf::Unix(w) => std::pin::Pin::new(w).poll_shutdown(cx),
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for ReadHalf {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match &mut *self {
+            ReadHalf::Tcp(r) => std::pin::Pin::new(r).poll_read(cx, buf),
+            ReadHalf::Unix(r) => std::pin::Pin::new(r).poll_read(cx, buf),
+        }
+    }
+}
+
+/// Shared socket server that handles multiple endpoints on a single port or socket path
 pub struct SharedTcpServer {
     handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
-    bind_addr: SocketAddr,
+    bind_addr: SocketAddress,
     cancellation_token: CancellationToken,
 }
 
@@ -52,7 +123,7 @@ struct EndpointHandler {
 }
 
 impl SharedTcpServer {
-    pub fn new(bind_addr: SocketAddr, cancellation_token: CancellationToken) -> Arc<Self> {
+    pub fn new(bind_addr: SocketAddress, cancellation_token: CancellationToken) -> Arc<Self> {
         Arc::new(Self {
             handlers: Arc::new(DashMap::new()),
             bind_addr,
@@ -101,47 +172,92 @@ impl SharedTcpServer {
         );
     }
 
-    pub async fn start(self: Arc<Self>) -> Result<()> {
-        tracing::info!("Starting shared TCP server on {}", self.bind_addr);
+    async fn create_listener(&self) -> Result<SocketListener> {
+        match &self.bind_addr {
+            SocketAddress::Tcp(addr) => {
+                let listener = TcpListener::bind(addr).await?;
+                Ok(SocketListener::Tcp(listener))
+            }
+            SocketAddress::Unix(path) => {
+                // Clean up existing socket file
+                if path.exists() {
+                    std::fs::remove_file(path)?;
+                }
 
-        let listener = TcpListener::bind(&self.bind_addr).await?;
+                // Create parent directories if needed
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+
+                let listener = UnixListener::bind(path)?;
+                Ok(SocketListener::Unix(listener))
+            }
+        }
+    }
+
+    pub async fn start(self: Arc<Self>) -> Result<()> {
+        tracing::info!("Starting shared socket server on {}", self.bind_addr);
+
+        let listener = self.create_listener().await?;
         let cancellation_token = self.cancellation_token.clone();
 
         loop {
             tokio::select! {
-                accept_result = listener.accept() => {
+                accept_result = self.accept_connection(&listener) => {
                     match accept_result {
-                        Ok((stream, peer_addr)) => {
-                            tracing::trace!("Accepted TCP connection from {}", peer_addr);
-
+                        Ok(stream) => {
                             let handlers = self.handlers.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = Self::handle_connection(stream, handlers).await {
-                                    tracing::debug!("TCP connection error: {}", e);
+                                    tracing::debug!("Socket connection error: {}", e);
                                 }
                             });
                         }
                         Err(e) => {
-                            tracing::error!("Failed to accept TCP connection: {}", e);
+                            tracing::error!("Failed to accept socket connection: {}", e);
                         }
                     }
                 }
                 _ = cancellation_token.cancelled() => {
-                    tracing::info!("SharedTcpServer received cancellation signal, shutting down");
+                    tracing::info!("SharedSocketServer received cancellation signal, shutting down");
                     return Ok(());
                 }
             }
         }
     }
 
+    async fn accept_connection(&self, listener: &SocketListener) -> Result<StreamType> {
+        match listener {
+            SocketListener::Tcp(tcp_listener) => {
+                let (stream, peer_addr) = tcp_listener.accept().await?;
+                tracing::trace!("Accepted TCP connection from {}", peer_addr);
+                Ok(StreamType::Tcp(stream))
+            }
+            SocketListener::Unix(unix_listener) => {
+                let (stream, _) = unix_listener.accept().await?;
+                tracing::trace!("Accepted Unix socket connection");
+                Ok(StreamType::Unix(stream))
+            }
+        }
+    }
+
     async fn handle_connection(
-        stream: TcpStream,
+        stream: StreamType,
         handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
     ) -> Result<()> {
         use crate::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
 
         // Split stream into read and write halves for concurrent operations
-        let (read_half, write_half) = tokio::io::split(stream);
+        let (read_half, write_half) = match stream {
+            StreamType::Tcp(stream) => {
+                let (r, w) = tokio::io::split(stream);
+                (ReadHalf::Tcp(r), WriteHalf::Tcp(w))
+            }
+            StreamType::Unix(stream) => {
+                let (r, w) = tokio::io::split(stream);
+                (ReadHalf::Unix(r), WriteHalf::Unix(w))
+            }
+        };
 
         // Channel for sending responses to the write task (zero-copy Bytes)
         let (response_tx, response_rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
@@ -159,7 +275,7 @@ impl SharedTcpServer {
     }
 
     async fn read_loop(
-        mut read_half: tokio::io::ReadHalf<TcpStream>,
+        mut read_half: ReadHalf,
         handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
         response_tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
     ) -> Result<()> {
@@ -308,7 +424,7 @@ impl SharedTcpServer {
     }
 
     async fn write_loop(
-        mut write_half: tokio::io::WriteHalf<TcpStream>,
+        mut write_half: WriteHalf,
         mut response_rx: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
     ) -> Result<()> {
         while let Some(response) = response_rx.recv().await {
@@ -350,11 +466,14 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
     }
 
     fn address(&self) -> String {
-        format!("tcp://{}:{}", self.bind_addr.ip(), self.bind_addr.port())
+        self.bind_addr.to_string()
     }
 
     fn transport_name(&self) -> &'static str {
-        "tcp"
+        match &self.bind_addr {
+            SocketAddress::Tcp(_) => "tcp",
+            SocketAddress::Unix(_) => "unix",
+        }
     }
 
     fn is_healthy(&self) -> bool {

@@ -16,7 +16,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UnixStream};
+use crate::socket_address::SocketAddress;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::codec::FramedRead;
@@ -112,6 +113,71 @@ struct TcpRequest {
     response_tx: oneshot::Sender<Result<Bytes>>,
 }
 
+/// Stream enum for both TCP and Unix sockets
+enum StreamType {
+    Tcp(TcpStream),
+    Unix(UnixStream),
+}
+
+/// Read half enum for both TCP and Unix sockets
+enum ReadHalf {
+    Tcp(tokio::io::ReadHalf<TcpStream>),
+    Unix(tokio::io::ReadHalf<UnixStream>),
+}
+
+/// Write half enum for both TCP and Unix sockets
+enum WriteHalf {
+    Tcp(tokio::io::WriteHalf<TcpStream>),
+    Unix(tokio::io::WriteHalf<UnixStream>),
+}
+
+
+impl tokio::io::AsyncWrite for WriteHalf {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        match &mut *self {
+            WriteHalf::Tcp(w) => std::pin::Pin::new(w).poll_write(cx, buf),
+            WriteHalf::Unix(w) => std::pin::Pin::new(w).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        match &mut *self {
+            WriteHalf::Tcp(w) => std::pin::Pin::new(w).poll_flush(cx),
+            WriteHalf::Unix(w) => std::pin::Pin::new(w).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        match &mut *self {
+            WriteHalf::Tcp(w) => std::pin::Pin::new(w).poll_shutdown(cx),
+            WriteHalf::Unix(w) => std::pin::Pin::new(w).poll_shutdown(cx),
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for ReadHalf {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match &mut *self {
+            ReadHalf::Tcp(r) => std::pin::Pin::new(r).poll_read(cx, buf),
+            ReadHalf::Unix(r) => std::pin::Pin::new(r).poll_read(cx, buf),
+        }
+    }
+}
+
 /// TCP connection with split read/write tasks
 ///
 /// Design: One writer task + one reader task per connection
@@ -123,7 +189,7 @@ struct TcpRequest {
 /// - Write path: Pre-encode on caller thread → direct write (minimal overhead, parallel encoding)
 /// - Read path: Framed codec handles partial reads and protocol complexity automatically
 struct TcpConnection {
-    addr: SocketAddr,
+    addr: SocketAddress,
     /// Channel to send requests to the writer task
     request_tx: mpsc::Sender<TcpRequest>,
     /// Writer task handle for cleanup
@@ -136,15 +202,33 @@ struct TcpConnection {
 
 impl TcpConnection {
     /// Create a new connection with split read/write tasks
-    async fn connect(addr: SocketAddr, timeout: Duration, channel_buffer: usize) -> Result<Self> {
-        let stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
-            .await
-            .map_err(|_| anyhow::anyhow!("TCP connect timeout to {}", addr))??;
+    async fn connect(addr: SocketAddress, timeout: Duration, channel_buffer: usize) -> Result<Self> {
+        let stream = match &addr {
+            SocketAddress::Tcp(tcp_addr) => {
+                let stream = tokio::time::timeout(timeout, TcpStream::connect(tcp_addr))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("TCP connect timeout to {}", tcp_addr))??;
+                Self::configure_tcp_socket(&stream)?;
+                StreamType::Tcp(stream)
+            }
+            SocketAddress::Unix(path) => {
+                let stream = tokio::time::timeout(timeout, UnixStream::connect(path))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Unix socket connect timeout to {}", path.display()))??;
+                StreamType::Unix(stream)
+            }
+        };
 
-        // Configure socket for lower latency
-        Self::configure_socket(&stream)?;
-
-        let (read_half, write_half) = tokio::io::split(stream);
+        let (read_half, write_half) = match stream {
+            StreamType::Tcp(stream) => {
+                let (r, w) = tokio::io::split(stream);
+                (ReadHalf::Tcp(r), WriteHalf::Tcp(w))
+            }
+            StreamType::Unix(stream) => {
+                let (r, w) = tokio::io::split(stream);
+                (ReadHalf::Unix(r), WriteHalf::Unix(w))
+            }
+        };
 
         // Channel for writer task to receive requests
         let (request_tx, request_rx) = mpsc::channel::<TcpRequest>(channel_buffer);
@@ -158,10 +242,11 @@ impl TcpConnection {
         // Spawn writer task
         let writer_handle = {
             let healthy = healthy.clone();
+            let addr_clone = addr.clone();
             tokio::spawn(async move {
                 if let Err(e) = Self::writer_task(write_half, request_rx, response_tx_channel).await
                 {
-                    tracing::debug!("Writer task failed for {}: {}", addr, e);
+                    tracing::debug!("Writer task failed for {}: {}", addr_clone, e);
                     healthy.store(false, Ordering::Relaxed);
                 }
             })
@@ -170,16 +255,17 @@ impl TcpConnection {
         // Spawn reader task
         let reader_handle = {
             let healthy = healthy.clone();
+            let addr_clone = addr.clone();
             tokio::spawn(async move {
                 if let Err(e) = Self::reader_task(read_half, response_rx_channel).await {
-                    tracing::debug!("Reader task failed for {}: {}", addr, e);
+                    tracing::debug!("Reader task failed for {}: {}", addr_clone, e);
                     healthy.store(false, Ordering::Relaxed);
                 }
             })
         };
 
         Ok(Self {
-            addr,
+            addr: addr.clone(),
             request_tx,
             writer_handle: Arc::new(writer_handle),
             reader_handle: Arc::new(reader_handle),
@@ -187,8 +273,8 @@ impl TcpConnection {
         })
     }
 
-    /// Configure socket for ultra-low latency based on dyn-transports patterns
-    fn configure_socket(stream: &TcpStream) -> Result<()> {
+    /// Configure TCP socket for ultra-low latency based on dyn-transports patterns
+    fn configure_tcp_socket(stream: &TcpStream) -> Result<()> {
         use socket2::{SockRef, Socket};
 
         let sock_ref = SockRef::from(stream);
@@ -241,7 +327,7 @@ impl TcpConnection {
     /// parallel encoding across multiple request handlers, while this task focuses
     /// on sequential socket writes with minimal overhead.
     async fn writer_task(
-        mut write_half: tokio::io::WriteHalf<TcpStream>,
+        mut write_half: WriteHalf,
         mut request_rx: mpsc::Receiver<TcpRequest>,
         response_tx_channel: mpsc::UnboundedSender<oneshot::Sender<Result<Bytes>>>,
     ) -> Result<()> {
@@ -270,7 +356,7 @@ impl TcpConnection {
     /// Reader task: reads responses using framed codec and sends them back via oneshot channels
     /// Protocol framing handled automatically via TcpResponseCodec
     async fn reader_task(
-        read_half: tokio::io::ReadHalf<TcpStream>,
+        read_half: ReadHalf,
         mut response_rx_channel: mpsc::UnboundedReceiver<oneshot::Sender<Result<Bytes>>>,
     ) -> Result<()> {
         use crate::pipeline::network::codec::TcpResponseCodec;
@@ -355,7 +441,7 @@ impl TcpConnection {
 
 /// Connection pool with health checking for TCP connections
 struct TcpConnectionPool {
-    pools: DashMap<SocketAddr, Arc<Mutex<Vec<TcpConnection>>>>,
+    pools: DashMap<SocketAddress, Arc<Mutex<Vec<TcpConnection>>>>,
     config: TcpRequestConfig,
 }
 
@@ -369,7 +455,7 @@ impl TcpConnectionPool {
 
     /// Get a connection from the pool or create a new one
     /// Automatically filters out unhealthy connections
-    async fn get_connection(&self, addr: SocketAddr) -> Result<TcpConnection> {
+    async fn get_connection(&self, addr: SocketAddress) -> Result<TcpConnection> {
         // Try to get from pool (lock-free read with DashMap)
         if let Some(pool) = self.pools.get(&addr) {
             let mut pool = pool.lock().await;
@@ -386,7 +472,7 @@ impl TcpConnectionPool {
         }
 
         // Create new connection with configured channel buffer
-        tracing::debug!("Creating new TCP connection to {}", addr);
+        tracing::debug!("Creating new connection to {}", addr);
         TcpConnection::connect(
             addr,
             self.config.connect_timeout,
@@ -403,12 +489,12 @@ impl TcpConnectionPool {
             return;
         }
 
-        let addr = conn.addr;
+        let addr = conn.addr.clone();
 
         // Get or create pool for this address (lock-free with DashMap)
         let pool = self
             .pools
-            .entry(addr)
+            .entry(addr.clone())
             .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
             .clone();
 
@@ -463,26 +549,27 @@ impl TcpRequestClient {
         Self::with_config(TcpRequestConfig::from_env())
     }
 
-    /// Parse TCP address from string
-    /// Supports formats: "host:port" or "tcp://host:port" or "host:port/endpoint_name"
-    /// Returns (SocketAddr, Option<endpoint_name>)
-    fn parse_address(address: &str) -> Result<(SocketAddr, Option<String>)> {
-        let addr_str = if let Some(stripped) = address.strip_prefix("tcp://") {
-            stripped
+    /// Parse socket address from string
+    /// Supports formats: "host:port", "tcp://host:port", "unix://path", "/path", or "host:port/endpoint_name"
+    /// Returns (SocketAddress, Option<endpoint_name>)
+    fn parse_address(address: &str) -> Result<(SocketAddress, Option<String>)> {
+        // Check if endpoint name is included (format: address/endpoint_name)
+        if let Some((addr_part, endpoint_name)) = address.split_once('/') {
+            if addr_part.starts_with('/') || addr_part.starts_with("unix://") {
+                // This is a Unix socket path with endpoint name
+                let socket_addr = addr_part.parse::<SocketAddress>()
+                    .map_err(|e| anyhow::anyhow!("Invalid socket address '{}': {}", addr_part, e))?;
+                Ok((socket_addr, Some(endpoint_name.to_string())))
+            } else {
+                // This is TCP with endpoint name
+                let socket_addr = addr_part.parse::<SocketAddress>()
+                    .map_err(|e| anyhow::anyhow!("Invalid socket address '{}': {}", addr_part, e))?;
+                Ok((socket_addr, Some(endpoint_name.to_string())))
+            }
         } else {
-            address
-        };
-
-        // Check if endpoint name is included (format: host:port/endpoint_name)
-        if let Some((socket_part, endpoint_name)) = addr_str.split_once('/') {
-            let socket_addr = socket_part
-                .parse::<SocketAddr>()
-                .map_err(|e| anyhow::anyhow!("Invalid TCP address '{}': {}", address, e))?;
-            Ok((socket_addr, Some(endpoint_name.to_string())))
-        } else {
-            let socket_addr = addr_str
-                .parse::<SocketAddr>()
-                .map_err(|e| anyhow::anyhow!("Invalid TCP address '{}': {}", address, e))?;
+            // No endpoint name
+            let socket_addr = address.parse::<SocketAddress>()
+                .map_err(|e| anyhow::anyhow!("Invalid socket address '{}': {}", address, e))?;
             Ok((socket_addr, None))
         }
     }
@@ -496,6 +583,7 @@ impl Default for TcpRequestClient {
 
 #[async_trait]
 impl RequestPlaneClient for TcpRequestClient {
+    #[tracing::instrument(level = "trace", skip(self, payload, headers), fields(payload_size = payload.len(), address = %address))]
     async fn send_request(
         &self,
         address: String,
@@ -516,15 +604,28 @@ impl RequestPlaneClient for TcpRequestClient {
         }
 
         // Get connection from pool (automatically filters unhealthy connections)
-        let conn = self.pool.get_connection(addr).await?;
+        let connection_span = tracing::trace_span!("tcp_get_connection", %addr);
+        let conn = connection_span.in_scope(|| async {
+            let start = std::time::Instant::now();
+            let result = self.pool.get_connection(addr.clone()).await;
+            let duration = start.elapsed();
+            tracing::trace!(duration_us = duration.as_micros() as u64, "tcp_get_connection_complete");
+            result
+        }).await?;
 
         // Send request with timeout
         // Note: The connection's send_request now handles all the async I/O via tasks
-        let result = tokio::time::timeout(
-            self.config.request_timeout,
-            conn.send_request(payload, &headers),
-        )
-        .await;
+        let request_span = tracing::trace_span!("tcp_send_request", payload_bytes = payload.len());
+        let result = request_span.in_scope(|| async {
+            let start = std::time::Instant::now();
+            let result = tokio::time::timeout(
+                self.config.request_timeout,
+                conn.send_request(payload, &headers),
+            ).await;
+            let duration = start.elapsed();
+            tracing::trace!(duration_us = duration.as_micros() as u64, "tcp_send_request_complete");
+            result
+        }).await;
 
         match result {
             Ok(Ok(response)) => {
@@ -542,21 +643,21 @@ impl RequestPlaneClient for TcpRequestClient {
             }
             Ok(Err(e)) => {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!("TCP request failed to {}: {}", addr, e);
+                tracing::warn!("Socket request failed to {}: {}", addr, e);
                 // Don't return unhealthy connection to pool, let it drop
                 Err(e)
             }
             Err(_) => {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!("TCP request timeout to {}", addr);
+                tracing::warn!("Socket request timeout to {}", addr);
                 // Don't return timed-out connection to pool
-                Err(anyhow::anyhow!("TCP request timeout to {}", addr))
+                Err(anyhow::anyhow!("Socket request timeout to {}", addr))
             }
         }
     }
 
     fn transport_name(&self) -> &'static str {
-        "tcp"
+        "socket" // Can handle both TCP and Unix
     }
 
     fn is_healthy(&self) -> bool {

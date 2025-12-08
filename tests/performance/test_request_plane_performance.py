@@ -45,12 +45,19 @@ SPEEDUP_RATIO = (
 )
 PORT = 8090
 
+# Port mapping for different transport types
+PORT_MAP = {
+    "tcp": PORT + 2,  # 8092 (avoid conflict with frontend HTTP port)
+    "http": 8888,  # Default HTTP port
+    "nats": 4222,  # Default NATS port
+}
+
 # Default performance test configuration
 DEFAULT_MIN_PROMPT_SIZE = 1000  # Start with 1K tokens
 DEFAULT_MAX_PROMPT_SIZE = 400000  # Go up to 400K tokens
 DEFAULT_STEP_SIZE = 50000  # Increase by 50K each step
 DEFAULT_NUM_RUNS_PER_SIZE = 3  # Number of runs to average
-DEFAULT_TRANSPORTS = ["tcp", "nats"]  # Default transports to test
+DEFAULT_TRANSPORTS = ["tcp", "unix", "nats"]  # Default transports to test
 
 
 # Global configuration (will be set by command line args or pytest)
@@ -410,6 +417,14 @@ class MockerProcess:
             env["DYN_REQUEST_PLANE"] = request_plane
             env["DYN_LOG"] = "debug"  # Enable trace logging for mocker
 
+            # Set transport-specific environment variables
+            if request_plane == "tcp":
+                env["DYN_TCP_RPC_PORT"] = str(PORT_MAP.get("tcp", PORT + 1))
+            elif request_plane == "unix":
+                env["DYN_UNIX_SOCKET_PATH"] = "/tmp/dynamo_perf_frontend.sock"
+            elif request_plane == "http":
+                env["DYN_HTTP_RPC_PORT"] = str(PORT_MAP.get("http", 8888))
+
             process = ManagedProcess(
                 command=command,
                 timeout=900,  # 15 minute timeout to match HTTP timeout
@@ -456,6 +471,14 @@ class FrontendProcess(ManagedProcess):
         env[
             "DYN_HTTP_BODY_LIMIT_MB"
         ] = "100"  # Set HTTP body limit to 100MB for large payload testing
+
+        # Set transport-specific environment variables
+        if request_plane == "tcp":
+            env["DYN_TCP_RPC_PORT"] = str(PORT_MAP.get("tcp", PORT + 1))
+        elif request_plane == "unix":
+            env["DYN_UNIX_SOCKET_PATH"] = "/tmp/dynamo_perf_frontend.sock"
+        elif request_plane == "http":
+            env["DYN_HTTP_RPC_PORT"] = str(PORT_MAP.get("http", 8888))
 
         super().__init__(
             command=command,
@@ -646,8 +669,9 @@ async def benchmark_request_plane(
     """
     results = {}
 
-    # Use different ports for TCP vs NATS to avoid conflicts
-    frontend_port = PORT + (1 if request_plane == "tcp" else 2)
+    # Use different ports for each transport to avoid conflicts
+    port_mapping = {"tcp": PORT + 1, "unix": PORT + 2, "nats": PORT + 3}
+    frontend_port = port_mapping.get(request_plane, PORT)
 
     try:
         logger.info(f"Starting {request_plane.upper()} performance test")
@@ -802,61 +826,71 @@ def extract_token_count_from_key(key):
             return 1000  # Default fallback
 
 
-def print_performance_comparison(tcp_results: Dict, nats_results: Dict):
-    """Print a formatted comparison of TCP vs NATS performance"""
-    print("\n" + "=" * 95)
+def print_performance_comparison(all_results: Dict[str, Dict]):
+    """Print a formatted comparison of all transport performance"""
+    transports = list(all_results.keys())
+    if not transports:
+        print("No results to compare")
+        return
+
+    # Determine column width based on number of transports
+    col_width = 12
+    table_width = (
+        25 + len(transports) * col_width + 20
+    )  # Size + transports + speedup + winner
+
+    print("\n" + "=" * table_width)
     print("REQUEST PLANE PERFORMANCE COMPARISON")
-    print("=" * 95)
-    print(
-        f"{'Payload Size (Tokens & Bytes)':<25} {'TCP Avg (s)':<12} {'NATS Avg (s)':<12} {'Speedup':<10} {'Winner':<8}"
-    )
-    print("-" * 95)
+    print("=" * table_width)
 
-    for size in sorted(set(tcp_results.keys()) | set(nats_results.keys())):
-        tcp_times = tcp_results.get(size, [])
-        nats_times = nats_results.get(size, [])
+    # Build header
+    header_parts = [f"{'Payload Size':<25}"]
+    for transport in transports:
+        header_parts.append(
+            f" {transport.upper()} (s)"[: col_width - 1].ljust(col_width - 1)
+        )
+    header_parts.extend([f" {'Best':<9}", f" {'Winner':<7}"])
+    print("".join(header_parts))
+    print("-" * table_width)
 
-        # Calculate averages for successful runs
-        tcp_avg = sum(tcp_times) / len(tcp_times) if tcp_times else None
-        nats_avg = sum(nats_times) / len(nats_times) if nats_times else None
+    # Get all sizes from all transports
+    all_sizes = set()
+    for results in all_results.values():
+        all_sizes.update(results.keys())
 
-        # Format display values
-        if tcp_avg is not None:
-            tcp_display = f"{tcp_avg:.3f}"
-        elif size in tcp_results:  # Test was attempted but failed
-            tcp_display = "FAILED"
-        else:  # Test not run yet
-            tcp_display = "NOT RUN"
+    for size in sorted(all_sizes):
+        # Calculate averages for each transport
+        transport_avgs = {}
+        displays = {}
 
-        if nats_avg is not None:
-            nats_display = f"{nats_avg:.3f}"
-        elif size in nats_results:  # Test was attempted but failed
-            nats_display = "FAILED"
-        else:  # Test not run yet
-            nats_display = "NOT RUN"
+        for transport in transports:
+            times = all_results[transport].get(size, [])
+            if times:
+                avg = sum(times) / len(times)
+                transport_avgs[transport] = avg
+                displays[transport] = f"{avg:.3f}"
+            elif size in all_results[transport]:  # Test was attempted but failed
+                displays[transport] = "FAILED"
+            else:  # Test not run
+                displays[transport] = "NOT RUN"
 
-        # Calculate speedup and winner if both have valid results
-        if tcp_avg is not None and nats_avg is not None:
-            if tcp_avg < nats_avg:
-                speedup = nats_avg / tcp_avg
-                winner = "TCP"
-            else:
-                speedup = tcp_avg / nats_avg
-                winner = "NATS"
-            speedup_display = f"{speedup:.2f}x"
-        elif tcp_avg is not None and nats_avg is None:
-            # Only TCP succeeded
-            speedup_display = "N/A"
-            winner = "TCP*"
-        elif tcp_avg is None and nats_avg is not None:
-            # Only NATS succeeded
-            speedup_display = "N/A"
-            winner = "NATS*"
-        else:
-            # Neither succeeded or both not run
-            speedup_display = "N/A"
-            winner = "N/A"
+        # Find winner and best time
+        winner = "N/A"
+        speedup_display = "N/A"
+        if transport_avgs:
+            best_transport = min(transport_avgs, key=transport_avgs.get)
+            best_time = transport_avgs[best_transport]
+            winner = best_transport.upper()
 
+            # Calculate speedup vs second best
+            if len(transport_avgs) > 1:
+                sorted_times = sorted(transport_avgs.values())
+                if len(sorted_times) > 1:
+                    second_best = sorted_times[1]
+                    speedup = second_best / best_time
+                    speedup_display = f"{speedup:.2f}x"
+
+        # Format size display
         token_count = extract_token_count_from_key(size)
         bytes_est = tokens_to_bytes_estimate(token_count)
         size_display = f"~{token_count//1000:,}K tokens (~{bytes_est//1024}KB)"
@@ -865,17 +899,21 @@ def print_performance_comparison(tcp_results: Dict, nats_results: Dict):
         if isinstance(size, str) and "t_" in size and "mb" in size:
             extra_mb = size.split("_")[1].replace("mb", "")
             size_display += f" + {extra_mb}MB"
-        print(
-            f"{size_display:<25} {tcp_display:<12} {nats_display:<12} {speedup_display:<10} {winner:<8}"
-        )
 
-    print("=" * 95)
+        # Build row
+        row_parts = [f"{size_display:<25}"]
+        for transport in transports:
+            display_val = displays.get(transport, "NOT RUN")
+            row_parts.append(f" {display_val:<{col_width-1}}"[:col_width])
+        row_parts.extend([f" {speedup_display:<9}", f" {winner:<7}"])
+        print("".join(row_parts))
+
+    print("=" * table_width)
     print("Notes:")
     print("- Payload sizes are approximate (1 token ≈ 0.75 words, ~4 bytes)")
     print(f"- Each test run {config.num_runs_per_size} times and averaged")
-    print("- Speedup shows how many times faster the winner is")
+    print("- 'Best' shows speedup of winner vs second-best transport")
     print("- Times include full request/response cycle")
-    print("- * indicates only one protocol had successful results")
     print("- FAILED means test was attempted but all runs failed")
     print("- NOT RUN means test was not attempted yet")
     print("=" * 95)
@@ -943,10 +981,8 @@ def test_request_plane_performance_comparison(request, predownload_tokenizers):
 
             all_results = asyncio.run(run_benchmarks())
 
-    # Print detailed comparison (support both single and dual transport testing)
-    tcp_results = all_results.get("tcp", {})
-    nats_results = all_results.get("nats", {})
-    print_performance_comparison(tcp_results, nats_results)
+    # Print detailed comparison for all transports
+    print_performance_comparison(all_results)
 
     # Basic assertions to ensure the test actually ran
     assert all_results, "At least one transport test should have produced results"
@@ -996,14 +1032,20 @@ def parse_size_ranges(size_str: str) -> List[int]:
 def parse_arguments():
     """Parse command line arguments for the performance test"""
     parser = argparse.ArgumentParser(
-        description="TCP vs NATS Performance Comparison Test",
+        description="Request Plane Performance Comparison Test (TCP, Unix, NATS)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Test all transports with default sizes
+  python test_request_plane_performance.py --transport all
+
   # Test only TCP with default sizes
   python test_request_plane_performance.py --transport tcp
 
-  # Test both transports with custom size range
+  # Test Unix sockets only
+  python test_request_plane_performance.py --transport unix
+
+  # Test all transports with custom size range
   python test_request_plane_performance.py --sizes 1000-100000:10000
 
   # Test specific sizes with NATS only
@@ -1030,9 +1072,9 @@ Examples:
     parser.add_argument(
         "--transport",
         "-t",
-        choices=["tcp", "nats", "both"],
-        default="both",
-        help="Transport(s) to test (default: both)",
+        choices=["tcp", "unix", "nats", "all"],
+        default="all",
+        help="Transport(s) to test (default: all)",
     )
 
     # Payload size configuration
@@ -1129,10 +1171,12 @@ def configure_from_args(args):
     global config
 
     # Transport selection
-    if args.transport == "both":
-        config.transports = ["tcp", "nats"]
+    if args.transport == "all":
+        config.transports = ["tcp", "unix", "nats"]
     elif args.transport == "tcp":
         config.transports = ["tcp"]
+    elif args.transport == "unix":
+        config.transports = ["unix"]
     elif args.transport == "nats":
         config.transports = ["nats"]
 
