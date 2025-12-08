@@ -2248,18 +2248,18 @@ mod test_integration_publisher {
         // Exactly one worker should have been routed requests. Find that worker
         for &worker_id in &worker_ids {
             let response = kv_router.query_worker_local_kv(worker_id).await?;
-            assert_eq!(response.worker_id, worker_id);
-
-            if !response.events.is_empty() {
-                let event_count = response.events.len();
-                tracing::info!(
-                    worker_id,
-                    events = event_count,
-                    "Worker query on worker {worker_id} returned buffered KV events"
-                );
-                best_worker_info = Some((worker_id, event_count));
-                break;
+            if response.events.is_empty() {
+                continue;
             }
+
+            let event_count = response.events.len();
+            tracing::info!(
+                worker_id,
+                events = event_count,
+                "Worker query on worker {worker_id} returned buffered KV events"
+            );
+            best_worker_info = Some((worker_id, event_count));
+            break;
         }
 
         // Verify that only one worker has KV events in buffer

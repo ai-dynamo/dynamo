@@ -21,7 +21,7 @@ use rs::traits::events::EventSubscriber;
 use tracing;
 
 use llm_rs::kv_router::protocols::*;
-use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
+use llm_rs::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher, create_stored_blocks, start_zmq_listener};
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 
 #[pyfunction]
@@ -36,7 +36,7 @@ pub fn compute_block_hash_for_seq_py(tokens: Vec<u32>, kv_block_size: usize) -> 
 
 #[pyclass]
 pub(crate) struct WorkerMetricsPublisher {
-    inner: Arc<llm_rs::kv_router::publisher::WorkerMetricsPublisher>,
+    inner: Arc<WorkerMetricsPublisher>,
 }
 
 #[pymethods]
@@ -44,7 +44,7 @@ impl WorkerMetricsPublisher {
     #[new]
     fn new() -> PyResult<Self> {
         let inner =
-            llm_rs::kv_router::publisher::WorkerMetricsPublisher::new().map_err(to_pyerr)?;
+            WorkerMetricsPublisher::new().map_err(to_pyerr)?;
         Ok(Self {
             inner: inner.into(),
         })
@@ -140,14 +140,14 @@ impl ZmqKvEventPublisherConfig {
 
 #[pyclass]
 pub(crate) struct ZmqKvEventPublisher {
-    inner: llm_rs::kv_router::publisher::KvEventPublisher,
+    inner: KvEventPublisher,
 }
 
 #[pymethods]
 impl ZmqKvEventPublisher {
     #[new]
     fn new(component: Component, config: ZmqKvEventPublisherConfig) -> PyResult<Self> {
-        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
+        let inner = KvEventPublisher::new_with_local_indexer(
             component.inner,
             config.kv_block_size as u32,
             Some(KvEventSourceConfig::Zmq {
@@ -186,7 +186,7 @@ impl ZmqKvEventListener {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<KvCacheEvent>();
             let shutdown_token = tokio_util::sync::CancellationToken::new();
 
-            tokio::spawn(llm_rs::kv_router::publisher::start_zmq_listener(
+            tokio::spawn(start_zmq_listener(
                 zmq_endpoint,
                 zmq_topic,
                 tx,
@@ -236,7 +236,7 @@ impl Drop for ZmqKvEventListener {
 
 #[pyclass]
 pub(crate) struct KvEventPublisher {
-    inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
+    inner: Arc<KvEventPublisher>,
     kv_block_size: usize,
     dp_rank: DpRank,
     warning_count: Arc<AtomicU32>,
@@ -260,7 +260,7 @@ impl KvEventPublisher {
         // The actual worker_id is inferred from component's connection_id in the Rust implementation.
         let _ = worker_id;
 
-        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
+        let inner = KvEventPublisher::new(
             component.inner,
             kv_block_size as u32,
             None,
