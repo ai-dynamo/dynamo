@@ -147,6 +147,9 @@ fn compute_single_block_checksum(
                     file.read_exact(&mut system_region)?;
                     hasher.update(system_region.as_slice());
                 }
+                StorageKind::Object(_) => {
+                    unimplemented!("Object storage checksums not yet supported")
+                }
             }
         }
     }

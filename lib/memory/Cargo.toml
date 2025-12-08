@@ -18,7 +18,7 @@ unsafe-slices = []
 
 # test features for hardware-specific tests
 testing-cuda = []
-testing-nixl = []
+testing-nixl = ["dep:nixl-sys"]
 testing-all = ["testing-cuda", "testing-nixl"]
 
 [dependencies]
@@ -26,7 +26,7 @@ dynamo-config = { workspace = true }
 
 anyhow = { workspace = true }
 cudarc = { workspace = true }
-nixl-sys = { version = "0.7" }
+nixl-sys = { git = "https://github.com/ai-dynamo/nixl.git", branch = "main", package = "nixl-sys", optional = true }
 serde = { workspace = true}
 thiserror = { workspace = true }
 tracing = { workspace = true }

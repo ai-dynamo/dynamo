@@ -517,6 +517,10 @@ where
             // Disk storage needs POSIX for regular I/O OR GDS for GPU direct I/O
             agent.has_backend("POSIX") || agent.has_backend("GDS_MT")
         }
+        StorageKind::Object(_) => {
+            // Object storage is always registered via NIXL's OBJ plugin
+            agent.has_backend("OBJ")
+        }
     };
 
     if !should_register {
@@ -752,6 +756,7 @@ fn derive_nixl_metadata(agent: &NixlAgent, entries: &[MemoryEntry]) -> Result<Ni
                 StorageKind::Pinned => (MemType::Dram, 0),
                 StorageKind::Device(id) => (MemType::Vram, id as u64),
                 StorageKind::Disk(id) => (MemType::File, id),
+                StorageKind::Object(_) => (MemType::Object, 0),
             };
             Ok(NixlMetadata::new(
                 agent.name().to_string(),

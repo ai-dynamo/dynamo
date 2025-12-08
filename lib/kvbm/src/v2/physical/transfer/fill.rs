@@ -113,6 +113,9 @@ pub fn fill_blocks(
                         file.sync_all()?;
                         file.flush()?;
                     }
+                    StorageKind::Object(_) => {
+                        unimplemented!("Object storage fill not yet supported")
+                    }
                 }
             }
         }

@@ -134,6 +134,7 @@ pub fn create_fc_layout_with_config(
         StorageKind::Pinned => builder.allocate_pinned(false).build().unwrap(),
         StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
+        StorageKind::Object(_) => unimplemented!("Object storage layout not yet supported"),
     }
 }
 
@@ -161,6 +162,7 @@ pub fn create_lw_layout_with_config(
         StorageKind::Pinned => builder.allocate_pinned(false).build().unwrap(),
         StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
+        StorageKind::Object(_) => unimplemented!("Object storage layout not yet supported"),
     }
 }
 

@@ -23,6 +23,7 @@ use crate::v2::physical::transfer::TransferContext;
 use crate::v2::physical::transfer::context::TransferCompleteNotification;
 use crate::v2::physical::transfer::executor::TransferOptionsInternal;
 use crate::v2::physical::transfer::options::TransferOptions;
+use crate::v2::distributed::worker::RemoteDescriptor;
 use anyhow::{Result, anyhow, bail};
 use dynamo_memory::StorageKind;
 use dynamo_memory::nixl::NixlAgent;
@@ -282,6 +283,36 @@ impl TransferManager {
             options,
             &self.context,
         )
+    }
+
+    /// Execute a G4 offload.
+    ///
+    /// Takes a LayoutHandle and a vector of block IDs for the source blocks and
+    /// a list of SequenceHashes for the destination blocks.
+    ///
+    /// use an extension on TransferOptions to pass in the "rank/part" of the the object in a
+    /// multi-worker/multi-tp scenario.
+    pub fn execute_g4_offload(
+        src_handle: LayoutHandle,
+        src_blocks: &[BlockId],
+        dst_descriptors: &[RemoteDescriptor],
+        options: TransferOptions, // add rank/part to the options
+    ) -> Result<TransferCompleteNotification> {
+        // check registration cache for the remote object, if it's not found, register it with nixl
+        // register all non-registered blocks with nixl in parallel
+        // then extend super::transfer::executor to access the memory regions for the source
+        // and generate a nixl descriptor
+        todo!("implement remote offload")
+    }
+
+    pub fn execute_g4_onboard(
+        &self,
+        src_descriptors: &[RemoteDescriptor],
+        dst_handle: LayoutHandle,
+        dst_blocks: &[BlockId],
+        options: TransferOptions,
+    ) -> Result<TransferCompleteNotification> {
+        todo!("implement G4 onboard")
     }
 
     // ===== Query Methods =====

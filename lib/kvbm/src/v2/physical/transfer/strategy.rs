@@ -210,6 +210,9 @@ fn select_direct_strategy(
                 }
             }
         }
+
+        // Object storage transfers - use NIXL OBJ plugin
+        (Object(_), _) | (_, Object(_)) => TransferPlan::Direct(NixlWrite),
     }
 }
 
@@ -243,6 +246,9 @@ fn select_remote_strategy(src: StorageKind, capabilities: &TransferCapabilities)
             bounce_location: Pinned,
             second: NixlWrite,
         },
+
+        // Object → Remote - direct NIXL
+        Object(_) => TransferPlan::Direct(NixlWrite),
     }
 }
 

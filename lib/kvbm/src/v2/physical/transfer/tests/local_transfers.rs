@@ -54,6 +54,9 @@ fn build_agent_for_kinds(src_kind: StorageKind, dst_kind: StorageKind) -> Result
             StorageKind::Disk(_) => {
                 backends.insert("POSIX"); // Required for disk I/O
             }
+            StorageKind::Object(_) => {
+                backends.insert("OBJ"); // Required for object storage
+            }
         }
     }
 
