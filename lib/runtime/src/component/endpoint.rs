@@ -4,14 +4,13 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-pub use async_nats::service::endpoint::Stats as EndpointStats;
 use derive_builder::Builder;
 use derive_getters::Dissolve;
 use educe::Educe;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    component::{Endpoint, Instance, TransportType, service::EndpointStatsHandler},
+    component::{Endpoint, Instance, TransportType},
     distributed::RequestPlaneMode,
     pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint},
     protocols::EndpointId,
@@ -29,11 +28,6 @@ pub struct EndpointConfig {
     /// Endpoint handler
     #[educe(Debug(ignore))]
     handler: Arc<dyn PushWorkHandler>,
-
-    /// Stats handler
-    #[educe(Debug(ignore))]
-    #[builder(default, private)]
-    _stats_handler: Option<EndpointStatsHandler>,
 
     /// Additional labels for metrics
     #[builder(default, setter(into))]
@@ -56,13 +50,6 @@ impl EndpointConfigBuilder {
         Self::default().endpoint(endpoint)
     }
 
-    pub fn stats_handler<F>(self, handler: F) -> Self
-    where
-        F: FnMut(EndpointStats) -> serde_json::Value + Send + Sync + 'static,
-    {
-        self._stats_handler(Some(Box::new(handler)))
-    }
-
     /// Register an async engine in the local endpoint registry for direct in-process calls
     pub fn register_local_engine(
         self,
@@ -80,45 +67,18 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
-        let (
-            endpoint,
-            handler,
-            stats_handler,
-            metrics_labels,
-            graceful_shutdown,
-            health_check_payload,
-        ) = self.build_internal()?.dissolve();
+        let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
+            self.build_internal()?.dissolve();
         let connection_id = endpoint.drt().connection_id();
         let endpoint_id = endpoint.id();
 
         tracing::debug!("Starting endpoint: {endpoint_id}");
-
-        let service_name = endpoint.component.service_name();
 
         let metrics_labels: Option<Vec<(&str, &str)>> = metrics_labels
             .as_ref()
             .map(|v| v.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect());
         // Add metrics to the handler. The endpoint provides additional information to the handler.
         handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
-
-        // Insert the stats handler. depends on NATS.
-        if let Some(stats_handler) = stats_handler {
-            let registry = endpoint.drt().component_registry().inner.lock().await;
-            let handler_map = registry
-                .stats_handlers
-                .get(&service_name)
-                .cloned()
-                .expect("no stats handler registry; this is unexpected");
-            // There is something wrong with the stats handler map I think.
-            // Here the connection_id is included, but in component/service.rs add_stats_service it uses service_name,
-            // no connection id so it's per-endpoint not per-instance. Doesn't match.
-            // To not block current refactor I am keeping previous behavior, but I think needs
-            // investigation.
-            handler_map.lock().insert(
-                nats::instance_subject(&endpoint_id, connection_id),
-                stats_handler,
-            );
-        }
 
         // This creates a child token of the runtime's endpoint_shutdown_token. That token is
         // cancelled first as part of graceful shutdown. See Runtime::shutdown.

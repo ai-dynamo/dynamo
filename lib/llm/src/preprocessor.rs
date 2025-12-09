@@ -28,7 +28,7 @@ use tracing;
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 #[cfg(feature = "media-nixl")]
-use crate::preprocessor::media::{MediaDecoder, MediaFetcher, MediaLoader};
+use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder,

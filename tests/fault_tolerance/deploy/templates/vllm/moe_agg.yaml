@@ -60,7 +60,6 @@ spec:
             - --model
             - deepseek-ai/DeepSeek-V2-Lite
             - --trust-remote-code
-            - --disable-log-requests
             - --tensor-parallel-size
             - "1"
             - --data-parallel-size

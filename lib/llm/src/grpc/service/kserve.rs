@@ -675,4 +675,38 @@ impl GrpcInferenceService for KserveService {
             request_model_name
         )))
     }
+
+    async fn server_live(
+        &self,
+        _request: Request<inference::ServerLiveRequest>,
+    ) -> Result<Response<inference::ServerLiveResponse>, Status> {
+        // server is live if we can respond
+        Ok(Response::new(inference::ServerLiveResponse { live: true }))
+    }
+
+    async fn server_ready(
+        &self,
+        _request: Request<inference::ServerReadyRequest>,
+    ) -> Result<Response<inference::ServerReadyResponse>, Status> {
+        let has_models = !self.state.manager().get_model_cards().is_empty();
+        Ok(Response::new(inference::ServerReadyResponse {
+            ready: has_models,
+        }))
+    }
+
+    async fn model_ready(
+        &self,
+        request: Request<inference::ModelReadyRequest>,
+    ) -> Result<Response<inference::ModelReadyResponse>, Status> {
+        let request_model_name = &request.into_inner().name;
+        let is_ready = self
+            .state
+            .manager()
+            .get_model_cards()
+            .into_iter()
+            .any(|card| request_model_name == &card.display_name);
+        Ok(Response::new(inference::ModelReadyResponse {
+            ready: is_ready,
+        }))
+    }
 }
