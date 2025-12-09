@@ -11,9 +11,22 @@
 
 ---
 
-## PR Flow
+## How copy-pr-bot Works
 
-**Direct checks** run immediately when a PR is opened or updated. **Backend builds and GitLab CI** only run when a maintainer triggers copy-pr-bot, which creates a `pull-request/N` branch - the push to that branch triggers the workflows.
+Some checks (backend builds, GitLab CI) don't run on direct PR events. They require a maintainer to trigger **copy-pr-bot**, which creates a `pull-request/N` branch. The **push to that branch** triggers the workflows.
+
+```mermaid
+flowchart LR
+    A[PR Opened] --> B{Maintainer comments<br/>to trigger bot}
+    B --> C[Bot creates<br/>pull-request/N branch]
+    C --> D[Push triggers<br/>backend builds + GitLab CI]
+```
+
+This applies to both internal and external PRs.
+
+---
+
+## PR Flow
 
 ```mermaid
 flowchart TD
@@ -41,7 +54,7 @@ flowchart TD
     end
 
     A --> B & C & I & D & E & F & G
-    A -.->|copy-pr-bot creates branch| H & N
+    A -.->|copy-pr-bot| H & N
     H -->|Yes| J & K & L
     J & K & L --> M
 
@@ -72,7 +85,7 @@ flowchart LR
 
 ## Backend Builds (`container-validation-backends.yml`)
 
-Only runs when code is pushed to `pull-request/N` branches (created by copy-pr-bot) or `main`/`release/*`. Uses `filters.yaml` to check if `has_code_changes` is true.
+Only runs when code is pushed to `pull-request/N` branches or `main`/`release/*`. Uses `filters.yaml` to check if `has_code_changes` is true.
 
 ```mermaid
 flowchart TD
@@ -98,7 +111,7 @@ flowchart TD
         end
     end
     
-    V2 & V3 & S2 & S3 & T2 & T3 & O2 --> Check[backend-status-check]
+    V2 & V3 & S2 & S3 & T2 & T3 --> Check[backend-status-check]
     Check --> FT[Fault Tolerance Tests]
     
     style Check fill:#1f6feb,color:#fff
@@ -106,25 +119,7 @@ flowchart TD
 
 ---
 
-## copy-pr-bot
-
-copy-pr-bot **creates a `pull-request/N` branch** when triggered by a maintainer. It does not directly trigger workflows - the **push to that branch** is what triggers backend builds and GitLab CI.
-
-```mermaid
-flowchart LR
-    A[PR Opened] --> B{Maintainer comments<br/>to trigger bot}
-    B --> C[Bot creates<br/>pull-request/N branch]
-    C --> D[Push triggers<br/>backend builds + GitLab CI]
-    D --> E[Results reported<br/>to PR]
-
-    style D fill:#1f6feb,color:#fff
-```
-
----
-
 ## Path Filters (`filters.yaml`)
-
-Workflows use `filters.yaml` to conditionally run based on changed files:
 
 | Filter | Used By | Paths |
 |--------|---------|-------|

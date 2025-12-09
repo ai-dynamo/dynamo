@@ -62,11 +62,11 @@ GitHub Actions workflows and configuration for the Dynamo CI/CD system.
 
 | Filter | Paths | Used By |
 |--------|-------|---------|
-| `has_code_changes` | `components/**`, `lib/**`, `tests/**`, `container/**`, `*.py`, `*.rs` | Backend builds |
-| `vllm` | `Dockerfile.vllm`, `components/dynamo/vllm/**` | vLLM-specific jobs |
-| `sglang` | `Dockerfile.sglang`, `components/dynamo/sglang/**` | SGLang-specific jobs |
-| `trtllm` | `Dockerfile.trtllm`, `components/dynamo/trtllm/**` | TRT-LLM-specific jobs |
-| `docs` | `docs/**`, `**/*.md`, `**/*.rst` | Docs link check |
+| `has_code_changes` | `components/**`, `lib/**`, `tests/**`, `container/**`, `*.py`, `*.rs` | `container-validation-backends.yml` (gates all backend jobs) |
+| `vllm` | `Dockerfile.vllm`, `components/dynamo/vllm/**` | `trigger_ci.yml` (tells GitLab which frameworks changed) |
+| `sglang` | `Dockerfile.sglang`, `components/dynamo/sglang/**` | `trigger_ci.yml` (tells GitLab which frameworks changed) |
+| `trtllm` | `Dockerfile.trtllm`, `components/dynamo/trtllm/**` | `trigger_ci.yml` (tells GitLab which frameworks changed) |
+| `docs` | `docs/**`, `**/*.md`, `**/*.rst` | (defined but not currently used) |
 
 ---
 
