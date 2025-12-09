@@ -529,9 +529,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
     export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
     export CMAKE_CUDA_COMPILER_LAUNCHER="sccache" && \
-    export CC=$(which gcc) && \
-    export CXX=$(which g++) && \
-    export CUDA_CXX=$(which nvcc) && \
+    export CC="gcc" && \
+    export CXX="g++" && \
+    export CUDA_CXX="nvcc" && \
     cd /sgl-workspace/nvshmem && \
     if [ "$GRACE_BLACKWELL" = true ]; then CUDA_ARCH="90;100;120"; else CUDA_ARCH="90"; fi && \
     NVSHMEM_SHMEM_SUPPORT=0 \
