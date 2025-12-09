@@ -134,6 +134,7 @@ def chat_payload(
     max_tokens: int = 300,
     temperature: Optional[float] = None,
     stream: bool = False,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> ChatPayload:
     body: Dict[str, Any] = {
         "messages": [
@@ -147,6 +148,9 @@ def chat_payload(
     }
     if temperature is not None:
         body["temperature"] = temperature
+
+    if extra_body:
+        body.update(extra_body)
 
     return ChatPayload(
         body=body,

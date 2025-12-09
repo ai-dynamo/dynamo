@@ -98,7 +98,8 @@ pub struct RuntimeConfig {
 
     /// System status server port for health and metrics endpoints
     /// Set to -1 to disable the system status server (default)
-    /// Set to a positive port number (e.g. 8081) to enable it
+    /// Set to 0 to bind to a random available port
+    /// Set to a positive port number (e.g. 8081) to bind to a specific port
     /// Set this at runtime with environment variable DYN_SYSTEM_PORT
     #[builder(default = "DEFAULT_SYSTEM_PORT")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
@@ -161,7 +162,7 @@ pub struct RuntimeConfig {
 
     /// Enable active health checking with payloads
     /// Set this at runtime with environment variable DYN_HEALTH_CHECK_ENABLED
-    #[builder(default = "false")]
+    #[builder(default = "true")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub health_check_enabled: bool,
 
@@ -335,11 +336,11 @@ impl RuntimeConfig {
     }
 
     /// Check if System server should be enabled
-    /// System server is enabled when DYN_SYSTEM_PORT is set to a positive value
+    /// System server is enabled when DYN_SYSTEM_PORT is set to 0 or a positive value
+    /// Port 0 binds to a random available port
     /// Negative values disable the server
-    /// TODO: Support port = 0 to bind to a random available port
     pub fn system_server_enabled(&self) -> bool {
-        self.system_port > 0
+        self.system_port >= 0
     }
 
     pub fn single_threaded() -> Self {
@@ -357,7 +358,7 @@ impl RuntimeConfig {
             compute_threads: Some(1),
             compute_stack_size: Some(2 * 1024 * 1024),
             compute_thread_prefix: "compute".to_string(),
-            health_check_enabled: false,
+            health_check_enabled: true,
             canary_wait_time_secs: DEFAULT_CANARY_WAIT_TIME_SECS,
             health_check_request_timeout_secs: DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
         }
@@ -393,7 +394,7 @@ impl Default for RuntimeConfig {
             compute_threads: None,
             compute_stack_size: Some(2 * 1024 * 1024),
             compute_thread_prefix: "compute".to_string(),
-            health_check_enabled: false,
+            health_check_enabled: true,
             canary_wait_time_secs: DEFAULT_CANARY_WAIT_TIME_SECS,
             health_check_request_timeout_secs: DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
         }
