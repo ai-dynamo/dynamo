@@ -358,8 +358,13 @@ get_options() {
 
     # Validate that --uid and --gid are only used with local-dev target
     if [[ -n "${CUSTOM_UID:-}" || -n "${CUSTOM_GID:-}" ]]; then
+<<<<<<< HEAD
         if [[ "${TARGET:-}" != "local-dev" ]]; then
             error "ERROR: --uid and --gid can only be used with --target local-dev"
+=======
+        if [[ -z "${DEV_IMAGE_INPUT:-}" && "${TARGET:-}" != "local-dev" && "${TARGET:-}" != "local-dev-aws" ]]; then
+            error "ERROR: --uid and --gid can only be used with --dev-image or --target local-dev or --target local-dev-aws"
+>>>>>>> e951a215c (feat: Add option for --target local-dev-aws in addition to local-dev)
         fi
     fi
 
@@ -395,7 +400,7 @@ get_options() {
 
     if [ -z "$TAG" ]; then
         TAG="--tag dynamo:${VERSION}-${FRAMEWORK,,}"
-        if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
+        if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ] && [ "${TARGET}" != "local-dev-aws" ]; then
             TAG="${TAG}-${TARGET}"
         fi
     fi
@@ -613,6 +618,12 @@ build_local_dev_with_header() {
 if [[ $TARGET == "local-dev" ]]; then
     LOCAL_DEV_BUILD=true
     TARGET_STR="--target dev"
+fi
+
+# Handle local-dev-aws target
+if [[ $TARGET == "local-dev-aws" ]]; then
+    LOCAL_DEV_AWS_BUILD=true
+    TARGET_STR="--target dev-aws"
 fi
 
 # BUILD DEV IMAGE
@@ -866,7 +877,7 @@ fi
 LATEST_TAG=""
 if [ -z "${NO_TAG_LATEST}" ]; then
     LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
-    if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
+    if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ] && [ "${TARGET}" != "local-dev-aws" ]; then
         LATEST_TAG="${LATEST_TAG}-${TARGET}"
     fi
 fi
@@ -918,6 +929,32 @@ if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
     # Extract first tag for success message
     FIRST_TAG=$(echo "$LOCAL_DEV_TAGS" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
     build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built $FIRST_TAG" "Building Local-Dev Image"
+fi
+
+# Handle --target local-dev-aws
+if [[ "${LOCAL_DEV_AWS_BUILD:-}" == "true" ]]; then
+    # Use the first tag name (TAG) if available, otherwise use latest
+    if [[ -n "$TAG" ]]; then
+        DEV_AWS_IMAGE=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev-aws$//')
+    else
+        DEV_AWS_IMAGE="dynamo:latest-${FRAMEWORK,,}-dev-aws"
+    fi
+
+    # Build local-dev-aws tags from existing tags
+    LOCAL_DEV_AWS_TAGS=""
+    if [[ -n "$TAG" ]]; then
+        # Extract tag name, remove any existing -local-dev-aws suffix, then add -local-dev-aws
+        TAG_NAME=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev-aws$//')
+        LOCAL_DEV_AWS_TAGS+=" --tag ${TAG_NAME}-local-dev-aws"
+    fi
+
+    if [[ -n "$LATEST_TAG" ]]; then
+        # Extract tag name, remove any existing -local-dev-aws suffix, then add -local-dev-aws
+        LATEST_TAG_NAME=$(echo "$LATEST_TAG" | sed 's/--tag //' | sed 's/-local-dev-aws$//')
+        LOCAL_DEV_AWS_TAGS+=" --tag ${LATEST_TAG_NAME}-local-dev-aws"
+    fi
+
+    build_local_dev_with_header "$DEV_AWS_IMAGE" "$LOCAL_DEV_AWS_TAGS" "Successfully built local-dev-aws images" "Starting Build 3: Local-Dev-AWS Image"
 fi
 
 
