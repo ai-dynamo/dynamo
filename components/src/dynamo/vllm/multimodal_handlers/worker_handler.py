@@ -52,7 +52,6 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
     async def async_init(self, runtime: DistributedRuntime):
         """Async initialization - connector needs async setup"""
         self._connector = connect.Connector()
-        await self._connector.initialize()
         logger.info("Multimodal Decode Worker async initialization completed.")
 
     async def generate(self, request: vLLMMultimodalRequest, context):
@@ -138,7 +137,6 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         """Async initialization for connector that requires async setup"""
         # Initialize the connector asynchronously
         self._connector = connect.Connector()
-        await self._connector.initialize()
         logger.info("Multimodal PD Worker async initialization completed.")
 
     async def generate(self, request: vLLMMultimodalRequest, context):
