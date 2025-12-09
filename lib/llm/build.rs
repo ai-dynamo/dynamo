@@ -74,9 +74,7 @@ fn find_fatbin_file() -> Option<PathBuf> {
     }
 
     // 2. Check standard locations (priority order)
-    let default_paths = [
-        "../kvbm-kernels/cuda/prebuilt/vectorized_copy.fatbin"
-    ];
+    let default_paths = ["../kvbm-kernels/cuda/prebuilt/vectorized_copy.fatbin"];
 
     for path in &default_paths {
         let fatbin_file = PathBuf::from(path);

@@ -5,8 +5,8 @@ use std::env;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
-use std::process::Command;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn main() {
     let cu_files = discover_cuda_files();
@@ -80,10 +80,9 @@ fn build_with_prebuilt_kernels() {
 
     for cu_path in &cu_files {
         let kernel_name = cu_path.file_stem().unwrap().to_str().unwrap();
-        let md5_path = Path::new(&manifest_dir)
-            .join(format!("cuda/prebuilt/{}.md5", kernel_name));
-        let fatbin_path = Path::new(&manifest_dir)
-            .join(format!("cuda/prebuilt/{}.fatbin", kernel_name));
+        let md5_path = Path::new(&manifest_dir).join(format!("cuda/prebuilt/{}.md5", kernel_name));
+        let fatbin_path =
+            Path::new(&manifest_dir).join(format!("cuda/prebuilt/{}.fatbin", kernel_name));
 
         // Validate prebuilt files exist
         if !md5_path.exists() {
@@ -102,8 +101,8 @@ fn build_with_prebuilt_kernels() {
         }
 
         // Read and validate hashes
-        let stored_hashes_content = fs::read_to_string(&md5_path)
-            .expect(&format!("Failed to read {}", md5_path.display()));
+        let stored_hashes_content =
+            fs::read_to_string(&md5_path).expect(&format!("Failed to read {}", md5_path.display()));
         let stored_hashes: Vec<&str> = stored_hashes_content.lines().collect();
 
         if stored_hashes.len() != 3 {
@@ -182,7 +181,8 @@ fn discover_cuda_files() -> Vec<PathBuf> {
 fn get_cuda_arch_flags() -> Vec<String> {
     let mut flags = Vec::new();
 
-    let arch_list = env::var("CUDA_ARCHS").unwrap_or_else(|_| "80,86,89,90,100,120,121".to_string());
+    let arch_list =
+        env::var("CUDA_ARCHS").unwrap_or_else(|_| "80,86,89,90,100,120,121".to_string());
 
     for arch in arch_list.split(',') {
         let arch = arch.trim();
