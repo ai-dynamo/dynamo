@@ -62,11 +62,66 @@ fn clone_parameters(function: &FunctionObject) -> Value {
         .unwrap_or_else(|| json!({"type": "object", "properties": {}}))
 }
 
+/// Builds a JSON Schema for `tool_choice=required` that enforces an array of tool calls.
+///
+/// # Schema Structure
+///
+/// The generated schema looks like:
+/// ```json
+/// {
+///   "type": "array",
+///   "minItems": 1,
+///   "items": {
+///     "type": "object",
+///     "anyOf": [
+///       {
+///         "properties": {
+///           "name": {"type": "string", "enum": ["tool1"]},
+///           "parameters": { /* tool1's parameter schema */ }
+///         },
+///         "required": ["name", "parameters"]
+///       },
+///       {
+///         "properties": {
+///           "name": {"type": "string", "enum": ["tool2"]},
+///           "parameters": { /* tool2's parameter schema */ }
+///         },
+///         "required": ["name", "parameters"]
+///       }
+///     ]
+///   },
+///   "$defs": { /* shared type definitions from all tools */ }
+/// }
+/// ```
+///
+/// # $defs Handling
+///
+/// `$defs` contains shared JSON Schema definitions that can be referenced via `$ref`.
+/// For example, if two tools reference a common type:
+/// ```json
+/// {
+///   "$defs": {
+///     "Location": {
+///       "type": "object",
+///       "properties": {
+///         "city": {"type": "string"},
+///         "country": {"type": "string"}
+///       }
+///     }
+///   }
+/// }
+/// ```
+///
+/// We extract `$defs` from each tool's schema and merge them into a global `$defs` map
+/// at the root level. If multiple tools define the same type, we verify they match to
+/// avoid conflicts.
 fn build_required_schema(tools: &[ChatCompletionTool]) -> Result<Value, ToolChoiceError> {
+    // Accumulator for all shared type definitions ($defs) across tools
     let mut defs: BTreeMap<String, Value> = BTreeMap::new();
     let mut any_of = Vec::with_capacity(tools.len());
 
     for tool in tools {
+        // Extract parameter schema and its $defs (if any)
         let ParamsAndDefs {
             schema,
             defs: new_defs,
@@ -84,6 +139,7 @@ fn build_required_schema(tools: &[ChatCompletionTool]) -> Result<Value, ToolChoi
         }));
     }
 
+    // Build the top-level array schema with anyOf constraints
     let mut result = json!({
         "type": "array",
         "minItems": 1,
@@ -93,6 +149,7 @@ fn build_required_schema(tools: &[ChatCompletionTool]) -> Result<Value, ToolChoi
         },
     });
 
+    // Attach the merged $defs at the root level if any were collected
     if !defs.is_empty()
         && let Value::Object(map) = &mut result
     {
@@ -105,11 +162,42 @@ fn build_required_schema(tools: &[ChatCompletionTool]) -> Result<Value, ToolChoi
     Ok(result)
 }
 
+/// Holds a tool's parameter schema and its extracted $defs (if any).
+///
+/// When a tool's parameters reference shared types via `$ref`, those types
+/// are defined in a `$defs` section within the schema. We extract them separately
+/// to merge into a global definitions map.
 struct ParamsAndDefs {
+    /// The parameter schema with `$defs` removed (if it had one)
     schema: Value,
+    /// Extracted `$defs` map, or None if the schema had no definitions
     defs: Option<BTreeMap<String, Value>>,
 }
 
+/// Extracts `$defs` from a function's parameter schema, returning both the
+/// cleaned schema and the definitions separately.
+///
+/// # Example
+///
+/// Input schema:
+/// ```json
+/// {
+///   "type": "object",
+///   "properties": {
+///     "location": {"$ref": "#/$defs/Location"}
+///   },
+///   "$defs": {
+///     "Location": {
+///       "type": "object",
+///       "properties": {"city": {"type": "string"}}
+///     }
+///   }
+/// }
+/// ```
+///
+/// Returns:
+/// - schema: same as input but with `$defs` removed
+/// - defs: `Some({"Location": {...}})`
 fn split_defs(function: &FunctionObject) -> Result<ParamsAndDefs, ToolChoiceError> {
     let mut schema = clone_parameters(function);
     let defs = match &mut schema {
@@ -136,6 +224,26 @@ fn convert_defs(
     }
 }
 
+/// Merges definitions from one tool into the global `$defs` accumulator.
+///
+/// # Conflict Detection
+///
+/// If two tools define the same type name but with different schemas, we return
+/// an error. This ensures consistency across tool definitions.
+///
+/// # Example
+///
+/// If `target` contains:
+/// ```json
+/// {"Location": {"type": "object", "properties": {"city": {"type": "string"}}}}
+/// ```
+///
+/// And we try to merge:
+/// ```json
+/// {"Location": {"type": "object", "properties": {"city": {"type": "number"}}}}
+/// ```
+///
+/// This will return `ToolChoiceError::ConflictingDefinition("Location")`.
 fn merge_defs(
     target: &mut BTreeMap<String, Value>,
     defs: Option<BTreeMap<String, Value>>,
