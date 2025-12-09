@@ -35,12 +35,33 @@ def pytest_addoption(parser):
         help="Include tests that require custom builds (e.g., MoE models). "
         "By default, these tests are excluded.",
     )
-    parser.addoption(
+parser.addoption(
         "--skip-service-restart",
         action="store_true",
         default=False,
         help="Skip restarting NATS and etcd services before deployment. "
         "By default, these services are restarted.",
+    )
+    # Hardware fault injection options
+    parser.addoption(
+        "--enable-hw-faults",
+        action="store_true",
+        default=False,
+        help="Enable hardware fault injection tests (GPU failures, CUDA errors). "
+        "Requires fault injection infrastructure.",
+    )
+    parser.addoption(
+        "--hw-fault-xid",
+        type=int,
+        default=79,
+        choices=[79, 48, 94, 95, 43, 74],
+        help="XID error type for hardware fault injection (default: 79 - GPU fell off bus)",
+    )
+    parser.addoption(
+        "--hw-fault-target-node",
+        type=str,
+        default=None,
+        help="Target node for hardware fault injection (auto-detect if not specified)"
     )
 
 
@@ -122,3 +143,21 @@ def client_type(request):
 def skip_service_restart(request):
     """Get skip restart services flag from command line."""
     return request.config.getoption("--skip-service-restart")
+
+
+@pytest.fixture
+def hw_fault_config(request):
+    """
+    Get hardware fault configuration from command line options.
+    
+    Returns None if --enable-hw-faults is not set, allowing tests to skip.
+    Returns a config dict if enabled.
+    """
+    if not request.config.getoption("--enable-hw-faults"):
+        return None
+    
+    return {
+        "enabled": True,
+        "xid_type": request.config.getoption("--hw-fault-xid"),
+        "target_node": request.config.getoption("--hw-fault-target-node"),
+    }
