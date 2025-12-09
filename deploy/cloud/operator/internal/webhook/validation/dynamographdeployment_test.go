@@ -419,7 +419,8 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			validator := NewDynamoGraphDeploymentValidator(tt.newDeployment)
-			warnings, err := validator.ValidateUpdate(tt.oldDeployment)
+			// Pass nil userInfo - these tests don't modify replicas, so it's safe
+			warnings, err := validator.ValidateUpdate(tt.oldDeployment, nil)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DynamoGraphDeploymentValidator.ValidateUpdate() error = %v, wantErr %v", err, tt.wantErr)

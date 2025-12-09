@@ -68,37 +68,42 @@ func (v *DynamoGraphDeploymentValidator) Validate() (admission.Warnings, error) 
 }
 
 // ValidateUpdate performs stateful validation comparing old and new DynamoGraphDeployment.
+// userInfo is used for identity-based validation (replica protection).
+// If userInfo is nil, replica changes for DGDSA-enabled services are rejected (fail closed).
 // Returns warnings and error.
-func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.DynamoGraphDeployment) (admission.Warnings, error) {
-	return v.ValidateUpdateWithUserInfo(old, nil)
-}
+func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo *authenticationv1.UserInfo) (admission.Warnings, error) {
+	var warnings admission.Warnings
 
-// ValidateUpdateWithUserInfo performs stateful validation with user identity checking.
-// When userInfo is provided, it validates that only allowed controllers can modify
-// replicas for services with scaling adapter enabled.
-// Returns warnings and error.
-func (v *DynamoGraphDeploymentValidator) ValidateUpdateWithUserInfo(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo *authenticationv1.UserInfo) (admission.Warnings, error) {
-	// Validate that BackendFramework is not changed (immutable)
-	if v.deployment.Spec.BackendFramework != old.Spec.BackendFramework {
-		warning := "Changing spec.backendFramework may cause unexpected behavior"
-		return admission.Warnings{warning}, fmt.Errorf("spec.backendFramework is immutable and cannot be changed after creation")
+	// Validate immutable fields
+	if err := v.validateImmutableFields(old, &warnings); err != nil {
+		return warnings, err
 	}
 
 	// Validate replicas changes for services with scaling adapter enabled
-	if userInfo != nil {
-		if err := v.validateReplicasChanges(old, *userInfo); err != nil {
-			return nil, err
-		}
+	// Pass userInfo (may be nil - will fail closed for DGDSA-enabled services)
+	if err := v.validateReplicasChanges(old, userInfo); err != nil {
+		return warnings, err
 	}
 
-	return nil, nil
+	return warnings, nil
+}
+
+// validateImmutableFields checks that immutable fields have not been changed.
+// Appends warnings to the provided slice.
+func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv1alpha1.DynamoGraphDeployment, warnings *admission.Warnings) error {
+	if v.deployment.Spec.BackendFramework != old.Spec.BackendFramework {
+		*warnings = append(*warnings, "Changing spec.backendFramework may cause unexpected behavior")
+		return fmt.Errorf("spec.backendFramework is immutable and cannot be changed after creation")
+	}
+	return nil
 }
 
 // validateReplicasChanges checks if replicas were changed for services with scaling adapter enabled.
 // Only authorized service accounts (operator controller, planner) can modify these fields.
-func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo authenticationv1.UserInfo) error {
+// If userInfo is nil, all replica changes for DGDSA-enabled services are rejected (fail closed).
+func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo *authenticationv1.UserInfo) error {
 	// If the request comes from an authorized service account, allow the change
-	if internalwebhook.CanModifyDGDReplicas(userInfo) {
+	if userInfo != nil && internalwebhook.CanModifyDGDReplicas(*userInfo) {
 		return nil
 	}
 

@@ -23,6 +23,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -92,22 +93,23 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 	}
 
 	// Get user info from admission request context for identity-based validation
+	var userInfo *authenticationv1.UserInfo
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
-		logger.Error(err, "failed to get admission request from context, skipping user-based validation")
-		// Fall back to basic validation without user info
-		updateWarnings, err := validator.ValidateUpdate(oldDeployment)
-		if err != nil {
-			return updateWarnings, err
-		}
-		warnings = append(warnings, updateWarnings...)
-		return warnings, nil
+		logger.Error(err, "failed to get admission request from context, replica changes for DGDSA-enabled services will be rejected")
+		// userInfo remains nil - validateReplicasChanges will fail closed
+	} else {
+		userInfo = &req.UserInfo
 	}
 
 	// Validate stateful rules (immutability + replicas protection)
-	updateWarnings, err := validator.ValidateUpdateWithUserInfo(oldDeployment, &req.UserInfo)
+	updateWarnings, err := validator.ValidateUpdate(oldDeployment, userInfo)
 	if err != nil {
-		logger.Info("validation failed", "error", err.Error(), "user", req.UserInfo.Username)
+		username := "<unknown>"
+		if userInfo != nil {
+			username = userInfo.Username
+		}
+		logger.Info("validation failed", "error", err.Error(), "user", username)
 		return updateWarnings, err
 	}
 
