@@ -19,7 +19,9 @@ package webhook
 
 import (
 	"context"
+	"strings"
 
+	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -114,6 +116,57 @@ func (v *LeaseAwareValidator) shouldSkipValidation(obj runtime.Object) bool {
 			"namespace", namespace,
 			"kind", obj.GetObjectKind().GroupVersionKind().Kind)
 		return true
+	}
+
+	return false
+}
+
+// DGDReplicasModifierSuffixes defines suffixes for service accounts that are authorized
+// to modify DGD replicas when scaling adapter is enabled.
+// Service accounts matching any of these suffixes are allowed regardless of namespace.
+var DGDReplicasModifierSuffixes = []string{
+	// Dynamo operator controller manager (handles DGDSA reconciliation)
+	// Example: "dynamo-platform-dynamo-operator-controller-manager"
+	"-dynamo-operator-controller-manager",
+
+	// Planner service account (manages DGD replicas for autoscaling)
+	// Example: "planner-serviceaccount"
+	"planner-serviceaccount",
+}
+
+// CanModifyDGDReplicas checks if the request comes from a service account authorized
+// to modify DGD replicas when scaling adapter is enabled.
+// Service accounts are identified by username format: system:serviceaccount:<namespace>:<name>
+//
+// Authorized service accounts (by suffix):
+// - *-dynamo-operator-controller-manager (for DGDSA reconciliation)
+// - *planner-serviceaccount (for Planner autoscaling)
+func CanModifyDGDReplicas(userInfo authenticationv1.UserInfo) bool {
+	username := userInfo.Username
+
+	// Service accounts have username format: system:serviceaccount:<namespace>:<name>
+	if !strings.HasPrefix(username, "system:serviceaccount:") {
+		return false
+	}
+
+	// Parse: system:serviceaccount:<namespace>:<name>
+	parts := strings.Split(username, ":")
+	if len(parts) != 4 {
+		return false
+	}
+
+	namespace := parts[2]
+	saName := parts[3]
+
+	// Check against authorized suffixes
+	for _, suffix := range DGDReplicasModifierSuffixes {
+		if strings.HasSuffix(saName, suffix) {
+			webhookCommonLog.V(1).Info("allowing DGD replicas modification",
+				"serviceAccount", saName,
+				"namespace", namespace,
+				"matchedSuffix", suffix)
+			return true
+		}
 	}
 
 	return false
