@@ -247,14 +247,12 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    export CC=$(which gcc) && \
+    export CXX=$(which g++) && \
     source ${VIRTUAL_ENV}/bin/activate && \
     git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
     mkdir build && \
-    ls -l /usr/local/bin | grep c++ && \
-    ls -l /usr/local/bin | grep g++ && \
-    which c++ && \
-    readlink -f $(which c++) && \
     meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
     -Dcudapath_lib="/usr/local/cuda/lib64" \
     -Dcudapath_inc="/usr/local/cuda/include" \
