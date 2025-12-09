@@ -206,9 +206,10 @@ await register_llm(
 The following models have been tested with Dynamo's vLLM multimodal backend:
 
 - **Qwen2.5-VL** - `Qwen/Qwen2.5-VL-7B-Instruct`
+- **Qwen3-VL** - `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8`
 - **LLaVA 1.5** - `llava-hf/llava-1.5-7b-hf`
 - **Llama 4 Maverick** - `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`
-- **LLa Next Video** - `llava-hf/LLaVA-NeXT-Video-7B-hf`
+- **LLaVA Next Video** - `llava-hf/LLaVA-NeXT-Video-7B-hf`
 - **Qwen2-Audio** - `Qwen/Qwen2-Audio-7B-Instruct`
 
 For a complete list of multimodal models supported by vLLM, see [vLLM Supported Multimodal Models](https://docs.vllm.ai/en/latest/models/supported_models/#list-of-multimodal-language-models). Models listed there should work with Simple Aggregated Mode but may not be explicitly tested.
