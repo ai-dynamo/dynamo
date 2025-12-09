@@ -335,6 +335,10 @@ def test_vllm_kv_router_basic(
         "ETCD_ENDPOINTS": f"http://localhost:{etcd_process.port}",
     }
 
+    # Set environment variables (needed for KVRouterProcess subprocess that gets created in _test_router_basic)
+    # pytest-xdist safe: workers are separate processes with isolated os.environ
+    os.environ.update(runtime_env)
+
     # Allocate dynamic frontend port
     frontend_port = allocate_free_port(8100)
     logger.info(f"Allocated dynamic frontend port: {frontend_port}")
@@ -391,6 +395,11 @@ def test_router_decisions_vllm_multiple_workers(
         "ETCD_ENDPOINTS": f"http://localhost:{etcd_process.port}",
     }
 
+    # Set environment variables (needed for KvPushRouter background task to subscribe to NATS KV events)
+    # KvPushRouter is created directly in _test_router_decisions and reads NATS_SERVER from os.environ
+    # pytest-xdist safe: workers are separate processes with isolated os.environ
+    os.environ.update(runtime_env)
+
     try:
         # Start 2 worker processes on the same GPU
         logger.info("Starting 2 vLLM worker processes on single GPU (gpu_mem=0.4)")
@@ -406,7 +415,7 @@ def test_router_decisions_vllm_multiple_workers(
         # Initialize vLLM workers
         vllm_workers.__enter__()
 
-        # Get runtime and create endpoint (pass env to avoid modifying global os.environ)
+        # Get runtime and create endpoint
         runtime = get_runtime(env=runtime_env)
         namespace = runtime.namespace(vllm_workers.namespace)
         component = namespace.component("backend")
@@ -447,6 +456,11 @@ def test_router_decisions_vllm_dp(
         "ETCD_ENDPOINTS": f"http://localhost:{etcd_process.port}",
     }
 
+    # Set environment variables (needed for KvPushRouter background task to subscribe to NATS KV events)
+    # KvPushRouter is created directly in _test_router_decisions and reads NATS_SERVER from os.environ
+    # pytest-xdist safe: workers are separate processes with isolated os.environ
+    os.environ.update(runtime_env)
+
     try:
         logger.info("Starting 2 vLLM DP ranks (dp_size=2) (gpu_mem=0.4)")
         vllm_workers = VLLMProcess(
@@ -460,7 +474,7 @@ def test_router_decisions_vllm_dp(
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
         vllm_workers.__enter__()
 
-        # Get runtime and create endpoint (pass env to avoid modifying global os.environ)
+        # Get runtime and create endpoint
         runtime = get_runtime(env=runtime_env)
         # Use the namespace from the vLLM workers
         namespace = runtime.namespace(vllm_workers.namespace)
@@ -500,6 +514,11 @@ def test_vllm_indexers_sync(
         "NATS_SERVER": f"nats://localhost:{nats_process.port}",
         "ETCD_ENDPOINTS": f"http://localhost:{etcd_process.port}",
     }
+
+    # Set environment variables (needed for KvPushRouter background task to subscribe to NATS KV events)
+    # KvPushRouter is created directly in _test_router_indexers_sync and reads NATS_SERVER from os.environ
+    # pytest-xdist safe: workers are separate processes with isolated os.environ
+    os.environ.update(runtime_env)
 
     try:
         # Start vLLM workers (pass runtime_env so workers can connect to NATS/ETCD)
