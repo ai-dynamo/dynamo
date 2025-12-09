@@ -222,7 +222,7 @@ NIXL is used only for embedding transfer:
 ```python
 Encode Worker:
   descriptor = connect.Descriptor(precomputed_embeddings)
-  with connector.create_readable(descriptor) as readable:
+  with await connector.create_readable(descriptor) as readable:
       request.serialized_request = readable.metadata()
       # Send request with NIXL metadata
       await pd_worker_client.round_robin(request)
