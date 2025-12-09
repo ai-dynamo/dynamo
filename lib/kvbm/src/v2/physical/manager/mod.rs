@@ -25,7 +25,7 @@ use crate::v2::physical::transfer::executor::TransferOptionsInternal;
 use crate::v2::physical::transfer::options::TransferOptions;
 use crate::v2::distributed::worker::RemoteDescriptor;
 use anyhow::{Result, anyhow, bail};
-use dynamo_memory::StorageKind;
+use dynamo_memory::{ObjectStorage, StorageKind};
 use dynamo_memory::nixl::NixlAgent;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -254,6 +254,7 @@ impl TransferManager {
             layer_range,
             nixl_write_notification,
             bounce_buffer,
+            ..
         } = options;
 
         let mut internal_options = TransferOptionsInternal::builder();
@@ -285,24 +286,169 @@ impl TransferManager {
         )
     }
 
-    /// Execute a G4 offload.
+    /// Execute a G4 offload (write to object storage).
     ///
     /// Takes a LayoutHandle and a vector of block IDs for the source blocks and
-    /// a list of SequenceHashes for the destination blocks.
+    /// a RemoteDescriptor specifying the destination (either a remote layout or object storage).
     ///
-    /// use an extension on TransferOptions to pass in the "rank/part" of the the object in a
-    /// multi-worker/multi-tp scenario.
+    /// For `RemoteDescriptor::Object`, this transfers local blocks to object storage using
+    /// NIXL's OBJ plugin. Each source block is mapped to a corresponding object key.
+    ///
+    /// # Arguments
+    /// * `src_handle` - Handle to the source layout (local)
+    /// * `src_blocks` - Block IDs to transfer from the source layout
+    /// * `dst_descriptor` - Destination descriptor (Layout or Object)
+    /// * `options` - Transfer options (layer range, notifications, etc.)
+    ///
+    /// # Returns
+    /// A notification handle that can be awaited for transfer completion
     pub fn execute_g4_offload(
+        &self,
         src_handle: LayoutHandle,
         src_blocks: &[BlockId],
-        dst_descriptors: &[RemoteDescriptor],
-        options: TransferOptions, // add rank/part to the options
+        dst_descriptor: RemoteDescriptor,
+        options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
-        // check registration cache for the remote object, if it's not found, register it with nixl
-        // register all non-registered blocks with nixl in parallel
-        // then extend super::transfer::executor to access the memory regions for the source
-        // and generate a nixl descriptor
-        todo!("implement remote offload")
+        match dst_descriptor {
+            RemoteDescriptor::Layout { handle, block_ids } => {
+                // Delegate to standard layout-to-layout transfer
+                self.execute_transfer(src_handle, src_blocks, handle, &block_ids, options)
+            }
+            RemoteDescriptor::Object { keys } => {
+                // Validate block count matches key count
+                if src_blocks.len() != keys.len() {
+                    bail!(
+                        "Block count mismatch: {} source blocks, {} destination keys",
+                        src_blocks.len(),
+                        keys.len()
+                    );
+                }
+                // Execute G4 object storage offload
+                self.execute_object_offload(src_handle, src_blocks, &keys, options)
+            }
+        }
+    }
+
+    /// Internal helper to execute object storage offload.
+    ///
+    /// Transfers blocks from a local layout to object storage using NIXL's OBJ plugin.
+    /// Assumes source layout is fully contiguous - each block is a single contiguous region.
+    ///
+    /// The flow is:
+    /// 1. Register object storage slots with metadata containing the u128 object key
+    /// 2. Build transfer descriptors using the registered device_ids
+    /// 3. Execute the transfer
+    fn execute_object_offload(
+        &self,
+        src_handle: LayoutHandle,
+        src_blocks: &[BlockId],
+        dst_keys: &[crate::v2::SequenceHash],
+        options: TransferOptions,
+    ) -> Result<TransferCompleteNotification> {
+        use dynamo_memory::nixl::{MemType, XferDescList, XferOp};
+        eprintln!("Executing object offload");
+        // Get source layout from registry
+        let src_layout = {
+            let registry = self.registry.read().unwrap();
+            registry
+                .get_layout(src_handle)
+                .ok_or_else(|| anyhow!("invalid source handle: {}", src_handle))?
+                .clone()
+        };
+
+        let nixl_agent = self.context.nixl_agent();
+
+        // Validate NIXL has OBJ backend loaded
+        if !nixl_agent.has_backend("OBJ") {
+            bail!("NIXL OBJ backend not available for object storage transfers");
+        }
+
+        let src_layout_inner = src_layout.layout();
+        let config = src_layout_inner.config();
+
+        // Calculate the size of one contiguous block
+        // block_size = num_layers * outer_dim * page_size * inner_dim * dtype_width_bytes
+        let block_size = config.num_layers
+            * config.outer_dim
+            * config.page_size
+            * config.inner_dim
+            * config.dtype_width_bytes;
+
+        // Get source NIXL metadata
+        let src_metadata = src_layout.nixl_metadata();
+        let src_mem_type = src_metadata.mem_type();
+        let src_device_id = src_metadata.device_id();
+
+        // Get TP rank for object key generation (default to 0 if not specified)
+        let tp_rank = options.tp_rank.unwrap_or(0);
+
+        // Step 1: Register object storage slots with metadata containing the object key
+        // The object key format is: "{sequence_hash}_{tp_rank}" to ensure uniqueness
+        // across both sequences and tensor parallel ranks.
+        // The OBJ backend stores the mapping: device_id -> object_key (from metaInfo)
+        // IMPORTANT: We must keep the ObjectStorage and RegistrationHandle alive until
+        // the transfer completes, as dropping the handle will deregister the memory.
+        let mut obj_storages = Vec::with_capacity(dst_keys.len());
+        let mut _registration_handles = Vec::with_capacity(dst_keys.len());
+        for dst_key in dst_keys.iter() {
+            // Create object key: "{sequence_hash}_{tp_rank}"
+            let object_key = format!("{}_{}", dst_key.as_u128(), tp_rank);
+            let obj_storage = ObjectStorage::new("", &object_key, block_size)
+                .map_err(|e| anyhow!("Failed to create object storage: {:?}", e))?;
+            let handle = nixl_agent
+                .register_memory(&obj_storage, None)
+                .map_err(|e| anyhow!("Failed to register object storage: {:?}", e))?;
+            obj_storages.push(obj_storage);
+            _registration_handles.push(handle);
+        }
+
+        // Step 2: Build transfer descriptor lists
+        let mut src_dl = XferDescList::new(src_mem_type)?;
+        let mut dst_dl = XferDescList::new(MemType::Object)?;
+
+        // Add one descriptor per block (contiguous memory assumption)
+        for (&src_block_id, dst_key) in src_blocks.iter().zip(dst_keys.iter()) {
+            // Get the base address of the block (first layer, first outer dim)
+            let src_region = src_layout.memory_region(src_block_id, 0, 0)?;
+
+            // Use the same object key format as registration
+            let object_key = format!("{}_{}", dst_key.as_u128(), tp_rank);
+            let device_id = ObjectStorage::device_id(&object_key);
+
+            // Add to source descriptor list - full contiguous block
+            src_dl.add_desc(src_region.addr(), block_size, src_device_id);
+
+            // Add to destination descriptor list
+            // The OBJ backend will look up the object key from the registration
+            dst_dl.add_desc(0, block_size, device_id);
+        }
+
+        // Step 3: Create transfer request
+        // For local plugin transfers (loopback), use the agent's own name
+        let agent_name = nixl_agent.name();
+        let xfer_req = nixl_agent.create_xfer_req(
+            XferOp::Write,
+            &src_dl,
+            &dst_dl,
+            &agent_name,
+            None,
+        )?;
+
+        // Post transfer request and handle completion
+        let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
+
+        // Registration handles will be dropped here, deregistering the memory.
+        // This is safe because the transfer has been posted.
+        drop(_registration_handles);
+        drop(obj_storages);
+
+        if still_pending {
+            // Register for async completion via status polling
+            Ok(self.context.register_nixl_status(xfer_req))
+        } else {
+            // Transfer completed synchronously
+            Ok(TransferCompleteNotification::completed())
+        }
     }
 
     pub fn execute_g4_onboard(

@@ -95,7 +95,7 @@ dialoguer = { version = "0.11", default-features = false, features = [
 
 # block_manager
 aligned-vec = { version = "0.6.4", optional = true }
-nixl-sys = { git = "https://github.com/ai-dynamo/nixl", branch = "main", optional = true }
+nixl-sys = { git = "https://github.com/cheese-head/nixl.git", branch = "rust-metadata", package = "nixl-sys", optional = true }
 
 cudarc = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }

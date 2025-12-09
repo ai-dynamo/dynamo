@@ -2905,6 +2905,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.17",
  "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -7036,7 +7037,7 @@ dependencies = [
 [[package]]
 name = "nixl-sys"
 version = "0.8.0"
-source = "git+https://github.com/ai-dynamo/nixl?branch=main#3fd4b923ba08b79e8c3ac9f4ab4f4a1d93376685"
+source = "git+https://github.com/cheese-head/nixl.git?branch=rust-metadata#e9861661bc08558913c99a5d1cec6da0ef415696"
 dependencies = [
  "bindgen 0.71.1",
  "cc",

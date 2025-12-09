@@ -49,12 +49,14 @@ use dynamo_nova::Nova;
 use serde::{Deserialize, Serialize};
 
 // Serializable transfer options for remote operations
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 struct SerializableTransferOptions {
     layer_range: Option<std::ops::Range<usize>>,
     nixl_write_notification: Option<u64>,
     bounce_buffer_handle: Option<LayoutHandle>,
     bounce_buffer_block_ids: Option<Vec<BlockId>>,
+    tp_rank: Option<u32>,
+    tp_size: Option<u32>,
 }
 
 impl From<SerializableTransferOptions> for TransferOptions {
@@ -64,6 +66,8 @@ impl From<SerializableTransferOptions> for TransferOptions {
             nixl_write_notification: opts.nixl_write_notification,
             // bounce_buffer requires TransportManager to resolve handle to layout
             bounce_buffer: None,
+            tp_rank: opts.tp_rank,
+            tp_size: opts.tp_size,
         }
     }
 }
@@ -94,6 +98,8 @@ impl From<TransferOptions> for SerializableTransferOptions {
             nixl_write_notification: opts.nixl_write_notification,
             bounce_buffer_handle,
             bounce_buffer_block_ids,
+            tp_rank: opts.tp_rank,
+            tp_size: opts.tp_size,
         }
     }
 }

@@ -30,14 +30,8 @@ impl WorkerTransfers for NovaWorkerClient {
         let event = self.nova.events().new_event()?;
         let awaiter = self.nova.events().awaiter(event.handle())?;
 
-        // Convert to serializable options
-        // TODO: Extract bounce buffer handle if present in options.bounce_buffer
-        let options = SerializableTransferOptions {
-            layer_range: options.layer_range,
-            nixl_write_notification: options.nixl_write_notification,
-            bounce_buffer_handle: None,
-            bounce_buffer_block_ids: None,
-        };
+        // Convert to serializable options (uses From<TransferOptions> impl)
+        let options: SerializableTransferOptions = options.into();
 
         // Create the message
         let message = LocalTransferMessage {
@@ -85,12 +79,7 @@ impl WorkerTransfers for NovaWorkerClient {
         let event = self.nova.events().new_event()?;
         let awaiter = self.nova.events().awaiter(event.handle())?;
 
-        let options = SerializableTransferOptions {
-            layer_range: options.layer_range,
-            nixl_write_notification: options.nixl_write_notification,
-            bounce_buffer_handle: None,
-            bounce_buffer_block_ids: None,
-        };
+        let options: SerializableTransferOptions = options.into();
 
         let message = RemoteOnboardMessage {
             src,
@@ -135,12 +124,7 @@ impl WorkerTransfers for NovaWorkerClient {
         let event = self.nova.events().new_event()?;
         let awaiter = self.nova.events().awaiter(event.handle())?;
 
-        let options = SerializableTransferOptions {
-            layer_range: options.layer_range,
-            nixl_write_notification: options.nixl_write_notification,
-            bounce_buffer_handle: None,
-            bounce_buffer_block_ids: None,
-        };
+        let options: SerializableTransferOptions = options.into();
 
         let message = RemoteOffloadMessage {
             src,

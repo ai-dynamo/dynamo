@@ -10,7 +10,8 @@ use std::ops::Range;
 /// Options for configuring transfer operations.
 ///
 /// This structure provides configuration for block and layer transfers,
-/// including layer ranges, NIXL write notifications, and bounce buffers.
+/// including layer ranges, NIXL write notifications, bounce buffers, and
+/// tensor parallelism (TP) configuration for distributed transfers.
 ///
 /// # Examples
 ///
@@ -18,6 +19,8 @@ use std::ops::Range;
 /// let options = TransferOptions::builder()
 ///     .nixl_write_notification(42)
 ///     .layer_range(0..10)
+///     .tp_rank(0)
+///     .tp_size(4)
 ///     .build();
 /// ```
 #[derive(Clone, Default, Builder)]
@@ -45,6 +48,23 @@ pub struct TransferOptions {
     /// source → bounce buffer → destination.
     #[builder(default, setter(strip_option, into))]
     pub bounce_buffer: Option<BounceBuffer>,
+
+    /// Tensor parallelism rank for distributed transfers.
+    ///
+    /// In a multi-worker TP scenario, this identifies which partition of the
+    /// data this worker handles. Used with G4 (object storage) transfers to
+    /// determine the part number for multipart uploads or which portion of
+    /// the object to read.
+    #[builder(default, setter(strip_option))]
+    pub tp_rank: Option<u32>,
+
+    /// Total number of tensor parallel workers.
+    ///
+    /// Used for validation and calculating byte offsets for object storage
+    /// transfers. Each worker transfers `total_size / tp_size` bytes at
+    /// offset `tp_rank * (total_size / tp_size)`.
+    #[builder(default, setter(strip_option))]
+    pub tp_size: Option<u32>,
 }
 
 impl TransferOptions {
@@ -79,6 +99,8 @@ mod tests {
         assert!(options.layer_range.is_none());
         assert!(options.nixl_write_notification.is_none());
         assert!(options.bounce_buffer.is_none());
+        assert!(options.tp_rank.is_none());
+        assert!(options.tp_size.is_none());
     }
 
     #[test]
@@ -113,5 +135,17 @@ mod tests {
 
         assert_eq!(options.nixl_write_notification, Some(100));
         assert_eq!(options.layer_range, Some(5..15));
+    }
+
+    #[test]
+    fn test_builder_with_tp_config() {
+        let options = TransferOptions::builder()
+            .tp_rank(2)
+            .tp_size(8)
+            .build()
+            .unwrap();
+
+        assert_eq!(options.tp_rank, Some(2));
+        assert_eq!(options.tp_size, Some(8));
     }
 }

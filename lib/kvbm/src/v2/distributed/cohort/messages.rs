@@ -163,6 +163,10 @@ pub struct TransferOptionsWire {
     pub layer_range: Option<Range<usize>>,
     /// NIXL write notification value delivered after RDMA write completes
     pub nixl_write_notification: Option<u64>,
+    /// Tensor parallelism rank for distributed transfers
+    pub tp_rank: Option<u32>,
+    /// Total number of tensor parallel workers
+    pub tp_size: Option<u32>,
 }
 
 impl From<TransferOptionsWire> for TransferOptions {
@@ -171,6 +175,8 @@ impl From<TransferOptionsWire> for TransferOptions {
             layer_range: wire.layer_range,
             nixl_write_notification: wire.nixl_write_notification,
             bounce_buffer: None,
+            tp_rank: wire.tp_rank,
+            tp_size: wire.tp_size,
         }
     }
 }
