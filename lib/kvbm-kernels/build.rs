@@ -134,7 +134,6 @@ fn build_with_prebuilt_kernels() {
 }
 
 fn build_from_source() {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let cu_files = discover_cuda_files();
     let out_dir = env::var("OUT_DIR").unwrap();
 

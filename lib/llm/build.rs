@@ -27,8 +27,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Emit cfg flag for conditional compilation
             println!("cargo:rustc-cfg=have_vec_copy_fatbin");
             println!(
-                "cargo:warning=CUDA FATBIN found at: {} - copied to OUT_DIR",
-                fatbin_path.display()
+                "cargo:warning=CUDA FATBIN copied from {} to {}",
+                fatbin_path.display(),
+                dest_path.display()
             );
         }
 
@@ -74,7 +75,7 @@ fn find_fatbin_file() -> Option<PathBuf> {
 
     // 2. Check standard locations (priority order)
     let default_paths = [
-        "./src/block_manager/block/transfer/kernels/vectorized_copy.fatbin", // Primary: Next to transfer module
+        "../kvbm-kernels/cuda/prebuilt/vectorized_copy.fatbin"
     ];
 
     for path in &default_paths {
