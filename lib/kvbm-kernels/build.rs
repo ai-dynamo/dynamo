@@ -120,8 +120,10 @@ fn build_with_prebuilt_kernels() {
             panic!(
                 "Hash mismatch for {}! Rebuild with nvcc.\n  .cu: current={}, stored={}\n  .fatbin: current={}, stored={}",
                 kernel_name,
-                current_cu_hash, stored_hashes[0],
-                current_fatbin_hash, stored_hashes[1]
+                current_cu_hash,
+                stored_hashes[0],
+                current_fatbin_hash,
+                stored_hashes[1]
             );
         }
 
