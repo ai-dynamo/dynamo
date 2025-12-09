@@ -16,6 +16,8 @@ on:
         required: false
         type: boolean
         default: false
+  schedule:
+    - cron: '0 8 * * *' # Daily at 08:00 UTC - runs fault tolerance tests
 
 concurrency:
     # The group name is a ternary operation. If the ref_name is 'main',
@@ -330,7 +332,10 @@ jobs:
 
   deploy-test-fault-tolerance:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Only run on nightly schedule or when explicitly requested
+    if: |
+      needs.changed-files.outputs.has_code_changes == 'true' && 
+      (github.event_name == 'schedule' || github.event.inputs.run_deploy_operator == 'true')
     needs: [changed-files, operator, vllm, trtllm, sglang]
     permissions:
       contents: read
