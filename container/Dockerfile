@@ -61,14 +61,6 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
 ARG ARCH
 ARG ARCH_ALT
-ARG PYTHON_VERSION
-ARG USE_SCCACHE
-ARG SCCACHE_BUCKET
-ARG SCCACHE_REGION
-ARG NIXL_UCX_REF
-ARG NIXL_REF
-ARG NIXL_GDRCOPY_REF
-ARG NIXL_LIBFABRIC_REF
 
 USER root
 WORKDIR /opt/dynamo
@@ -121,15 +113,6 @@ FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 ARG ARCH
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
-ARG PYTHON_VERSION
-ARG ENABLE_KVBM
-ARG USE_SCCACHE
-ARG SCCACHE_BUCKET
-ARG SCCACHE_REGION
-ARG NIXL_UCX_REF
-ARG NIXL_REF
-ARG NIXL_GDRCOPY_REF
-ARG NIXL_LIBFABRIC_REF
 
 WORKDIR /workspace
 
@@ -267,6 +250,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
      echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
      ldconfig
 
+ARG NIXL_LIBFABRIC_REF
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
