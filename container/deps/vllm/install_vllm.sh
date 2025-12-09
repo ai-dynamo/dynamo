@@ -141,6 +141,7 @@ else
     echo "Building vLLM from source for ${ARCH} architecture..."
     echo "Try to install specific PyTorch and other dependencies first"
     uv pip install --no-cache --index-strategy=unsafe-best-match --index https://download.pytorch.org/whl/ -r requirements/cuda.txt
+    uv pip install --no-cache setuptools_scm # required to build vLLM from source
     MAX_JOBS=${MAX_JOBS} uv pip install -v --no-cache --no-build-isolation .
 fi
 
