@@ -151,6 +151,26 @@ runs:
         # Exit with the build's exit code
         exit ${BUILD_EXIT_CODE}
 
+    - name: Run Sanity Check on Runtime Image
+      if: inputs.target == 'runtime'
+      shell: bash
+      run: |
+        IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+        echo "Running sanity check on image: $IMAGE_TAG"
+
+        # Run the sanity check script inside the container
+        # The script is located in /workspace/deploy/sanity_check.py in runtime containers
+        set +e
+        docker run --rm "$IMAGE_TAG" python /workspace/deploy/sanity_check.py --runtime-check --no-gpu-check
+        SANITY_CHECK_EXIT_CODE=$?
+        set -e
+        if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+          echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+          exit ${SANITY_CHECK_EXIT_CODE}
+        else
+          echo "✅ Sanity check passed"
+        fi
+
     - name: Capture Build Metrics
       id: metrics
       shell: bash
