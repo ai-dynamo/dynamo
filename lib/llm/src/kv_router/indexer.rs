@@ -48,7 +48,10 @@ use std::{
     thread::JoinHandle,
     time::{Duration, Instant},
 };
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::{
+    runtime::Handle,
+    sync::{broadcast, mpsc, oneshot},
+};
 use tokio_util::sync::CancellationToken;
 use xxhash_rust::xxh3;
 
@@ -207,11 +210,14 @@ impl RouterEvent {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct WorkerKvQueryRequest {
     /// The worker ID of the worker to query.
-    /// TODO: let request query for `n` events.
-    /// For now, assume that every request is
-    /// a request to dump the whole event buffer
-    /// in the worker local KvIndexer
     pub worker_id: WorkerId,
+
+    /// The query can specify the [start, end) range of event id's to return.
+    /// If neither is specified, the worker dumps all events.
+    /// If only one is specified, `start` is assumed to be the oldest logged event,
+    /// and `end` is assumed to be the newest logged event.
+    pub start_event_id: Option<u64>,
+    pub end_event_id: Option<u64>,
 }
 
 /// Response from a worker's local KV indexer.
@@ -1320,7 +1326,7 @@ pub struct LocalKvIndexer {
     /// Circular buffer of recent events
     event_buffer: Mutex<VecDeque<RouterEvent>>,
     /// Maximum number of events to keep in buffer
-    max_buffer_size: usize,
+    max_buffer_size: usize, // Router sets this to WORKER_KV_INDEXER_BUFFER_SIZE
 }
 
 impl LocalKvIndexer {
@@ -1340,19 +1346,90 @@ impl LocalKvIndexer {
 
     /// get the N most recent events (returned in oldest->newest order)
     pub fn get_recent_events(&self, n: usize) -> Vec<RouterEvent> {
-        // TODO what if n > buffer size
+        if n == 0 {
+            return Vec::new();
+        }
+
+        // If requested more events than buffer size, fetch snapshot from indexer
+        // using self.indexer.dump_events()
+        if n > self.max_buffer_size {
+            tracing::warn!(
+                requested = n,
+                buffer_capacity = self.max_buffer_size,
+                "Requested more events than buffer size; fetching snapshot from indexer."
+            );
+
+            // Borrow worker runtime and async block on the future
+            return Handle::try_current()
+                .map_err(|err| {
+                    tracing::error!(
+                        error = %err,
+                        "LocalKvIndexer.get_recent_events called outside of Tokio runtime; falling back to buffered events"
+                    );
+                })
+                .and_then(|handle| {
+                    handle.block_on(async {
+                        match self.indexer.dump_events().await {
+                            Ok(mut events) => {
+                                if events.len() > n {
+                                    let keep_from = events.len() - n;
+                                    events.drain(0..keep_from);
+                                }
+                                Ok(events)
+                            }
+                            Err(err) => {
+                                tracing::error!(
+                                    error = %err,
+                                    "Failed to dump events from LocalKvIndexer; returning buffered subset"
+                                );
+                                Err(())
+                            }
+                        }
+                    })
+                })
+                .unwrap_or_else(|_| self.collect_from_buffer(self.max_buffer_size));
+        }
+
+        // If requested less than or equal to buffer size, collect from buffer
         let buffer = self.event_buffer.lock().unwrap();
-        buffer.iter().rev().take(n).cloned().rev().collect()
+        buffer.iter().rev().take(limit).cloned().rev().collect()
     }
 
     /// get all buffered events (oldest first)
-    pub fn get_all_buffered_events(&self) -> Vec<RouterEvent> {
+    pub fn get_all_events_in_buffer(&self) -> Vec<RouterEvent> {
         let buffer = self.event_buffer.lock().unwrap();
         buffer.iter().cloned().collect()
     }
 
     /// Returns events in [start_id, end_id)
-    pub fn get_events_in_id_range(&self, start_id: u64, end_id: u64) -> Vec<RouterEvent> {
+    pub async fn get_events(&self, start_id: Optional<u64>, end_id: Optional<u64>) -> Vec<RouterEvent> {
+        let events = match (start_id, end_id) {
+            (None, None) => {self.dump_events().await.unwrap()}
+            (None, Some(end_id)) => {self.dump_events().await.unwrap().iter().take_while(|e| e.event.event_id < end_id).collect()}
+            (Some(start_id), None) => {
+                let first_buffered_id = self.event_buffer.lock().unwrap().front().map(|e| e.event.event_id).unwrap();
+                if start_id > first_buffered_id {
+                    get_buffer_events_in_id_range(start_id, u64::MAX)
+                }
+                else {
+                    self.dump_events().await.unwrap().iter().take_while(|e| e.event.event_id < start_id).collect()
+                }
+            }
+            (Some(start_id), Some(end_id)) => {
+
+                let first_buffered_id = self.event_buffer.lock().unwrap().front().map(|e| e.event.event_id).unwrap();
+                if start_id > first_buffered_id {
+                    get_buffer_events_in_id_range(start_id, end_id)
+                }
+                else {
+                    self.dump_events().await.unwrap().iter().take_while(|e| e.event.event_id < start_id).collect()
+                }
+            }
+        };
+        events
+    }
+
+    pub fn get_buffer_events_in_id_range(&self, start_id: u64, end_id: u64) -> Vec<RouterEvent> {
         let buffer = self.event_buffer.lock().unwrap();
         if buffer.is_empty() {
             tracing::warn!("No events in buffer yet; returning empty result.");
@@ -3354,7 +3431,7 @@ mod tests_local_indexer_query {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         // Get buffered events (what the query service would return)
-        let buffered_events = local_indexer.get_all_buffered_events();
+        let buffered_events = local_indexer.get_all_events_in_buffer();
 
         // Verify buffer contents
         assert_eq!(buffered_events.len(), 1, "Buffer should have 1 event");

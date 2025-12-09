@@ -81,6 +81,7 @@ pub const RADIX_STATE_FILE: &str = "radix-state";
 
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_QUERY_SUBJECT: &str = "worker_kv_indexer_query";
+pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 100; // store 100 most recent events in worker buffer
 
 // for router discovery registration
 pub const KV_ROUTER_COMPONENT: &str = "kv-router";

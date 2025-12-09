@@ -26,10 +26,10 @@ use dynamo_runtime::{
 use futures::StreamExt;
 
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_QUERY_SUBJECT,
+    KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_QUERY_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
     indexer::{
-        KvIndexerMetrics, LocalKvIndexer, RouterEvent, WorkerKvQueryRequest, WorkerKvQueryResponse,
-        compute_block_hash_for_seq,
+        KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer, RouterEvent, WorkerKvQueryRequest,
+        WorkerKvQueryResponse, compute_block_hash_for_seq,
     },
     protocols::*,
     scoring::LoadEvent,
@@ -156,7 +156,7 @@ impl KvEventPublisher {
                 cancellation_token.clone(),
                 kv_block_size,
                 metrics,
-                100, // TODO make this a parameter available for user change?
+                WORKER_KV_INDEXER_BUFFER_SIZE,
             )))
         } else {
             None
@@ -337,8 +337,38 @@ async fn start_worker_kv_query_service(
                 // TODO extract request event id range. For now, just debug print
                 tracing::debug!("Received WorkerKvQueryRequest: {:?}", request);
 
-                // Get events from local indexer (TODO for now, dump all events)
-                let events = local_indexer.get_all_buffered_events();
+                // Resolve which events to return based on optional start/end ids
+                let events = match (request.start_event_id, request.end_event_id) {
+                    (None, None) => {
+                        match local_indexer.dump_events().await {
+                            Ok(events) => events,
+                            Err(err) => {
+                                tracing::error!(
+                                    error = %err,
+                                    worker_id,
+                                    "Failed to dump events for WorkerKvQueryRequest; returning buffered events instead"
+                                );
+                                local_indexer.get_all_events_in_buffer()
+                            }
+                        }
+                    }
+                    _ => {
+                        let start_id = request.start_event_id.unwrap_or(0);
+                        let end_id = request.end_event_id.unwrap_or(u64::MAX);
+
+                        if start_id >= end_id {
+                            tracing::warn!(
+                                worker_id,
+                                start_id,
+                                end_id,
+                                "Invalid WorkerKvQueryRequest range; returning empty result"
+                            );
+                            Vec::new()
+                        } else {
+                            local_indexer.get_events_in_id_range(start_id, end_id)
+                        }
+                    }
+                };
 
                 // Build WorkerKvQueryResponse
                 let response = WorkerKvQueryResponse { events };
@@ -1742,7 +1772,7 @@ mod tests_startup_helpers {
         );
 
         // assert: Worker's local indexer buffered event
-        let buffered = local_indexer_1.get_all_buffered_events();
+        let buffered = local_indexer_1.get_all_events_in_buffer();
         assert_eq!(buffered.len(), 1, "Local indexer should buffer 1 event");
 
         // === STEP 2 & 3: Simulate Outage - Stop forwarding to router ===
@@ -1778,7 +1808,7 @@ mod tests_startup_helpers {
         }
 
         // assert: Worker's local indexer has both events
-        let buffered = local_indexer_1.get_all_buffered_events();
+        let buffered = local_indexer_1.get_all_events_in_buffer();
         assert_eq!(
             buffered.len(),
             2,
