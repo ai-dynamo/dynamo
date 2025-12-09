@@ -122,13 +122,35 @@ def build_sampling_params(
     if output_options:
         # Handle logprobs - vLLM expects this as an integer or None
         logprobs_value = output_options.get("logprobs")
-        if logprobs_value is not None:
-            sampling_params.logprobs = int(logprobs_value)
+        if logprobs_value is not None and logprobs_value != "":
+            try:
+                parsed_logprobs = int(logprobs_value)
+                if parsed_logprobs < 0:
+                    logger.warning(
+                        f"Invalid logprobs value: {logprobs_value} (must be non-negative), ignoring"
+                    )
+                else:
+                    sampling_params.logprobs = parsed_logprobs
+            except (ValueError, TypeError):
+                logger.warning(
+                    f"Invalid logprobs value: {logprobs_value} (must be integer), ignoring"
+                )
 
         # Handle prompt_logprobs - vLLM expects this as an integer or None
         prompt_logprobs_value = output_options.get("prompt_logprobs")
-        if prompt_logprobs_value is not None:
-            sampling_params.prompt_logprobs = int(prompt_logprobs_value)
+        if prompt_logprobs_value is not None and prompt_logprobs_value != "":
+            try:
+                parsed_prompt_logprobs = int(prompt_logprobs_value)
+                if parsed_prompt_logprobs < 0:
+                    logger.warning(
+                        f"Invalid prompt_logprobs value: {prompt_logprobs_value} (must be non-negative), ignoring"
+                    )
+                else:
+                    sampling_params.prompt_logprobs = parsed_prompt_logprobs
+            except (ValueError, TypeError):
+                logger.warning(
+                    f"Invalid prompt_logprobs value: {prompt_logprobs_value} (must be integer), ignoring"
+                )
 
     # If max_tokens wasn't provided (None or missing), compute a dynamic default
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
