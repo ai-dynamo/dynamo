@@ -145,7 +145,7 @@ impl HealthCheckManager {
                 tokio::select! {
                     _ = tokio::time::sleep(canary_wait) => {
                         // Timeout - send health check for this specific endpoint
-                        info!("Canary timer expired for {}, sending health check", endpoint_subject);
+                        debug!("Canary timer expired for {}, sending health check", endpoint_subject);
 
                         // Get the health check payload for this endpoint
                         let target = manager.drt.system_health().lock().get_health_check_target(&endpoint_subject);
@@ -292,7 +292,7 @@ impl HealthCheckManager {
                                 );
                                 false
                             } else {
-                                info!("Health check successful for {}", endpoint_subject_owned);
+                                debug!("Health check successful for {}", endpoint_subject_owned);
                                 true
                             }
                         } else {
@@ -302,6 +302,11 @@ impl HealthCheckManager {
                             );
                             false
                         };
+
+                        tokio::spawn(async move {
+                            // We need to consume the rest of the stream to avoid warnings on the frontend.
+                            response_stream.for_each(|_| async {}).await;
+                        });
 
                         // Update health status based on response
                         system_health.lock().set_endpoint_health_status(

@@ -369,6 +369,7 @@ rules:
   - dynamocomponentdeployments
   - dynamographdeploymentrequests
   - dynamographdeployments
+  - dynamographdeploymentscalingadapters
   - dynamomodels
   verbs:
   - create
@@ -393,6 +394,7 @@ rules:
   - dynamocomponentdeployments/status
   - dynamographdeploymentrequests/status
   - dynamographdeployments/status
+  - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
   verbs:
   - get
