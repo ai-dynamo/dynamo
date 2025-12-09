@@ -9,7 +9,6 @@
 
 pub mod config;
 pub mod connector;
-pub mod offload;
 pub mod vllm;
 
 // Re-export key types for convenience

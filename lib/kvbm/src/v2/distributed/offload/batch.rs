@@ -16,6 +16,7 @@ use crate::v2::logical::blocks::BlockMetadata;
 use crate::v2::{BlockId, SequenceHash};
 
 use super::handle::TransferId;
+use super::pending::PendingGuard;
 use super::queue::CancellableQueue;
 use super::source::SourceBlock;
 
@@ -73,6 +74,11 @@ pub struct QueuedBlock<T: BlockMetadata> {
     pub source: SourceBlock<T>,
     /// Transfer state for completion tracking
     pub state: Arc<std::sync::Mutex<TransferState>>,
+    /// RAII guard that removes this block from pending set on drop.
+    ///
+    /// This ensures duplicate prevention tracking is automatically cleaned up
+    /// when the block completes transfer, is cancelled, or errors out.
+    pub pending_guard: Option<PendingGuard>,
 }
 
 impl<T: BlockMetadata> std::fmt::Debug for QueuedBlock<T> {

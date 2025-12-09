@@ -17,6 +17,7 @@ pub struct ImmutableBlock<T: BlockMetadata> {
 }
 
 /// Weak reference to a registered block with upgrade capability
+#[derive(Clone)]
 pub struct WeakBlock<T: BlockMetadata> {
     sequence_hash: SequenceHash,
     block: Weak<dyn RegisteredBlock<T>>,

@@ -288,6 +288,7 @@ impl TransferContext {
         &self.cuda_context
     }
 
+    #[deprecated(since = "0.1.0", note = "Use the d2h_stream method instead")]
     pub(crate) fn d2h_stream(&self) -> &Arc<CudaStream> {
         &self.d2h_stream
     }

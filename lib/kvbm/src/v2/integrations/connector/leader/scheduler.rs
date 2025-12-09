@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::ConnectorLeader;
-use crate::v2::BlockId;
+use crate::{
+    G1,
+    distributed::offload::{ExternalBlock, SourceBlock},
+    v2::BlockId,
+};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -182,22 +186,64 @@ impl ConnectorLeader {
 
         for req in &scheduler_output.scheduled_new_reqs {
             match self.get_slot(&req.req_id) {
-                Ok(_slot) => {
+                Ok(shared_slot) => {
                     // thompson sampling to determine if we should offload any blocks for this request
                     // - todo: need to consider the what variables we should sample on
                     // determine if we should offload any blocks for this request
                     // - if the request max_tokens is 1 or very small, we don't have a lot of time to offload
                     //   and not put memory pressure on the device memory pool (request may finish before offload finishes)
-                    match self.oracle.evaluate_new_request(req) {
-                        Ok(_) => {
-                            tracing::debug!("new_request_data: {:#?}", req);
-                            // todo!("update fp builder")
-                        }
-                        Err(_) => {
-                            tracing::warn!("failed to evaluate new request_data: {:?}", req);
-                            continue;
-                        }
+                    // - if the request is nearing max_seq_lenght, the chances of it being used against being do diminish
+                    //   as agents will generally need to re-write the context and start over - we may get more aggressive
+                    //   and demote blocks that achieve this threshold to a lower priority offload / free-list
+                    // match self.oracle.evaluate_new_request(req) {
+                    //     Ok(_) => {
+                    //         tracing::debug!("new_request_data: {:#?}", req);
+                    //         // todo!("update fp builder")
+                    //     }
+                    //     Err(_) => {
+                    //         tracing::warn!("failed to evaluate new request_data: {:?}", req);
+                    //         continue;
+                    //     }
+                    // }
+
+                    // we should dump all the blocks for this request into the offload engine and let the offload engine
+                    // and it's respective policies decide whether or not to offload them.
+                    let slot = shared_slot.lock();
+
+                    if slot.is_marked_for_deletion() {
+                        tracing::warn!("slot is not marked for deletion, skipping offload");
+                        continue;
                     }
+
+                    let block_count = req.block_ids.len();
+                    assert_eq!(req.prompt_token_ids.len(), slot.sequence.total_tokens());
+
+                    let token_blocks = slot
+                        .sequence
+                        .blocks()
+                        .get(0..block_count).expect("block count must be less than or equal to the total number of blocks in the sequence");
+
+                    let sequence_hashes = token_blocks
+                        .iter()
+                        .map(|b| b.positional_sequence_hash())
+                        .collect::<Vec<_>>();
+
+                    let source_blocks = req
+                        .block_ids
+                        .iter()
+                        .zip(sequence_hashes)
+                        .map(|(block_id, sequence_hash)| {
+                            ExternalBlock::<G1>::new(*block_id, sequence_hash)
+                        })
+                        .collect::<Vec<_>>();
+
+                    let tranfer_handle = self
+                        .offload_engine
+                        .get()
+                        .unwrap()
+                        .enqueue_g1_to_g2(source_blocks);
+
+                    //slot.offload_blocks(&sequence_hashes, transfer_handle);
                 }
                 Err(_) => {
                     tracing::warn!(

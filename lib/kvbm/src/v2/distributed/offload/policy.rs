@@ -28,10 +28,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
+use dynamo_kvbm_config::{PolicyType, TierOffloadConfig};
 use futures::future::Either;
 
 use crate::v2::logical::blocks::{BlockMetadata, BlockRegistry, ImmutableBlock};
 use crate::v2::{BlockId, SequenceHash};
+
+use super::pending::PendingTracker;
 
 /// Boxed future type for async policy evaluation.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -172,6 +175,12 @@ pub trait OffloadPolicy<T: BlockMetadata>: Send + Sync {
 /// in the destination tier without acquiring a full block reference.
 /// This is efficient because it only checks the registry metadata.
 ///
+/// # Duplicate Prevention
+///
+/// When a `PendingTracker` is configured, this filter also checks for blocks
+/// that are currently in-flight through the pipeline. This prevents duplicate
+/// transfers when overlapping sequences are enqueued at roughly the same time.
+///
 /// # Performance
 ///
 /// This policy is fully synchronous and returns `Either::Left(Ready)`,
@@ -179,21 +188,41 @@ pub trait OffloadPolicy<T: BlockMetadata>: Send + Sync {
 ///
 /// # Example
 /// ```ignore
-/// let filter = PresenceFilter::<G1, G2>::new(registry.clone());
-/// // Blocks already in G2 will be filtered out
+/// let tracker = Arc::new(PendingTracker::new());
+/// let filter = PresenceFilter::<G1, G2>::new(registry.clone())
+///     .with_pending_tracker(tracker);
+/// // Blocks already in G2 OR in-flight will be filtered out
 /// ```
 pub struct PresenceFilter<Src: BlockMetadata, Dst: BlockMetadata> {
     registry: Arc<BlockRegistry>,
+    /// Optional tracker for pending (in-flight) transfers.
+    /// When set, blocks that are already being transferred will be filtered out.
+    pending_tracker: Option<Arc<PendingTracker>>,
     _marker: PhantomData<(Src, Dst)>,
 }
 
 impl<Src: BlockMetadata, Dst: BlockMetadata> PresenceFilter<Src, Dst> {
-    /// Create a new presence filter.
+    /// Create a new presence filter without pending tracking.
     pub fn new(registry: Arc<BlockRegistry>) -> Self {
         Self {
             registry,
+            pending_tracker: None,
             _marker: PhantomData,
         }
+    }
+
+    /// Add a pending tracker for duplicate prevention.
+    ///
+    /// When set, blocks that are currently in-flight (passed policy but not
+    /// yet registered in destination) will be filtered out.
+    pub fn with_pending_tracker(mut self, tracker: Arc<PendingTracker>) -> Self {
+        self.pending_tracker = Some(tracker);
+        self
+    }
+
+    /// Get a reference to the pending tracker if configured.
+    pub fn pending_tracker(&self) -> Option<&Arc<PendingTracker>> {
+        self.pending_tracker.as_ref()
     }
 }
 
@@ -204,10 +233,23 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceFilt
 
     fn evaluate<'a>(&'a self, ctx: &'a EvalContext<Src>) -> PolicyFuture<'a> {
         // Purely synchronous - uses Left(Ready), zero heap allocation
+
+        // 1. Check if already present in destination registry
         let presence = self.registry.check_presence::<Dst>(&[ctx.sequence_hash]);
-        // Return false (filter out) if already present in Dst
-        // presence[0].1 is true if block exists in Dst
-        sync_result(Ok(!presence[0].1))
+        if presence[0].1 {
+            return sync_result(Ok(false)); // Already transferred
+        }
+
+        // 2. Check if currently in-flight (pending transfer)
+        if self
+            .pending_tracker
+            .as_ref()
+            .is_some_and(|tracker| tracker.is_pending(&ctx.sequence_hash))
+        {
+            return sync_result(Ok(false)); // Already being transferred
+        }
+
+        sync_result(Ok(true)) // Not present, not pending - pass
     }
 
     fn evaluate_batch<'a>(&'a self, contexts: &'a [EvalContext<Src>]) -> PolicyBatchFuture<'a> {
@@ -219,11 +261,29 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceFilt
         let hashes: Vec<SequenceHash> = contexts.iter().map(|ctx| ctx.sequence_hash).collect();
         let presence = self.registry.check_presence::<Dst>(&hashes);
 
-        // Invert presence: true means "not present" (pass the filter)
-        sync_batch_result(Ok(presence
+        // Build results checking both registry presence and pending status
+        let results: Vec<bool> = presence
             .into_iter()
-            .map(|(_, present)| !present)
-            .collect()))
+            .map(|(hash, present)| {
+                // Filter out if already in registry
+                if present {
+                    return false;
+                }
+
+                // Filter out if currently pending
+                if self
+                    .pending_tracker
+                    .as_ref()
+                    .is_some_and(|tracker| tracker.is_pending(&hash))
+                {
+                    return false;
+                }
+
+                true // Not present, not pending - pass
+            })
+            .collect();
+
+        sync_batch_result(Ok(results))
     }
 }
 
@@ -236,6 +296,11 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceFilt
 /// The LFU threshold ensures we only offload "hot" blocks that have been
 /// accessed frequently, avoiding wasted transfers for rarely-used blocks.
 ///
+/// # Duplicate Prevention
+///
+/// When a `PendingTracker` is configured, this filter also checks for blocks
+/// that are currently in-flight through the pipeline.
+///
 /// # Performance
 ///
 /// This policy is fully synchronous and returns `Either::Left(Ready)`,
@@ -243,12 +308,16 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceFilt
 ///
 /// # Example
 /// ```ignore
-/// // Only offload blocks with LFU count > 8 that aren't in G3
-/// let filter = PresenceAndLFUFilter::<G2, G3>::new(registry.clone(), 8);
+/// // Only offload blocks with LFU count > 8 that aren't in G3 or in-flight
+/// let tracker = Arc::new(PendingTracker::new());
+/// let filter = PresenceAndLFUFilter::<G2, G3>::new(registry.clone(), 8)
+///     .with_pending_tracker(tracker);
 /// ```
 pub struct PresenceAndLFUFilter<Src: BlockMetadata, Dst: BlockMetadata> {
     registry: Arc<BlockRegistry>,
     min_lfu_count: u32,
+    /// Optional tracker for pending (in-flight) transfers.
+    pending_tracker: Option<Arc<PendingTracker>>,
     _marker: PhantomData<(Src, Dst)>,
 }
 
@@ -258,6 +327,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> PresenceAndLFUFilter<Src, Dst> {
         Self {
             registry,
             min_lfu_count,
+            pending_tracker: None,
             _marker: PhantomData,
         }
     }
@@ -265,6 +335,12 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> PresenceAndLFUFilter<Src, Dst> {
     /// Create with default threshold of 8.
     pub fn with_default_threshold(registry: Arc<BlockRegistry>) -> Self {
         Self::new(registry, 8)
+    }
+
+    /// Add a pending tracker for duplicate prevention.
+    pub fn with_pending_tracker(mut self, tracker: Arc<PendingTracker>) -> Self {
+        self.pending_tracker = Some(tracker);
+        self
     }
 }
 
@@ -280,7 +356,16 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceAndL
             return sync_result(Ok(false));
         }
 
-        // 2. Check LFU count > threshold
+        // 2. Skip if currently pending transfer
+        if self
+            .pending_tracker
+            .as_ref()
+            .is_some_and(|pending| pending.is_pending(&ctx.sequence_hash))
+        {
+            return sync_result(Ok(false));
+        }
+
+        // 3. Check LFU count > threshold
         if let Some(tracker) = self.registry.frequency_tracker() {
             // Convert SequenceHash to u128 for the tracker
             let count = tracker.count(ctx.sequence_hash.as_u128());
@@ -300,21 +385,30 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceAndL
         let hashes: Vec<SequenceHash> = contexts.iter().map(|ctx| ctx.sequence_hash).collect();
         let presence = self.registry.check_presence::<Dst>(&hashes);
 
-        // Get tracker once
-        let tracker = self.registry.frequency_tracker();
+        // Get trackers once
+        let freq_tracker = self.registry.frequency_tracker();
         let min_lfu = self.min_lfu_count;
 
         let results: Vec<bool> = presence
             .into_iter()
             .zip(contexts.iter())
-            .map(|((_, present), ctx)| {
+            .map(|((hash, present), ctx)| {
                 // Skip if present in Dst
                 if present {
                     return false;
                 }
 
+                // Skip if currently pending
+                if self
+                    .pending_tracker
+                    .as_ref()
+                    .is_some_and(|pending| pending.is_pending(&hash))
+                {
+                    return false;
+                }
+
                 // Check LFU count
-                if let Some(ref t) = tracker {
+                if let Some(ref t) = freq_tracker {
                     let count = t.count(ctx.sequence_hash.as_u128());
                     count > min_lfu
                 } else {
@@ -453,6 +547,77 @@ impl<T: BlockMetadata> OffloadPolicy<T> for PassAllPolicy<T> {
     }
 }
 
+/// Create a composite policy from tier configuration.
+///
+/// Policies are applied in order with AND logic - blocks must pass all policies.
+/// Returns `PassAllPolicy` if no policies are configured.
+///
+/// When a `pending_tracker` is provided, it is automatically wired into
+/// `Presence` and `PresenceLfu` policies to enable duplicate prevention
+/// for blocks currently in-flight through the pipeline.
+///
+/// # Example
+///
+/// ```ignore
+/// use dynamo_kvbm_config::offload::TierOffloadConfig;
+///
+/// let tracker = Arc::new(PendingTracker::new());
+/// let config = TierOffloadConfig {
+///     policies: vec![PolicyType::Presence, PolicyType::PresenceLfu],
+///     presence_lfu: PresenceLfuFilterConfig { min_lfu_count: 8 },
+///     ..Default::default()
+/// };
+///
+/// // Pending tracker is automatically wired into presence-based policies
+/// let policy = create_policy_from_config::<G2, G3>(&config, registry.clone(), Some(tracker));
+/// ```
+pub fn create_policy_from_config<Src, Dst>(
+    config: &TierOffloadConfig,
+    registry: Arc<BlockRegistry>,
+    pending_tracker: Option<Arc<PendingTracker>>,
+) -> Arc<dyn OffloadPolicy<Src>>
+where
+    Src: BlockMetadata + 'static,
+    Dst: BlockMetadata + 'static,
+{
+    if config.policies.is_empty() {
+        return Arc::new(PassAllPolicy::<Src>::new());
+    }
+
+    let policies: Vec<Arc<dyn OffloadPolicy<Src>>> = config
+        .policies
+        .iter()
+        .map(|policy_type| -> Arc<dyn OffloadPolicy<Src>> {
+            match policy_type {
+                PolicyType::PassAll => Arc::new(PassAllPolicy::<Src>::new()),
+                PolicyType::Presence => {
+                    let mut filter = PresenceFilter::<Src, Dst>::new(registry.clone());
+                    if let Some(tracker) = &pending_tracker {
+                        filter = filter.with_pending_tracker(tracker.clone());
+                    }
+                    Arc::new(filter)
+                }
+                PolicyType::PresenceLfu => {
+                    let mut filter = PresenceAndLFUFilter::<Src, Dst>::new(
+                        registry.clone(),
+                        config.presence_lfu.min_lfu_count,
+                    );
+                    if let Some(tracker) = &pending_tracker {
+                        filter = filter.with_pending_tracker(tracker.clone());
+                    }
+                    Arc::new(filter)
+                }
+            }
+        })
+        .collect();
+
+    if policies.len() == 1 {
+        policies.into_iter().next().unwrap()
+    } else {
+        Arc::new(AllOfPolicy::new(policies))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,5 +669,36 @@ mod tests {
             Either::Right(boxed) => boxed.await,
         };
         assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn test_pending_tracker_wiring() {
+        use super::PendingTracker;
+
+        // Verify pending_tracker can be set on PresenceFilter
+        let tracker = Arc::new(PendingTracker::new());
+        let registry = Arc::new(BlockRegistry::new());
+
+        let filter: PresenceFilter<(), ()> =
+            PresenceFilter::new(registry).with_pending_tracker(tracker.clone());
+
+        // Verify we can get the tracker back
+        assert!(filter.pending_tracker().is_some());
+        assert!(Arc::ptr_eq(filter.pending_tracker().unwrap(), &tracker));
+    }
+
+    #[test]
+    fn test_pending_tracker_wiring_lfu() {
+        use super::PendingTracker;
+
+        // Verify pending_tracker can be set on PresenceAndLFUFilter
+        let tracker = Arc::new(PendingTracker::new());
+        let registry = Arc::new(BlockRegistry::new());
+
+        let filter: PresenceAndLFUFilter<(), ()> =
+            PresenceAndLFUFilter::new(registry, 8).with_pending_tracker(tracker);
+
+        // Filter was successfully created with pending tracker
+        assert_eq!(filter.name(), "PresenceAndLFUFilter");
     }
 }

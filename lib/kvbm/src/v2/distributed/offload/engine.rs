@@ -33,15 +33,17 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use dashmap::DashMap;
+use tokio::task::JoinHandle;
 
 use crate::v2::distributed::leader::InstanceLeader;
 use crate::v2::logical::LogicalLayoutHandle;
-use crate::v2::logical::blocks::{BlockMetadata, BlockRegistry};
+use crate::v2::logical::blocks::{BlockMetadata, BlockRegistry, WeakBlock};
 use crate::v2::logical::manager::BlockManager;
 use crate::v2::{BlockId, G1, G2, G3, G4};
 
 use super::handle::{TransferHandle, TransferId, TransferState};
-use super::pipeline::{Pipeline, PipelineConfig};
+use super::pipeline::{ChainOutput, ChainOutputRx, Pipeline, PipelineConfig, PipelineInput};
+use super::queue::CancellableQueue;
 use super::source::SourceBlocks;
 
 /// Central coordinator for offload pipelines.
@@ -62,6 +64,8 @@ pub struct OffloadEngine {
     g2_to_g4: Option<Pipeline<G2, G4>>,
     /// Active transfer tracking
     transfers: Arc<DashMap<TransferId, Arc<std::sync::Mutex<TransferState>>>>,
+    /// Chain router task handle (routes G1→G2 output to downstream pipelines)
+    _chain_router_handle: Option<JoinHandle<()>>,
 }
 
 impl OffloadEngine {
@@ -276,7 +280,7 @@ impl OffloadEngineBuilder {
         let runtime = self.runtime.unwrap_or_else(|| self.leader.runtime());
 
         // Build G1→G2 pipeline if configured
-        let g1_to_g2 = if let Some(config) = self.g1_to_g2_config {
+        let mut g1_to_g2 = if let Some(config) = self.g1_to_g2_config {
             let g1_manager = self
                 .g1_manager
                 .ok_or_else(|| anyhow::anyhow!("G1 manager required for G1→G2 pipeline"))?;
@@ -346,6 +350,42 @@ impl OffloadEngineBuilder {
             None
         };
 
+        // Wire up auto-chaining from G1→G2 to downstream G2→G3/G2→G4 pipelines
+        let chain_router_handle = if let Some(ref mut g1_to_g2_pipeline) = g1_to_g2 {
+            if g1_to_g2_pipeline.auto_chain() {
+                if let Some(chain_rx) = g1_to_g2_pipeline.take_chain_rx() {
+                    // Get references to downstream pipeline queues
+                    let g2_to_g3_queue = g2_to_g3.as_ref().map(|p| p.eval_queue.clone());
+                    let g2_to_g4_queue = g2_to_g4.as_ref().map(|p| p.eval_queue.clone());
+
+                    // Only spawn if there's at least one downstream pipeline
+                    if g2_to_g3_queue.is_some() || g2_to_g4_queue.is_some() {
+                        tracing::debug!(
+                            has_g2_to_g3 = g2_to_g3_queue.is_some(),
+                            has_g2_to_g4 = g2_to_g4_queue.is_some(),
+                            "Spawning chain router for G1→G2 auto-chaining"
+                        );
+                        Some(runtime.spawn(chain_router_task(
+                            chain_rx,
+                            g2_to_g3_queue,
+                            g2_to_g4_queue,
+                        )))
+                    } else {
+                        tracing::debug!(
+                            "G1→G2 auto_chain enabled but no downstream pipelines configured"
+                        );
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(OffloadEngine {
             leader: self.leader,
             registry,
@@ -353,8 +393,72 @@ impl OffloadEngineBuilder {
             g2_to_g3,
             g2_to_g4,
             transfers: Arc::new(DashMap::new()),
+            _chain_router_handle: chain_router_handle,
         })
     }
+}
+
+/// Routes chain output from G1→G2 to downstream G2→G3 and G2→G4 pipelines.
+///
+/// Blocks are converted to WeakBlocks for best-effort offloading - if they're
+/// evicted before the downstream pipeline processes them, that's acceptable.
+/// This enables graceful degradation under memory pressure.
+async fn chain_router_task(
+    mut chain_rx: ChainOutputRx<G2>,
+    g2_to_g3_queue: Option<Arc<CancellableQueue<PipelineInput<G2>>>>,
+    g2_to_g4_queue: Option<Arc<CancellableQueue<PipelineInput<G2>>>>,
+) {
+    while let Some(output) = chain_rx.recv().await {
+        let ChainOutput {
+            transfer_id,
+            blocks,
+            state,
+        } = output;
+
+        if blocks.is_empty() {
+            continue;
+        }
+
+        // Convert strong blocks to weak blocks for best-effort downstream processing
+        // This allows blocks to be evicted if memory pressure requires it
+        let weak_blocks: Vec<WeakBlock<G2>> =
+            blocks.iter().map(|block| block.downgrade()).collect();
+
+        // Drop strong references - blocks can now be evicted if needed
+        drop(blocks);
+
+        tracing::debug!(
+            %transfer_id,
+            num_blocks = weak_blocks.len(),
+            "Routing chain output to downstream pipelines as WeakBlocks"
+        );
+
+        // Enqueue to G2→G3 if available
+        if let Some(ref queue) = g2_to_g3_queue {
+            let input = PipelineInput {
+                transfer_id,
+                source: SourceBlocks::Weak(weak_blocks.clone()),
+                state: state.clone(),
+            };
+            if !queue.push(transfer_id, input) {
+                tracing::debug!(%transfer_id, "G2→G3 chain enqueue skipped (cancelled)");
+            }
+        }
+
+        // Enqueue to G2→G4 if available
+        if let Some(ref queue) = g2_to_g4_queue {
+            let input = PipelineInput {
+                transfer_id,
+                source: SourceBlocks::Weak(weak_blocks),
+                state,
+            };
+            if !queue.push(transfer_id, input) {
+                tracing::debug!(%transfer_id, "G2→G4 chain enqueue skipped (cancelled)");
+            }
+        }
+    }
+
+    tracing::debug!("Chain router task shutting down");
 }
 
 #[cfg(test)]

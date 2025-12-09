@@ -3,6 +3,7 @@
 
 //! Python bindings for the v2 connector worker.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
@@ -139,14 +140,8 @@ impl PyConnectorWorker {
     /// Returns:
     ///     tuple: (Optional[set[str]], Optional[set[str]]) for (offload_ids, onboard_ids)
     ///            Returns None for each set if there are no completed requests of that type.
-    #[pyo3(name = "get_finished")]
     #[allow(clippy::type_complexity)]
-    pub fn py_get_finished(
-        &self,
-    ) -> PyResult<(
-        Option<std::collections::HashSet<String>>,
-        Option<std::collections::HashSet<String>>,
-    )> {
+    pub fn get_finished(&self) -> PyResult<(Option<HashSet<String>>, Option<HashSet<String>>)> {
         let (offload_ids, onboard_ids) = self.inner.get_finished();
 
         let offload = if offload_ids.is_empty() {
@@ -161,5 +156,9 @@ impl PyConnectorWorker {
         };
 
         Ok((offload, onboard))
+    }
+
+    pub fn get_failed_onboarding(&self) -> PyResult<HashSet<usize>> {
+        Ok(self.inner.get_failed_onboarding())
     }
 }

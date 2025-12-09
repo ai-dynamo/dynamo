@@ -17,6 +17,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::KvbmRuntime;
+use crate::v2::BlockId;
 use crate::v2::distributed::worker::{
     DirectWorker, LeaderLayoutConfig, NovaWorkerService, WorkerLayoutResponse,
 };
@@ -25,6 +26,7 @@ use crate::v2::integrations::vllm::layout::determine_kv_layout;
 
 pub const ONBOARD_COMPLETE_HANDLER: &str = "kvbm.connector.worker.onboard_complete";
 pub const OFFLOAD_COMPLETE_HANDLER: &str = "kvbm.connector.worker.offload_complete";
+pub const FAILED_ONBOARD_HANDLER: &str = "kvbm.connector.worker.failed_onboard";
 pub const GET_LAYOUT_CONFIG_HANDLER: &str = "kvbm.connector.worker.get_layout_config";
 pub const INITIALIZE_HANDLER: &str = "kvbm.connector.worker.initialize";
 
@@ -54,6 +56,9 @@ pub trait ConnectorWorkerInterface: Send + Sync {
 
     /// Get and drain all finished request IDs.
     fn get_finished(&self) -> (HashSet<String>, HashSet<String>);
+
+    /// Get and drain all failed onboarding block IDs.
+    fn get_failed_onboarding(&self) -> HashSet<usize>;
 }
 
 /// Tracks completed operations for worker-side reporting.
@@ -65,6 +70,7 @@ pub trait ConnectorWorkerInterface: Send + Sync {
 pub struct FinishedState {
     finished_onboarding: Mutex<HashSet<String>>,
     finished_offloading: Mutex<HashSet<String>>,
+    failed_onboarding: Mutex<HashSet<usize>>,
 }
 
 impl FinishedState {
@@ -85,6 +91,14 @@ impl FinishedState {
         let onboarding = std::mem::take(&mut *self.finished_onboarding.lock().unwrap());
         (offloading, onboarding)
     }
+
+    pub fn mark_failed_onboarding(&self, block_ids: Vec<BlockId>) {
+        self.failed_onboarding.lock().unwrap().extend(block_ids);
+    }
+
+    pub fn take_failed_onboarding(&self) -> HashSet<usize> {
+        std::mem::take(&mut *self.failed_onboarding.lock().unwrap())
+    }
 }
 
 /// Message sent by leader to workers when onboarding completes.
@@ -97,6 +111,13 @@ pub struct OnboardCompleteMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OffloadCompleteMessage {
     pub request_id: String,
+}
+
+/// Message sent by leader to workers when onboarding fails for specific blocks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailedOnboardMessage {
+    pub request_id: String,
+    pub block_ids: Vec<BlockId>,
 }
 
 /// GPU information for the worker, used for logging and debugging.
@@ -222,7 +243,7 @@ impl ConnectorWorker {
         }
 
         // Handler: "kvbm.connector.worker.offload_complete"
-        let offload_state = state;
+        let offload_state = Arc::clone(&state);
         let offload_handler =
             NovaHandler::typed_unary_async(OFFLOAD_COMPLETE_HANDLER, move |ctx| {
                 let state = Arc::clone(&offload_state);
@@ -239,6 +260,27 @@ impl ConnectorWorker {
 
         if let Err(e) = nova.register_handler(offload_handler) {
             tracing::error!("Failed to register offload_complete handler: {}", e);
+        }
+
+        // Handler: "kvbm.connector.worker.failed_onboard"
+        let failed_state = state;
+        let failed_handler = NovaHandler::typed_unary_async(FAILED_ONBOARD_HANDLER, move |ctx| {
+            let state = Arc::clone(&failed_state);
+            async move {
+                let msg: FailedOnboardMessage = ctx.input;
+                tracing::debug!(
+                    request_id = %msg.request_id,
+                    block_ids = ?msg.block_ids,
+                    "Worker received failed onboard notification"
+                );
+                state.finished_state.mark_failed_onboarding(msg.block_ids);
+                Ok(())
+            }
+        })
+        .build();
+
+        if let Err(e) = nova.register_handler(failed_handler) {
+            tracing::error!("Failed to register failed_onboard handler: {}", e);
         }
     }
 
@@ -340,6 +382,10 @@ impl ConnectorWorkerInterface for ConnectorWorker {
     fn get_finished(&self) -> (HashSet<String>, HashSet<String>) {
         self.state.finished_state.take_finished()
     }
+
+    fn get_failed_onboarding(&self) -> HashSet<usize> {
+        self.state.finished_state.take_failed_onboarding()
+    }
 }
 
 impl SharedWorkerState {
@@ -378,5 +424,76 @@ impl SharedWorkerState {
         );
 
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mark_failed_onboarding_adds_block_ids() {
+        let state = FinishedState::new();
+
+        state.mark_failed_onboarding(vec![1, 2, 3]);
+
+        let failed = state.take_failed_onboarding();
+        assert_eq!(failed.len(), 3);
+        assert!(failed.contains(&1));
+        assert!(failed.contains(&2));
+        assert!(failed.contains(&3));
+    }
+
+    #[test]
+    fn test_take_failed_onboarding_drains_set() {
+        let state = FinishedState::new();
+
+        state.mark_failed_onboarding(vec![10, 20]);
+
+        // First take should return the block IDs
+        let first_take = state.take_failed_onboarding();
+        assert_eq!(first_take.len(), 2);
+        assert!(first_take.contains(&10));
+        assert!(first_take.contains(&20));
+
+        // Second take should return empty set
+        let second_take = state.take_failed_onboarding();
+        assert!(second_take.is_empty());
+    }
+
+    #[test]
+    fn test_failed_onboarding_before_complete() {
+        // Verifies that failed blocks can be marked before marking completion
+        // This matches the ordering guarantee in the implementation
+        let state = FinishedState::new();
+
+        // First mark some blocks as failed
+        state.mark_failed_onboarding(vec![5, 6, 7]);
+
+        // Then mark onboarding as complete for a request
+        state.mark_onboarding_complete("req-123".to_string());
+
+        // Both should be retrievable
+        let failed = state.take_failed_onboarding();
+        assert_eq!(failed.len(), 3);
+
+        let (offloading, onboarding) = state.take_finished();
+        assert!(offloading.is_empty());
+        assert!(onboarding.contains("req-123"));
+    }
+
+    #[test]
+    fn test_mark_failed_onboarding_accumulates() {
+        let state = FinishedState::new();
+
+        // Mark multiple batches of failed blocks
+        state.mark_failed_onboarding(vec![1, 2]);
+        state.mark_failed_onboarding(vec![3, 4, 5]);
+
+        let failed = state.take_failed_onboarding();
+        assert_eq!(failed.len(), 5);
+        for id in 1..=5 {
+            assert!(failed.contains(&id));
+        }
     }
 }

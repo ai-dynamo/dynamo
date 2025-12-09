@@ -11,6 +11,9 @@ use crate::distributed::worker::{LeaderLayoutConfig, NovaWorkerClient, Worker};
 use crate::integrations::connector::worker::ConnectorWorkerClient;
 use crate::logical::blocks::BlockRegistry;
 use crate::logical::manager::{BlockManager, FrequencyTrackingCapacity};
+use crate::v2::distributed::offload::{
+    OffloadEngine, PendingTracker, PipelineBuilder, create_policy_from_config,
+};
 use crate::{G2, G3, InstanceId};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -24,7 +27,7 @@ impl ConnectorLeader {
         instance_id: InstanceId,
         worker_address: WorkerAddress,
     ) -> Result<()> {
-        let mut state = self.state.lock();
+        let mut state = self.init.lock();
 
         if rank != state.worker_instance_ids.len() {
             bail!("Rank mismatch");
@@ -77,7 +80,7 @@ impl ConnectorLeader {
         tracing::debug!("Step 1: Acquiring lock to gather layout config futures");
         let layout_config_futures = {
             tracing::debug!("Lock acquired, checking worker count");
-            let state = self.state.lock();
+            let state = self.init.lock();
 
             if state.worker_connector_clients.is_empty() {
                 bail!("No workers registered");
@@ -101,6 +104,7 @@ impl ConnectorLeader {
                 num_futures = futures.len(),
                 "Created all layout config futures"
             );
+
             futures
         }; // Lock released here
         tracing::debug!("Lock released, starting to await layout configs");
@@ -233,7 +237,7 @@ impl ConnectorLeader {
         tracing::debug!("Step 5: Acquiring lock to create initialize futures");
         let initialize_futures = {
             tracing::debug!("Lock acquired for creating initialize futures");
-            let state = self.state.lock();
+            let state = self.init.lock();
             tracing::debug!(
                 num_workers = state.worker_connector_clients.len(),
                 "Creating initialize futures for all workers"
@@ -279,7 +283,7 @@ impl ConnectorLeader {
         tracing::debug!("Acquiring lock to store metadata and configure handles");
         {
             tracing::debug!("Lock acquired for storing metadata");
-            let mut state = self.state.lock();
+            let mut state = self.init.lock();
             tracing::debug!(
                 num_metadata = collected_metadata.len(),
                 "Storing worker metadata"
@@ -314,36 +318,40 @@ impl ConnectorLeader {
             page_size = reference_config.page_size,
             "Building G2 manager"
         );
-        let g2_manager = BlockManager::<G2>::builder()
-            .block_count(host_block_count)
-            .block_size(reference_config.page_size)
-            .registry(registry.clone())
-            .with_lru_backend()
-            .build()
-            .expect("Should build G2 manager");
+        let g2_manager = Arc::new(
+            BlockManager::<G2>::builder()
+                .block_count(host_block_count)
+                .block_size(reference_config.page_size)
+                .registry(registry.clone())
+                .with_lru_backend()
+                .build()
+                .expect("Should build G2 manager"),
+        );
         tracing::debug!("G2 manager built");
 
         tracing::debug!("Building G3 manager");
-        let g3_manager = disk_block_count.map(|count| {
+        let g3_manager: Option<Arc<BlockManager<G3>>> = disk_block_count.map(|count| {
             tracing::debug!(
                 disk_block_count = count,
                 page_size = reference_config.page_size,
                 "Building G3 manager with disk cache"
             );
-            BlockManager::<G3>::builder()
-                .block_count(count)
-                .block_size(reference_config.page_size)
-                .registry(registry.clone())
-                .with_lru_backend()
-                .build()
-                .expect("Should build G3 manager")
+            Arc::new(
+                BlockManager::<G3>::builder()
+                    .block_count(count)
+                    .block_size(reference_config.page_size)
+                    .registry(registry.clone())
+                    .with_lru_backend()
+                    .build()
+                    .expect("Should build G3 manager"),
+            )
         });
         tracing::debug!("G3 manager built (if configured)");
 
         tracing::debug!("Acquiring lock to get worker clients and metadata");
         let (worker_clients, worker_metadata) = {
             tracing::debug!("Lock acquired for getting worker data");
-            let state = self.state.lock();
+            let state = self.init.lock();
             tracing::debug!(
                 num_clients = state.worker_transfer_clients.len(),
                 num_metadata = state.worker_metadata.len(),
@@ -360,19 +368,29 @@ impl ConnectorLeader {
             num_workers = worker_clients.len(),
             "Building InstanceLeader"
         );
-        let leader = InstanceLeader::builder()
+        // Clone registry and managers for OffloadEngine (they will share state via internal Arcs)
+        let registry_for_offload = Arc::new(registry.clone());
+        let g2_manager_for_offload = g2_manager.clone();
+        let g3_manager_for_offload = g3_manager.clone();
+
+        let mut leader_builder = InstanceLeader::builder()
             .nova(self.runtime.nova.clone())
             .registry(registry)
-            .with_g2_manager(Some(g2_manager))
-            .with_g3_manager(g3_manager)
+            .g2_manager(g2_manager)
             .workers(
                 worker_clients
                     .into_iter()
                     .map(|client| Arc::new(client) as Arc<dyn Worker>)
                     .collect(),
             )
-            .with_cached_worker_metadata(worker_metadata)
-            .build()?;
+            .with_cached_worker_metadata(worker_metadata);
+
+        // Conditionally add G3 manager
+        if let Some(g3_mgr) = g3_manager {
+            leader_builder = leader_builder.g3_manager(g3_mgr);
+        }
+
+        let leader = leader_builder.build()?;
         tracing::debug!("InstanceLeader built");
 
         tracing::debug!("Registering handlers on InstanceLeader");
@@ -380,8 +398,51 @@ impl ConnectorLeader {
         tracing::debug!("Handlers registered");
 
         tracing::debug!("Setting instance leader");
-        self.set_instance_leader(leader)?;
+        self.set_instance_leader(leader.clone())?;
         tracing::debug!("Instance leader set");
+
+        // Build OffloadEngine with config-driven policies
+        tracing::debug!("Building OffloadEngine");
+        let offload_config = &self.runtime.config().offload;
+        let runtime_handle = self.runtime.tokio();
+
+        // Build G2→G3 policy from config (G1 managers are on workers, not on leader)
+        // Create shared pending tracker for duplicate prevention
+        let g2_to_g3_pending = Arc::new(PendingTracker::new());
+        let g2_to_g3_policy = create_policy_from_config::<G2, G3>(
+            &offload_config.g2_to_g3,
+            registry_for_offload.clone(),
+            Some(g2_to_g3_pending.clone()),
+        );
+        let g2_to_g3_pipeline = PipelineBuilder::<G2, G3>::new()
+            .policy(g2_to_g3_policy)
+            .pending_tracker(g2_to_g3_pending)
+            .build();
+
+        let mut engine_builder = OffloadEngine::builder(Arc::new(leader))
+            .with_registry(registry_for_offload)
+            .with_g2_manager(g2_manager_for_offload)
+            .with_runtime(runtime_handle);
+
+        // Conditionally add G3 pipeline if G3 manager exists
+        if let Some(g3_mgr) = g3_manager_for_offload {
+            engine_builder = engine_builder
+                .with_g3_manager(g3_mgr)
+                .with_g2_to_g3_pipeline(g2_to_g3_pipeline);
+        }
+
+        match engine_builder.build() {
+            Ok(offload_engine) => {
+                tracing::debug!("OffloadEngine built successfully");
+                let _ = self.offload_engine.set(offload_engine);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to build OffloadEngine: {}. Continuing without offload.",
+                    e
+                );
+            }
+        }
 
         tracing::info!("All workers initialized successfully");
 
@@ -390,7 +451,7 @@ impl ConnectorLeader {
         tracing::debug!("Acquiring lock to get worker instance IDs for handler refresh");
         let worker_instance_ids = {
             tracing::debug!("Lock acquired for getting worker instance IDs");
-            let state = self.state.lock();
+            let state = self.init.lock();
             tracing::debug!(
                 num_workers = state.worker_instance_ids.len(),
                 "Cloning worker instance IDs"
@@ -429,6 +490,9 @@ impl ConnectorLeader {
         );
 
         tracing::debug!("initialize_async completed successfully");
+        let workers = self.init.lock().clone();
+        let _ = self.workers.set(Arc::new(workers));
+
         Ok(())
     }
 }

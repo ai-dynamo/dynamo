@@ -43,7 +43,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use kvbm::v2::integrations::offload::{
+//! use kvbm::v2::distributed::offload::{
 //!     OffloadEngine, PipelineBuilder, PresenceFilter, PresenceAndLFUFilter,
 //! };
 //!
@@ -79,6 +79,7 @@ mod batch;
 mod cancel;
 mod engine;
 mod handle;
+mod pending;
 mod pipeline;
 mod policy;
 mod queue;
@@ -88,11 +89,12 @@ mod source;
 pub use cancel::{CancelConfirmation, CancelState, CancellationToken};
 pub use engine::{OffloadEngine, OffloadEngineBuilder};
 pub use handle::{TransferHandle, TransferId, TransferResult, TransferStatus};
+pub use pending::{PendingGuard, PendingTracker};
 pub use pipeline::{Pipeline, PipelineBuilder, PipelineConfig};
 pub use policy::{
     AllOfPolicy, AnyOfPolicy, BoxFuture, EvalContext, OffloadPolicy, PassAllPolicy,
     PolicyBatchFuture, PolicyFuture, PresenceAndLFUFilter, PresenceFilter, async_batch_result,
-    async_result, sync_batch_result, sync_result,
+    async_result, create_policy_from_config, sync_batch_result, sync_result,
 };
 pub use queue::CancellableQueue;
 pub use source::{ExternalBlock, SourceBlock, SourceBlocks};

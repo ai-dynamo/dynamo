@@ -10,6 +10,7 @@ use crate::distributed::leader::{
 };
 use crate::distributed::worker::NovaWorkerClient;
 use crate::v2::distributed::leader::InstanceLeader;
+use crate::v2::distributed::offload::OffloadEngine;
 use crate::v2::distributed::worker::SerializedLayout;
 use crate::{BlockId, InstanceId, KvbmRuntime};
 
@@ -32,14 +33,18 @@ pub trait ConnectorLeaderInterface: Send + Sync {}
 pub struct ConnectorLeader {
     pub(crate) runtime: Arc<KvbmRuntime>,
     block_size: usize,
-    state: Arc<Mutex<ConnectorLeaderState>>,
+    init: Arc<Mutex<WorkerClients>>,
+    workers: OnceLock<Arc<WorkerClients>>,
     instance_leader: OnceLock<InstanceLeader>,
     slots: DashMap<String, Arc<Mutex<RequestSlot>>>,
+    #[allow(dead_code)] // Will be used for scheduling decisions
     oracle: Arc<dyn Oracle>,
+    /// Offload engine for G1→G2→G3 transfers (initialized in initialize_async)
+    offload_engine: OnceLock<OffloadEngine>,
 }
 
-#[derive(Default)]
-struct ConnectorLeaderState {
+#[derive(Default, Clone)]
+struct WorkerClients {
     worker_instance_ids: Vec<InstanceId>,
     worker_connector_clients: Vec<ConnectorWorkerClient>,
     worker_transfer_clients: Vec<NovaWorkerClient>,
@@ -48,6 +53,12 @@ struct ConnectorLeaderState {
 
 // Connector leader implementation extensions
 mod init;
+
+/// Implementation of the request_finished function.
+mod finish;
+
+/// Calls to coordinator workers.
+mod clients;
 
 // Implementation of search tools for the get_num_new_matched_tokens function.
 mod search;
@@ -66,10 +77,12 @@ impl ConnectorLeader {
         Self {
             runtime,
             block_size,
-            state: Arc::new(Mutex::new(ConnectorLeaderState::default())),
+            init: Arc::new(Mutex::new(WorkerClients::default())),
+            workers: OnceLock::new(),
             instance_leader: OnceLock::new(),
             slots: DashMap::new(),
             oracle: Arc::new(DefaultOracle::default()),
+            offload_engine: OnceLock::new(),
         }
     }
 
@@ -91,6 +104,13 @@ impl ConnectorLeader {
         self.instance_leader
             .set(leader)
             .map_err(|_| anyhow!("InstanceLeader already set"))
+    }
+
+    /// Get the offload engine.
+    ///
+    /// Returns `None` if `initialize_async()` has not been called.
+    pub fn offload_engine(&self) -> Option<&OffloadEngine> {
+        self.offload_engine.get()
     }
 
     /// Check if a slot exists for the given request ID.
@@ -210,100 +230,6 @@ impl ConnectorLeader {
         output: &scheduler::SchedulerOutput,
     ) -> Result<scheduler::KvConnectorMetadata> {
         self.process_scheduler_output(output)
-    }
-
-    /// Mark a request as finished, returning the status.
-    #[tracing::instrument(level = "debug", skip(self), fields(?request_id), ret)]
-    pub fn request_finished(&self, request_id: &str) -> FinishedStatus {
-        tracing::debug!("evaluating finished status");
-        if let Some(shared_slot) = self.slots.get(request_id).map(|slot| slot.clone()) {
-            let mut slot = shared_slot.lock();
-            match slot.slot_mark_finished() {
-                FinishedStatus::Finished => {
-                    self.slots.remove(slot.request_id());
-                    return FinishedStatus::Finished;
-                }
-                FinishedStatus::Pending => return FinishedStatus::Pending,
-                FinishedStatus::UntrackedRequest => unreachable!(),
-            }
-        }
-        FinishedStatus::UntrackedRequest
-    }
-
-    #[tracing::instrument(level = "debug", skip(self), fields(finished_sending = finished_sending.len(), finished_recving = finished_recving.len()))]
-    pub fn update_connector_output(
-        &self,
-        finished_sending: HashSet<String>,
-        finished_recving: HashSet<String>,
-    ) -> Result<()> {
-        // process the requests that have finished onboarding
-        // recving ==> remote kv storage -> worker g1 memory
-        for request_id in finished_recving {
-            match self.process_finished_onboarding(&request_id) {
-                Ok(()) => {
-                    tracing::debug!("finished onboarding for request ID: {}", request_id);
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to process finished onboarding for request ID: {}: {}",
-                        request_id,
-                        e
-                    );
-                    todo!("clean up session and free resources")
-                }
-            }
-        }
-
-        // Process the requests that have finished offloading
-        // These requests should be marked for deletion but are waiting for the outstanding operations
-        // to be complete. This is that signal.
-        for request_id in finished_sending {
-            match self.process_finished_offloading(&request_id) {
-                Ok(()) => {
-                    tracing::debug!("finished offloading for request ID: {}", request_id);
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to process finished offloading for request ID: {}: {}",
-                        request_id,
-                        e
-                    );
-                    todo!("clean up session and free resources")
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn process_finished_onboarding(&self, request_id: &str) -> Result<()> {
-        let shared_slot = self
-            .slots
-            .get(request_id)
-            .map(|slot| slot.clone())
-            .ok_or_else(|| anyhow!("Slot not found for request ID: {}", request_id))?;
-
-        let mut slot = shared_slot.lock();
-        let onboarding_state = slot.txn_take_onboarding()?;
-        if let Some(session_id) = onboarding_state.find_session.session_id() {
-            self.instance_leader
-                .get()
-                .unwrap()
-                .release_session(session_id);
-        }
-        Ok(())
-    }
-
-    fn process_finished_offloading(&self, request_id: &str) -> Result<()> {
-        let shared_slot = self
-            .slots
-            .get(request_id)
-            .map(|slot| slot.clone())
-            .ok_or_else(|| anyhow!("Slot not found for request ID: {}", request_id))?;
-
-        let mut slot = shared_slot.lock();
-        let _offloading_state = slot.txn_take_offloading()?;
-        todo!("clean up session and free resources");
     }
 }
 

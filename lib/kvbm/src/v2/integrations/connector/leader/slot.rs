@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::{HashMap, HashSet};
+
 use dynamo_tokens::TokenBlockSequence;
 
 use super::Request;
 use crate::distributed::leader::FindMatchesResult;
+use crate::distributed::offload::{TransferHandle, TransferId};
 use crate::v2::SequenceHash;
 
 // ============================================================================
@@ -41,7 +44,13 @@ pub struct OnboardingState {
 ///
 /// This struct holds all the state needed for offloading KV cache blocks to remote storage.
 #[derive(Debug)]
-pub struct OffloadingState {}
+pub struct OffloadingState {
+    /// The sequence hashes of the blocks that have been sent to the offload engine.
+    pub sequence_hashes: HashSet<SequenceHash>,
+
+    /// The transfer handle for the offload operation.
+    pub handles: HashMap<TransferId, TransferHandle>,
+}
 
 /// Wrapper enum for state data that can be recovered from error states.
 ///
@@ -541,7 +550,10 @@ impl RequestSlot {
     ///
     /// Only valid when in `Inactive` state and slot is not marked for deletion.
     pub fn txn_start_offloading(&mut self) -> Result<(), StateTransitionError> {
-        let state = OffloadingState {};
+        let state = OffloadingState {
+            sequence_hashes: HashSet::new(),
+            handles: HashMap::new(),
+        };
         self.state.txn_start_offloading(state)
     }
 
@@ -604,6 +616,22 @@ impl RequestSlot {
         self.state.offloading_state_mut()
     }
 
+    pub fn get_or_create_offloading_state(&mut self) -> &mut OffloadingState {
+        if self.state.offloading_state().is_none() {
+            let state = OffloadingState {
+                sequence_hashes: HashSet::new(),
+                handles: HashMap::new(),
+            };
+            self.state
+                .txn_start_offloading(state)
+                .expect("get_or_create_offloading_state called in invalid state");
+        }
+
+        self.state
+            .offloading_state_mut()
+            .expect("offloading state must exist after creation")
+    }
+
     /// Finalize a match check by transitioning state and returning the vLLM-compatible tuple.
     ///
     /// This is the single exit point for state transitions from PreparingToOnboard.
@@ -656,6 +684,38 @@ impl RequestSlot {
                 Err(e)
             }
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // Offloading Methods
+    // ------------------------------------------------------------------------
+
+    pub fn offload_blocks(
+        &mut self,
+        sequence_hashes: &[SequenceHash],
+        handle: TransferHandle,
+    ) -> Result<(), anyhow::Error> {
+        // the state must be active, not marked for deletion, and the txn_state
+        // must be inactive or offloading
+        if self.is_marked_for_deletion() {
+            return Err(anyhow::anyhow!("Slot is marked for deletion"));
+        }
+
+        if !matches!(
+            self.txn_state(),
+            TransactionState::Inactive | TransactionState::Offloading(_)
+        ) {
+            return Err(anyhow::anyhow!("Invalid transaction state"));
+        }
+
+        // create or get the offloading state
+        let mut offloading_state = self.get_or_create_offloading_state();
+
+        // check that the sequence hashes provides are not already in the set
+        // add the sequence hashes to the set
+        // add the transfer handle to the hashmap
+
+        unimplemented!()
     }
 }
 

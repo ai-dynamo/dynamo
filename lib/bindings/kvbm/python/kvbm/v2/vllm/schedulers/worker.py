@@ -80,7 +80,7 @@ class SchedulerConnectorWorker:
         self.runtime = KvbmRuntime.build_worker(self.kvbm_override_config)
 
         # Create the Rust ConnectorWorker that handles NIXL registration
-        self.connector_worker = ConnectorWorker(self.runtime)
+        self.worker = ConnectorWorker(self.runtime)
 
         # Store peer info for handshake
         instance_id, worker_addr = self.runtime.peer_info()
@@ -149,7 +149,7 @@ class SchedulerConnectorWorker:
         # This caches tensor state for deferred NIXL registration
         # The actual NIXL registration happens when the leader triggers
         # initialization via bind_connector_metadata()
-        self.connector_worker.register_kv_caches(
+        self.worker.register_kv_caches(
             tensors,
             num_device_blocks,
             page_size,
@@ -171,7 +171,7 @@ class SchedulerConnectorWorker:
         """
         Bind connector metadata from the leader.
         """
-        self.connector_worker.bind_connector_metadata(data)
+        self.worker.bind_connector_metadata(data)
 
     def clear_connector_metadata(self) -> None:
         """
@@ -222,19 +222,11 @@ class SchedulerConnectorWorker:
         Returns:
             (None, None): No finished sends/receives
         """
-        # Just acknowledge the finished requests
-        # Since our leader's request_finished() always returns False,
-        # these requests have already had their blocks freed
-        if len(finished_req_ids) > 0:
-            print(
-                f"SchedulerConnectorWorker.get_finished() acknowledging {len(finished_req_ids)} finished requests"
-            )
-
-        return (None, None)
+        return self.worker.get_finished()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Returns empty set - no load errors tracked."""
-        return set()
+        return self.worker.get_failed_onboarding()
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata:
         """

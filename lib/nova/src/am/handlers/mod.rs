@@ -399,9 +399,42 @@ where
         let executor = self.executor.clone();
         let name = self.name.clone();
 
+        // Extract response routing info for conditional ACK/NACK
+        let backend = ctx.system.backend().clone();
+        let response_id = ctx.message_id;
+        let response_type = ctx.response_type;
+
         Box::pin(async move {
-            if let Err(e) = executor.execute(am_ctx).await {
-                error!("AM handler '{}' failed: {}", name, e);
+            let result = executor.execute(am_ctx).await;
+
+            // Send ACK/NACK if client expects a response (am_sync)
+            match response_type {
+                ResponseType::FireAndForget => {
+                    // Fire-and-forget: no response expected
+                    if let Err(e) = result {
+                        error!("AM handler '{}' failed: {}", name, e);
+                    }
+                }
+                ResponseType::AckNack => {
+                    // am_sync: send ACK on success, NACK on error
+                    let send_result = match result {
+                        Ok(()) => send_ack(backend, response_id).await,
+                        Err(err) => {
+                            error!("AM handler '{}' failed: {}", name, err);
+                            send_nack(backend, response_id, err.to_string()).await
+                        }
+                    };
+                    if let Err(e) = send_result {
+                        debug!("Failed to send ACK/NACK response: {}", e);
+                    }
+                }
+                ResponseType::Unary => {
+                    // Unary messages shouldn't be routed to AM handlers
+                    error!("Unary message incorrectly routed to AM handler '{}'", name);
+                    if let Err(e) = result {
+                        error!("AM handler '{}' failed: {}", name, e);
+                    }
+                }
             }
         })
     }

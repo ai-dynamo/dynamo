@@ -19,7 +19,7 @@ mod tests {
 
     use anyhow::Result;
 
-    use crate::v2::integrations::offload::{
+    use crate::v2::distributed::offload::{
         ExternalBlock, OffloadEngine, PipelineBuilder, PresenceAndLFUFilter, PresenceFilter,
         SourceBlocks, TransferStatus,
     };
@@ -354,6 +354,16 @@ mod tests {
         eprintln!(
             "DEBUG: Using skip_transfers={} (has_parallel_worker={})",
             skip_transfers, has_parallel_worker
+        );
+
+        assert!(
+            has_parallel_worker,
+            "Parallel worker is required for actual transfers"
+        );
+
+        assert!(
+            !skip_transfers,
+            "skip_transfers should be false when parallel worker is available"
         );
 
         // 2. Populate G2 manager with 4 blocks (small to make test fast)

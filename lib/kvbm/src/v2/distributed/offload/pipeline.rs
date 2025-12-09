@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::Either;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::v2::distributed::leader::InstanceLeader;
@@ -45,6 +45,7 @@ use super::batch::{
     BatchCollector, BatchConfig, BatchOutputRx, EvalResult, QueuedBlock, TransferBatch,
 };
 use super::handle::{TransferId, TransferState, TransferStatus};
+use super::pending::PendingTracker;
 use super::policy::{EvalContext, OffloadPolicy};
 use super::queue::CancellableQueue;
 use super::source::{SourceBlock, SourceBlocks};
@@ -70,6 +71,17 @@ pub struct PipelineConfig<Src: BlockMetadata, Dst: BlockMetadata> {
     pub sweep_interval: Duration,
     /// Skip actual transfers (for testing)
     pub skip_transfers: bool,
+    /// Maximum number of concurrent transfer batches.
+    ///
+    /// This controls how many batches can be transferred simultaneously.
+    /// Setting this higher can improve throughput at the cost of memory.
+    /// Default: 1 (sequential execution)
+    pub max_concurrent_transfers: usize,
+    /// Pending tracker for duplicate prevention.
+    ///
+    /// If provided, this tracker is used. If None, the pipeline creates its own.
+    /// Share this tracker with presence-based policies to prevent duplicate transfers.
+    pub pending_tracker: Option<Arc<PendingTracker>>,
     /// Marker
     _marker: PhantomData<(Src, Dst)>,
 }
@@ -86,6 +98,8 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Default for PipelineConfig<Src, Dst
             transfer_input_capacity: 8,
             sweep_interval: Duration::from_millis(10),
             skip_transfers: false,
+            max_concurrent_transfers: 1,
+            pending_tracker: None,
             _marker: PhantomData,
         }
     }
@@ -155,6 +169,27 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> PipelineBuilder<Src, Dst> {
         self
     }
 
+    /// Set maximum concurrent transfers.
+    ///
+    /// This controls how many batches can be transferred simultaneously.
+    /// Must be at least 1.
+    ///
+    /// # Default
+    /// 1 (sequential execution)
+    pub fn max_concurrent_transfers(mut self, n: usize) -> Self {
+        self.config.max_concurrent_transfers = n.max(1);
+        self
+    }
+
+    /// Set the pending tracker for duplicate prevention.
+    ///
+    /// Share this tracker with presence-based policies (via `create_policy_from_config`)
+    /// to prevent duplicate transfers when overlapping sequences are enqueued.
+    pub fn pending_tracker(mut self, tracker: Arc<PendingTracker>) -> Self {
+        self.config.pending_tracker = Some(tracker);
+        self
+    }
+
     /// Build the configuration.
     pub fn build(self) -> PipelineConfig<Src, Dst> {
         self.config
@@ -208,6 +243,8 @@ pub struct Pipeline<Src: BlockMetadata, Dst: BlockMetadata> {
     chain_rx: Option<ChainOutputRx<Dst>>,
     /// Watch channel for cancelled transfer IDs (triggers sweep)
     cancel_tx: watch::Sender<HashSet<TransferId>>,
+    /// Tracker for pending (in-flight) transfers to prevent duplicates
+    pending_tracker: Arc<PendingTracker>,
     /// Task handles for pipeline stages
     _task_handles: Vec<JoinHandle<()>>,
     /// Marker
@@ -259,6 +296,12 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
             (None, None)
         };
 
+        // Use provided pending tracker or create a new one
+        let pending_tracker = config
+            .pending_tracker
+            .clone()
+            .unwrap_or_else(|| Arc::new(PendingTracker::new()));
+
         // Spawn policy evaluator
         let evaluator = PolicyEvaluator {
             policies: config.policies.clone(),
@@ -266,6 +309,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
             input_queue: eval_queue.clone(),
             output_queue: batch_queue.clone(),
             cancel_rx: cancel_rx.clone(),
+            pending_tracker: pending_tracker.clone(),
         };
         let eval_handle = runtime.spawn(async move {
             evaluator.run().await;
@@ -294,6 +338,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
             src_layout,
             dst_layout,
             skip_transfers: config.skip_transfers,
+            max_concurrent_transfers: config.max_concurrent_transfers,
             chain_tx,
             _src_marker: PhantomData::<Src>,
         };
@@ -322,6 +367,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
             output_tx: Some(output_tx),
             chain_rx,
             cancel_tx,
+            pending_tracker,
             _task_handles: vec![eval_handle, batch_handle, transfer_handle, sweeper_handle],
             _marker: PhantomData,
         }
@@ -379,6 +425,14 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
     pub fn take_chain_rx(&mut self) -> Option<ChainOutputRx<Dst>> {
         self.chain_rx.take()
     }
+
+    /// Get the pending tracker for this pipeline.
+    ///
+    /// This can be shared with presence policies to enable duplicate prevention
+    /// for blocks currently in-flight through this pipeline.
+    pub fn pending_tracker(&self) -> &Arc<PendingTracker> {
+        &self.pending_tracker
+    }
 }
 
 /// Sweeper task that removes cancelled items from queues.
@@ -429,6 +483,8 @@ struct PolicyEvaluator<T: BlockMetadata> {
     input_queue: Arc<CancellableQueue<PipelineInput<T>>>,
     output_queue: Arc<CancellableQueue<EvalResult<T>>>,
     cancel_rx: watch::Receiver<HashSet<TransferId>>,
+    /// Tracker for pending transfers - guards are created when blocks pass policy
+    pending_tracker: Arc<PendingTracker>,
 }
 
 impl<T: BlockMetadata> PolicyEvaluator<T> {
@@ -475,12 +531,15 @@ impl<T: BlockMetadata> PolicyEvaluator<T> {
             SourceBlocks::External(external_blocks) => {
                 // External blocks bypass policy evaluation - caller explicitly chose these
                 for ext in external_blocks {
+                    // Create pending guard for duplicate prevention
+                    let pending_guard = self.pending_tracker.guard(ext.sequence_hash);
                     passed.push(QueuedBlock {
                         transfer_id,
                         block_id: Some(ext.block_id),
                         sequence_hash: ext.sequence_hash,
                         source: SourceBlock::External(ext),
                         state: input.state.clone(),
+                        pending_guard: Some(pending_guard),
                     });
                 }
                 tracing::debug!(%transfer_id, passed = passed.len(), "External blocks bypass policy evaluation");
@@ -498,12 +557,15 @@ impl<T: BlockMetadata> PolicyEvaluator<T> {
 
                     if pass {
                         let block = ctx.block.expect("Strong block context always has block");
+                        // Create pending guard for duplicate prevention
+                        let pending_guard = self.pending_tracker.guard(ctx.sequence_hash);
                         passed.push(QueuedBlock {
                             transfer_id,
                             block_id: Some(ctx.block_id),
                             sequence_hash: ctx.sequence_hash,
                             source: SourceBlock::Strong(block),
                             state: input.state.clone(),
+                            pending_guard: Some(pending_guard),
                         });
                     } else {
                         filtered.push(ctx.block_id);
@@ -524,12 +586,15 @@ impl<T: BlockMetadata> PolicyEvaluator<T> {
                     let pass = self.evaluate_policies(&ctx).await;
 
                     if pass {
+                        // Create pending guard for duplicate prevention
+                        let pending_guard = self.pending_tracker.guard(sequence_hash);
                         passed.push(QueuedBlock {
                             transfer_id,
                             block_id: None, // Determined at upgrade time
                             sequence_hash,
                             source: SourceBlock::Weak(weak),
                             state: input.state.clone(),
+                            pending_guard: Some(pending_guard),
                         });
                     } else {
                         // For weak blocks, we track by sequence_hash since block_id is unknown
@@ -654,20 +719,282 @@ struct TransferExecutor<Src: BlockMetadata, Dst: BlockMetadata> {
     dst_layout: LogicalLayoutHandle,
     /// Skip actual transfers (for testing)
     skip_transfers: bool,
+    /// Maximum concurrent transfers
+    max_concurrent_transfers: usize,
     /// Channel to send registered blocks for chaining to downstream pipeline
     chain_tx: Option<mpsc::Sender<ChainOutput<Dst>>>,
     _src_marker: PhantomData<Src>,
 }
 
+/// Shared executor state that can be cloned across concurrent transfer tasks.
+struct SharedExecutorState<Dst: BlockMetadata> {
+    leader: Arc<InstanceLeader>,
+    dst_manager: Arc<BlockManager<Dst>>,
+    src_layout: LogicalLayoutHandle,
+    dst_layout: LogicalLayoutHandle,
+    skip_transfers: bool,
+    chain_tx: Option<mpsc::Sender<ChainOutput<Dst>>>,
+}
+
 impl<Src: BlockMetadata, Dst: BlockMetadata> TransferExecutor<Src, Dst> {
     async fn run(mut self) {
+        // N slots for active transfers
+        let transfer_semaphore = Arc::new(Semaphore::new(self.max_concurrent_transfers));
+        // 1 slot for preparation (upgrade) work - on-deck
+        let prepare_semaphore = Arc::new(Semaphore::new(1));
+
+        // Extract shared state for concurrent tasks
+        let shared = Arc::new(SharedExecutorState {
+            leader: self.leader.clone(),
+            dst_manager: self.dst_manager.clone(),
+            src_layout: self.src_layout,
+            dst_layout: self.dst_layout,
+            skip_transfers: self.skip_transfers,
+            chain_tx: self.chain_tx.take(),
+        });
+
         while let Some(batch) = self.input_rx.recv().await {
-            if let Err(e) = self.execute_batch(batch).await {
-                tracing::error!("TransferExecutor: batch failed: {}", e);
+            if batch.is_empty() {
+                continue;
             }
+
+            // Wait for prepare slot (only 1 batch preparing at a time)
+            // This is the "on-deck" slot for preparing while transfers run
+            let prepare_permit = prepare_semaphore.clone().acquire_owned().await;
+            if prepare_permit.is_err() {
+                break; // Semaphore closed
+            }
+            let prepare_permit = prepare_permit.unwrap();
+
+            // Prepare stage: resolve/upgrade blocks (weak→strong)
+            // This happens in the "on-deck" slot while other transfers may be running
+            let (resolved, _evicted) = Self::prepare_batch(batch);
+
+            // Done preparing, release prepare slot for next batch
+            drop(prepare_permit);
+
+            if resolved.is_empty() {
+                tracing::debug!("All blocks in batch evicted, skipping transfer");
+                continue;
+            }
+
+            // Now wait for transfer slot
+            let transfer_permit = transfer_semaphore.clone().acquire_owned().await;
+            if transfer_permit.is_err() {
+                break; // Semaphore closed
+            }
+            let transfer_permit = transfer_permit.unwrap();
+
+            // Spawn transfer task
+            let shared_clone = shared.clone();
+            tokio::spawn(async move {
+                let _permit = transfer_permit; // Hold permit until task completes
+                if let Err(e) = Self::execute_transfer(&shared_clone, resolved).await {
+                    tracing::error!("TransferExecutor: transfer failed: {}", e);
+                }
+            });
         }
+
+        // Wait for all in-flight transfers to complete by acquiring all permits
+        let _ = transfer_semaphore
+            .acquire_many(self.max_concurrent_transfers as u32)
+            .await;
     }
 
+    /// Prepare a batch by upgrading weak blocks to strong.
+    ///
+    /// Returns (resolved_blocks, evicted_sequence_hashes).
+    /// This is synchronous CPU work that can run in the "on-deck" slot.
+    fn prepare_batch(batch: TransferBatch<Src>) -> (Vec<ResolvedBlock<Src>>, Vec<SequenceHash>) {
+        let mut resolved: Vec<ResolvedBlock<Src>> = Vec::with_capacity(batch.len());
+        let mut evicted_sequence_hashes: Vec<SequenceHash> = Vec::new();
+
+        for queued in batch.blocks {
+            // Note: pending_guard is automatically dropped when QueuedBlock is processed,
+            // which removes the sequence_hash from the pending set. This happens either
+            // when the block is resolved and transferred, or when it's evicted/dropped.
+            match queued.source {
+                SourceBlock::Strong(block) => {
+                    resolved.push(ResolvedBlock {
+                        transfer_id: queued.transfer_id,
+                        block_id: block.block_id(),
+                        sequence_hash: queued.sequence_hash,
+                        guard: Some(block),
+                        state: queued.state,
+                    });
+                }
+                SourceBlock::External(ext) => {
+                    resolved.push(ResolvedBlock {
+                        transfer_id: queued.transfer_id,
+                        block_id: ext.block_id,
+                        sequence_hash: ext.sequence_hash,
+                        guard: None,
+                        state: queued.state,
+                    });
+                }
+                SourceBlock::Weak(weak) => {
+                    match weak.upgrade() {
+                        Some(block) => {
+                            resolved.push(ResolvedBlock {
+                                transfer_id: queued.transfer_id,
+                                block_id: block.block_id(),
+                                sequence_hash: queued.sequence_hash,
+                                guard: Some(block),
+                                state: queued.state,
+                            });
+                        }
+                        None => {
+                            tracing::debug!(
+                                sequence_hash = ?queued.sequence_hash,
+                                "Weak block evicted before transfer"
+                            );
+                            evicted_sequence_hashes.push(queued.sequence_hash);
+                        }
+                    }
+                }
+            }
+        }
+
+        (resolved, evicted_sequence_hashes)
+    }
+
+    /// Execute the actual transfer for resolved blocks.
+    ///
+    /// This is async I/O work that runs concurrently with other transfers.
+    async fn execute_transfer(
+        shared: &SharedExecutorState<Dst>,
+        resolved: Vec<ResolvedBlock<Src>>,
+    ) -> anyhow::Result<()> {
+        if resolved.is_empty() {
+            return Ok(());
+        }
+
+        // Collect block_ids and sequence_hashes from resolved blocks
+        let src_block_ids: Vec<BlockId> = resolved.iter().map(|b| b.block_id).collect();
+        let sequence_hashes: Vec<SequenceHash> = resolved.iter().map(|b| b.sequence_hash).collect();
+
+        // Collect states for completion tracking (group by transfer_id)
+        let mut transfer_states: std::collections::HashMap<
+            TransferId,
+            (Arc<std::sync::Mutex<TransferState>>, Vec<BlockId>),
+        > = std::collections::HashMap::new();
+        for block in &resolved {
+            transfer_states
+                .entry(block.transfer_id)
+                .or_insert_with(|| (block.state.clone(), Vec::new()))
+                .1
+                .push(block.block_id);
+        }
+
+        // Skip actual transfers when in test mode
+        if !shared.skip_transfers {
+            // Allocate destination blocks
+            let dst_blocks = shared
+                .dst_manager
+                .allocate_blocks(resolved.len())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Failed to allocate {} destination blocks", resolved.len())
+                })?;
+
+            let dst_block_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
+
+            // Execute transfer via leader
+            let notification = shared.leader.execute_local_transfer(
+                shared.src_layout,
+                shared.dst_layout,
+                src_block_ids.clone(),
+                dst_block_ids.clone(),
+                TransferOptions::default(),
+            )?;
+
+            // Wait for transfer completion
+            notification.await?;
+
+            // Register each transferred block in the destination tier
+            let registered_blocks: Vec<ImmutableBlock<Dst>> = dst_blocks
+                .into_iter()
+                .zip(sequence_hashes.iter())
+                .map(|(dst_block, seq_hash)| {
+                    shared
+                        .dst_manager
+                        .register_mutable_block_with_hash(dst_block, *seq_hash)
+                })
+                .collect();
+
+            tracing::debug!(
+                num_registered = registered_blocks.len(),
+                "Registered transferred blocks in destination tier"
+            );
+
+            // Send registered blocks to downstream pipeline if chaining is enabled
+            if let Some(chain_tx) = &shared.chain_tx {
+                #[allow(clippy::type_complexity)]
+                let mut chain_outputs: std::collections::HashMap<
+                    TransferId,
+                    (
+                        Arc<std::sync::Mutex<TransferState>>,
+                        Vec<ImmutableBlock<Dst>>,
+                    ),
+                > = std::collections::HashMap::new();
+
+                for (registered, resolved_block) in
+                    registered_blocks.into_iter().zip(resolved.iter())
+                {
+                    chain_outputs
+                        .entry(resolved_block.transfer_id)
+                        .or_insert_with(|| (resolved_block.state.clone(), Vec::new()))
+                        .1
+                        .push(registered);
+                }
+
+                for (transfer_id, (state, blocks)) in chain_outputs {
+                    let output = ChainOutput {
+                        transfer_id,
+                        blocks,
+                        state,
+                    };
+                    if chain_tx.send(output).await.is_err() {
+                        tracing::warn!(
+                            %transfer_id,
+                            "Chain channel closed, downstream pipeline unavailable"
+                        );
+                    } else {
+                        tracing::debug!(
+                            %transfer_id,
+                            "Sent blocks to chain output for downstream processing"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Mark blocks as completed in each transfer state
+        for (transfer_id, (state, block_ids)) in transfer_states {
+            let mut state_guard = state.lock().unwrap();
+            state_guard.mark_completed(block_ids);
+
+            let total = state_guard.passed_blocks.len() + state_guard.filtered_out.len();
+            let done = state_guard.completed.len() + state_guard.filtered_out.len();
+            tracing::debug!(
+                %transfer_id,
+                total,
+                done,
+                passed = state_guard.passed_blocks.len(),
+                filtered = state_guard.filtered_out.len(),
+                completed = state_guard.completed.len(),
+                "Transfer batch progress"
+            );
+            if done >= total && total > 0 {
+                state_guard.set_complete();
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Legacy execute_batch method - kept for backwards compatibility
+    /// This uses the sequential execution model.
+    #[allow(dead_code)]
     async fn execute_batch(&self, batch: TransferBatch<Src>) -> anyhow::Result<()> {
         if batch.is_empty() {
             return Ok(());

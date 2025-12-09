@@ -20,7 +20,7 @@ mod tests {
 
     use anyhow::Result;
 
-    use crate::v2::integrations::offload::{
+    use crate::v2::distributed::offload::{
         EvalContext, OffloadEngine, OffloadPolicy, PipelineBuilder, PolicyFuture, SourceBlocks,
         TransferStatus, async_result,
     };

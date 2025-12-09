@@ -42,29 +42,15 @@
 //! permanently retired and will not be returned to the free list. This prevents
 //! generation counter wraparound issues.
 //!
-//! # Known Issues
+//! # Client/Handler Pairing
 //!
-//! TODO(nova-rpc): Investigate `am_sync` completion path reliability.
+//! Active message handlers (`am_handler`, `am_handler_async`) now correctly send
+//! ACK/NACK responses when paired with `am_sync` clients. The `AmExecutorAdapter`
+//! checks `ResponseType` and:
+//! - `FireAndForget` (`am_send`): No response sent (fire-and-forget)
+//! - `AckNack` (`am_sync`): ACK on success, NACK on error
 //!
-//! There is observed behavior where `am_sync` (client) paired with `am_handler_async`
-//! (handler) does not reliably complete. The client awaits indefinitely even after
-//! the handler finishes processing. This was discovered during KVBM RDMA transfer
-//! testing where transfers would timeout.
-//!
-//! Switching to `unary` (client) with `unary_handler_async` (handler) resolved
-//! the issue. The key difference is that:
-//! - `am_handler_async` returns `Result<()>` - return value NOT sent to client
-//! - `unary_handler_async` returns `Result<Option<Bytes>>` - return value IS sent
-//!
-//! Areas to investigate:
-//! 1. Ack/Event response path in `complete_outcome()` vs Response path
-//! 2. Potential race condition in `poll_wait` / `poll_recv` when completion
-//!    arrives before waker registration
-//! 3. Whether `am_sync` properly registers a response awaiter, or if it uses
-//!    a different completion mechanism (Event channel vs Response channel)
-//!
-//! Current recommendation: Use only `am_send` (fire-and-forget) or `unary`
-//! (request-response). Avoid `am_sync` until this is resolved.
+//! For request-response patterns with payloads, use `unary`/`unary_handler_async`.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dashmap::DashSet;
