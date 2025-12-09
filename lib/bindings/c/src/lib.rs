@@ -499,6 +499,13 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
 /// - `annotated_request_json_out` (`*mut c_char` to a NUL-terminated C string;
 ///   caller frees via the same free function)
 ///
+/// Optional disaggregated serving outputs (may be null if not needed):
+/// - `prefill_stage_complete_out` (`*mut bool`) - true if prefill stage is complete
+/// - `prefill_worker_id_out` (`*mut i64`) - prefill worker ID (-1 if not set)
+/// - `decode_worker_id_out` (`*mut i64`) - decode worker ID (-1 if not set)
+/// - `prefill_result_json_out` (`*mut *mut c_char`) - prefill result JSON string (null if not set)
+///   caller must free via `dynamo_free_worker_selection_result_extended`
+///
 /// # Safety
 /// - `pipeline`
 ///   - Must be a **non-null** pointer previously returned by
@@ -517,6 +524,9 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
 ///     and `annotated_request_json_out` must each be **non-null** and point to
 ///     writable memory for their respective types. On success, this function
 ///     writes to all four outputs exactly once.
+///   - Optional disaggregated outputs (`prefill_stage_complete_out`, `prefill_worker_id_out`,
+///     `decode_worker_id_out`, `prefill_result_json_out`) may be **null** if not needed.
+///     If non-null, they will be written on success.
 ///   - On **error**, outputs are left unmodified.
 /// - Ownership & deallocation:
 ///   - On success, if there are zero tokens, `*token_ids_out` may be set to `NULL`
@@ -526,6 +536,9 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
 ///     `dynamo_free_worker_selection_result` with the same `token_count_out` value.
 ///   - The pointer written to `*annotated_request_json_out` is a `CString` allocated
 ///     by Rust and **must** be freed by calling `dynamo_free_worker_selection_result`.
+///   - The pointer written to `*prefill_result_json_out` (if non-null) is a `CString`
+///     allocated by Rust and **must** be freed by calling
+///     `dynamo_free_worker_selection_result_extended`.
 ///   - **Do not** free these with `free(3)` or any other allocator; doing so is
 ///     undefined behavior.
 /// - Blocking & context:
@@ -548,6 +561,11 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     token_ids_out: *mut *mut u32,
     token_count_out: *mut usize,
     annotated_request_json_out: *mut *mut c_char,
+    // Optional disaggregated serving outputs (may be null)
+    prefill_stage_complete_out: *mut bool,
+    prefill_worker_id_out: *mut i64,
+    decode_worker_id_out: *mut i64,
+    prefill_result_json_out: *mut *mut c_char,
 ) -> DynamoLlmResult {
     if pipeline.is_null() {
         tracing::error!("Pipeline pointer is null");
@@ -558,7 +576,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         || token_count_out.is_null()
         || annotated_request_json_out.is_null()
     {
-        tracing::error!("One or more output pointers are null");
+        tracing::error!("One or more required output pointers are null");
         return DynamoLlmResult::ERR;
     }
 
@@ -579,7 +597,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
 
     let pl = unsafe { &*pipeline };
     let fut = async { query_worker_selection_and_annotate(&pl.engine, request).await };
-    let (worker_id, tokens, annotated_req) = match pl.wk.runtime().secondary().block_on(fut) {
+    let (result, annotated_req) = match pl.wk.runtime().secondary().block_on(fut) {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = ?e, "query_worker_selection_and_annotate failed");
@@ -587,10 +605,10 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         }
     };
 
-    let tokens_ptr = if tokens.is_empty() {
+    let tokens_ptr = if result.tokens.is_empty() {
         std::ptr::null_mut()
     } else {
-        let len = tokens.len();
+        let len = result.tokens.len();
         let layout = std::alloc::Layout::array::<u32>(len).unwrap();
         let ptr = unsafe { std::alloc::alloc(layout) as *mut u32 };
         if ptr.is_null() {
@@ -598,7 +616,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
             return DynamoLlmResult::ERR;
         }
         unsafe {
-            std::ptr::copy_nonoverlapping(tokens.as_ptr(), ptr, len);
+            std::ptr::copy_nonoverlapping(result.tokens.as_ptr(), ptr, len);
         }
         ptr
     };
@@ -606,13 +624,13 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     let annotated_json = match serde_json::to_string(&annotated_req) {
         Ok(s) => s,
         Err(e) => {
-            let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
-            unsafe {
-                std::alloc::dealloc(tokens_ptr as *mut u8, layout);
-            }
             if !tokens_ptr.is_null() {
-                tracing::error!(error = ?e, "serialize annotated request failed");
+                let layout = std::alloc::Layout::array::<u32>(result.tokens.len()).unwrap();
+                unsafe {
+                    std::alloc::dealloc(tokens_ptr as *mut u8, layout);
+                }
             }
+            tracing::error!(error = ?e, "serialize annotated request failed");
             return DynamoLlmResult::ERR;
         }
     };
@@ -621,7 +639,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         Err(e) => {
             tracing::error!(error = ?e, "CString::new for annotated JSON failed");
             if !tokens_ptr.is_null() {
-                let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
+                let layout = std::alloc::Layout::array::<u32>(result.tokens.len()).unwrap();
                 unsafe {
                     std::alloc::dealloc(tokens_ptr as *mut u8, layout);
                 }
@@ -629,12 +647,61 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
             return DynamoLlmResult::ERR;
         }
     };
+
+    // Allocate prefill_result_json if present
+    let prefill_result_ptr: *mut c_char = if let Some(ref json_str) = result.prefill_result_json {
+        match std::ffi::CString::new(json_str.as_str()) {
+            Ok(c) => c.into_raw(),
+            Err(e) => {
+                tracing::error!(error = ?e, "CString::new for prefill_result_json failed");
+                if !tokens_ptr.is_null() {
+                    let layout = std::alloc::Layout::array::<u32>(result.tokens.len()).unwrap();
+                    unsafe {
+                        std::alloc::dealloc(tokens_ptr as *mut u8, layout);
+                    }
+                }
+                return DynamoLlmResult::ERR;
+            }
+        }
+    } else {
+        std::ptr::null_mut()
+    };
+
+    // Write required outputs
     unsafe {
-        *worker_instance_id_out = worker_id;
+        *worker_instance_id_out = result.worker_id;
         *token_ids_out = tokens_ptr;
-        *token_count_out = tokens.len();
+        *token_count_out = result.tokens.len();
         *annotated_request_json_out = cjson.into_raw();
     }
+
+    // Write optional disaggregated outputs if pointers are provided
+    if !prefill_stage_complete_out.is_null() {
+        unsafe {
+            *prefill_stage_complete_out = result.prefill_stage_complete.unwrap_or(false);
+        }
+    }
+    if !prefill_worker_id_out.is_null() {
+        unsafe {
+            *prefill_worker_id_out = result.prefill_worker_id.unwrap_or(-1);
+        }
+    }
+    if !decode_worker_id_out.is_null() {
+        unsafe {
+            *decode_worker_id_out = result.decode_worker_id.unwrap_or(-1);
+        }
+    }
+    if !prefill_result_json_out.is_null() {
+        unsafe {
+            *prefill_result_json_out = prefill_result_ptr;
+        }
+    } else if !prefill_result_ptr.is_null() {
+        // Caller didn't want it but we allocated it - free it
+        unsafe {
+            drop(std::ffi::CString::from_raw(prefill_result_ptr));
+        }
+    }
+
     DynamoLlmResult::OK
 }
 
@@ -683,7 +750,7 @@ pub unsafe extern "C" fn dynamo_destroy_worker_selection_pipeline(
 /// - `token_ids` and `annotated_request_json` **must come from this library**:
 ///   - `token_ids` must be the exact pointer previously returned by
 ///     `dynamo_query_worker_selection_and_annotate` for the tokens buffer,
-///     allocated with Rust’s global allocator in this process.
+///     allocated with Rust's global allocator in this process.
 ///   - `annotated_request_json` must be the exact pointer previously returned by
 ///     `CString::into_raw` inside `dynamo_query_worker_selection_and_annotate`.
 /// - **Call at most once** per pointer. Passing the same pointer again is a
@@ -696,7 +763,7 @@ pub unsafe extern "C" fn dynamo_destroy_worker_selection_pipeline(
 ///     implementation (we only dealloc when `token_count > 0`).
 /// - After return, the pointers are **invalid** and must not be used again.
 /// - The caller and callee must be in the same process and share the same
-///   allocator/ABI (these deallocations use Rust’s global allocator).
+///   allocator/ABI (these deallocations use Rust's global allocator).
 /// - Ensure no other threads are concurrently reading/writing these buffers when
 ///   freeing them.
 /// - Do not call from contexts that forbid running destructors (e.g., signal handlers).
@@ -724,18 +791,94 @@ pub unsafe extern "C" fn dynamo_free_worker_selection_result(
     DynamoLlmResult::OK
 }
 
+/// Free buffers allocated by `dynamo_query_worker_selection_and_annotate` including
+/// the optional prefill_result_json.
+///
+/// # Safety
+/// Same requirements as `dynamo_free_worker_selection_result`, plus:
+/// - `prefill_result_json` must be null or the exact pointer returned by
+///   `dynamo_query_worker_selection_and_annotate` for the prefill result.
+///
+/// Returns `DynamoLlmResult::OK` on success.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dynamo_free_worker_selection_result_extended(
+    token_ids: *mut u32,
+    token_count: usize,
+    annotated_request_json: *mut c_char,
+    prefill_result_json: *mut c_char,
+) -> DynamoLlmResult {
+    // Free the basic results
+    // SAFETY: caller guarantees the pointers are valid and came from this library
+    let _ = unsafe {
+        dynamo_free_worker_selection_result(token_ids, token_count, annotated_request_json)
+    };
+
+    // Free prefill_result_json if present
+    if !prefill_result_json.is_null() {
+        // SAFETY: caller guarantees this pointer came from this library
+        unsafe {
+            drop(std::ffi::CString::from_raw(prefill_result_json));
+        }
+    }
+    DynamoLlmResult::OK
+}
+
+/// Result from worker selection that includes optional prefill stage data
+#[derive(Debug, Default)]
+pub struct WorkerSelectionResult {
+    /// The worker instance ID selected for routing
+    pub worker_id: i64,
+    /// Token IDs from preprocessing
+    pub tokens: Vec<u32>,
+    /// Whether prefill stage is complete (only set for disaggregated serving)
+    pub prefill_stage_complete: Option<bool>,
+    /// Prefill worker ID (only set for disaggregated serving)
+    pub prefill_worker_id: Option<i64>,
+    /// Decode worker ID (only set for disaggregated serving)
+    pub decode_worker_id: Option<i64>,
+    /// Prefill result JSON string (only set for disaggregated serving)
+    /// Contains kv_transfer_params needed by decode worker
+    pub prefill_result_json: Option<String>,
+}
+
 /// Helper function to extract worker selection information from the annotation stream
 pub async fn extract_worker_selection_from_stream(
     mut stream: Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
-) -> anyhow::Result<(i64, Vec<u32>)> {
+) -> anyhow::Result<WorkerSelectionResult> {
     use futures::StreamExt;
 
-    let mut worker_id: i64 = 0;
-    let mut tokens: Vec<u32> = Vec::new();
+    let mut result = WorkerSelectionResult::default();
 
     while let Some(response) = stream.next().await {
+        // Check for prefill stage data in nvext (from disaggregated serving)
+        if let Some(data) = response.data.as_ref()
+            && let Some(nvext) = data.nvext.as_ref()
+        {
+            // Extract prefill_stage if present
+            if let Some(prefill_stage) = nvext.get("prefill_stage") {
+                if let Some(complete) = prefill_stage.get("prefill_stage_complete") {
+                    result.prefill_stage_complete = complete.as_bool();
+                }
+                if let Some(prefill_id) = prefill_stage.get("prefill_worker_id") {
+                    result.prefill_worker_id = prefill_id.as_i64();
+                }
+                if let Some(decode_id) = prefill_stage.get("decode_worker_id") {
+                    result.decode_worker_id = decode_id.as_i64();
+                }
+                if let Some(prefill_result) = prefill_stage.get("prefill_result") {
+                    result.prefill_result_json = Some(prefill_result.to_string());
+                }
+                tracing::debug!(
+                    "Extracted prefill_stage from nvext: complete={:?}, prefill_worker={:?}, decode_worker={:?}",
+                    result.prefill_stage_complete,
+                    result.prefill_worker_id,
+                    result.decode_worker_id
+                );
+            }
+        }
+
+        // Process annotations
         let Some(event) = &response.event else {
-            tracing::error!("Response has no event field");
             continue;
         };
 
@@ -752,8 +895,8 @@ pub async fn extract_worker_selection_from_stream(
                 if let Ok(id_string) = serde_json::from_str::<String>(first_comment) {
                     match id_string.parse::<i64>() {
                         Ok(parsed_id) => {
-                            worker_id = parsed_id;
-                            tracing::debug!("parsed worker_id from JSON string: {}", worker_id);
+                            result.worker_id = parsed_id;
+                            tracing::debug!("parsed worker_id from JSON string: {}", result.worker_id);
                         }
                         Err(_) => {
                             tracing::error!(
@@ -767,8 +910,8 @@ pub async fn extract_worker_selection_from_stream(
 
                 match first_comment.parse::<i64>() {
                     Ok(parsed_id) => {
-                        worker_id = parsed_id;
-                        tracing::debug!("parsed worker_id directly: {}", worker_id);
+                        result.worker_id = parsed_id;
+                        tracing::debug!("parsed worker_id directly: {}", result.worker_id);
                     }
                     Err(_) => {
                         tracing::error!("failed to parse worker_id from: '{}'", first_comment);
@@ -787,8 +930,8 @@ pub async fn extract_worker_selection_from_stream(
                 tracing::debug!("Token comment: '{}'", first_comment);
                 match serde_json::from_str::<Vec<u32>>(first_comment) {
                     Ok(parsed_tokens) => {
-                        tokens = parsed_tokens;
-                        tracing::debug!("Successfully parsed {} tokens", tokens.len());
+                        result.tokens = parsed_tokens;
+                        tracing::debug!("Successfully parsed {} tokens", result.tokens.len());
                     }
                     Err(e) => {
                         tracing::error!("Failed to parse tokens from '{}': {}", first_comment, e);
@@ -803,11 +946,12 @@ pub async fn extract_worker_selection_from_stream(
     }
 
     tracing::info!(
-        "Final worker_id={}, tokens.len()={}",
-        worker_id,
-        tokens.len()
+        "Final worker_id={}, tokens.len()={}, prefill_stage_complete={:?}",
+        result.worker_id,
+        result.tokens.len(),
+        result.prefill_stage_complete
     );
-    Ok((worker_id, tokens))
+    Ok(result)
 }
 
 /// Utility function to add the "query_instance_id" annotation to an OpenAI request
@@ -890,16 +1034,16 @@ fn set_kv_annotation(
 /// This function performs the complete flow:
 /// 1. Clones the original request and adds "query_instance_id" annotation
 /// 2. Calls engine.generate() with the modified request
-/// 3. Extracts worker_instance_id and tokens from the response stream
+/// 3. Extracts worker_instance_id, tokens, and optional prefill stage data from the response
 /// 4. Adds worker_instance_id and token_data annotations to the original request
-/// 5. Returns (worker_id, tokens, annotated_original_request)
+/// 5. Returns WorkerSelectionResult with all data + annotated_original_request
 ///
 /// # Parameters
 /// - `engine`: The worker selection pipeline engine
 /// - `original_request`: The original OpenAI request to process
 ///
 /// # Returns
-/// A tuple containing (worker_instance_id, tokens, modified_original_request)
+/// A tuple containing (WorkerSelectionResult, modified_original_request)
 /// where the modified_original_request has worker_instance_id and token_data annotations added
 pub async fn query_worker_selection_and_annotate(
     engine: &ServiceEngine<
@@ -907,16 +1051,16 @@ pub async fn query_worker_selection_and_annotate(
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >,
     mut original_request: NvCreateChatCompletionRequest,
-) -> anyhow::Result<(i64, Vec<u32>, NvCreateChatCompletionRequest)> {
+) -> anyhow::Result<(WorkerSelectionResult, NvCreateChatCompletionRequest)> {
     let mut query_request = original_request.clone();
     add_query_instance_id(&mut query_request);
     let single_in = SingleIn::new(query_request);
     let response_stream = engine.generate(single_in).await?;
-    let (worker_id, tokens) = extract_worker_selection_from_stream(response_stream).await?;
-    add_worker_instance_id_annotation(&mut original_request, worker_id);
-    add_token_data_annotation(&mut original_request, &tokens);
+    let result = extract_worker_selection_from_stream(response_stream).await?;
+    add_worker_instance_id_annotation(&mut original_request, result.worker_id);
+    add_token_data_annotation(&mut original_request, &result.tokens);
 
-    Ok((worker_id, tokens, original_request))
+    Ok((result, original_request))
 }
 
 /// Create a worker selection pipeline for OpenAI Chat Completion requests
