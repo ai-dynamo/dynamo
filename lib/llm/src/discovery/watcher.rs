@@ -402,6 +402,13 @@ impl ModelWatcher {
                     )
                 });
 
+            // Get or create the worker monitor for this model
+            // This allows dynamic threshold updates via the ModelManager
+            let worker_monitor = self.router_config.busy_threshold.map(|threshold| {
+                self.manager
+                    .get_or_create_worker_monitor(card.name(), client.clone(), threshold)
+            });
+
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
                 let chat_engine = entrypoint::build_routed_pipeline::<
@@ -411,7 +418,7 @@ impl ModelWatcher {
                     card,
                     &client,
                     self.router_config.router_mode,
-                    self.router_config.busy_threshold,
+                    worker_monitor.clone(),
                     kv_chooser.clone(),
                     tokenizer_hf.clone(),
                     prefill_chooser.clone(),
@@ -442,7 +449,7 @@ impl ModelWatcher {
                     card,
                     &client,
                     self.router_config.router_mode,
-                    self.router_config.busy_threshold,
+                    worker_monitor,
                     kv_chooser,
                     preprocessor,
                     tokenizer_hf,

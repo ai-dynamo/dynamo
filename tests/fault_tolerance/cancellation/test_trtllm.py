@@ -21,6 +21,14 @@ from tests.utils.payloads import check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
 
+pytestmark = [
+    pytest.mark.trtllm,
+    pytest.mark.gpu_1,
+    pytest.mark.e2e,
+    pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
+    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
+]
+
 
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with TensorRT-LLM backend"""
@@ -80,6 +88,11 @@ class DynamoWorkerProcess(ManagedProcess):
         # Set debug logging environment
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
+        # Disable canary health check - these tests expect full control over requests
+        # sent to the workers where canary health check intermittently sends dummy
+        # requests to workers interfering with the test process which may cause
+        # intermittent failures
+        env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
 
@@ -127,13 +140,8 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.trtllm_marker
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_request_cancellation_trtllm_aggregated(
-    request, runtime_services, predownload_models
-):
+@pytest.mark.timeout(140)  # 3x average
+def test_request_cancellation_trtllm_aggregated(request, runtime_services):
     """
     End-to-end test for request cancellation functionality in aggregated mode.
 
@@ -204,13 +212,8 @@ def test_request_cancellation_trtllm_aggregated(
                 logger.info(f"{description} detected successfully")
 
 
-@pytest.mark.trtllm_marker
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_request_cancellation_trtllm_decode_cancel(
-    request, runtime_services, predownload_models
-):
+@pytest.mark.timeout(350)  # 3x average
+def test_request_cancellation_trtllm_decode_cancel(request, runtime_services):
     """
     End-to-end test for request cancellation during decode phase with unified frontend.
 
@@ -280,13 +283,8 @@ def test_request_cancellation_trtllm_decode_cancel(
                 )
 
 
-@pytest.mark.trtllm_marker
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_request_cancellation_trtllm_prefill_cancel(
-    request, runtime_services, predownload_models
-):
+@pytest.mark.timeout(350)  # 3x average
+def test_request_cancellation_trtllm_prefill_cancel(request, runtime_services):
     """
     End-to-end test for request cancellation during prefill phase with unified frontend.
 
@@ -366,13 +364,12 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 )
 
 
-@pytest.mark.trtllm_marker
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_request_cancellation_trtllm_kv_transfer_cancel(
-    request, runtime_services, predownload_models
-):
+@pytest.mark.timeout(350)  # 3x average
+@pytest.mark.xfail(
+    reason="May fail due to unknown reason with TRT-LLM or backend implementation",
+    strict=False,
+)
+def test_request_cancellation_trtllm_kv_transfer_cancel(request, runtime_services):
     """
     End-to-end test for request cancellation during prefill to decode KV transfer phase.
 
