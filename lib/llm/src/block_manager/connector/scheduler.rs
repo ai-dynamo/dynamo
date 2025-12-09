@@ -231,7 +231,7 @@ impl WorkerSchedulerClient {
                 // Log when slot is NOT complete to help diagnose stuck operations
                 if !is_done {
                     tracing::debug!(
-                        target: "blocking_ops",
+                        target: "worker_scheduler",
                         request_id = request_id,
                         completed = completed,
                         total_ops = total_ops,
@@ -515,8 +515,8 @@ impl Scheduler {
 
     #[tracing::instrument(level = "debug", skip_all, fields(request_id = %result.request_id, operation_id = %result.uuid))]
     fn handle_immediate_result(&mut self, result: ImmediateTransferResult) {
-        tracing::info!(
-            target: "blocking_ops",
+        tracing::debug!(
+            target: "scheduler",
             request_id = %result.request_id,
             operation_id = %result.uuid,
             "SCHEDULER: Received immediate transfer completion"
@@ -524,19 +524,9 @@ impl Scheduler {
         match self.slots.get_mut(&result.request_id) {
             Some(slot) => {
                 let new_count = slot.completed.fetch_add(1, Ordering::Relaxed) + 1;
-                tracing::info!(
-                    target: "blocking_ops",
-                    request_id = %result.request_id,
-                    completed = new_count,
-                    "SCHEDULER: Incremented completed counter"
-                );
+                let _ = new_count; // silence unused variable warning
             }
             None => {
-                tracing::info!(
-                    target: "blocking_ops",
-                    request_id = %result.request_id,
-                    "SCHEDULER: No slot found, adding to unprocessed results"
-                );
                 self.unprocessed_immediate_results
                     .entry(result.request_id)
                     .or_default()

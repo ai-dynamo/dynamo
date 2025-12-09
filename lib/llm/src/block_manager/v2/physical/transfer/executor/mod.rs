@@ -271,18 +271,16 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
     let ctx_clone = ctx.clone();
     handle.spawn(async move {
         let Some(ref bounce_buffer_spec) = options_clone.bounce_buffer else {
-            tx.send(Err(anyhow::anyhow!(
+            let _ = tx.send(Err(anyhow::anyhow!(
                 "Two-hop transfers require a bounce buffer."
-            )))
-            .unwrap();
+            )));
             return;
         };
 
         if bounce_buffer_spec.layout().location() != bounce_location {
-            tx.send(Err(anyhow::anyhow!(
+            let _ = tx.send(Err(anyhow::anyhow!(
                 "Bounce buffer layout does not match bounce location."
-            )))
-            .unwrap();
+            )));
             return;
         }
 
@@ -292,13 +290,12 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
         // The batcher ensures transfers fit within the bounce buffer slot.
         // If this assertion fails, there's a configuration mismatch.
         if num_bounce_blocks < total_blocks {
-            tx.send(Err(anyhow::anyhow!(
+            let _ = tx.send(Err(anyhow::anyhow!(
                 "Transfer size ({}) exceeds bounce buffer capacity ({}). \
                  Ensure DYN_KVBM_TRANSFER_BATCH_SIZE <= bounce buffer slot size.",
                 total_blocks,
                 num_bounce_blocks
-            )))
-            .unwrap();
+            )));
             return;
         }
 
@@ -339,7 +336,8 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
             total_elapsed.as_secs_f64() * 1000.0,
         );
 
-        tx.send(result).unwrap();
+        // Use let _ to gracefully handle receiver being dropped (e.g., due to timeout)
+        let _ = tx.send(result);
     });
 
     Ok(TransferCompleteNotification { status: rx })

@@ -434,6 +434,21 @@ impl Worker for KvConnectorWorker {
             }
         }
 
+        // Debug logging to diagnose scheduling stalls
+        if !self.maybe_finished_offloading.is_empty() || !self.maybe_finished_onboarding.is_empty() {
+            // Log details of stuck slots
+            for request_id in self.maybe_finished_offloading.iter().take(3) {
+                if self.connector.has_slot(request_id) {
+                    let _is_complete = self.connector.is_complete(request_id);
+                }
+            }
+            for request_id in self.maybe_finished_onboarding.iter().take(3) {
+                if self.connector.has_slot(request_id) {
+                    let _is_complete = self.connector.is_complete(request_id);
+                }
+            }
+        }
+
         (is_finished_offloading, is_finished_onboarding)
     }
 }

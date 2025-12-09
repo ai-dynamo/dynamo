@@ -142,12 +142,6 @@ pub struct ConnectorTransferBatcher {
 impl ConnectorTransferBatcher {
     pub fn new() -> Self {
         let batch_size = max_transfer_batch_size();
-        tracing::debug!(
-            target: "object_transfer_timing",
-            batch_size = batch_size,
-            "ConnectorTransferBatcher initialized with batch_size={}",
-            batch_size
-        );
         Self {
             max_batch_size: batch_size,
         }
@@ -231,7 +225,13 @@ impl BlockTransferHandler for BlockTransferHandlerV1 {
 #[async_trait]
 impl BlockTransferDirectHandler for BlockTransferHandlerV1 {
     async fn execute_transfer_direct(&self, request: BlockTransferRequest) -> Result<()> {
+        // Early return for empty transfers
+        if request.blocks().is_empty() {
+            return Ok(());
+        }
+
         tracing::debug!(
+            target: "block_transfer_v1",
             "Performing transfer of {} blocks from {:?} to {:?}",
             request.blocks().len(),
             request.from_pool(),
@@ -472,6 +472,11 @@ impl BlockTransferHandler for BlockTransferHandlerV2 {
 #[async_trait]
 impl BlockTransferDirectHandler for BlockTransferHandlerV2 {
     async fn execute_transfer_direct(&self, request: BlockTransferRequest) -> Result<()> {
+        // Early return for empty transfers
+        if request.blocks().is_empty() {
+            return Ok(());
+        }
+
         // Check if this involves object storage - requires dynamic layout creation
         let involves_object = matches!(request.from_pool(), Object)
             || matches!(request.to_pool(), Object);
@@ -479,6 +484,14 @@ impl BlockTransferDirectHandler for BlockTransferHandlerV2 {
         if involves_object {
             return self.execute_object_transfer(&request).await;
         }
+
+        tracing::debug!(
+            target: "block_transfer_v2",
+            "Performing transfer of {} blocks from {:?} to {:?}",
+            request.blocks().len(),
+            request.from_pool(),
+            request.to_pool()
+        );
 
         // Standard transfer path for non-object storage
         let (src, dst) = match (request.from_pool(), request.to_pool()) {
@@ -502,15 +515,6 @@ impl BlockTransferDirectHandler for BlockTransferHandlerV2 {
                 .map(|(_, to)| *to)
                 .collect::<Vec<_>>();
 
-            let num_blocks = src_block_ids.len();
-            tracing::info!(
-                target: "blocking_ops",
-                num_blocks = num_blocks,
-                from = ?request.from_pool(),
-                to = ?request.to_pool(),
-                "BLOCKING: Starting standard NIXL transfer"
-            );
-
             self.transport_manager
                 .execute_transfer(
                     *src,
@@ -520,14 +524,6 @@ impl BlockTransferDirectHandler for BlockTransferHandlerV2 {
                     TransferOptions::default(),
                 )?
                 .await?;
-
-            tracing::info!(
-                target: "blocking_ops",
-                num_blocks = num_blocks,
-                from = ?request.from_pool(),
-                to = ?request.to_pool(),
-                "UNBLOCKED: Completed standard NIXL transfer"
-            );
         } else {
             return Err(anyhow::anyhow!("Invalid transfer type."));
         }
@@ -640,15 +636,6 @@ impl BlockTransferHandlerV2 {
                 let num_blocks = blocks.len();
                 let transfer_timeout = object_offload_timeout();
 
-                tracing::info!(
-                    target: "blocking_ops",
-                    num_blocks = num_blocks,
-                    timeout_secs = transfer_timeout.as_secs(),
-                    from = ?request.from_pool(),
-                    needs_bounce = needs_bounce,
-                    "BLOCKING: Starting object OFFLOAD transfer (S3 write)"
-                );
-
                 let transfer_future = self.transport_manager
                     .execute_transfer(
                         *src_handle,
@@ -662,13 +649,6 @@ impl BlockTransferHandlerV2 {
                     Ok(Ok(())) => {
                         let elapsed = start.elapsed();
                         let total_elapsed = transfer_start.elapsed();
-
-                        tracing::info!(
-                            target: "blocking_ops",
-                            num_blocks = num_blocks,
-                            elapsed_ms = elapsed.as_millis(),
-                            "UNBLOCKED: Completed object OFFLOAD transfer"
-                        );
 
                         log_object_transfer_complete(
                             "OBJECT_OFFLOAD_DONE",
@@ -719,8 +699,6 @@ impl BlockTransferHandlerV2 {
                 // Move blocking layout creation + registration off the async runtime
                 // This prevents 100s of concurrent registrations from blocking all tokio workers
                 let object_handle = tokio::task::spawn_blocking(move || -> Result<LayoutHandle> {
-                    let reg_start = std::time::Instant::now();
-
                     let config = object_storage_config.as_ref()
                         .ok_or_else(|| anyhow::anyhow!("Object storage config not set"))?;
 
@@ -738,14 +716,6 @@ impl BlockTransferHandlerV2 {
                         .build()?;
 
                     let handle = transport_manager.register_layout(object_layout)?;
-
-                    tracing::debug!(
-                        target: "blocking_ops",
-                        elapsed_ms = reg_start.elapsed().as_millis(),
-                        num_blocks = num_keys,
-                        "Object layout created and registered (spawn_blocking)"
-                    );
-
                     Ok(handle)
                 })
                 .await
@@ -775,15 +745,6 @@ impl BlockTransferHandlerV2 {
                 let num_blocks = blocks.len();
                 let transfer_timeout = object_onboard_timeout();
 
-                tracing::info!(
-                    target: "blocking_ops",
-                    num_blocks = num_blocks,
-                    timeout_secs = transfer_timeout.as_secs(),
-                    to = ?request.to_pool(),
-                    needs_bounce = needs_bounce,
-                    "BLOCKING: Starting object ONBOARD transfer (S3 read)"
-                );
-
                 let transfer_future = self.transport_manager
                     .execute_transfer(
                         object_handle,
@@ -797,13 +758,6 @@ impl BlockTransferHandlerV2 {
                     Ok(Ok(())) => {
                         let elapsed = start.elapsed();
                         let total_elapsed = transfer_start.elapsed();
-
-                        tracing::info!(
-                            target: "blocking_ops",
-                            num_blocks = num_blocks,
-                            elapsed_ms = elapsed.as_millis(),
-                            "UNBLOCKED: Completed object ONBOARD transfer"
-                        );
 
                         log_object_transfer_complete(
                             "OBJECT_ONBOARD_DONE",

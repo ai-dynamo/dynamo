@@ -78,6 +78,9 @@ impl KvConnectorLeader {
             parse_kvbm_metrics_port(),
         );
 
+        // Spawn periodic stats logger (logs every 30 seconds)
+        kvbm_metrics.spawn_periodic_stats_logger(std::time::Duration::from_secs(30));
+
         let kvbm_metrics_clone = kvbm_metrics.clone();
 
         let slot_manager_cell = Arc::new(OnceLock::new());
