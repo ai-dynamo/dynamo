@@ -219,7 +219,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 			}
 
 			// Check requeue
-			if tt.expectRequeue && result.Requeue == false && result.RequeueAfter == 0 {
+			if tt.expectRequeue && result.RequeueAfter == 0 {
 				t.Errorf("Expected requeue, but got none")
 			}
 
