@@ -78,7 +78,8 @@ pub async fn process_polling_notifications<C: CompletionChecker>(
     mut rx: mpsc::Receiver<RegisterPollingNotification<C>>,
 ) {
     let mut outstanding: HashMap<Uuid, OutstandingPollingTransfer<C>> = HashMap::new();
-    let mut check_interval = interval(Duration::from_millis(1));
+    // Use a less aggressive interval (10ms) to avoid starving the runtime at high concurrency
+    let mut check_interval = interval(Duration::from_millis(10));
 
     loop {
         tokio::select! {

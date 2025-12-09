@@ -16,7 +16,7 @@ use crate::block_manager::{
     },
     connector::scheduler::TransferSchedulerClient,
     layout::LayoutType,
-    offload::{MAX_CONCURRENT_TRANSFERS, MAX_TRANSFER_BATCH_SIZE},
+    offload::{MAX_CONCURRENT_TRANSFERS, max_transfer_batch_size},
     storage::{DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
     v2::memory::DeviceStorage as DeviceStorageV2,
     v2::physical::{
@@ -37,6 +37,84 @@ use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 use tokio::sync::{Mutex, RwLock, oneshot};
+
+/// Inject NIXL OBJ backend environment variables with resolved worker_id.
+///
+/// This allows using `{worker_id}` template in bucket names.
+/// Environment variables are set BEFORE creating the NIXL agent so it
+/// picks them up during backend initialization.
+///
+/// NIXL's S3 client reads these parameters (lowercase version of env var suffix):
+/// - `DYN_KVBM_NIXL_BACKEND_OBJ_BUCKET` → `bucket`
+/// - `DYN_KVBM_NIXL_BACKEND_OBJ_ENDPOINT_OVERRIDE` → `endpoint_override`
+/// - `DYN_KVBM_NIXL_BACKEND_OBJ_ACCESS_KEY` → `access_key`
+/// - `DYN_KVBM_NIXL_BACKEND_OBJ_SECRET_KEY` → `secret_key`
+/// - `DYN_KVBM_NIXL_BACKEND_OBJ_REGION` → `region`
+///
+/// This function also forwards standard AWS credentials if NIXL-specific ones aren't set.
+///
+/// # Safety
+/// Uses `set_var` which is unsafe because environment variable mutation is
+/// not thread-safe. However, this is called during worker initialization
+/// before any concurrent access to these specific variables.
+fn inject_nixl_object_env_vars(worker_id: u32, config: &Option<ObjectStorageConfig>) {
+    let Some(config) = config else {
+        return;
+    };
+
+    // Resolve bucket template with worker_id
+    let bucket = config.resolve_bucket(worker_id);
+
+    // Collect optional env vars to set
+    let endpoint = config.endpoint_override.as_ref();
+    let region = config.region.as_ref();
+
+    // Forward AWS credentials to NIXL format if not already set
+    // This allows users to use standard AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+    let access_key = if std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_ACCESS_KEY").is_err() {
+        std::env::var("AWS_ACCESS_KEY_ID").ok()
+    } else {
+        None
+    };
+
+    let secret_key = if std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_SECRET_KEY").is_err() {
+        std::env::var("AWS_SECRET_ACCESS_KEY").ok()
+    } else {
+        None
+    };
+
+    // SAFETY: Called during single-threaded worker initialization phase,
+    // before NIXL agent creation reads these variables.
+    unsafe {
+        std::env::set_var("DYN_KVBM_NIXL_BACKEND_OBJ_BUCKET", &bucket);
+
+        if let Some(endpoint) = endpoint {
+            std::env::set_var("DYN_KVBM_NIXL_BACKEND_OBJ_ENDPOINT_OVERRIDE", endpoint);
+        }
+
+        if let Some(region) = region {
+            std::env::set_var("DYN_KVBM_NIXL_BACKEND_OBJ_REGION", region);
+        }
+
+        if let Some(ref access_key) = access_key {
+            std::env::set_var("DYN_KVBM_NIXL_BACKEND_OBJ_ACCESS_KEY", access_key);
+        }
+
+        if let Some(ref secret_key) = secret_key {
+            std::env::set_var("DYN_KVBM_NIXL_BACKEND_OBJ_SECRET_KEY", secret_key);
+        }
+    }
+
+    tracing::info!(
+        worker_id = worker_id,
+        bucket = %bucket,
+        endpoint = ?config.endpoint_override,
+        region = ?config.region,
+        has_access_key = std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_ACCESS_KEY").is_ok(),
+        has_secret_key = std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_SECRET_KEY").is_ok(),
+        "Injected NIXL OBJ backend env vars"
+    );
+}
 
 struct WorkerState {
     ready_for_ping: AtomicBool,
@@ -126,22 +204,41 @@ async fn perform_allocation_and_build_handler(
 
     if use_v2_transfer {
         tracing::warn!("Using V2 transfer handler. This is experimental. Use at your own risk.");
-        let backends = if leader_meta.num_disk_blocks > 0 {
-            vec!["POSIX", "GDS_MT"]
-        } else {
-            vec!["POSIX"]
-        };
+
+        // Build backend list based on configured storage tiers
+        let mut backends = vec!["POSIX"];
+        if leader_meta.num_disk_blocks > 0 {
+            backends.push("GDS_MT");
+        }
+        if leader_meta.num_object_blocks > 0 {
+            backends.push("OBJ");
+
+            // Inject NIXL OBJ backend env vars with resolved worker_id
+            // This allows using {worker_id} template in bucket names
+            inject_nixl_object_env_vars(worker_id as u32, &leader_meta.object_storage_config);
+        }
 
         let agent = NixlAgentV2::new_with_backends(worker_id.to_string().as_str(), &backends)?;
 
+        let device_cfg = device_layout.config();
+        tracing::info!(
+            "Device layout config: num_blocks={}, num_layers={}, outer_dim={}, inner_dim={}, page_size={}, dtype_bytes={}",
+            device_cfg.num_blocks,
+            device_cfg.num_layers,
+            device_cfg.outer_dim,
+            device_cfg.inner_dim,
+            device_cfg.page_size,
+            device_cfg.dtype_width_bytes
+        );
+
         let mut layout_config = LayoutConfigV2::builder()
-            .num_blocks(device_layout.config().num_blocks)
-            .num_layers(device_layout.config().num_layers)
-            .outer_dim(device_layout.config().outer_dim)
-            .inner_dim(device_layout.config().inner_dim)
-            .page_size(device_layout.config().page_size)
-            .alignment(device_layout.config().alignment)
-            .dtype_width_bytes(device_layout.config().dtype_width_bytes)
+            .num_blocks(device_cfg.num_blocks)
+            .num_layers(device_cfg.num_layers)
+            .outer_dim(device_cfg.outer_dim)
+            .inner_dim(device_cfg.inner_dim)
+            .page_size(device_cfg.page_size)
+            .alignment(device_cfg.alignment)
+            .dtype_width_bytes(device_cfg.dtype_width_bytes)
             .build()?;
 
         let v2_device_layout =
@@ -182,7 +279,7 @@ async fn perform_allocation_and_build_handler(
             layout_config.num_blocks = leader_meta.num_disk_blocks;
             Some(
                 PhysicalLayoutBuilder::new(agent.clone())
-                    .with_config(layout_config)
+                    .with_config(layout_config.clone())
                     .fully_contiguous()
                     .allocate_disk(None)
                     .build()?,
@@ -191,6 +288,22 @@ async fn perform_allocation_and_build_handler(
             None
         };
 
+        if leader_meta.num_object_blocks > 0 {
+            if let Some(ref obj_config) = leader_meta.object_storage_config {
+                tracing::info!(
+                    "Object storage enabled: bucket_template='{}', resolved='{}', max_blocks={}",
+                    obj_config.bucket_template,
+                    obj_config.resolve_bucket(worker_id as u32),
+                    leader_meta.num_object_blocks
+                );
+            } else {
+                tracing::warn!(
+                    "Object storage blocks configured ({}) but no ObjectStorageConfig provided",
+                    leader_meta.num_object_blocks
+                );
+            }
+        }
+
         let transport_manager = TransportManager::builder()
             .capabilities(TransferCapabilities::default().with_gds(true))
             .worker_id(worker_id as u64)
@@ -198,12 +311,24 @@ async fn perform_allocation_and_build_handler(
             .cuda_device_id(device_id)
             .build()?;
 
+        // Pass object storage config for dynamic layout creation
+        // Create bounce allocators if object storage is ENABLED (via config), not just if num_object_blocks > 0
+        let object_storage_config = leader_meta.object_storage_config.clone();
+        let object_layout_config = if object_storage_config.is_some() {
+            Some(layout_config.clone())
+        } else {
+            None
+        };
+
         let handler = BlockTransferHandlerV2::new(
             Some(v2_device_layout),
             host_layout,
             disk_layout,
             transport_manager,
             scheduler_client,
+            object_storage_config,
+            object_layout_config,
+            worker_id as u32,
         )?;
 
         Ok(Arc::new(handler) as Arc<dyn BlockTransferHandler>)
@@ -212,7 +337,7 @@ async fn perform_allocation_and_build_handler(
         let pool_config = PoolConfig {
             enable_pool: true,
             max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
-            max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
+            max_transfer_batch_size: max_transfer_batch_size(),
             num_outer_components: device_layout.config().outer_dim,
             num_layers: device_layout.config().num_layers,
         };

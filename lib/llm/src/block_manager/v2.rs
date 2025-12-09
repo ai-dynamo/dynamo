@@ -2,5 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod kernels;
+pub mod logical;
 pub mod memory;
 pub mod physical;

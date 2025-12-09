@@ -70,7 +70,44 @@ use derive_getters::Getters;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 pub const MAX_CONCURRENT_TRANSFERS: usize = 4;
-pub const MAX_TRANSFER_BATCH_SIZE: usize = 16;
+
+/// Default maximum number of blocks per transfer batch.
+/// Can be overridden via DYN_KVBM_TRANSFER_BATCH_SIZE environment variable.
+pub const DEFAULT_TRANSFER_BATCH_SIZE: usize = 16;
+
+/// Get the maximum transfer batch size from environment or use default.
+///
+/// Larger batches reduce overhead but increase per-transfer latency.
+/// For object storage (S3), larger batches (32-64) can improve throughput.
+///
+/// Set via: `DYN_KVBM_TRANSFER_BATCH_SIZE=32`
+pub fn max_transfer_batch_size() -> usize {
+    use dynamo_runtime::config::environment_names::kvbm::transfer;
+
+    std::env::var(transfer::DYN_KVBM_TRANSFER_BATCH_SIZE)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_TRANSFER_BATCH_SIZE)
+}
+
+/// Check if async (fire-and-forget) offload mode is enabled.
+///
+/// When enabled, offload requests return immediately while the transfer
+/// completes in the background. This improves throughput but sacrifices
+/// immediate error reporting.
+///
+/// Set via: `DYN_KVBM_ASYNC_OFFLOAD=true`
+pub fn async_offload_enabled() -> bool {
+    use dynamo_runtime::config::environment_names::kvbm::transfer;
+
+    std::env::var(transfer::DYN_KVBM_ASYNC_OFFLOAD)
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false)
+}
+
+/// Legacy constant for backwards compatibility.
+/// Prefer using `max_transfer_batch_size()` for runtime configuration.
+pub const MAX_TRANSFER_BATCH_SIZE: usize = DEFAULT_TRANSFER_BATCH_SIZE;
 
 /// Configuration for creating an OffloadManager
 pub struct OffloadManagerConfig {
@@ -145,10 +182,16 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
 
         let cuda_ctx = Cuda::device_or_create(0)?;
 
+        let transfer_batch_size = max_transfer_batch_size();
+        tracing::info!(
+            "OffloadManager using transfer_batch_size={}",
+            transfer_batch_size
+        );
+
         let pool_config = PoolConfig {
             enable_pool: true,
             max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
-            max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
+            max_transfer_batch_size: transfer_batch_size,
             num_outer_components: config.model_config.outer_dim,
             num_layers: config.model_config.num_layers,
         };
@@ -173,7 +216,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -211,7 +254,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -242,7 +285,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -268,7 +311,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -299,7 +342,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                         &config.async_rt_handle,
                         config.cancellation_token.clone(),
                     )?,
-                    MAX_TRANSFER_BATCH_SIZE,
+                    transfer_batch_size,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )),

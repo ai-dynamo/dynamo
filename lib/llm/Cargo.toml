@@ -58,6 +58,7 @@ futures = { workspace = true }
 futures-util = "0.3.31"
 hf-hub = { workspace = true }
 humantime = { workspace = true }                           # input/batch
+moka = { version = "0.12", features = ["sync"] }
 rand = { workspace = true }
 oneshot = { workspace = true }
 parking_lot = { workspace = true }

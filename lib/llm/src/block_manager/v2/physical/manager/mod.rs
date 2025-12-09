@@ -99,6 +99,21 @@ impl TransportManager {
         self.registry.write().unwrap().register_local(layout)
     }
 
+    /// Get a layout by handle, returning a clone.
+    ///
+    /// # Arguments
+    /// * `handle` - Handle to the layout
+    ///
+    /// # Returns
+    /// Returns Some(PhysicalLayout) if found, None otherwise
+    pub fn get_layout(&self, handle: LayoutHandle) -> Option<PhysicalLayout> {
+        self.registry
+            .read()
+            .unwrap()
+            .get_layout(handle)
+            .cloned()
+    }
+
     /// Export layout metadata for transmission to remote workers.
     ///
     /// This exports all registered local layouts along with NIXL metadata
@@ -438,7 +453,7 @@ impl LayoutRegistry {
     ///
     /// # Returns
     /// Returns a reference to the PhysicalLayout if found
-    pub(crate) fn get_layout(&self, handle: LayoutHandle) -> Option<&PhysicalLayout> {
+    pub fn get_layout(&self, handle: LayoutHandle) -> Option<&PhysicalLayout> {
         self.local_layouts
             .get(&handle)
             .map(|l| l.layout())
