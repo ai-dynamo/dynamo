@@ -332,10 +332,10 @@ jobs:
 
   deploy-test-fault-tolerance:
     runs-on: cpu-amd-m5-2xlarge
-    # Only run on nightly schedule or when explicitly requested
+    # Run on nightly schedule (health check) or when explicitly requested via workflow_dispatch
     if: |
-      needs.changed-files.outputs.has_code_changes == 'true' && 
-      (github.event_name == 'schedule' || github.event.inputs.run_deploy_operator == 'true')
+      github.event_name == 'schedule' ||
+      (needs.changed-files.outputs.has_code_changes == 'true' && github.event.inputs.run_deploy_operator == 'true')
     needs: [changed-files, operator, vllm, trtllm, sglang]
     permissions:
       contents: read
