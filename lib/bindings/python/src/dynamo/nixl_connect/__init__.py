@@ -629,6 +629,16 @@ class Connector:
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created {self.__repr__()}."
         )
 
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, Connector):
+            return False
+        return self._worker_id == other._worker_id
+
+    def __ne__(self, value: object) -> bool:
+        if not isinstance(value, Connector):
+            return True
+        return self._worker_id != value._worker_id
+
     def __repr__(self) -> str:
         return str(
             f"{self.__class__.__name__}("
