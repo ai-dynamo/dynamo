@@ -50,6 +50,7 @@ impl NvCreateChatCompletionRequest {
                 .unwrap_or(false),
             enable_logprobs: self.inner.logprobs.unwrap_or(false)
                 || self.inner.top_logprobs.unwrap_or(0) > 0,
+            observability_fields: self.nvext.as_ref().and_then(|nv| nv.observability_fields.clone()),
             runtime_config: ModelRuntimeConfig::default(),
         };
 
@@ -64,6 +65,8 @@ pub struct DeltaGeneratorOptions {
     pub enable_usage: bool,
     /// Determines whether log probabilities should be included in the response.
     pub enable_logprobs: bool,
+    /// Extra fields to include in response nvext (e.g., "worker_id", "timing_metrics")
+    pub observability_fields: Option<Vec<String>>,
 
     pub runtime_config: ModelRuntimeConfig,
 }
@@ -288,6 +291,15 @@ impl DeltaGenerator {
     pub fn is_usage_enabled(&self) -> bool {
         self.options.enable_usage
     }
+
+    /// Check if an observability field is requested
+    fn is_observability_field_requested(&self, field: &str) -> bool {
+        self.options
+            .observability_fields
+            .as_ref()
+            .map(|fields| fields.iter().any(|f| f == field))
+            .unwrap_or(false)
+    }
 }
 
 /// Implements the [`crate::protocols::openai::DeltaGeneratorExt`] trait for [`DeltaGenerator`], allowing
@@ -362,37 +374,28 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         let index = 0;
         let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
 
-        // Extract worker_id from disaggregated_params and inject into nvext if present
-        if let Some(worker_id_json) = delta
-            .disaggregated_params
-            .as_ref()
-            .and_then(|params| params.get("worker_id"))
-        {
-            use crate::protocols::openai::nvext::{NvExtResponse, WorkerIdInfo};
+        // Extract worker_id and timing_metrics from disaggregated_params and inject into nvext
+        // Only include fields that were explicitly requested via observability_fields
+        if let Some(ref disaggregated_params) = delta.disaggregated_params {
+            let mut nvext_obj = serde_json::Map::new();
 
-            let prefill_worker_id = worker_id_json
-                .get("prefill_worker_id")
-                .and_then(|v| v.as_u64());
-            let decode_worker_id = worker_id_json
-                .get("decode_worker_id")
-                .and_then(|v| v.as_u64());
+            // Extract worker_id if present and requested
+            if self.is_observability_field_requested("worker_id")
+                && let Some(worker_id_json) = disaggregated_params.get("worker_id")
+            {
+                nvext_obj.insert("worker_id".to_string(), worker_id_json.clone());
+            }
 
-            let worker_id_info = WorkerIdInfo {
-                prefill_worker_id,
-                decode_worker_id,
-            };
+            // Extract timing_metrics if present and requested
+            if self.is_observability_field_requested("timing_metrics")
+                && let Some(timing_metrics_json) = disaggregated_params.get("timing_metrics")
+            {
+                nvext_obj.insert("timing_metrics".to_string(), timing_metrics_json.clone());
+            }
 
-            let nvext_response = NvExtResponse {
-                worker_id: Some(worker_id_info),
-            };
-
-            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
-                stream_response.nvext = Some(nvext_json);
-                tracing::debug!(
-                    "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
-                    prefill_worker_id,
-                    decode_worker_id
-                );
+            // Only set nvext if we have at least one field
+            if !nvext_obj.is_empty() {
+                stream_response.nvext = Some(serde_json::Value::Object(nvext_obj));
             }
         }
 
@@ -473,5 +476,53 @@ mod tests {
             request.inner.stream_options.is_none(),
             "Streaming request should not have stream_options modified"
         );
+    }
+
+    #[test]
+    fn test_delta_extracts_timing_metrics_from_disaggregated_params() {
+        use crate::protocols::openai::DeltaGeneratorExt;
+
+        let options = DeltaGeneratorOptions {
+            observability_fields: Some(vec!["worker_id".to_string(), "timing_metrics".to_string()]),
+            ..Default::default()
+        };
+        let mut generator = DeltaGenerator::new(
+            "test-model".to_string(),
+            options,
+            "test-request-id".to_string(),
+        );
+
+        let timing_metrics = serde_json::json!({
+            "request_received_seconds": 1700000000.0,
+            "decode_end_seconds": 1700000001.0
+        });
+        let worker_id = serde_json::json!({
+            "prefill_worker_id": 42,
+            "decode_worker_id": 7
+        });
+
+        let output = common::llm_backend::BackendOutput {
+            token_ids: vec![1],
+            tokens: vec![Some("test".to_string())],
+            text: Some("test".to_string()),
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(common::FinishReason::Stop),
+            index: None,
+            completion_usage: None,
+            disaggregated_params: Some(serde_json::json!({
+                "worker_id": worker_id.clone(),
+                "timing_metrics": timing_metrics.clone()
+            })),
+        };
+
+        let result = generator.choice_from_postprocessor(output).unwrap();
+
+        // Verify both fields were extracted into nvext
+        assert!(result.nvext.is_some());
+        let nvext = result.nvext.unwrap();
+        assert_eq!(nvext.get("worker_id").unwrap(), &worker_id);
+        assert_eq!(nvext.get("timing_metrics").unwrap(), &timing_metrics);
     }
 }

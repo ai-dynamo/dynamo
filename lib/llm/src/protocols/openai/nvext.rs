@@ -10,26 +10,6 @@ pub trait NvExtProvider {
     fn raw_prompt(&self) -> Option<String>;
 }
 
-/// Worker ID information for disaggregated serving
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct WorkerIdInfo {
-    /// The prefill worker ID that processed this request
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prefill_worker_id: Option<u64>,
-
-    /// The decode worker ID that processed this request
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub decode_worker_id: Option<u64>,
-}
-
-/// NVIDIA LLM response extensions
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct NvExtResponse {
-    /// Worker ID information (prefill and decode worker IDs)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub worker_id: Option<WorkerIdInfo>,
-}
-
 /// NVIDIA LLM extensions to the OpenAI API
 #[derive(Serialize, Deserialize, Builder, Validate, Debug, Clone)]
 #[validate(schema(function = "validate_nv_ext"))]
@@ -74,12 +54,19 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     pub max_thinking_tokens: Option<u32>,
 
-    /// Extra fields to be included in the response's nvext
+    /// Observability fields to be included in the response's nvext
     /// This is a list of field names that should be populated in the response
-    /// Supported fields: "worker_id"
+    /// Supported fields: "worker_id", "timing_metrics"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    pub extra_fields: Option<Vec<String>>,
+    pub observability_fields: Option<Vec<String>>,
+
+    /// Timestamp when the request was received by the frontend (seconds since epoch)
+    /// This is set internally by the Dynamo frontend HTTP layer and passed to backends
+    /// for timing metrics calculation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub request_received_seconds: Option<f32>,
 }
 
 impl Default for NvExt {
@@ -125,7 +112,8 @@ mod tests {
         assert_eq!(nv_ext.backend_instance_id, None);
         assert_eq!(nv_ext.token_data, None);
         assert_eq!(nv_ext.max_thinking_tokens, None);
-        assert_eq!(nv_ext.extra_fields, None);
+        assert_eq!(nv_ext.observability_fields, None);
+        assert_eq!(nv_ext.request_received_seconds, None);
     }
 
     // Test valid builder configurations
@@ -137,7 +125,7 @@ mod tests {
             .backend_instance_id(42)
             .token_data(vec![1, 2, 3, 4])
             .max_thinking_tokens(1024)
-            .extra_fields(vec!["worker_id".to_string()])
+            .observability_fields(vec!["worker_id".to_string(), "timing_metrics".to_string()])
             .build()
             .unwrap();
 
@@ -146,7 +134,10 @@ mod tests {
         assert_eq!(nv_ext.backend_instance_id, Some(42));
         assert_eq!(nv_ext.token_data, Some(vec![1, 2, 3, 4]));
         assert_eq!(nv_ext.max_thinking_tokens, Some(1024));
-        assert_eq!(nv_ext.extra_fields, Some(vec!["worker_id".to_string()]));
+        assert_eq!(
+            nv_ext.observability_fields,
+            Some(vec!["worker_id".to_string(), "timing_metrics".to_string()])
+        );
         // Validate the built struct
         assert!(nv_ext.validate().is_ok());
     }
