@@ -735,14 +735,16 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
     if let Some(event_type) = &event.event
         && event_type == "error"
     {
-        let comment_str = event.comment
+        let comment_str = event
+            .comment
             .as_ref()
             .map(|c| c.join(", "))
             .unwrap_or_else(|| "Unknown error".to_string());
 
         // Try to parse comment as error JSON to extract status code
         if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&comment_str) {
-            let code = error_payload.code
+            let code = error_payload
+                .code
                 .and_then(|c| StatusCode::from_u16(c).ok())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let message = error_payload.message.unwrap_or(comment_str);
@@ -753,21 +755,17 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
     }
 
     // Check if the data payload itself contains an error structure with code >= 400
-    if let Some(data) = &event.data {
-        if let Ok(json_value) = serde_json::to_value(data) {
-            if let Ok(error_payload) = serde_json::from_value::<ErrorPayload>(json_value.clone()) {
-                if let Some(code_num) = error_payload.code {
-                    if code_num >= 400 {
-                        let code = StatusCode::from_u16(code_num)
-                            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                        let message = error_payload.message.unwrap_or_else(|| {
-                            json_value.to_string()
-                        });
-                        return Some((message, code));
-                    }
-                }
-            }
-        }
+    if let Some(data) = &event.data
+        && let Ok(json_value) = serde_json::to_value(data)
+        && let Ok(error_payload) = serde_json::from_value::<ErrorPayload>(json_value.clone())
+        && let Some(code_num) = error_payload.code
+        && code_num >= 400
+    {
+        let code = StatusCode::from_u16(code_num).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let message = error_payload
+            .message
+            .unwrap_or_else(|| json_value.to_string());
+        return Some((message, code));
     }
 
     // Check if comment contains error information (without event: error)
@@ -777,19 +775,18 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
         let comment_str = comments.join(", ");
 
         // Try to parse comment as error JSON with code >= 400
-        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&comment_str) {
-            if let Some(code_num) = error_payload.code {
-                if code_num >= 400 {
-                    let code = StatusCode::from_u16(code_num)
-                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                    let message = error_payload.message.unwrap_or(comment_str);
-                    return Some((message, code));
-                }
-            }
+        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&comment_str)
+            && let Some(code_num) = error_payload.code
+            && code_num >= 400
+        {
+            let code = StatusCode::from_u16(code_num).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let message = error_payload.message.unwrap_or(comment_str);
+            return Some((message, code));
         }
 
-        // Comments present with no data often indicates error
-        if event.data.is_none() {
+        // Comments present with no data AND no event type indicates error
+        // (events with event types like "request_id" or "event.dynamo.test.sentinel" are annotations)
+        if event.data.is_none() && event.event.is_none() {
             return Some((comment_str, StatusCode::INTERNAL_SERVER_ERROR));
         }
     }
@@ -937,17 +934,11 @@ async fn chat_completions(
     // todo - tap the stream and propagate request level metrics
     // note - we might do this as part of the post processing set to make it more generic
 
-    // Check first event for backend errors before streaming
-    let stream_with_check = check_for_backend_error(stream).await.map_err(|error_response| {
-        tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-        error_response
-    })?;
-
     if streaming {
         stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
 
         let mut http_queue_guard = Some(http_queue_guard);
-        let stream = stream_with_check.map(move |response| {
+        let stream = stream.map(move |response| {
             // Calls observe_response() on each token
             process_response_using_event_converter_and_observe_metrics(
                 EventConverter::from(response),
@@ -965,6 +956,15 @@ async fn chat_completions(
 
         Ok(sse_stream.into_response())
     } else {
+        // Check first event for backend errors before aggregating (non-streaming only)
+        let stream_with_check =
+            check_for_backend_error(stream)
+                .await
+                .map_err(|error_response| {
+                    tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                    error_response
+                })?;
+
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream_with_check.inspect(move |response| {
             // Calls observe_response() on each token - drops http_queue_guard on first token
@@ -975,22 +975,20 @@ async fn chat_completions(
             );
         });
 
-        let response = NvCreateChatCompletionResponse::from_annotated_stream(
-            stream,
-            parsing_options.clone(),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                request_id,
-                "Failed to parse chat completion response: {:?}",
-                e
-            );
-            ErrorMessage::internal_server_error(&format!(
-                "Failed to parse chat completion response: {}",
-                e
-            ))
-        })?;
+        let response =
+            NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        request_id,
+                        "Failed to parse chat completion response: {:?}",
+                        e
+                    );
+                    ErrorMessage::internal_server_error(&format!(
+                        "Failed to parse chat completion response: {}",
+                        e
+                    ))
+                })?;
 
         inflight_guard.mark_ok();
         Ok(Json(response).into_response())
@@ -2210,7 +2208,8 @@ mod tests {
         use futures::stream;
 
         // Create an error event with JSON payload containing error code in comment
-        let error_json = r#"{"message":"prompt > max_seq_len","type":"Internal Server Error","code":500}"#;
+        let error_json =
+            r#"{"message":"prompt > max_seq_len","type":"Internal Server Error","code":500}"#;
         let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
             data: None,
             id: None,
