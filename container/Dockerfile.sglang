@@ -791,3 +791,151 @@ RUN python3 -m pip install --no-cache-dir \
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+
+###########################################################
+########## Runtime with AWS EFA ##########################
+###########################################################
+#
+# PURPOSE: Production runtime environment with AWS EFA support
+#
+# This stage extends the runtime stage with AWS EFA installer which includes:
+# - AWS-optimized libfabric with EFA provider support
+# - aws-ofi-nccl plugin for optimal NCCL performance on EFA
+# - Updated RDMA and ibverbs packages configured for AWS networking
+# - All AWS best practices for EFA-enabled instances
+#
+# Use this stage when deploying on AWS EC2 instances with EFA support
+# (e.g., p4d.24xlarge, p5.48xlarge, etc.)
+
+FROM runtime AS runtime-aws
+
+ARG EFA_VERSION=1.45.1
+
+USER root
+
+# Install AWS EFA installer with bundled libfabric and aws-ofi-nccl
+# Flags explanation:
+#   --skip-kmod: Skip kernel module installation (handled by host)
+#   --skip-limit-conf: Skip ulimit configuration (handled by container runtime)
+#   --no-verify: Skip GPG verification (optional, can be removed if verification is needed)
+RUN cd /tmp && \
+    curl --retry 3 --retry-delay 2 -fsSL -o aws-efa-installer-${EFA_VERSION}.tar.gz \
+        https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_VERSION}.tar.gz && \
+    tar -xzf aws-efa-installer-${EFA_VERSION}.tar.gz && \
+    cd aws-efa-installer && \
+    apt-get update && \
+    ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify && \
+    cd /tmp && \
+    rm -rf aws-efa-installer-${EFA_VERSION}.tar.gz aws-efa-installer && \
+    ldconfig
+
+USER dynamo
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
+
+###########################################################
+########## Development with AWS EFA ######################
+###########################################################
+#
+# PURPOSE: Development environment with AWS EFA support
+#
+# This stage extends runtime-aws with development tools for building and
+# debugging on EFA-enabled AWS instances.
+
+FROM runtime-aws AS dev-aws
+
+ARG WORKSPACE_DIR=/sgl-workspace/dynamo
+ARG PYTHON_VERSION
+
+# NOTE: SGLang uses system Python (not a virtualenv in framework/runtime stages) to align with
+# upstream SGLang Dockerfile: https://github.com/sgl-project/sglang/blob/main/docker/Dockerfile
+# For dev stage, we create a lightweight venv with --system-site-packages to satisfy maturin develop
+# requirements while still accessing all system-installed packages (sglang, torch, deepep, etc.)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+RUN mkdir -p /opt/dynamo/venv && \
+    uv venv /opt/dynamo/venv --python $PYTHON_VERSION --system-site-packages
+
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
+
+USER root
+# venv permissions are handled by umask 002 set earlier
+
+# Install development tools and utilities
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends  \
+    # System monitoring and debugging tools
+    nvtop \
+    htop \
+    gdb \
+    # Network and system utilities
+    wget \
+    iproute2 \
+    net-tools \
+    openssh-client \
+    rsync \
+    lsof \
+    # File and archive utilities
+    zip \
+    tree \
+    # Development and build tools
+    vim \
+    tmux \
+    git \
+    git-lfs \
+    autoconf \
+    automake \
+    cmake \
+    libtool \
+    meson \
+    bear \
+    ccache \
+    less \
+    # Language and development support
+    clang \
+    libclang-dev \
+    # Shell and productivity tools
+    zsh \
+    silversearcher-ag \
+    cloc \
+    locales \
+    # sudo for dev stage
+    sudo \
+    # NVIDIA tools dependencies
+    gnupg && \
+    echo "deb https://developer.download.nvidia.com/devtools/repos/ubuntu2004/amd64 /" | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
+    apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub && \
+    apt-get update -y && \
+    apt-get install -y nsight-systems-cli && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install clang-format and clangd
+RUN curl --retry 3 --retry-delay 2 -LSso /usr/local/bin/clang-format https://github.com/muttleyxd/clang-tools-static-binaries/releases/download/master-32d3ac78/clang-format-16_linux-amd64 \
+    && chmod +x /usr/local/bin/clang-format \
+    && curl --retry 3 --retry-delay 2 -L https://github.com/clangd/clangd/releases/download/18.1.3/clangd-linux-18.1.3.zip -o clangd.zip \
+    && unzip clangd.zip \
+    && cp -r clangd_18.1.3/bin/* /usr/local/bin/ \
+    && cp -r clangd_18.1.3/lib/* /usr/local/lib/ \
+    && rm -rf clangd_18.1.3 clangd.zip
+
+# Editable install of dynamo
+COPY --chmod=664 pyproject.toml README.md hatch_build.py /workspace/
+RUN python3 -m pip install --no-deps -e .
+
+# Install Python development packages
+RUN python3 -m pip install --no-cache-dir \
+    maturin[patchelf] \
+    pytest \
+    black \
+    isort \
+    icdiff \
+    scikit_build_core \
+    uv \
+    pre-commit \
+    pandas \
+    matplotlib \
+    tabulate
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
