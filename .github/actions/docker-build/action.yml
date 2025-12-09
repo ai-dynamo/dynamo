@@ -112,9 +112,9 @@ runs:
         EXTRA_ARGS="--cache-to type=inline "
         EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache "
         EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-${PLATFORM##*/} "
-        # if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+        if [[ "$GITHUB_REF_NAME" == "main" ]]; then
           EXTRA_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache,mode=max "
-        # fi
+        fi
 
         echo "$EXTRA_ARGS"
         # Collect optional overrides provided by the workflow
