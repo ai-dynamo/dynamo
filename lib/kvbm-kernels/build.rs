@@ -186,8 +186,7 @@ fn discover_cuda_files() -> Vec<PathBuf> {
 fn get_cuda_arch_flags() -> Vec<String> {
     let mut flags = Vec::new();
 
-    let arch_list =
-        env::var("CUDA_ARCHS").unwrap_or_else(|_| "80,86,89,90,100,120,121".to_string());
+    let arch_list = env::var("CUDA_ARCHS").unwrap_or_else(|_| "80,86,89,90,100,120".to_string());
 
     for arch in arch_list.split(',') {
         let arch = arch.trim();
