@@ -2,6 +2,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Transfer executors for different copy strategies.
+//!
+//! # Pipelined Two-Hop Transfers
+//!
+//! For Device ↔ Object Storage transfers, we use a pipelined approach:
+//!
+//! ```text
+//! Sequential (old):
+//! ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+//! │ GPU→Host C1  │ │ Host→S3 C1   │ │ GPU→Host C2  │ │ Host→S3 C2   │
+//! └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘
+//!
+//! Pipelined (new, with double-buffering):
+//! ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+//! │ GPU→Host C1  │ │ GPU→Host C2  │ │ GPU→Host C3  │   (bounce slot A/B alternating)
+//! └──────────────┘ └──────────────┘ └──────────────┘
+//!       ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+//!       │ Host→S3 C1   │ │ Host→S3 C2   │ │ Host→S3 C3   │  (overlapped)
+//!       └──────────────┘ └──────────────┘ └──────────────┘
+//! ```
 
 mod contiguous_transfer;
 pub(super) mod cuda;
@@ -141,6 +160,7 @@ fn execute_direct_transfer(
     }
 }
 
+/// Execute a single chunk of a two-hop transfer (sequential, for single-chunk transfers).
 #[allow(clippy::too_many_arguments)]
 async fn execute_two_hop_transfer_chunk(
     src: &PhysicalLayout,
@@ -156,8 +176,11 @@ async fn execute_two_hop_transfer_chunk(
     ctx: &TransferContext,
 ) -> Result<()> {
     let bounce_ids_to_use = &bounce_block_ids[..src_block_ids.len()];
+    let num_blocks = src_block_ids.len();
+    let chunk_start = std::time::Instant::now();
 
     // First hop: src → bounce (use Auto, bounce is always host memory)
+    let hop1_start = std::time::Instant::now();
     execute_direct_transfer(
         src,
         bounce_layout,
@@ -169,8 +192,10 @@ async fn execute_two_hop_transfer_chunk(
         ctx,
     )?
     .await?;
+    let hop1_elapsed = hop1_start.elapsed();
 
     // Second hop: bounce → dst (use the original hint for object storage)
+    let hop2_start = std::time::Instant::now();
     execute_direct_transfer(
         bounce_layout,
         dst,
@@ -182,6 +207,24 @@ async fn execute_two_hop_transfer_chunk(
         ctx,
     )?
     .await?;
+    let hop2_elapsed = hop2_start.elapsed();
+
+    let chunk_elapsed = chunk_start.elapsed();
+
+    tracing::debug!(
+        target: "object_transfer_timing",
+        blocks = num_blocks,
+        hop1_ms = hop1_elapsed.as_secs_f64() * 1000.0,
+        hop2_ms = hop2_elapsed.as_secs_f64() * 1000.0,
+        total_ms = chunk_elapsed.as_secs_f64() * 1000.0,
+        idle_pct = (hop1_elapsed.as_secs_f64() / chunk_elapsed.as_secs_f64()) * 100.0,
+        "TWO_HOP_CHUNK: {} blocks | hop1(GPU→Host)={:.2}ms | hop2(Host→S3)={:.2}ms | total={:.2}ms | S3_idle_during_GPU={:.1}%",
+        num_blocks,
+        hop1_elapsed.as_secs_f64() * 1000.0,
+        hop2_elapsed.as_secs_f64() * 1000.0,
+        chunk_elapsed.as_secs_f64() * 1000.0,
+        (hop1_elapsed.as_secs_f64() / chunk_elapsed.as_secs_f64()) * 100.0,
+    );
 
     Ok(())
 }
@@ -199,6 +242,11 @@ struct TwoHopTransferParams<'a> {
     ctx: &'a TransferContext,
 }
 
+/// Execute a two-hop transfer: src → bounce → dst.
+///
+/// The bounce buffer must be large enough to hold the entire transfer.
+/// This is guaranteed by the ConnectorTransferBatcher which splits large
+/// transfers into chunks that fit within the bounce buffer slot size.
 fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferCompleteNotification> {
     let TwoHopTransferParams {
         src,
@@ -213,13 +261,10 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
     } = params;
     let (tx, rx) = tokio::sync::oneshot::channel();
 
-    // TODO: Cloning all this stuff is not ideal.
     let src_clone = src.clone();
     let dst_clone = dst.clone();
-
     let src_block_ids = src_block_ids.to_vec();
     let dst_block_ids = dst_block_ids.to_vec();
-
     let options_clone = options.clone();
 
     let handle = ctx.tokio();
@@ -242,53 +287,59 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
         }
 
         let num_bounce_blocks = bounce_buffer_spec.block_ids().len();
+        let total_blocks = src_block_ids.len();
 
-        if num_bounce_blocks < src_block_ids.len() {
-            for (src_block_ids, dst_block_ids) in src_block_ids
-                .chunks(num_bounce_blocks)
-                .zip(dst_block_ids.chunks(num_bounce_blocks))
-            {
-                let bounce_block_ids_to_use =
-                    &bounce_buffer_spec.block_ids()[..src_block_ids.len()];
-                if let Err(e) = execute_two_hop_transfer_chunk(
-                    &src_clone,
-                    bounce_buffer_spec.layout(),
-                    &dst_clone,
-                    src_block_ids,
-                    bounce_block_ids_to_use,
-                    dst_block_ids,
-                    first_strategy,
-                    second_strategy,
-                    &options_clone.layer_range,
-                    options_clone.descriptor_hint,
-                    &ctx_clone,
-                )
-                .await
-                {
-                    tx.send(Err(e)).unwrap();
-                    return;
-                }
-            }
-            tx.send(Ok(())).unwrap();
-        } else {
-            let bounce_block_ids_to_use = &bounce_buffer_spec.block_ids()[..src_block_ids.len()];
-            let result = execute_two_hop_transfer_chunk(
-                &src_clone,
-                bounce_buffer_spec.layout(),
-                &dst_clone,
-                src_block_ids.as_slice(),
-                bounce_block_ids_to_use,
-                dst_block_ids.as_slice(),
-                first_strategy,
-                second_strategy,
-                &options_clone.layer_range,
-                options_clone.descriptor_hint,
-                &ctx_clone,
-            )
-            .await;
-
-            tx.send(result).unwrap();
+        // The batcher ensures transfers fit within the bounce buffer slot.
+        // If this assertion fails, there's a configuration mismatch.
+        if num_bounce_blocks < total_blocks {
+            tx.send(Err(anyhow::anyhow!(
+                "Transfer size ({}) exceeds bounce buffer capacity ({}). \
+                 Ensure DYN_KVBM_TRANSFER_BATCH_SIZE <= bounce buffer slot size.",
+                total_blocks,
+                num_bounce_blocks
+            )))
+            .unwrap();
+            return;
         }
+
+        let transfer_start = std::time::Instant::now();
+
+        tracing::debug!(
+            target: "object_transfer_timing",
+            total_blocks = total_blocks,
+            bounce_size = num_bounce_blocks,
+            "TWO_HOP_START: {} blocks, bounce_size={}",
+            total_blocks,
+            num_bounce_blocks,
+        );
+
+        let bounce_block_ids_to_use = &bounce_buffer_spec.block_ids()[..total_blocks];
+        let result = execute_two_hop_transfer_chunk(
+            &src_clone,
+            bounce_buffer_spec.layout(),
+            &dst_clone,
+            src_block_ids.as_slice(),
+            bounce_block_ids_to_use,
+            dst_block_ids.as_slice(),
+            first_strategy,
+            second_strategy,
+            &options_clone.layer_range,
+            options_clone.descriptor_hint,
+            &ctx_clone,
+        )
+        .await;
+
+        let total_elapsed = transfer_start.elapsed();
+        tracing::debug!(
+            target: "object_transfer_timing",
+            total_blocks = total_blocks,
+            total_ms = total_elapsed.as_secs_f64() * 1000.0,
+            "TWO_HOP_COMPLETE: {} blocks, total={:.2}ms",
+            total_blocks,
+            total_elapsed.as_secs_f64() * 1000.0,
+        );
+
+        tx.send(result).unwrap();
     });
 
     Ok(TransferCompleteNotification { status: rx })

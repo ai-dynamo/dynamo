@@ -46,6 +46,7 @@ impl TransferSchedulerClient {
         request: LeaderTransferRequest,
     ) -> anyhow::Result<Box<dyn TransferCompletionHandle>> {
         let scheduler_tx = self.scheduler_tx.clone();
+
         match request.request_type {
             RequestType::Immediate => {
                 let handle = ImmediateTransferCompletionHandle::new(
@@ -222,7 +223,25 @@ impl WorkerSchedulerClient {
 
     pub fn is_complete(&self, request_id: &str) -> bool {
         match self.slots.get(request_id) {
-            Some(slot) => slot.completed.load(Ordering::Relaxed) == slot.operations.len() as u64,
+            Some(slot) => {
+                let completed = slot.completed.load(Ordering::Relaxed);
+                let total_ops = slot.operations.len() as u64;
+                let is_done = completed == total_ops;
+
+                // Log when slot is NOT complete to help diagnose stuck operations
+                if !is_done {
+                    tracing::debug!(
+                        target: "blocking_ops",
+                        request_id = request_id,
+                        completed = completed,
+                        total_ops = total_ops,
+                        "SLOT_INCOMPLETE: {}/{} operations done",
+                        completed,
+                        total_ops
+                    );
+                }
+                is_done
+            }
             None => {
                 tracing::debug!(request_id, "slot not found - likely aborted");
                 true
@@ -386,20 +405,59 @@ impl Scheduler {
 
     fn remove_slot(&mut self, request_id: String) {
         debug_assert!(self.slots.contains_key(&request_id), "slot not found");
+
+        // Cancel the cancel token for this request - this signals any waiting tasks to abort
         self.cancel_tokens.remove(&request_id);
+
         self.slots.remove(&request_id);
 
-        let maybe_controller = self.enqueued_requests.remove(&request_id);
-        debug_assert!(
-            maybe_controller.is_none() || maybe_controller.unwrap().is_empty(),
-            "any scheduled request should be removed and enqueued/scheduled before the slot is removed"
-        );
+        // Clean up any pending enqueued requests for this slot
+        // If there are pending Transfer controllers, cancel them properly
+        if let Some(pending_requests) = self.enqueued_requests.remove(&request_id) {
+            if !pending_requests.is_empty() {
+                tracing::debug!(
+                    request_id = %request_id,
+                    pending_count = pending_requests.len(),
+                    "Cancelling pending scheduled requests for removed slot"
+                );
 
-        let maybe_unprocessed_results = self.unprocessed_immediate_results.remove(&request_id);
-        debug_assert!(
-            maybe_unprocessed_results.is_none() || maybe_unprocessed_results.unwrap().is_empty(),
-            "any unprocessed immediate results should be removed before the slot is removed"
-        );
+                for (uuid, source) in pending_requests {
+                    match source {
+                        TransferRequestSource::Transfer(controller) => {
+                            // Cancel the pending transfer by executing with Cancel decision
+                            // We don't need to track completion since the slot is being removed
+                            tracing::debug!(
+                                request_id = %request_id,
+                                uuid = %uuid,
+                                "Cancelling pending transfer controller"
+                            );
+                            // Spawn cancellation - use a dummy completed counter since we don't care
+                            let dummy_completed = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                            tokio::spawn(controller.execute(SchedulingDecision::Cancel, dummy_completed));
+                        }
+                        TransferRequestSource::Worker => {
+                            // Worker was waiting for transfer - nothing to cancel, just log
+                            tracing::debug!(
+                                request_id = %request_id,
+                                uuid = %uuid,
+                                "Dropping pending worker request for removed slot"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clean up any unprocessed immediate results
+        if let Some(results) = self.unprocessed_immediate_results.remove(&request_id) {
+            if !results.is_empty() {
+                tracing::debug!(
+                    request_id = %request_id,
+                    unprocessed_count = results.len(),
+                    "Dropping unprocessed immediate results for removed slot"
+                );
+            }
+        }
 
         tracing::debug!(
             request_id,
@@ -457,16 +515,28 @@ impl Scheduler {
 
     #[tracing::instrument(level = "debug", skip_all, fields(request_id = %result.request_id, operation_id = %result.uuid))]
     fn handle_immediate_result(&mut self, result: ImmediateTransferResult) {
+        tracing::info!(
+            target: "blocking_ops",
+            request_id = %result.request_id,
+            operation_id = %result.uuid,
+            "SCHEDULER: Received immediate transfer completion"
+        );
         match self.slots.get_mut(&result.request_id) {
             Some(slot) => {
-                slot.completed.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(
-                    "matched slot; incrementing completed counter to {}",
-                    slot.completed.load(Ordering::Relaxed)
+                let new_count = slot.completed.fetch_add(1, Ordering::Relaxed) + 1;
+                tracing::info!(
+                    target: "blocking_ops",
+                    request_id = %result.request_id,
+                    completed = new_count,
+                    "SCHEDULER: Incremented completed counter"
                 );
             }
             None => {
-                tracing::debug!("no slot found; adding to unprocessed immediate results");
+                tracing::info!(
+                    target: "blocking_ops",
+                    request_id = %result.request_id,
+                    "SCHEDULER: No slot found, adding to unprocessed results"
+                );
                 self.unprocessed_immediate_results
                     .entry(result.request_id)
                     .or_default()

@@ -56,6 +56,10 @@ pub struct KvbmLeaderConfig {
 
     #[builder(default = "String::from(\"tcp://127.0.0.1:56002\")")]
     leader_ack_url: String,
+
+    /// Object storage configuration (read from environment variables)
+    #[builder(default = "ObjectStorageConfig::from_env()")]
+    object_storage_config: Option<ObjectStorageConfig>,
 }
 
 impl KvbmLeaderConfig {
@@ -74,7 +78,10 @@ impl KvbmLeaderConfig {
         let disk = &self.disk_blocks_config;
         let cpu_configured = cpu.num_blocks_overriden > 0 || cpu.cache_size_in_gb > 0.0;
         let disk_configured = disk.num_blocks_overriden > 0 || disk.cache_size_in_gb > 0.0;
-        if !cpu_configured && !disk_configured {
+        let object_configured = ObjectStorageConfig::is_offload_enabled()
+            && ObjectStorageConfig::num_blocks_from_env() > 0;
+
+        if !cpu_configured && !disk_configured && !object_configured {
             panic!(
                 "KVBM Configuration Error: At least one cache tier must be configured.\n\
                 \n\
@@ -86,7 +93,12 @@ impl KvbmLeaderConfig {
                 • DYN_KVBM_DISK_CACHE_GB=<size_in_gb>     (e.g., DYN_KVBM_DISK_CACHE_GB=8)\n\
                 • DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS=<num_blocks>\n\
                 \n\
-                Note: If only disk cache is configured, KVBM will offload directly from GPU (G1) to Disk (G3), bypassing CPU memory (G2)."
+                OR configure object storage (G4) for S3-compatible offloading:\n\
+                • DYN_KVBM_USE_OBJECT_OFFLOAD=1\n\
+                • DYN_KVBM_OBJECT_BUCKET=<bucket_name>  (supports {{worker_id}} template)\n\
+                • DYN_KVBM_OBJECT_NUM_BLOCKS=<num_blocks>\n\
+                \n\
+                Note: Object storage requires DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL=1"
             );
         }
         Ok(())
@@ -98,6 +110,9 @@ pub struct KvbmLeaderState {
     pub num_device_blocks: Arc<AtomicUsize>,
     pub num_host_blocks: Arc<AtomicUsize>,
     pub num_disk_blocks: Arc<AtomicUsize>,
+    pub num_object_blocks: Arc<AtomicUsize>,
+    /// Bytes per KV block (sum across TP workers for full block size)
+    pub bytes_per_block: Arc<AtomicUsize>,
     pub workers_allocation_ready: Arc<AtomicBool>,
     pub workers_ready_notify: Arc<Notify>,
 }
@@ -141,11 +156,14 @@ impl KvbmLeader {
         let timeout = self.config.leader_init_timeout_secs;
         let host_cfg = self.config.host_blocks_config.clone();
         let disk_cfg = self.config.disk_blocks_config.clone();
+        let object_cfg = self.config.object_storage_config.clone();
 
-        // capture num_device_blocks so we can set it inside the closure
+        // capture state cells so we can set them inside the closure
         let num_device_blocks_cell = state.num_device_blocks.clone();
         let num_host_blocks_cell = state.num_host_blocks.clone();
         let num_disk_blocks_cell = state.num_disk_blocks.clone();
+        let num_object_blocks_cell = state.num_object_blocks.clone();
+        let bytes_per_block_cell = state.bytes_per_block.clone();
 
         tokio::spawn(async move {
             let res = ZmqActiveMessageLeader::new_with_handshake(
@@ -164,13 +182,27 @@ impl KvbmLeader {
                     let num_host_blocks = compute_num_blocks(&host_cfg, bytes_per_block);
                     let num_disk_blocks = compute_num_blocks(&disk_cfg, bytes_per_block);
 
+                    // Object storage blocks from environment config
+                    let num_object_blocks = ObjectStorageConfig::num_blocks_from_env();
+
                     // store into leader state
+                    bytes_per_block_cell.store(bytes_per_block, Ordering::Release);
                     num_host_blocks_cell.store(num_host_blocks, Ordering::Release);
                     num_disk_blocks_cell.store(num_disk_blocks, Ordering::Release);
+                    num_object_blocks_cell.store(num_object_blocks, Ordering::Release);
+
+                    if num_object_blocks > 0 {
+                        tracing::info!(
+                            "Object storage configured: {} blocks",
+                            num_object_blocks
+                        );
+                    }
 
                     LeaderMetadata {
                         num_host_blocks,
                         num_disk_blocks,
+                        num_object_blocks,
+                        object_storage_config: object_cfg.clone(),
                     }
                 },
             )
@@ -214,6 +246,15 @@ impl KvbmLeader {
 
     pub fn num_disk_blocks(&self) -> usize {
         self.state.num_disk_blocks.load(Ordering::Acquire)
+    }
+
+    pub fn num_object_blocks(&self) -> usize {
+        self.state.num_object_blocks.load(Ordering::Acquire)
+    }
+
+    /// Returns the bytes per KV block (sum across TP workers).
+    pub fn bytes_per_block(&self) -> usize {
+        self.state.bytes_per_block.load(Ordering::Acquire)
     }
 
     pub async fn wait_worker_sync_ready(&self) -> bool {

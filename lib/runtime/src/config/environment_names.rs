@@ -218,6 +218,49 @@ pub mod kvbm {
         /// Example: DYN_KVBM_NIXL_BACKEND_UCX=true
         pub const PREFIX: &str = "DYN_KVBM_NIXL_BACKEND_";
     }
+
+    /// Object storage (S3-compatible) configuration
+    ///
+    /// Objects are allocated dynamically - keys are derived from sequence hashes.
+    pub mod object_storage {
+        /// S3 bucket name for object storage cache
+        pub const DYN_KVBM_OBJECT_BUCKET: &str = "DYN_KVBM_OBJECT_BUCKET";
+
+        /// S3 endpoint override (for MinIO or custom S3-compatible endpoints)
+        /// Example: "http://minio:9000"
+        pub const DYN_KVBM_OBJECT_ENDPOINT: &str = "DYN_KVBM_OBJECT_ENDPOINT";
+
+        /// Maximum number of blocks that can be stored in object storage
+        pub const DYN_KVBM_OBJECT_NUM_BLOCKS: &str = "DYN_KVBM_OBJECT_NUM_BLOCKS";
+
+        /// AWS region for object storage
+        pub const DYN_KVBM_OBJECT_REGION: &str = "DYN_KVBM_OBJECT_REGION";
+
+        /// Enable offloading to object storage (set to "1" to enable)
+        /// When enabled, blocks are offloaded to S3 instead of host/disk
+        pub const DYN_KVBM_USE_OBJECT_OFFLOAD: &str = "DYN_KVBM_USE_OBJECT_OFFLOAD";
+
+        /// Enable write-through caching for object storage offloads.
+        /// When enabled, blocks offloaded to S3 are ALSO kept in host cache.
+        /// This provides faster cache hits while ensuring persistence to S3.
+        /// Default: false (pure staging, blocks not kept in host cache)
+        pub const DYN_KVBM_OBJECT_WRITE_THROUGH: &str = "DYN_KVBM_OBJECT_WRITE_THROUGH";
+    }
+
+    /// Transfer configuration
+    pub mod transfer {
+        /// Maximum number of blocks per transfer batch.
+        /// Larger batches reduce overhead but increase per-transfer latency.
+        /// For object storage (S3), larger batches (32-64) can improve throughput.
+        /// Default: 16
+        pub const DYN_KVBM_TRANSFER_BATCH_SIZE: &str = "DYN_KVBM_TRANSFER_BATCH_SIZE";
+
+        /// Enable fire-and-forget mode for object storage offloads.
+        /// When enabled, offload requests return immediately while transfer
+        /// completes in background. Improves throughput but loses error reporting.
+        /// Default: false
+        pub const DYN_KVBM_ASYNC_OFFLOAD: &str = "DYN_KVBM_ASYNC_OFFLOAD";
+    }
 }
 
 /// LLM (Language Model) inference environment variables
@@ -357,6 +400,12 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_HOST,
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_PUB_PORT,
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
+            kvbm::object_storage::DYN_KVBM_OBJECT_BUCKET,
+            kvbm::object_storage::DYN_KVBM_OBJECT_ENDPOINT,
+            kvbm::object_storage::DYN_KVBM_OBJECT_NUM_BLOCKS,
+            kvbm::object_storage::DYN_KVBM_OBJECT_REGION,
+            kvbm::object_storage::DYN_KVBM_USE_OBJECT_OFFLOAD,
+            kvbm::transfer::DYN_KVBM_TRANSFER_BATCH_SIZE,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_LORA_ENABLED,

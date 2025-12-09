@@ -318,6 +318,7 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
         ))
     }
 
+
     /// Use existing NIXL-compatible memory regions supplied by the caller.
     pub fn with_memory_regions<S>(
         self,
