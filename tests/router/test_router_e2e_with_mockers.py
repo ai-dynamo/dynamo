@@ -66,7 +66,7 @@ def get_unique_ports(
         "test_mocker_two_kv_router": 100,
         "test_mocker_kv_router_overload_503": 200,
         "test_query_instance_id_returns_worker_and_tokens": 300,
-        "test_router_disagg_decisions": 400,
+        "test_router_decisions_disagg": 400,
         "test_busy_threshold_endpoint": 500,
     }
 
