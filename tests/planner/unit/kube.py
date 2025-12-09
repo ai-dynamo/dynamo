@@ -76,10 +76,86 @@ def test_get_graph_deployment_from_name(k8s_api, mock_custom_api):
     )
 
 
-def test_update_graph_replicas(k8s_api, mock_custom_api):
+def test_update_service_replicas_uses_dgdsa_scale(k8s_api, mock_custom_api):
+    """Test that update_service_replicas uses DGDSA Scale API when available"""
+    mock_custom_api.patch_namespaced_custom_object_scale.return_value = None
+
+    k8s_api.update_service_replicas("test-deployment", "Frontend", 3)
+
+    # Should use Scale subresource with lowercase adapter name
+    mock_custom_api.patch_namespaced_custom_object_scale.assert_called_once_with(
+        group="nvidia.com",
+        version="v1alpha1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographdeploymentscalingadapters",
+        name="test-deployment-frontend",  # lowercase service name
+        body={"spec": {"replicas": 3}},
+    )
+    # Should NOT fall back to DGD patch
+    mock_custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
+    """Test that update_service_replicas falls back to DGD when DGDSA not found"""
+    # DGDSA doesn't exist (404)
+    mock_custom_api.patch_namespaced_custom_object_scale.side_effect = (
+        client.ApiException(status=404)
+    )
     mock_custom_api.patch_namespaced_custom_object.return_value = None
 
+    k8s_api.update_service_replicas("test-deployment", "test-component", 1)
+
+    # Should have tried DGDSA first
+    mock_custom_api.patch_namespaced_custom_object_scale.assert_called_once()
+
+    # Should fall back to DGD patch
+    mock_custom_api.patch_namespaced_custom_object.assert_called_once_with(
+        group="nvidia.com",
+        version="v1alpha1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographdeployments",
+        name="test-deployment",
+        body={"spec": {"services": {"test-component": {"replicas": 1}}}},
+    )
+
+
+def test_update_service_replicas_propagates_other_errors(k8s_api, mock_custom_api):
+    """Test that update_service_replicas propagates non-404 errors"""
+    mock_custom_api.patch_namespaced_custom_object_scale.side_effect = (
+        client.ApiException(status=500, reason="Internal Server Error")
+    )
+
+    with pytest.raises(client.ApiException) as exc_info:
+        k8s_api.update_service_replicas("test-deployment", "test-component", 1)
+
+    assert exc_info.value.status == 500
+    # Should NOT fall back to DGD
+    mock_custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_update_graph_replicas_calls_update_service_replicas(k8s_api, mock_custom_api):
+    """Test that deprecated update_graph_replicas calls update_service_replicas"""
+    mock_custom_api.patch_namespaced_custom_object_scale.return_value = None
+
+    # Use the deprecated method
     k8s_api.update_graph_replicas("test-deployment", "test-component", 1)
+
+    # Should delegate to update_service_replicas which uses Scale API
+    mock_custom_api.patch_namespaced_custom_object_scale.assert_called_once_with(
+        group="nvidia.com",
+        version="v1alpha1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographdeploymentscalingadapters",
+        name="test-deployment-test-component",
+        body={"spec": {"replicas": 1}},
+    )
+
+
+def test_update_dgd_replicas_directly(k8s_api, mock_custom_api):
+    """Test the internal _update_dgd_replicas method"""
+    mock_custom_api.patch_namespaced_custom_object.return_value = None
+
+    k8s_api._update_dgd_replicas("test-deployment", "test-component", 1)
 
     mock_custom_api.patch_namespaced_custom_object.assert_called_once_with(
         group="nvidia.com",
