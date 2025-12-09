@@ -21,17 +21,87 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from router import RouterAPI, RouterRequest, RouterResponse
+from PIL import Image
+from tensorrt_llm.inputs.multimodal import apply_mm_hashes
+from tensorrt_llm.inputs.utils import default_multimodal_input_loader, load_image
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
+from transformers import AutoProcessor
 from worker import TrtllmWorkers
 
 from dynamo._core import compute_block_hash_for_seq_py
 
 logger = logging.getLogger(__name__)
 
+# Debug file paths
+DEBUG_API_FILE = "/tmp/debug_api_hashes.txt"
+DEBUG_KV_EVENT_FILE = "/tmp/debug_kv_events.txt"
+DEBUG_PROMPT_FILE = "/tmp/debug_prompts.txt"
+
+
+def dump_prompt_debug(
+    messages_dict: list[dict],
+    prompt_after_chat_template: str,
+    prompt_after_mm_loader: str | None,
+    image_urls: list[str] | None,
+    processor_tokens: list[int] | None = None,
+):
+    """Dump prompt transformations to file for debugging."""
+    import datetime
+    with open(DEBUG_PROMPT_FILE, "a") as f:
+        f.write(f"\n{'='*80}\n")
+        f.write(f"Timestamp: {datetime.datetime.now()}\n")
+        f.write(f"\n--- Raw messages_dict ---\n")
+        f.write(f"{messages_dict}\n")
+        f.write(f"\n--- Image URLs ---\n")
+        f.write(f"{image_urls}\n")
+        f.write(f"\n--- After tokenizer.apply_chat_template ---\n")
+        f.write(f"{prompt_after_chat_template}\n")
+        if prompt_after_mm_loader:
+            f.write(f"\n--- After default_multimodal_input_loader (processed_prompt) ---\n")
+            f.write(f"{prompt_after_mm_loader}\n")
+        if processor_tokens:
+            f.write(f"\n--- Processor tokens (len={len(processor_tokens)}) ---\n")
+            f.write(f"{processor_tokens}\n")
+        f.write(f"{'='*80}\n")
+
+
+def dump_api_debug(
+    tokens: list[int],
+    block_size: int,
+    local_hashes: list[int],
+    mm_hash: int | None,
+    block_mm_infos: list | None,
+    image_urls: list[str] | None,
+):
+    """Dump API-side hash computation to file for debugging."""
+    import datetime
+    with open(DEBUG_API_FILE, "a") as f:
+        f.write(f"\n{'='*60}\n")
+        f.write(f"Timestamp: {datetime.datetime.now()}\n")
+        f.write(f"Image URLs: {image_urls}\n")
+        f.write(f"mm_hash: {mm_hash}\n")
+        f.write(f"block_size: {block_size}\n")
+        f.write(f"num_tokens: {len(tokens)}\n")
+        f.write(f"tokens (first 50): {tokens[:50]}\n")
+        f.write(f"tokens (last 50): {tokens[-50:]}\n")
+        f.write(f"block_mm_infos: {block_mm_infos}\n")
+        f.write(f"local_hashes ({len(local_hashes)}): {local_hashes}\n")
+        f.write(f"{'='*60}\n")
+
+# Multimodal content types (OpenAI format)
+class ImageUrl(BaseModel):
+    url: str
+
+
+class ContentPart(BaseModel):
+    type: str  # "text" | "image_url"
+    text: Optional[str] = None
+    image_url: Optional[ImageUrl] = None
+
 
 class Message(BaseModel):
     role: str
-    content: str
+    content: str | list[ContentPart]  # str for text-only, list for multimodal
 
 
 class ChatCompletionRequest(BaseModel):
@@ -51,6 +121,7 @@ class ErrorResponse(BaseModel):
 @dataclass(frozen=True)
 class ServingParams:
     model: str
+    model_type: str  # e.g., "qwen2_vl", "llava"
     block_size: int
     num_workers: int
     base_kv_events_port: int
@@ -66,6 +137,7 @@ class ServiceAPI:
 
         self.workers: Optional[TrtllmWorkers] = None
         self.tokenizer = None
+        self.processor = None  # HuggingFace processor for token expansion
         self.http_client: Optional[httpx.AsyncClient] = None
 
         self.setup_routes()
@@ -101,10 +173,25 @@ class ServiceAPI:
                         }
                     )
 
-                messages_dict = [
-                    {"role": msg.role, "content": msg.content} for msg in request.messages
-                ]
+                # Extract text and multimodal content from messages
+                messages_dict = []
+                image_urls = []
 
+                for msg in request.messages:
+                    if isinstance(msg.content, str):
+                        # Text-only message
+                        messages_dict.append({"role": msg.role, "content": msg.content})
+                    else:
+                        # Multimodal message
+                        text_parts = []
+                        for part in msg.content:
+                            if part.type == "text" and part.text:
+                                text_parts.append(part.text)
+                            elif part.type == "image_url" and part.image_url:
+                                image_urls.append(part.image_url.url)
+                        messages_dict.append({"role": msg.role, "content": " ".join(text_parts)})
+
+                # Build prompt text
                 try:
                     prompt = self.tokenizer.apply_chat_template(
                         messages_dict, tokenize=False, add_generation_prompt=True
@@ -115,7 +202,116 @@ class ServiceAPI:
                     )
                     prompt = self._format_messages_simple(messages_dict)
 
-                tokens = self.tokenizer.encode(prompt)
+                # Log raw messages and chat template result
+                logger.info(f"API: Raw messages_dict: {messages_dict}")
+                logger.info(f"API: After tokenizer.apply_chat_template: {repr(prompt[:500])}...")
+                if image_urls:
+                    logger.info(f"API: Image URLs: {image_urls}")
+
+                # Process multimodal or text-only
+                block_mm_infos = None
+                mm_hash = None
+                mm_input = None  # The input to pass to TRTLLM generate_async
+                image_offsets = None  # [start, end] of image tokens in the sequence
+
+                if image_urls:
+                    # Use default_multimodal_input_loader for multimodal requests
+                    try:
+                        # 1. Get processed input for TRTLLM generation
+                        inputs = default_multimodal_input_loader(
+                            tokenizer=self.tokenizer,
+                            model_dir=self.init_params.model,
+                            model_type=self.init_params.model_type,
+                            modality="image",
+                            prompts=[prompt],
+                            media=[image_urls],
+                            image_data_format="pt",
+                            device="cuda",
+                        )
+                        mm_input = inputs[0]  # Dict to pass to generate_async
+                        processed_prompt = mm_input.get("prompt", prompt)
+                        multi_modal_data = mm_input.get("multi_modal_data")
+
+                        logger.info(f"API: Processed MM input for TRTLLM, prompt length: {len(processed_prompt)}")
+                        logger.info(f"API: After default_multimodal_input_loader processed_prompt: {repr(processed_prompt[:500])}...")
+
+                        # 2. Use HF processor to get expanded tokens for routing hash
+                        if self.processor is not None:
+                            pil_images = [load_image(url, format="pil") for url in image_urls]
+
+                            processor_output = self.processor(
+                                text=[processed_prompt],
+                                images=pil_images,
+                                return_tensors="pt",
+                                padding=True,
+                            )
+                            tokens = processor_output["input_ids"][0].tolist()
+                            logger.info(f"API: Processor returned {len(tokens)} tokens (with visual token expansion)")
+
+                            # 3. Replace image_token with vocab_size + 1 (TRTLLM convention)
+                            #    and find the image token positions (offsets)
+                            image_token_id = getattr(self.processor, "image_token_id", None)
+                            if image_token_id is None:
+                                # Fallback for Qwen2-VL: image_token_id = 151655
+                                image_token_id = 151655
+                            replacement_id = 151937
+
+                            # Find image token positions and replace
+                            image_start = None
+                            image_end = None
+                            num_replaced = 0
+                            for i, t in enumerate(tokens):
+                                if t == image_token_id:
+                                    if image_start is None:
+                                        image_start = i
+                                    image_end = i + 1  # exclusive end
+                                    tokens[i] = replacement_id
+                                    num_replaced += 1
+
+                            # Store image offsets for mm_hash routing
+                            image_offsets = None
+                            if image_start is not None and image_end is not None:
+                                image_offsets = [image_start, image_end]
+                                logger.info(
+                                    f"API: Image tokens at positions [{image_start}, {image_end}), "
+                                    f"replaced {num_replaced} tokens"
+                                )
+                            else:
+                                logger.info(f"API: Replaced {num_replaced} image tokens")
+                        else:
+                            tokens = self.tokenizer.encode(processed_prompt)
+                            logger.warning(f"API: No processor, using tokenizer only: {len(tokens)} tokens")
+
+                        # 4. Compute mm_hash from multi_modal_data
+                        if multi_modal_data:
+                            mm_hashes_dict = apply_mm_hashes(multi_modal_data)
+                            if "image" in mm_hashes_dict and mm_hashes_dict["image"]:
+                                logger.info(mm_hashes_dict["image"][0])
+                                first_hex = mm_hashes_dict["image"][0][:16]
+                                mm_hash = int(first_hex, 16)
+                                logger.info(f"API: Computed mm_hash={mm_hash}")
+
+                    except Exception as e:
+                        logger.warning(f"Failed to process MM input: {e}, falling back to text-only")
+                        import traceback
+                        traceback.print_exc()
+                        tokens = self.tokenizer.encode(prompt)
+                        mm_input = None
+                        processed_prompt = None
+                else:
+                    # Text-only request
+                    tokens = self.tokenizer.encode(prompt)
+                    processed_prompt = None
+
+                # Dump prompt debug info
+                dump_prompt_debug(
+                    messages_dict=messages_dict,
+                    prompt_after_chat_template=prompt,
+                    prompt_after_mm_loader=processed_prompt if image_urls else None,
+                    image_urls=image_urls if image_urls else None,
+                    processor_tokens=tokens if image_urls else None,
+                )
+
                 num_tokens = len(tokens)
 
                 if num_tokens == 0:
@@ -127,15 +323,41 @@ class ServiceAPI:
                         }
                     )
 
-                logger.info(
-                    f"API: Tokenized {num_tokens} tokens, first 10: {tokens[:10]}, "
-                    f"block_size={self.init_params.block_size}"
-                )
+                # logger.info(
+                #     f"API: Tokenized {num_tokens} tokens, first 10: {tokens[:10]}, "
+                #     f"block_size={self.init_params.block_size}"
+                # )
 
+                # Build block_mm_infos if we have mm_hash
+                # Use actual image token positions (image_offsets) not [0, num_tokens]
+                if mm_hash is not None and image_offsets is not None:
+                    num_blocks = (num_tokens + self.init_params.block_size - 1) // self.init_params.block_size
+                    block_mm_infos = [
+                        {
+                            "mm_objects": [{
+                                "mm_hash": mm_hash,
+                                "offsets": [image_offsets]  # [[start, end]] - request level mask
+                            }]
+                        }
+                        for _ in range(num_blocks)
+                    ]
+                    logger.info(f"API: block_mm_infos with offsets {image_offsets}")
+
+                # Compute block hashes (with MM info if available)
                 local_hashes = compute_block_hash_for_seq_py(
-                    tokens, self.init_params.block_size
+                    tokens, self.init_params.block_size, block_mm_infos
                 )
                 logger.info(f"API: Computed {len(local_hashes)} local_hashes: {local_hashes}")
+
+                # Dump debug info to file
+                dump_api_debug(
+                    tokens=tokens,
+                    block_size=self.init_params.block_size,
+                    local_hashes=local_hashes,
+                    mm_hash=mm_hash,
+                    block_mm_infos=block_mm_infos,
+                    image_urls=image_urls,
+                )
 
                 try:
                     router_request = RouterRequest(
@@ -171,8 +393,10 @@ class ServiceAPI:
                     "top_p": request.top_p,
                 }
 
+                # For MM requests, pass mm_input dict; for text, pass tokens
+                prompt_input = mm_input if mm_input else tokens
                 result_generator = self.workers.direct(
-                    tokens, best_worker_id, sampling_params
+                    prompt_input, best_worker_id, sampling_params
                 )
 
                 return StreamingResponse(
@@ -293,8 +517,18 @@ class ServiceAPI:
         logger.info("Step 3/4: Initializing HTTP client...")
         self.http_client = httpx.AsyncClient()
 
-        logger.info("Step 4/4: Initializing tokenizer...")
+        logger.info("Step 4/5: Initializing tokenizer...")
         self.tokenizer = tokenizer_factory(self.init_params.model)
+
+        logger.info("Step 5/5: Initializing HuggingFace processor for MM token expansion...")
+        try:
+            self.processor = AutoProcessor.from_pretrained(
+                self.init_params.model, trust_remote_code=True
+            )
+            logger.info("Processor initialized successfully")
+        except Exception as e:
+            logger.warning(f"Failed to initialize processor: {e}")
+            self.processor = None
 
         logger.info("Waiting 2 seconds for services to stabilize...")
         await asyncio.sleep(2)
@@ -333,8 +567,14 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="Qwen/Qwen2.5-0.5B-Instruct",
-        help="Model name to use",
+        default="Qwen/Qwen2-VL-2B-Instruct",
+        help="Model name to use (VLM for multimodal support)",
+    )
+    parser.add_argument(
+        "--model-type",
+        type=str,
+        default="qwen2_vl",
+        help="Model type for TRTLLM (e.g., qwen2_vl, llava, phi3_v)",
     )
     parser.add_argument(
         "--block-size", type=int, default=32, help="Block size for caching (TensorRT-LLM uses 32)"
@@ -364,6 +604,7 @@ def main():
 
     init_params = ServingParams(
         model=args.model,
+        model_type=args.model_type,
         block_size=args.block_size,
         num_workers=args.num_workers,
         base_kv_events_port=args.base_kv_events_port,

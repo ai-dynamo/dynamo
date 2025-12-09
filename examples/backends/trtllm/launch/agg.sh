@@ -11,6 +11,11 @@ export MODALITY=${MODALITY:-"text"}
 # If you want to use multimodal, set MODALITY to "multimodal"
 #export MODALITY=${MODALITY:-"multimodal"}
 
+# MPI environment variables
+export OMPI_ALLOW_RUN_AS_ROOT=1
+export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+
 # Setup cleanup trap
 cleanup() {
     echo "Cleaning up background processes..."
@@ -22,12 +27,15 @@ trap cleanup EXIT INT TERM
 
 
 # run frontend
-python3 -m dynamo.frontend --http-port 8000 &
+python3 -m dynamo.frontend --http-port 8000 --store-kv mem --request-plane tcp &
 DYNAMO_PID=$!
 
 # run worker
-python3 -m dynamo.trtllm \
+mpirun -np 1 --allow-run-as-root --oversubscribe \
+  python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --modality "$MODALITY" \
-  --extra-engine-args "$AGG_ENGINE_ARGS"
+  --extra-engine-args "$AGG_ENGINE_ARGS" \
+  --store-kv mem \
+  --request-plane tcp

@@ -137,7 +137,27 @@ pub fn compute_block_hash_for_seq(
     kv_block_size: u32,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
 ) -> Vec<LocalBlockHash> {
-    tokens
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    // Log input parameters
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/debug_compute_block_hash.txt")
+    {
+        let _ = writeln!(
+            file,
+            "\n============================================================"
+        );
+        let _ = writeln!(file, "=== compute_block_hash_for_seq INPUT ===");
+        let _ = writeln!(file, "kv_block_size: {}", kv_block_size);
+        let _ = writeln!(file, "num_tokens: {}", tokens.len());
+        let _ = writeln!(file, "tokens: {:?}", tokens);
+        let _ = writeln!(file, "block_mm_infos: {:?}", block_mm_infos);
+    }
+
+    let result: Vec<LocalBlockHash> = tokens
         .chunks_exact(kv_block_size as usize)
         .enumerate()
         .map(|(block_idx, chunk)| {
@@ -154,6 +174,19 @@ pub fn compute_block_hash_for_seq(
                         .collect();
                     mm_hashes.sort_unstable();
 
+                    // Log MM hash inclusion
+                    if let Ok(mut file) = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/debug_compute_block_hash.txt")
+                    {
+                        let _ = writeln!(
+                            file,
+                            "Block {}: Including mm_hashes {:?} in hash computation",
+                            block_idx, mm_hashes
+                        );
+                    }
+
                     // Append sorted mm_hashes to the byte array
                     for mm_hash in mm_hashes {
                         bytes.extend_from_slice(&mm_hash.to_le_bytes());
@@ -161,9 +194,46 @@ pub fn compute_block_hash_for_seq(
                 }
             }
 
-            compute_block_hash(&Bytes::from(bytes))
+            let hash = compute_block_hash(&Bytes::from(bytes));
+
+            // Log per-block result
+            if let Ok(mut file) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/debug_compute_block_hash.txt")
+            {
+                let _ = writeln!(
+                    file,
+                    "Block {}: chunk tokens {:?} -> hash {}",
+                    block_idx, chunk, hash.0
+                );
+            }
+
+            hash
         })
-        .collect()
+        .collect();
+
+    // Log output
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/debug_compute_block_hash.txt")
+    {
+        let hash_values: Vec<u64> = result.iter().map(|h| h.0).collect();
+        let _ = writeln!(file, "=== OUTPUT ===");
+        let _ = writeln!(
+            file,
+            "result_hashes ({}): {:?}",
+            hash_values.len(),
+            hash_values
+        );
+        let _ = writeln!(
+            file,
+            "============================================================"
+        );
+    }
+
+    result
 }
 
 /// Compute rolling sequence hashes for a vector of block hashes.

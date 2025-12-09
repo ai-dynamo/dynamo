@@ -22,6 +22,25 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
+# Debug file path
+DEBUG_WORKER_KV_FILE = "/tmp/debug_worker_kv.txt"
+
+
+def dump_worker_kv_event(worker_id: int, event: dict, token_ids: list[int]):
+    """Dump worker-side KV event with token_ids to file for debugging."""
+    import datetime
+    with open(DEBUG_WORKER_KV_FILE, "a") as f:
+        f.write(f"\n{'='*60}\n")
+        f.write(f"Timestamp: {datetime.datetime.now()}\n")
+        f.write(f"Worker ID: {worker_id}\n")
+        f.write(f"Event type: {event.get('type')}\n")
+        f.write(f"num_tokens: {len(token_ids)}\n")
+        f.write(f"token_ids (first 50): {token_ids[:50]}\n")
+        f.write(f"token_ids (last 50): {token_ids[-50:]}\n")
+        f.write(f"block_hashes: {event.get('block_hashes', [])}\n")
+        f.write(f"parent_hash: {event.get('parent_hash')}\n")
+        f.write(f"{'='*60}\n")
+
 
 def _to_signed_i64(value: int | None) -> int | None:
     """Convert a Python int to signed 64-bit range by two's complement."""
@@ -112,7 +131,16 @@ class KvEventsPublisher:
             # Only add these if they have actual values
             if parent_hash is not None:
                 stored_event["parent_block_hash"] = int(parent_hash)
-            # Don't include lora_id for now
+
+            # Inject block_mm_infos if present in the event
+            # Rust expects: block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>
+            # where BlockExtraInfo has mm_objects: Vec<MmObject>
+            mm_extra_info = event.get("mm_extra_info")
+            if mm_extra_info is not None:
+                # Create per-block mm_infos array (one entry per block)
+                num_blocks = len(block_hashes)
+                block_mm_infos = [mm_extra_info for _ in range(num_blocks)]
+                stored_event["block_mm_infos"] = block_mm_infos
             
             converted_events.append(stored_event)
         elif event_type == "removed":
@@ -276,14 +304,16 @@ class TrtllmWorker:
         
         try:
             events = self.llm.get_kv_cache_events_async(timeout=5)
+            logger.info(f"Worker {self.worker_id}: events: {events}")
             logger.info(f"Worker {self.worker_id}: KV events iterator obtained")
+
+
             
             event_count = 0
             async for event in events:
                 event_count += 1
-                logger.info(f"Worker {self.worker_id}: Received KV event #{event_count}")
-
-                # logger.info(f"Worker {self.worker_id}: Received KV event #{event_count}: {event}")
+                # Print full event for debugging
+                logger.info(f"Worker {self.worker_id}: KV event #{event_count}: {event}")
                 
                 try:
                     # Validate event structure
@@ -325,7 +355,7 @@ class TrtllmWorker:
                             if token_num_in_block == self.block_size:
                                 token_ids = [int(token["token_id"]) for token in block["tokens"]]
                                 logger.info(
-                                    f"Worker {self.worker_id}: Block token_ids (first 10): {token_ids[:10]}, "
+                                    f"Worker {self.worker_id}: Block token_ids (first 10): {token_ids}, "
                                     f"block_hash={block_hash}"
                                 )
                                 blocks.append({
@@ -341,12 +371,49 @@ class TrtllmWorker:
                                 break
 
                         if blocks:
+                            # Collect all token_ids from blocks for debugging
+                            all_token_ids = []
+                            for b in blocks:
+                                all_token_ids.extend(b["token_ids"])
+
+                            # Check if there are image tokens (151937 for Qwen2-VL)
+                            # and inject mm_extra_info with fixed mm_hash for testing
+                            IMAGE_TOKEN_ID = 151937
+                            MM_HASH_TEST = 146425076850666018
+                            mm_extra_info = None
+
+                            # Find image token positions in all_token_ids
+                            image_start = None
+                            image_end = None
+                            for i, tid in enumerate(all_token_ids):
+                                if tid == IMAGE_TOKEN_ID:
+                                    if image_start is None:
+                                        image_start = i
+                                    image_end = i + 1
+
+                            if image_start is not None:
+                                mm_extra_info = {
+                                    "mm_objects": [{
+                                        "mm_hash": MM_HASH_TEST,
+                                        "offsets": [[image_start, image_end]]
+                                    }]
+                                }
+                                logger.info(
+                                    f"Worker {self.worker_id}: Injecting mm_extra_info with "
+                                    f"mm_hash={MM_HASH_TEST}, offsets=[{image_start}, {image_end}]"
+                                )
+
                             kv_event = {
                                 "event_id": event_id,
                                 "type": "stored",
                                 "parent_hash": parent_hash,
                                 "blocks": blocks,
                             }
+                            if mm_extra_info is not None:
+                                kv_event["mm_extra_info"] = mm_extra_info
+
+                            dump_worker_kv_event(self.worker_id, kv_event, all_token_ids)
+
                             self.kv_events_publisher.publish_event(kv_event)
                             logger.info(
                                 f"Worker {self.worker_id} published stored event: {len(blocks)} blocks, "
@@ -400,7 +467,9 @@ class TrtllmWorker:
             logger.error(f"Worker {self.worker_id} KV events loop error: {e}")
 
     async def generate(
-        self, prompt_token_ids: list[int], sampling_params: dict
+        self,
+        prompt_input,  # Can be list[int] (tokens) or dict (MM input from default_multimodal_input_loader)
+        sampling_params: dict,
     ) -> AsyncGenerator[dict, None]:
         """Generate tokens for a request."""
         from tensorrt_llm.llmapi.llm import SamplingParams
@@ -425,12 +494,18 @@ class TrtllmWorker:
             top_k=top_k,
         )
 
-        # TensorRT-LLM: streaming is a parameter of generate_async, not SamplingParams
-        # streaming=True is required for proper KV cache event emission
+        # Log input type for debugging
+        if isinstance(prompt_input, dict):
+            logger.info(f"Worker {self.worker_id}: Processing MM request with keys: {prompt_input.keys()}")
+        else:
+            logger.info(f"Worker {self.worker_id}: Processing text request with {len(prompt_input)} tokens")
+
+        # Pass prompt_input directly to generate_async
+        # TRTLLM accepts both token list and dict (from default_multimodal_input_loader)
         outputs = self.llm.generate_async(
-            prompt_token_ids,
+            prompt_input,
             sampling_params=trtllm_sampling_params,
-            streaming=True  # Must be True for KV events and incremental output
+            streaming=True,  # Must be True for KV events and incremental output
         )
 
         # Extract text from TensorRT-LLM RequestOutput objects
@@ -515,11 +590,14 @@ class TrtllmWorkers:
             await worker.start_background_tasks()
 
     async def direct(
-        self, prompt_token_ids: list[int], worker_id: int, sampling_params: dict
+        self,
+        prompt_input,  # Can be list[int] (tokens) or dict (MM input)
+        worker_id: int,
+        sampling_params: dict,
     ) -> AsyncGenerator[dict, None]:
         """Send request directly to a specific worker."""
         worker = self.workers[worker_id]
-        async for output in worker.generate(prompt_token_ids, sampling_params):
+        async for output in worker.generate(prompt_input, sampling_params):
             yield output
 
     def shutdown_all(self):

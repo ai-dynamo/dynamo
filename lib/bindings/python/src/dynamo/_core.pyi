@@ -226,7 +226,6 @@ def compute_block_hash_for_seq_py(
                            "mm_objects": [
                                {
                                    "mm_hash": int,  # Hash of the MM object
-                                   "offsets": [[start, end], ...]  # Token offset ranges in this block
                                }
                            ]
                        }
@@ -239,7 +238,6 @@ def compute_block_hash_for_seq_py(
         >>> mm_info = {
         ...     "mm_objects": [{
         ...         "mm_hash": 0xDEADBEEF,
-        ...         "offsets": [[0, 5]]
         ...     }]
         ... }
         >>> hashes = compute_block_hash_for_seq_py(tokens, 32, [mm_info])

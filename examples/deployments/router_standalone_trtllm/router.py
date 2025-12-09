@@ -30,6 +30,20 @@ from dynamo._core import RadixTree, ZmqKvEventListener
 
 logger = logging.getLogger(__name__)
 
+# Debug file path
+DEBUG_KV_EVENT_FILE = "/tmp/debug_kv_events.txt"
+
+
+def dump_kv_event(worker_id: int, event: dict):
+    """Dump KV event to file for debugging."""
+    import datetime
+    with open(DEBUG_KV_EVENT_FILE, "a") as f:
+        f.write(f"\n{'='*60}\n")
+        f.write(f"Timestamp: {datetime.datetime.now()}\n")
+        f.write(f"Worker ID: {worker_id}\n")
+        f.write(f"Event: {json.dumps(event, indent=2)}\n")
+        f.write(f"{'='*60}\n")
+
 
 class RouterRequest(BaseModel):
     local_hashes: List[int]
@@ -38,6 +52,14 @@ class RouterRequest(BaseModel):
 
 class RouterResponse(BaseModel):
     worker_id: int
+
+
+class InjectEventRequest(BaseModel):
+    """Request to inject a KV event directly into the RadixTree for testing."""
+    worker_id: int
+    tokens_hash: int
+    block_hash: int | None = None  # If None, use tokens_hash
+    mm_extra_info: dict | None = None
 
 
 class LoadMetrics(BaseModel):
@@ -124,6 +146,8 @@ class KvRouter:
                     ].get_events()
                     for event_str in kv_events:
                         event = json.loads(event_str)
+                        # Dump event to file for debugging
+                        dump_kv_event(worker_id, event)
                         # Log the event data to debug hash issues
                         if "data" in event and "stored" in event.get("data", {}):
                             stored_data = event["data"]["stored"]
@@ -297,6 +321,31 @@ class RouterAPI:
                 "num_blocks": len(events),
                 "events": events[:20],  # Show first 20 events to avoid huge response
             }
+
+        @self.app.post("/debug/inject_event")
+        async def inject_event(request: InjectEventRequest):
+            """Inject a KV event directly into RadixTree for testing."""
+            if self.router is None:
+                raise HTTPException(status_code=503, detail="Router not initialized")
+
+            block_hash = request.block_hash if request.block_hash else request.tokens_hash
+            event = {
+                "event_id": 99999,  # Test event ID
+                "data": {
+                    "stored": {
+                        "parent_hash": None,
+                        "blocks": [{
+                            "block_hash": block_hash,
+                            "tokens_hash": request.tokens_hash,
+                            "mm_extra_info": request.mm_extra_info,
+                        }]
+                    }
+                }
+            }
+            self.router.radix_tree.apply_event(
+                request.worker_id, json.dumps(event).encode("utf-8")
+            )
+            return {"status": "ok", "tokens_hash": request.tokens_hash, "worker_id": request.worker_id}
 
     async def start(self):
         """Start the router API server"""

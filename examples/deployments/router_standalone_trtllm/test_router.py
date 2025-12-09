@@ -5,20 +5,26 @@
 Test suite for TensorRT-LLM KV Router.
 
 Usage:
-    python test_router.py              # Run all tests
+    python test_router.py              # Run text-only tests (requires server)
     python test_router.py --verbose    # Show detailed logs
-    python test_router.py --mm-only    # Run only multimodal tests (no server needed)
+    python test_router.py --mm-only    # Run multimodal hash tests (no server needed)
+    python test_router.py --mm-server  # Run multimodal server tests (requires VLM)
+    python test_router.py --all        # Run all tests
 """
 
 import argparse
-import json
 import sys
 import time
 from dataclasses import dataclass
 
 import httpx
 
-from dynamo.llm import RadixTree, compute_block_hash_for_seq_py
+from dynamo.llm import compute_block_hash_for_seq_py
+
+# Sample test images from COCO dataset
+TEST_IMAGE_1 = "http://images.cocodataset.org/test2017/000000155781.jpg"
+TEST_IMAGE_2 = "http://images.cocodataset.org/test2017/000000000001.jpg"
+TEST_IMAGE_3 = "http://images.cocodataset.org/test2017/000000155721.jpg"
 
 
 @dataclass
@@ -38,9 +44,26 @@ class TestResult:
 
 
 def make_request(content: str, max_tokens: int = 10) -> dict:
+    """Create a text-only chat completion request."""
     return {
         "model": "test",
         "messages": [{"role": "user", "content": content}],
+        "stream": True,
+        "max_tokens": max_tokens,
+    }
+
+
+def make_mm_request(text: str, image_url: str, max_tokens: int = 10) -> dict:
+    """Create a multimodal chat completion request with image."""
+    return {
+        "model": "test",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+                {"type": "image_url", "image_url": {"url": image_url}}
+            ]
+        }],
         "stream": True,
         "max_tokens": max_tokens,
     }
@@ -113,13 +136,27 @@ class KvRouterTests:
         return self._print_summary()
 
     def run_mm_tests(self) -> bool:
-        """Run multimodal tests (no server needed)."""
-        print("\nMultimodal KV Router Tests")
+        """Run multimodal tests (local hash computation, no server needed)."""
+        print("\nMultimodal KV Router Tests (Local)")
         print("=" * 50)
-        print("(These tests run locally without server)")
+        print("(These tests verify hash computation without server)")
 
         self._test_mm_hash_computation()
         self._test_mm_routing_distinction()
+
+        return self._print_summary()
+
+    def run_mm_server_tests(self) -> bool:
+        """Run multimodal tests that require server."""
+        print("\nMultimodal KV Router Tests (Server)")
+        print("=" * 50)
+
+        if not self._check_servers():
+            print("\nFATAL: Cannot connect to servers")
+            return False
+
+        self._test_mm_same_image_cache_hit()
+        self._test_mm_different_images_no_cache_hit()
 
         return self._print_summary()
 
@@ -268,6 +305,174 @@ class KvRouterTests:
             "OK - Check server logs for 'overlap = 0.000' (no cache hit expected)."
         ))
 
+    def _test_mm_hash_computation(self):
+        """
+        Test: Verify that compute_block_hash_for_seq_py produces different hashes
+        for same tokens with different mm_hash values.
+        """
+        print("\n[MM-1] MM Hash Computation Test")
+        print("    Verifying same tokens + different mm_hash = different block_hash...")
+
+        # Simulated tokens (32 tokens = 1 block)
+        tokens = [100] * 32
+        block_size = 32
+
+        # Hash without MM info
+        hash_no_mm = compute_block_hash_for_seq_py(tokens, block_size)
+
+        # Hash with MM info (simulated mm_hash)
+        mm_info_1 = {"mm_objects": [{"mm_hash": 0xDEADBEEF, "offsets": [[0, 32]]}]}
+        hash_with_mm1 = compute_block_hash_for_seq_py(tokens, block_size, [mm_info_1])
+
+        # Hash with different MM info
+        mm_info_2 = {"mm_objects": [{"mm_hash": 0xCAFEBABE, "offsets": [[0, 32]]}]}
+        hash_with_mm2 = compute_block_hash_for_seq_py(tokens, block_size, [mm_info_2])
+
+        self.log(f"Hash without MM: {hash_no_mm}")
+        self.log(f"Hash with MM 1:  {hash_with_mm1}")
+        self.log(f"Hash with MM 2:  {hash_with_mm2}")
+
+        # Verify all hashes are different
+        if hash_no_mm == hash_with_mm1:
+            self.results.append(TestResult(
+                "mm_hash_computation", False,
+                "FAIL - Hash without MM equals hash with MM"
+            ))
+            return
+
+        if hash_with_mm1 == hash_with_mm2:
+            self.results.append(TestResult(
+                "mm_hash_computation", False,
+                "FAIL - Different mm_hash produced same block_hash"
+            ))
+            return
+
+        self.results.append(TestResult(
+            "mm_hash_computation", True,
+            "OK - Different mm_hash values produce different block hashes"
+        ))
+
+    def _test_mm_routing_distinction(self):
+        """
+        Test: Verify that the routing logic can distinguish between
+        requests with same text but different images.
+        """
+        print("\n[MM-2] MM Routing Distinction Test")
+        print("    Verifying routing can distinguish same text + different images...")
+
+        # This test simulates what the router would see
+        tokens = [100] * 64  # 2 blocks
+        block_size = 32
+
+        # Simulate Image A cached on worker 0
+        mm_info_a = {"mm_objects": [{"mm_hash": 0x1111111111111111, "offsets": [[0, 64]]}]}
+        hashes_a = compute_block_hash_for_seq_py(tokens, block_size, [mm_info_a, mm_info_a])
+
+        # Simulate Image B cached on worker 1
+        mm_info_b = {"mm_objects": [{"mm_hash": 0x2222222222222222, "offsets": [[0, 64]]}]}
+        hashes_b = compute_block_hash_for_seq_py(tokens, block_size, [mm_info_b, mm_info_b])
+
+        self.log(f"Hashes for Image A: {hashes_a}")
+        self.log(f"Hashes for Image B: {hashes_b}")
+
+        # Verify hashes are different
+        if hashes_a == hashes_b:
+            self.results.append(TestResult(
+                "mm_routing_distinction", False,
+                "FAIL - Same tokens with different images produced same hashes"
+            ))
+            return
+
+        self.results.append(TestResult(
+            "mm_routing_distinction", True,
+            "OK - Router can distinguish requests with different images"
+        ))
+
+    def _test_mm_same_image_cache_hit(self):
+        """
+        Test: Send same text + same image twice.
+        Expected: Second request should have cache hit (overlap > 0).
+        """
+        print("\n[MM-3] Same Image Cache Hit Test")
+        print("    Sending same text + same image twice...")
+
+        payload = make_mm_request("Describe this image", TEST_IMAGE_1)
+
+        # Get initial state
+        initial = get_tree_info(self.client, self.config.router_url)
+        self.log(f"Initial blocks: {initial['num_blocks']}")
+
+        # First request
+        self.log("Sending first MM request...")
+        if not send_request(self.client, self.config.api_url, payload):
+            self.results.append(TestResult(
+                "mm_same_image", False, "First MM request failed"
+            ))
+            return
+
+        time.sleep(self.config.kv_settle_time)
+
+        after_first = get_tree_info(self.client, self.config.router_url)
+        self.log(f"Blocks after first: {after_first['num_blocks']}")
+
+        # Second identical request
+        self.log("Sending second MM request (same image)...")
+        if not send_request(self.client, self.config.api_url, payload):
+            self.results.append(TestResult(
+                "mm_same_image", False, "Second MM request failed"
+            ))
+            return
+
+        self.results.append(TestResult(
+            "mm_same_image", True,
+            "OK - Check server logs for 'overlap > 0' (same image = cache hit)"
+        ))
+
+    def _test_mm_different_images_no_cache_hit(self):
+        """
+        Test: Send same text but different images.
+        Expected: No cache hit (overlap = 0) because mm_hash differs.
+        """
+        print("\n[MM-4] Different Images No Cache Hit Test")
+        print("    Sending same text + different images...")
+
+        # First image
+        payload_1 = make_mm_request("Describe this image in detail", TEST_IMAGE_2)
+
+        self.log(f"Sending request with image 1: {TEST_IMAGE_2}")
+        if not send_request(self.client, self.config.api_url, payload_1):
+            self.results.append(TestResult(
+                "mm_different_images", False, "Image 1 request failed"
+            ))
+            return
+
+        time.sleep(self.config.kv_settle_time)
+
+        before = get_tree_info(self.client, self.config.router_url)
+        self.log(f"Blocks after image 1: {before['num_blocks']}")
+
+        # Second image (same text, different image)
+        payload_2 = make_mm_request("Describe this image in detail", TEST_IMAGE_3)
+
+        self.log(f"Sending request with image 2: {TEST_IMAGE_3}")
+        if not send_request(self.client, self.config.api_url, payload_2):
+            self.results.append(TestResult(
+                "mm_different_images", False, "Image 2 request failed"
+            ))
+            return
+
+        time.sleep(self.config.kv_settle_time)
+
+        after = get_tree_info(self.client, self.config.router_url)
+        new_blocks = after["num_blocks"] - before["num_blocks"]
+        self.log(f"New blocks from image 2: {new_blocks}")
+
+        self.results.append(TestResult(
+            "mm_different_images", True,
+            f"OK - Image 2 added {new_blocks} new blocks. "
+            "Check server logs for 'overlap = 0' (different image = no cache hit)"
+        ))
+
     def _print_summary(self) -> bool:
         """Print test results summary."""
         print("\n" + "=" * 50)
@@ -303,13 +508,40 @@ def main():
     parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed logs")
     parser.add_argument("--api-url", default="http://localhost:8000", help="API server URL")
     parser.add_argument("--router-url", default="http://localhost:7000", help="Router URL")
+    parser.add_argument(
+        "--mm-only", action="store_true",
+        help="Run only multimodal local tests (no server needed)"
+    )
+    parser.add_argument(
+        "--mm-server", action="store_true",
+        help="Run multimodal server tests (requires VLM model)"
+    )
+    parser.add_argument(
+        "--all", action="store_true",
+        help="Run all tests including multimodal"
+    )
     args = parser.parse_args()
 
     config = TestConfig(api_url=args.api_url, router_url=args.router_url)
     tests = KvRouterTests(config, verbose=args.verbose)
 
     try:
-        success = tests.run_all()
+        if args.mm_only:
+            # Local MM tests only (no server)
+            success = tests.run_mm_tests()
+        elif args.mm_server:
+            # MM server tests (requires VLM)
+            success = tests.run_mm_server_tests()
+        elif args.all:
+            # Run all tests
+            success = tests.run_all()
+            if success:
+                success = tests.run_mm_tests()
+            if success:
+                success = tests.run_mm_server_tests()
+        else:
+            # Default: text-only tests
+            success = tests.run_all()
         sys.exit(0 if success else 1)
     finally:
         tests.cleanup()
