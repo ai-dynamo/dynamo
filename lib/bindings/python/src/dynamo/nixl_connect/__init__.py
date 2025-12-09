@@ -27,7 +27,6 @@ from enum import IntEnum
 from functools import cached_property
 from typing import Any, List, Optional
 
-from cv2 import log
 from pydantic import BaseModel, ConfigDict, field_validator
 
 try:
@@ -143,10 +142,14 @@ class AbstractOperation(ABC):
         if isinstance(local_descriptors, list):
             for d in local_descriptors:
                 d.register_with_connector(self._connection)
-                logger.debug(f"dynamo.nixl_connect.{self.__class__.__name__}: Registered descriptor {d} with connector {self._connection}.")
+                logger.debug(
+                    f"dynamo.nixl_connect.{self.__class__.__name__}: Registered descriptor {d} with connector {self._connection}."
+                )
         else:
             local_descriptors.register_with_connector(self._connection)
-            logger.debug(f"dynamo.nixl_connect.{self.__class__.__name__}: Registered descriptor {local_descriptors} with connector {self._connection}.")
+            logger.debug(
+                f"dynamo.nixl_connect.{self.__class__.__name__}: Registered descriptor {local_descriptors} with connector {self._connection}."
+            )
 
         # Record local descriptors.
         device_kind, desc_tlist = self._create_desc_tlist(local_descriptors)
@@ -178,12 +181,16 @@ class AbstractOperation(ABC):
                 if d.is_registered:
                     d.deregister_with_connector(self._connection)
                 else:
-                    logger.debug(f"dynamo.nixl_connect.{self.__class__.__name__}: Descriptor {d} was not registered, skipping deregistration.")
+                    logger.debug(
+                        f"dynamo.nixl_connect.{self.__class__.__name__}: Descriptor {d} was not registered, skipping deregistration."
+                    )
         else:
             if self._local_desc_list.is_registered:
                 self._local_desc_list.deregister_with_connector(self._connection)
             else:
-                logger.debug(f"dynamo.nixl_connect.{self.__class__.__name__}: Descriptor {self._local_desc_list} was not registered, skipping deregistration.")
+                logger.debug(
+                    f"dynamo.nixl_connect.{self.__class__.__name__}: Descriptor {self._local_desc_list} was not registered, skipping deregistration."
+                )
 
     @property
     def connection(self) -> Connection:
