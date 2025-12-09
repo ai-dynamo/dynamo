@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -224,6 +225,26 @@ def pytest_collection_modifyitems(config, items):
     # Store models to download in pytest config for fixtures to access
     if models_to_download:
         config.models_to_download = models_to_download
+
+
+def pytest_runtestloop(session):
+    """Download models after collection but before any tests run.
+
+    This hook runs after pytest_collection_modifyitems (so models are collected)
+    but before any test execution, ensuring model downloads don't count against test timeouts.
+    """
+    models = getattr(session.config, "models_to_download", None)
+
+    if models:
+        logging.info(
+            f"Downloading {len(models)} models before test execution\nModels: {models}"
+        )
+        start_time = time.time()
+
+        download_models(model_list=list(models))
+
+        download_duration = time.time() - start_time
+        logging.info(f"Model download completed in {download_duration:.1f}s")
 
 
 class EtcdServer(ManagedProcess):

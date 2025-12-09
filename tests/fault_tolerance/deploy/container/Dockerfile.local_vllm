@@ -9,7 +9,7 @@
 ARG LOCAL_VLLM_IMAGE="vllm-elastic-ep:latest_all2all_buffer_input"
 ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
+ARG RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
 
 # Other build arguments
 ARG PYTHON_VERSION=3.12
@@ -57,7 +57,7 @@ RUN apt-get update && \
         # prometheus dependencies
         ca-certificates \
         # DeepGemm uses 'cuobjdump' which does not come with CUDA image
-        cuda-command-line-tools-12-8 && \
+        cuda-command-line-tools-12-9 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy CUDA development tools from vLLM image (for JIT compilation)

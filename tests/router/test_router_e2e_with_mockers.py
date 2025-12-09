@@ -30,7 +30,6 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
     pytest.mark.integration,
-    pytest.mark.parallel,
     pytest.mark.model(MODEL_NAME),
 ]
 NUM_MOCKERS = 2
@@ -287,6 +286,7 @@ class DisaggMockerProcess:
         self._process.__exit__(exc_type, exc_val, exc_tb)
 
 
+@pytest.mark.parallel
 def test_mocker_kv_router(request, runtime_services_session, predownload_tokenizers):
     """
     Test KV router with multiple mocker engine instances.
@@ -326,6 +326,7 @@ def test_mocker_kv_router(request, runtime_services_session, predownload_tokeniz
             mockers.__exit__(None, None, None)
 
 
+@pytest.mark.parallel
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
 def test_mocker_two_kv_router(
     request,
@@ -381,6 +382,7 @@ def test_mocker_two_kv_router(
             mockers.__exit__(None, None, None)
 
 
+@pytest.mark.parallel
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
 def test_mocker_kv_router_overload_503(
     request, runtime_services_session, predownload_tokenizers
@@ -419,6 +421,7 @@ def test_mocker_kv_router_overload_503(
             mockers.__exit__(None, None, None)
 
 
+@pytest.mark.parallel
 def test_kv_push_router_bindings(
     request, runtime_services_session, predownload_tokenizers
 ):
@@ -504,6 +507,7 @@ def test_indexers_sync(
             mockers.__exit__(None, None, None)
 
 
+@pytest.mark.parallel
 def test_query_instance_id_returns_worker_and_tokens(
     request, runtime_services_session, predownload_tokenizers
 ):
@@ -538,6 +542,7 @@ def test_query_instance_id_returns_worker_and_tokens(
             mockers.__exit__(None, None, None)
 
 
+@pytest.mark.parallel
 def test_router_decisions(request, runtime_services_session, predownload_tokenizers):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes."""
 
@@ -577,6 +582,7 @@ def test_router_decisions(request, runtime_services_session, predownload_tokeniz
             mockers.__exit__(None, None, None)
 
 
+@pytest.mark.parallel
 def test_router_disagg_decisions(
     request, runtime_services_session, predownload_tokenizers
 ):
@@ -642,6 +648,7 @@ def test_router_disagg_decisions(
             prefill_workers.__exit__(None, None, None)
 
 
+@pytest.mark.parallel
 def test_busy_threshold_endpoint(
     request, runtime_services_session, predownload_tokenizers
 ):

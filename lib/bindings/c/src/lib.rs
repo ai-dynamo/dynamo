@@ -1031,7 +1031,7 @@ pub async fn create_worker_selection_pipeline_chat(
 
     // Create worker monitor if busy_threshold is set
     // Note: C bindings don't register with ModelManager, so HTTP endpoint won't see this
-    let worker_monitor = busy_threshold.map(|t| KvWorkerMonitor::new(Arc::new(client.clone()), t));
+    let worker_monitor = busy_threshold.map(|t| KvWorkerMonitor::new(client.clone(), t));
 
     let engine = build_routed_pipeline::<
         NvCreateChatCompletionRequest,
