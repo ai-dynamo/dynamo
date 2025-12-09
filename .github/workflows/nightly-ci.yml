@@ -1,34 +1,66 @@
-name: Nightly CI
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Nightly CI pipeline
 
 on:
   schedule:
-    - cron: '0 8 * * *'  # Every day at 12:00 AM PST (08:00 UTC)
-  workflow_dispatch:
+    - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail {0}
+
+env:
+  REGISTRY_IMAGE: ai-dynamo/dynamo
+  NIGHTLY_IMAGE_PREFIX: nightly
+
+############################## BUILD JOBS ##############################
 
 jobs:
-  vllm:
+  build-amd64:
+    name: Build ${{ matrix.framework }} (amd64)
+    runs-on: cpu-amd-m5-4xlarge
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: vllm (${{ matrix.platform.arch }})
-    runs-on: ${{ matrix.platform.runner }}
+        framework: [vllm, trtllm, sglang]
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
-      - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 #v4.3.1
-      - name: Build vLLM Docker Image
-        id: build-vllm
+      - uses: actions/checkout@v4
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Pull existing images for cache
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "Attempting to pull existing images for layer caching..."
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-amd64" || echo "Framework image not found in cache"
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64" || echo "Runtime image not found in cache"
+          echo "Cache pull completed"
+      - name: Build Framework Image
+        id: build_framework
         uses: ./.github/actions/docker-build
         with:
-          framework: vllm
-          target: runtime
-          platform: linux/${{ matrix.platform.arch }}
-          base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
-          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ matrix.platform.arch == 'arm64' && '129' || '' }}
-          torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
+          framework: ${{ matrix.framework }}
+          target: framework
+          platform: linux/amd64
+          base_image_tag: ''
+          runtime_image_tag: ''
+          cuda_version: ''
+          torch_backend: ''
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -36,70 +68,107 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: nightly-vllm-${{ matrix.platform.arch }}
-      - name: Tag and Push vLLM Nightly Image
+          image_tag: framework-${{ matrix.framework }}-amd64:${{ github.run_id }}
+      - name: Tag and Push Framework Images
         uses: ./.github/actions/docker-tag-push
         with:
-          local_image: ${{ steps.build-vllm.outputs.image_tag }}
-          # Tag the image nightly
-          push_tag: ai-dynamo/dynamo:nightly-vllm-${{ matrix.platform.arch }}
-          aws_push: 'false'
+          local_image: framework-${{ matrix.framework }}-amd64:${{ github.run_id }}
+          push_tags: |
+            ${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-amd64
+            ${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-amd64-run-${{ github.run_id }}
+          aws_push: 'true'
+          azure_push: 'false'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      - name: Build Runtime Image
+        id: build_runtime
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ matrix.framework }}
+          target: runtime
+          platform: linux/amd64
+          base_image_tag: ''
+          runtime_image_tag: ''
+          cuda_version: ''
+          torch_backend: ''
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
+      - name: Tag and Push Runtime Images
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
+          push_tags: |
+            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
+            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64-run-${{ github.run_id }}
+          aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Run unit tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: nightly-vllm-${{ matrix.platform.arch }}
-          pytest_marks: "vllm and unit"
-          framework: "vllm"
-          test_type: "unit"
-          platform_arch: ${{ matrix.platform.arch }}
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: nightly-vllm-${{ matrix.platform.arch }}
-          pytest_marks: "nightly and vllm and gpu_1"
-          framework: "vllm"
-          test_type: "e2e"
-          platform_arch: ${{ matrix.platform.arch }}
 
-  ####################
-  # Framework Builds #
-  ####################
-  vllm-framework:
+  build-arm64:
+    name: Build ${{ matrix.framework }} (arm64)
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - { arch: amd64, runner: cpu-amd-m5-4xlarge }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: vllm-framework (${{ matrix.platform.arch }})
-    runs-on: ${{ matrix.platform.runner }}
+        include:
+          - framework: vllm
+            base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
+            runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
+            cuda_version: '129'
+            torch_backend: 'cu129'
+          - framework: trtllm
+            base_image_tag: '25.06-py3'
+            runtime_image_tag: ''
+            cuda_version: '129'
+            torch_backend: 'cu129'
+          - framework: sglang
+            base_image_tag: ''
+            runtime_image_tag: ''
+            cuda_version: ''
+            torch_backend: ''
     env:
-      FRAMEWORK: vllm
-    steps: &framework-build-steps
-      - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 #v4.3.1
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
         with:
-          ref: main
-      - name: Build Image
-        id: build-image
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Pull existing images for cache
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "Attempting to pull existing images for layer caching..."
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-arm64" || echo "Framework image not found in cache"
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-arm64" || echo "Runtime image not found in cache"
+          echo "Cache pull completed"
+      - name: Build Framework Image
+        id: build_framework
         uses: ./.github/actions/docker-build
         with:
-          framework: ${{ env.FRAMEWORK }}
+          framework: ${{ matrix.framework }}
           target: framework
-          platform: linux/${{ matrix.platform.arch }}
-          # Ternary operations that are specific to vllm/arm64, empty str for all other combinations
-          base_image_tag: ${{ (matrix.platform.arch == 'arm64' && env.FRAMEWORK == 'vllm') && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
-          runtime_image_tag: ${{ (matrix.platform.arch == 'arm64' && env.FRAMEWORK == 'vllm') && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ (matrix.platform.arch == 'arm64' && env.FRAMEWORK == 'vllm') && '129' || '' }}
-          torch_backend: ${{ (matrix.platform.arch == 'arm64' && env.FRAMEWORK == 'vllm') && 'cu129' || '' }}
+          platform: linux/arm64
+          base_image_tag: ${{ matrix.base_image_tag }}
+          runtime_image_tag: ${{ matrix.runtime_image_tag }}
+          cuda_version: ${{ matrix.cuda_version }}
+          torch_backend: ${{ matrix.torch_backend }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -107,39 +176,630 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      - name: Docker Tag and Push
+          image_tag: framework-${{ matrix.framework }}-arm64:${{ github.run_id }}
+      - name: Tag and Push Framework Images
         uses: ./.github/actions/docker-tag-push
         with:
-          local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:main-${{ env.FRAMEWORK }}-framework-${{ matrix.platform.arch }}
+          local_image: framework-${{ matrix.framework }}-arm64:${{ github.run_id }}
+          push_tags: |
+            ${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-arm64
+            ${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-arm64-run-${{ github.run_id }}
           aws_push: 'true'
           azure_push: 'false'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      - name: Build Runtime Image
+        id: build_runtime
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ matrix.framework }}
+          target: runtime
+          platform: linux/arm64
+          base_image_tag: ${{ matrix.base_image_tag }}
+          runtime_image_tag: ${{ matrix.runtime_image_tag }}
+          cuda_version: ${{ matrix.cuda_version }}
+          torch_backend: ${{ matrix.torch_backend }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: runtime-${{ matrix.framework }}-arm64:${{ github.run_id }}
+      - name: Tag and Push Runtime Images
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: runtime-${{ matrix.framework }}-arm64:${{ github.run_id }}
+          push_tags: |
+            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-arm64
+            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-arm64-run-${{ github.run_id }}
+          aws_push: 'true'
+          azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-  sglang-framework:
+
+############################## TEST JOBS ##############################
+
+  unit-tests:
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-unit
+    needs: [build-amd64, build-arm64]
+    if: always()
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - { arch: amd64, runner: cpu-amd-m5-4xlarge }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: sglang-framework (${{ matrix.platform.arch }})
-    runs-on: ${{ matrix.platform.runner }}
-    env:
-      FRAMEWORK: sglang
-    steps: *framework-build-steps
-  trtllm-framework:
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +x
+          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          # Determine which build job to check
+          if [ "${{ matrix.arch.arch }}" = "amd64" ]; then
+            BUILD_JOB_NAME="Build ${{ matrix.framework }} (amd64)"
+          else
+            BUILD_JOB_NAME="Build ${{ matrix.framework }} (arm64)"
+          fi
+          # Query GitHub API for job status using curl (token from env to avoid log exposure)
+          JOBS=$(curl -s -S -L --fail-with-body \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to query GitHub API"
+            exit 1
+          fi
+          # Find the specific build job and check its conclusion
+          BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
+          echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo "Build failed or did not complete successfully. Failing tests."
+            exit 1
+          fi
+          echo "Build succeeded. Proceeding with tests."
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull nightly image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run Unit Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: "unit and (nightly or post_merge or pre_merge)"
+          framework: ${{ matrix.framework }}
+          test_type: unit
+          platform_arch: ${{ matrix.arch.arch }}
+          cpu_limit: '8'
+          dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+
+  integration-tests:
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-integ
+    needs: [build-amd64, build-arm64]
+    if: always()
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - { arch: amd64, runner: cpu-amd-m5-4xlarge }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: trtllm-framework (${{ matrix.platform.arch }})
-    runs-on: ${{ matrix.platform.runner }}
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 90
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +x
+          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_NAME="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          JOBS=$(curl -s -S -L --fail-with-body \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to query GitHub API"
+            exit 1
+          fi
+          BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
+          echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo "Build failed or did not complete successfully. Marking tests as failed."
+            exit 1
+          fi
+          echo "Build succeeded. Proceeding with tests."
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull nightly image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run Integration Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: "integration and (nightly or post_merge or pre_merge)"
+          framework: ${{ matrix.framework }}
+          test_type: integration
+          platform_arch: ${{ matrix.arch.arch }}
+          dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+
+  e2e-single-gpu-tests:
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e
+    needs: [build-amd64, build-arm64]
+    if: always()
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 120
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +x
+          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_NAME="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          JOBS=$(curl -s -S -L --fail-with-body \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to query GitHub API"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
+          echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo "Build failed or did not complete successfully. Failing tests."
+            exit 1
+          fi
+          echo "Build succeeded. Proceeding with tests."
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull nightly image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run E2E Tests (gpu_1)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: "${{ matrix.framework }} and e2e and gpu_1"
+          framework: ${{ matrix.framework }}
+          test_type: e2e-single-gpu
+          platform_arch: ${{ matrix.arch.arch }}
+          dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+
+  e2e-multi-gpu-tests:
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
+    needs: [build-amd64, build-arm64]
+    if: always()
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 150
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +x
+          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_NAME="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          JOBS=$(curl -s -S -L --fail-with-body \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to query GitHub API"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
+          echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo "Build failed or did not complete successfully. Marking tests as failed."
+            exit 1
+          fi
+          echo "Build succeeded. Proceeding with tests."
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull nightly image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run E2E Tests (gpu_2)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: "(nightly or post_merge or pre_merge) and e2e and gpu_2"
+          framework: ${{ matrix.framework }}
+          test_type: e2e-multi-gpu
+          platform_arch: ${{ matrix.arch.arch }}
+          dry_run: 'true'
+
+  # component-tests:
+  #   name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-${{ matrix.component }}
+  #   needs: [build-amd64, build-arm64]
+  #   if: always()
+  #   runs-on: ${{ matrix.arch.runner }}
+  #   timeout-minutes: ${{ matrix.arch.timeout }}
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       framework: [vllm, trtllm, sglang]
+  #       arch:
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 90
+  #           component: router
+  #           marks: "nightly and router"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 90
+  #           component: planner
+  #           marks: "nightly and planner"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 150
+  #           component: kvbm
+  #           marks: "nightly and (kvbm or kvbm_v2)"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 60
+  #           component: router
+  #           marks: "nightly and router"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 60
+  #           component: planner
+  #           marks: "nightly and planner"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 150
+  #           component: kvbm
+  #           marks: "nightly and (kvbm or kvbm_v2)"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 90
+  #           component: router
+  #           marks: "nightly and router"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 90
+  #           component: planner
+  #           marks: "nightly and planner"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 150
+  #           component: kvbm
+  #           marks: "nightly and (kvbm or kvbm_v2)"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 60
+  #           component: router
+  #           marks: "nightly and router"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 60
+  #           component: planner
+  #           marks: "nightly and planner"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 150
+  #           component: kvbm
+  #           marks: "nightly and (kvbm or kvbm_v2)"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 90
+  #           component: router
+  #           marks: "nightly and router"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 90
+  #           component: planner
+  #           marks: "nightly and planner"
+  #         - arch: amd64
+  #           runner: gpu-l40-amd64
+  #           timeout: 150
+  #           component: kvbm
+  #           marks: "nightly and (kvbm or kvbm_v2)"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 60
+  #           component: router
+  #           marks: "nightly and router"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 60
+  #           component: planner
+  #           marks: "nightly and planner"
+  #         - arch: arm64
+  #           runner: cpu-arm-r8g-4xlarge
+  #           timeout: 150
+  #           component: kvbm
+  #           marks: "nightly and (kvbm or kvbm_v2)"
+
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Check if build succeeded
+  #       id: check_build
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #       run: |
+  #         set +x
+  #         echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+
+  #         if [ "${{ matrix.arch.arch }}" = "amd64" ]; then
+  #           BUILD_JOB_NAME="Build ${{ matrix.framework }} (amd64)"
+  #         else
+  #           BUILD_JOB_NAME="Build ${{ matrix.framework }} (arm64)"
+  #         fi
+
+  #         JOBS=$(curl -s -S -L --fail-with-body \
+  #           -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+  #           -H "Accept: application/vnd.github.v3+json" \
+  #           "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
+
+  #         if [ $? -ne 0 ]; then
+  #           echo "Error: Failed to query GitHub API"
+  #           echo "skip=true" >> $GITHUB_OUTPUT
+  #           exit 0
+  #         fi
+
+  #         BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
+
+  #         echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
+
+  #         if [ "$BUILD_STATUS" != "success" ]; then
+  #           echo "Build failed or did not complete successfully. Marking tests as failed."
+  #           exit 1
+  #         fi
+
+  #         echo "Build succeeded. Proceeding with tests."
+  #     - name: Login to Container Registries
+  #       uses: ./.github/actions/docker-login
+  #       with:
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #     - name: Pull nightly image
+  #       shell: bash
+  #       env:
+  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  #         IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+  #       run: |
+  #         docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+  #         docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+  #     - name: Run Component Tests (${{ matrix.component }})
+  #       uses: ./.github/actions/pytest
+  #       with:
+  #         image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+  #         pytest_marks: "${{ matrix.marks }}"
+  #         framework: ${{ matrix.framework }}
+  #         test_type: component-${{ matrix.component }}
+  #         platform_arch: ${{ matrix.arch.arch }}
+
+  ############################## RESULTS SUMMARY ##############################
+  results-summary:
+    name: Results Summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests] # component-tests
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Gather job metadata
+        id: gather
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +x -e
+          echo "# Nightly CI Results Summary" > results.md
+          echo "" >> results.md
+          echo "| Stage | Status | Runner | Duration (min) | Artifacts |" >> results.md
+          echo "|-------|--------|--------|----------------|-----------|" >> results.md
+
+          curl -s -S -L --fail-with-body \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            2>/dev/null | jq -c '.jobs[] | {id, name, runner_name, conclusion, started_at, completed_at}' > jobs.jsonl
+
+          while read job_entry; do
+            job_id=$(echo "$job_entry" | jq -r '.id')
+            name=$(echo "$job_entry" | jq -r '.name')
+            runner=$(echo "$job_entry" | jq -r '.runner_name')
+            status=$(echo "$job_entry" | jq -r '.conclusion')
+            started=$(echo "$job_entry" | jq -r '.started_at')
+            completed=$(echo "$job_entry" | jq -r '.completed_at')
+            minutes="N/A"
+            if [[ "$started" != "null" && "$completed" != "null" ]]; then
+              start_epoch=$(date -d "$started" +%s)
+              end_epoch=$(date -d "$completed" +%s)
+              minutes=$(( (end_epoch - start_epoch)/60 ))
+            fi
+            artifact_link="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#job-$job_id"
+            printf "| %s | %s | %s | %s | [Log & Artifacts](%s) |\n" "$name" "$status" "$runner" "$minutes" "$artifact_link" >> results.md
+          done < jobs.jsonl
+
+          echo "" >> results.md
+          echo "---" >> results.md
+      - name: Display workflow summary
+        run: cat results.md
+      - name: Upload results summary as job summary
+        run: cat results.md >> $GITHUB_STEP_SUMMARY
+      - name: Upload results as artifact for Slack
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-results-summary
+          path: results.md
+          retention-days: 7
+
+  ############################## SLACK NOTIFICATION ##############################
+  notify-slack:
+    name: Notify Slack
+    runs-on: cpu-amd-m5-4xlarge
+    if: always() && github.event_name == 'schedule' && !github.event.repository.fork
+    needs: results-summary
+    permissions:
+      contents: read
     env:
-      FRAMEWORK: trtllm
-    steps: *framework-build-steps
+      HAS_SLACK_WEBHOOK: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL != '' }}
+    steps:
+      - name: Send Slack notification
+        if: env.HAS_SLACK_WEBHOOK == 'true'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          JOBS_JSON=$(mktemp)
+          trap 'rm -f "$JOBS_JSON"' EXIT
+
+          if ! curl -sSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            > "$JOBS_JSON"; then
+            echo "Error: Failed to fetch job data from GitHub API"
+            exit 1
+          fi
+
+          if [ ! -s "$JOBS_JSON" ]; then
+            echo "Error: No job data received"
+            exit 1
+          fi
+
+          TOTAL_JOBS=$(jq '[.jobs[]] | length' "$JOBS_JSON")
+          SUCCESS_COUNT=$(jq '[.jobs[] | select(.conclusion == "success")] | length' "$JOBS_JSON")
+          FAILED_COUNT=$(jq '[.jobs[] | select(.conclusion == "failure")] | length' "$JOBS_JSON")
+
+          if [ "$FAILED_COUNT" -eq 0 ]; then
+            STATUS="Success ✅"
+            STATUS_EMOJI=":white_check_mark:"
+          else
+            STATUS="Failed ❌"
+            STATUS_EMOJI=":x:"
+          fi
+
+          # Main message with summary
+          SUMMARY_TEXT="*Nightly CI Pipeline - ${STATUS}*"$'\n'"Summary: ${SUCCESS_COUNT}/${TOTAL_JOBS} jobs passed"$'\n'"<${RUN_URL}|View Workflow Summary>"
+
+          if [ "$FAILED_COUNT" -eq 0 ]; then
+            # Success - simple message
+            PAYLOAD=$(jq -n \
+              --arg text "$SUMMARY_TEXT" \
+              '{text: $text}')
+          else
+            # Failed - message with blocks
+            FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | "• " + .name' "$JOBS_JSON")
+            FAILED_JOBS_TEXT="*Failed Jobs (${FAILED_COUNT}):*"$'\n'"${FAILED_JOBS}"
+
+            PAYLOAD=$(jq -n \
+              --arg summary "$SUMMARY_TEXT" \
+              --arg failed "$FAILED_JOBS_TEXT" \
+              '{
+                text: $summary,
+                blocks: [
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: $summary
+                    }
+                  },
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: $failed
+                    }
+                  }
+                ]
+              }')
+          fi
+
+          if curl -sSf -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$SLACK_WEBHOOK_URL"; then
+            echo "Slack notification sent successfully"
+          else
+            echo "Warning: Failed to send Slack notification"
+            exit 1
+          fi

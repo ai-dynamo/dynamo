@@ -25,6 +25,11 @@ class DynamoFrontendProcess(ManagedProcess):
 
         # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
         env = os.environ.copy()
+        # Disable canary health check - these tests expect full control over requests
+        # sent to the workers where canary health check intermittently sends dummy
+        # requests to workers interfering with the test process which may cause
+        # intermittent failures
+        env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         env.pop("DYN_SYSTEM_PORT", None)
 
         log_dir = f"{request.node.name}_frontend"
@@ -57,7 +62,7 @@ def start_completion_request() -> tuple:
 
     def send_request():
         prompt = "Tell me a long long long story about yourself?"
-        max_tokens = 8192
+        max_tokens = 8000
         timeout = 240  # Extended timeout for long request
 
         payload = {

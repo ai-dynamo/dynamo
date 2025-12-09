@@ -67,15 +67,14 @@ class VllmHealthCheckPayload(HealthCheckPayload):
         self.default_payload = {
             "token_ids": [bos_token_id],
             "sampling_options": {
-                "max_tokens": 1,
                 "temperature": 0.0,
             },
             "stop_conditions": {
+                "max_tokens": 1,
                 "stop": None,
                 "stop_token_ids": None,
                 "include_stop_str_in_output": False,
                 "ignore_eos": False,
-                "min_tokens": 0,
             },
         }
         super().__init__()
