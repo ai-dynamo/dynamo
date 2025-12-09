@@ -1,6 +1,6 @@
 # Nightly CI Workflow
 
-**Schedule**: Daily at 12:00 AM PST (08:00 UTC)  
+**Schedule**: Daily at 12:00 AM PST (08:00 UTC)
 **Workflow**: `nightly-ci.yml`
 
 The nightly pipeline builds all frameworks for both architectures and runs comprehensive test suites. Unlike PR builds, nightly builds all frameworks regardless of what changed.

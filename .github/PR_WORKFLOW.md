@@ -94,26 +94,26 @@ flowchart TD
             V1[Build amd64] --> V2[Run tests]
             V3[Build arm64]
         end
-        
+
         subgraph SGLang["SGLang"]
             S1[Build amd64] --> S2[Run tests]
             S3[Build arm64]
         end
-        
+
         subgraph TRT["TRT-LLM"]
             T1[Build amd64] --> T2[Run tests]
             T3[Build arm64]
         end
-        
+
         subgraph Operator["Operator"]
             O1[Lint & Test]
             O2[Build container]
         end
     end
-    
+
     V2 & V3 & S2 & S3 & T2 & T3 --> Check[backend-status-check]
     Check --> FT[Fault Tolerance Tests]
-    
+
     style Check fill:#1f6feb,color:#fff
 ```
 
