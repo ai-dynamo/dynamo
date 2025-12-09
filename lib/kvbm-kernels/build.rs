@@ -100,26 +100,29 @@ fn build_with_prebuilt_kernels() {
             );
         }
 
-        // Read and validate hashes
+        // Read and validate hashes (only .cu and .fatbin, not build.rs)
         let stored_hashes_content = fs::read_to_string(&md5_path)
             .unwrap_or_else(|_| panic!("Failed to read {}", md5_path.display()));
         let stored_hashes: Vec<&str> = stored_hashes_content.lines().collect();
 
-        if stored_hashes.len() != 3 {
-            panic!("Invalid .md5 format for {}", kernel_name);
+        if stored_hashes.len() != 2 {
+            panic!(
+                "Invalid .md5 format for {} (expected 2 lines: .cu hash, .fatbin hash)",
+                kernel_name
+            );
         }
 
-        let build_rs_path = Path::new(&manifest_dir).join("build.rs");
-        let current_build_rs_hash = compute_file_hash(&build_rs_path);
         let current_cu_hash = compute_file_hash(cu_path);
         let current_fatbin_hash = compute_file_hash(&fatbin_path);
 
         // Validate hashes
-        if current_build_rs_hash != stored_hashes[0]
-            || current_cu_hash != stored_hashes[1]
-            || current_fatbin_hash != stored_hashes[2]
-        {
-            panic!("Hash mismatch for {}! Rebuild with nvcc.", kernel_name);
+        if current_cu_hash != stored_hashes[0] || current_fatbin_hash != stored_hashes[1] {
+            panic!(
+                "Hash mismatch for {}! Rebuild with nvcc.\n  .cu: current={}, stored={}\n  .fatbin: current={}, stored={}",
+                kernel_name,
+                current_cu_hash, stored_hashes[0],
+                current_fatbin_hash, stored_hashes[1]
+            );
         }
 
         // Copy fatbin to OUT_DIR
@@ -237,14 +240,12 @@ fn generate_prebuilt_artifacts(cu_path: &Path, arch_flags: &[String], out_dir: &
     // Copy .fatbin to prebuilt directory
     fs::copy(&temp_fatbin, &fatbin_path).expect("Failed to copy .fatbin to cuda/prebuilt/");
 
-    // Generate MD5 hashes of all three files for consistency validation
-    let build_rs_path = Path::new(&manifest_dir).join("build.rs");
-    let build_rs_hash = compute_file_hash(&build_rs_path);
+    // Generate MD5 hashes for consistency validation (only .cu and .fatbin)
     let cu_hash = compute_file_hash(cu_path);
     let fatbin_hash = compute_file_hash(&fatbin_path);
 
-    // Write all three hashes (one per line)
-    let hashes = format!("{}\n{}\n{}\n", build_rs_hash, cu_hash, fatbin_hash);
+    // Write hashes (one per line: .cu hash, .fatbin hash)
+    let hashes = format!("{}\n{}\n", cu_hash, fatbin_hash);
     fs::write(&md5_path, hashes).expect("Failed to write .md5 file");
 
     println!(
@@ -252,7 +253,6 @@ fn generate_prebuilt_artifacts(cu_path: &Path, arch_flags: &[String], out_dir: &
         fatbin_path.display(),
         md5_path.display()
     );
-    println!("cargo:warning=build.rs hash: {}", build_rs_hash);
     println!("cargo:warning=.cu source hash: {}", cu_hash);
     println!("cargo:warning=.fatbin hash: {}", fatbin_hash);
 }
