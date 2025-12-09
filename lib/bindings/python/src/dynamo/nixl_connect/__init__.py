@@ -141,9 +141,9 @@ class AbstractOperation(ABC):
         # Note: Only local descriptors should be registered with NIXL,
         if isinstance(local_descriptors, list):
             for d in local_descriptors:
-                d.register_memory(self._connection)
+                d.register_with_connector(self._connection)
         else:
-            local_descriptors.register_memory(self._connection)
+            local_descriptors.register_with_connector(self._connection)
 
         # Record local descriptors.
         device_kind, desc_tlist = self._create_desc_tlist(local_descriptors)
@@ -172,9 +172,11 @@ class AbstractOperation(ABC):
         # Deregister local descriptors from NIXL, allowing them to reused by a future operation.
         if isinstance(self._local_desc_list, list):
             for d in self._local_desc_list:
-                d.deregister_memory(self._connection)
+                if d.is_registered:
+                    d.deregister_with_connector(self._connection)
         else:
-            self._local_desc_list.deregister_memory(self._connection)
+            if self._local_desc_list.is_registered:
+                self._local_desc_list.deregister_with_connector(self._connection)
 
     @property
     def connection(self) -> Connection:
@@ -983,6 +985,13 @@ class Descriptor:
         return self._data_device
 
     @property
+    def is_registered(self) -> bool:
+        """
+        Gets whether the descriptor is registered with NIXL.
+        """
+        return self._connection is not None and self._nixl_hndl is not None
+
+    @property
     def ptr(self) -> int:
         """
         Gets the pointer of the descriptor.
@@ -1032,7 +1041,7 @@ class Descriptor:
 
         return self._serialized
 
-    def deregister_memory(self, connection: Connection) -> None:
+    def deregister_with_connector(self, connection: Connection) -> None:
         """
         Deregisters the memory of the descriptor with NIXL.
         """
@@ -1040,10 +1049,9 @@ class Descriptor:
             raise TypeError(
                 "Argument `connection` must be `dynamo.nixl_connect.Connection`."
             )
-
         if connection != self._connection:
-            logger.warning(
-                f"dynamo.nixl_connect.{self.__class__.__name__}: Descriptor can only be deregistered from the connection it was registered with. "
+            raise RuntimeError(
+                "Descriptor can only be deregistered from the connection it was registered with. "
                 f"Existing connection: {self._connection.name if self._connection is not None else None}, requested connection: {connection.name}."
             )
             return
@@ -1061,7 +1069,7 @@ class Descriptor:
             f"dynamo.nixl_connect.{self.__class__.__name__}: Deregistered {self.__repr__()} with NIXL."
         )
 
-    def register_memory(
+    def register_with_connector(
         self,
         connection: Connection,
     ) -> None:
