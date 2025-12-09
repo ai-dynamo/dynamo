@@ -13,7 +13,6 @@ peer information via get_handshake_metadata() for the leader to connect.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -22,13 +21,10 @@ import torch
 # Import KvbmRuntime and ConnectorWorker from Rust bindings
 from kvbm._core import v2 as _v2
 from kvbm.v2.vllm import KvbmVllmConfig
-
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
 from vllm.model_executor.models.utils import extract_layer_index
-
-from ..config import extract_vllm_config_for_kvbm
 
 KvbmRuntime = _v2.KvbmRuntime
 ConnectorWorker = _v2.ConnectorWorker
@@ -68,7 +64,11 @@ class SchedulerConnectorWorker:
     """
 
     def __init__(
-        self, vllm_config: "VllmConfig", kvbm_config: KvbmVllmConfig, kv_cache_config: KVCacheConfig, **kwargs
+        self,
+        vllm_config: "VllmConfig",
+        kvbm_config: KvbmVllmConfig,
+        kv_cache_config: KVCacheConfig,
+        **kwargs,
     ):
         """Initialize the scheduler connector worker."""
         self.vllm_config = vllm_config
@@ -134,7 +134,7 @@ class SchedulerConnectorWorker:
         # For NHD layout: [2 (K/V), num_blocks, block_size, num_heads, head_size]
         # For HND layout: [2 (K/V), num_blocks, num_heads, block_size, head_size]
         num_device_blocks = max(shape[0], shape[1])
-        page_size = self.kvbm_config.block_size()
+        page_size = self.vllm_config.cache_config.block_size
         dtype_width_bytes = self.kvbm_config.cache_dtype_bytes()
 
         config_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks
@@ -222,7 +222,9 @@ class SchedulerConnectorWorker:
         Returns:
             (None, None): No finished sends/receives
         """
-        print(f"SchedulerConnectorWorker.get_finished called with {len(finished_req_ids)} finished requests")
+        print(
+            f"SchedulerConnectorWorker.get_finished called with {len(finished_req_ids)} finished requests"
+        )
         return self.worker.get_finished()
 
     def get_block_ids_with_load_errors(self) -> set[int]:

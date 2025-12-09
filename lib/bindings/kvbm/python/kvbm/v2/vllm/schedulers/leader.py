@@ -20,19 +20,13 @@ from typing import TYPE_CHECKING, Any, Optional
 from kvbm._core import v2 as _v2
 from kvbm.v2.vllm import KvbmVllmConfig
 
+from ..sched_output import process_scheduler_output
+from .worker import NovaPeerMetadata
+
 KvbmRuntime = _v2.KvbmRuntime
 ConnectorLeader = _v2.ConnectorLeader
 KvbmRequest = _v2.KvbmRequest
 
-# TODO: Re-enable when v2 connector bindings are updated
-# These classes need to be updated for v2 API changes in kvbm crate
-# KvbmRequest = _v2.KvbmRequest
-# RustKvConnectorLeader = _v2.KvConnectorLeader
-# RustSchedulerOutput = _v2.RustSchedulerOutput
-
-# Import the handshake metadata type from worker module
-from .worker import NovaPeerMetadata
-from ..sched_output import process_scheduler_output
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -41,8 +35,8 @@ if TYPE_CHECKING:
     )
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheConfig
     from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.request import Request
     from vllm.v1.outputs import KVConnectorOutput
+    from vllm.v1.request import Request
 
 
 class SchedulerConnectorLeader:
@@ -59,7 +53,11 @@ class SchedulerConnectorLeader:
     """
 
     def __init__(
-        self, vllm_config: VllmConfig, kvbm_config: KvbmVllmConfig, kv_cache_config: KVCacheConfig, **kwargs
+        self,
+        vllm_config: VllmConfig,
+        kvbm_config: KvbmVllmConfig,
+        kv_cache_config: KVCacheConfig,
+        **kwargs,
     ):
         """Initialize the scheduler connector leader."""
         print("[KVBM DEBUG] SchedulerConnectorLeader.__init__ START", flush=True)
@@ -90,7 +88,9 @@ class SchedulerConnectorLeader:
         num_computed_tokens: int,
     ) -> tuple[Optional[int], bool]:
         self._create_slot(request)
-        return self.leader.get_num_new_matched_tokens(request.request_id, num_computed_tokens)
+        return self.leader.get_num_new_matched_tokens(
+            request.request_id, num_computed_tokens
+        )
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -101,7 +101,9 @@ class SchedulerConnectorLeader:
         This should never be called with num_external_tokens > 0.
         """
         block_ids = [int(block_id) for block_id in blocks.get_block_ids()[0]]
-        self.leader.update_state_after_alloc(request.request_id, block_ids, num_external_tokens)
+        self.leader.update_state_after_alloc(
+            request.request_id, block_ids, num_external_tokens
+        )
 
     def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> bytes:
         """
@@ -136,12 +138,19 @@ class SchedulerConnectorLeader:
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         # Convert None to empty sets for Rust binding compatibility
-        finished_sending = connector_output.finished_sending if connector_output.finished_sending is not None else set()
-        finished_recving = connector_output.finished_recving if connector_output.finished_recving is not None else set()
+        finished_sending = (
+            connector_output.finished_sending
+            if connector_output.finished_sending is not None
+            else set()
+        )
+        finished_recving = (
+            connector_output.finished_recving
+            if connector_output.finished_recving is not None
+            else set()
+        )
         self.leader.update_connector_output(finished_sending, finished_recving)
 
     def get_finished_count(self) -> Optional[int]:
-        """No finished count tracking for Phase 1."""
         return None
 
     def set_xfer_handshake_metadata(
@@ -193,7 +202,7 @@ class SchedulerConnectorLeader:
     def _create_slot(self, request: "Request") -> None:
         if self.leader.has_slot(request.request_id):
             return
-    
+
         if bool(getattr(request, "mm_features", None)) or bool(
             getattr(request, "mm_positions", None)
         ):
@@ -207,7 +216,7 @@ class SchedulerConnectorLeader:
         else:
             # Single-sequence case: already flat
             all_token_ids = [int(token) for token in request.all_token_ids]
-    
+
         kv_request = KvbmRequest(
             request_id=request.request_id,
             tokens=all_token_ids,
@@ -219,5 +228,5 @@ class SchedulerConnectorLeader:
             else None,
             max_tokens=request.max_tokens,
         )
-    
+
         self.leader.create_slot(kv_request)

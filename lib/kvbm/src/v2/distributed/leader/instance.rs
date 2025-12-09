@@ -1233,8 +1233,20 @@ impl Leader for InstanceLeader {
         };
 
         // Determine if we can return immediately (Ready) or need async session
-        // Ready: no remote search AND no G3 blocks (nothing to stage)
-        let is_ready = !options.search_remote && matched_g3_blocks.is_empty();
+        // Ready if:
+        //   - g3 blocks is empty
+        //   - there are no remote leaders
+        //   - OR there are remote leaders, but search_remote is false
+        //
+        // is_ready is false if:
+        //   - g3 is not empty, or
+        //   - remote_search is true and there are remote leaders
+        let has_remote_leaders = !self.remote_leaders.read().unwrap().is_empty();
+        let is_ready = matched_g3_blocks.is_empty()
+            && (
+                !has_remote_leaders
+                || (has_remote_leaders && !options.search_remote)
+            );
 
         if is_ready {
             // No session needed - blocks owned directly by ReadyResult (RAII)

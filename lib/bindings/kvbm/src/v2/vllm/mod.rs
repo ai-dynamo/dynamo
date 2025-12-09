@@ -5,9 +5,3 @@
 
 pub mod config;
 pub use config::PyKvbmVllmConfig;
-
-// // Leader connector classes for v2 vLLM integration
-// pub mod connector;
-// pub use connector::{
-//     PyConnectorMetadataBuilder, PyKvConnectorLeader, PyKvbmRequest, PyRustSchedulerOutput,
-// };

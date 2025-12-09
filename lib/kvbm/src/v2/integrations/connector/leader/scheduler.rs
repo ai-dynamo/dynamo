@@ -176,8 +176,12 @@ impl ConnectorLeader {
         &self,
         scheduler_output: &SchedulerOutput,
     ) -> Result<KvConnectorMetadata> {
-        // todo: early exit if the number of scheduled tokens is 0
-        // - we do not register the session
+        tracing::debug!(
+            "processing scheduler output for iteration: {}; active slots: {}",
+            scheduler_output.iteration,
+            self.slots.len()
+        );
+
         if scheduler_output.total_num_scheduled_tokens == 0 {
             tracing::debug!("no scheduled tokens, early exiting");
             return Ok(KvConnectorMetadata::new(scheduler_output.iteration));
