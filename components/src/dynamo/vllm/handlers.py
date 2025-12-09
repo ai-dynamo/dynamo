@@ -633,10 +633,10 @@ class BaseWorkerHandler(ABC):
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
-                        out["completion_usage"] = (
-                            BaseWorkerHandler._build_completion_usage(
-                                request_output=res,
-                            )
+                        out[
+                            "completion_usage"
+                        ] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res,
                         )
                         # Log completion with LoRA info (debug level to avoid log spam)
                         if lora_request:
@@ -805,7 +805,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 ):
                     # Capture first token timing
                     if include_timing and not first_token_sent:
-                        first_token_time = time.time()
+                        first_token_time = decode_start_seconds + (
+                            time.perf_counter() - decode_start_perf_counter
+                        )
                         timing_metrics["decode_first_token_seconds"] = first_token_time
                         # In aggregated mode, prefill finishes when first token is generated
                         if prefill_result is None:
@@ -966,14 +968,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     disaggregated_params: Optional[Dict[str, Any]] = {}
 
                     if res.kv_transfer_params:
-                        disaggregated_params["kv_transfer_params"] = (
-                            res.kv_transfer_params
-                        )
+                        disaggregated_params[
+                            "kv_transfer_params"
+                        ] = res.kv_transfer_params
 
                     if include_timing and timing_metrics:
-                        timing_metrics["prefill_end_seconds"] = (
-                            prefill_start_seconds
-                            + (time.perf_counter() - prefill_start_perf_counter)
+                        timing_metrics[
+                            "prefill_end_seconds"
+                        ] = prefill_start_seconds + (
+                            time.perf_counter() - prefill_start_perf_counter
                         )
                         disaggregated_params["timing_metrics"] = timing_metrics
 

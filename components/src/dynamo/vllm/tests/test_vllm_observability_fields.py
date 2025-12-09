@@ -35,7 +35,9 @@ class TestShouldIncludeTimingMetrics:
 
     def test_returns_true_with_multiple_observability_fields(self):
         """Timing metrics should be included when explicitly requested."""
-        request = {"observability_fields": ["worker_id", "timing_metrics", "other_field"]}
+        request = {
+            "observability_fields": ["worker_id", "timing_metrics", "other_field"]
+        }
         assert _request_contains_timing_metrics(request) is True
 
     def test_returns_false_when_observability_fields_is_none(self):
