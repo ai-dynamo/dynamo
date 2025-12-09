@@ -477,6 +477,7 @@ async def run_profile(args):
             # Safety guards: no results → exit early with a clear message
             if not prefill_data.num_gpus:
                 logger.error("No prefill results produced; skipping recommendations.")
+                return
 
             if args.pick_with_webui:
                 # select best P/D config in webUI
