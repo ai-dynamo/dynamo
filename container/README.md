@@ -37,102 +37,34 @@ The `build.sh` and `run.sh` scripts are convenience wrappers that simplify commo
 
 ## Development Targets Feature Matrix
 
-These targets are specified with `build.sh --target <target>` and correspond to Docker multi-stage build targets defined in the Dockerfiles (e.g., `FROM somebase AS <target>`). Some commonly used targets include:
+**Note**: In Dynamo, "targets" and "Docker stages" are synonymous. Each target corresponds to a stage in the multi-stage Docker build. Similarly, "frameworks" and "engines" are synonymous (vLLM, TensorRT-LLM, SGLang).
 
-- `runtime` - For running pre-built containers without development tools (minimal size, runs as non-root `dynamo` user with UID 1000 and GID 0)
-- `dev` - For development (inferencing/benchmarking/etc, runs as root user for maximum flexibility)
-- `local-dev` - For development with local user permissions matching host UID/GID. This is useful when mounting host partitions (with local user permissions) to Docker partitions. The `dynamo` user UID/GID is remapped to match the host user.
-
-Additional targets are available in the Dockerfiles for specific build stages and use cases.
-
-| Feature | **dev + `run.sh`** | **local-dev + `run.sh`** | **local-dev + Dev Container** |
-|---------|-------------------|--------------------------|-------------------------------|
-| **Default User** | root | dynamo (matched to host UID/GID) | dynamo (matched to host UID/GID) |
-| **User Setup** | None (root) | Matches UID/GID of `build.sh` user | Matches UID/GID of `build.sh` user |
-| **Permissions** | root | dynamo with sudo | dynamo with sudo |
-| **Home Directory** | `/root` | `/home/dynamo` | `/home/dynamo` |
-| **Working Directory** | `/workspace` | `/workspace` | `/workspace` |
-| **Rust Toolchain** | System install (`/usr/local/rustup`, `/usr/local/cargo`) | User install (`~/.rustup`, `~/.cargo`) | User install (`~/.rustup`, `~/.cargo`) |
-| **Python Env** | dynamo user owned | dynamo owned venv | dynamo owned venv |
-| **File Permissions** | root-level | user-level (dynamo), safe | user-level (dynamo), safe |
-| **Compatibility** | Legacy workflows, maximum flexibility | workspace writable on NFS, non-root security | workspace writable on NFS, non-root security |
-
-## Environment Variables Across Build Stages
-
-Understanding how environment variables change across different build stages is crucial for development and debugging. The Dynamo build system uses a multi-stage Docker build process where environment variables are set, inherited, and overridden at different stages.
-
-### Build Stage Flow
-
-```
-Dockerfile → base → dev (dynamo-base image)
-              ↓
-Dockerfile.vllm → framework → runtime → dev (vllm dev image)
-                                         ↓
-Dockerfile.local_dev → local-dev (from vllm dev image)
-```
-
-### Environment Variables by Stage
-
-| Variable             | **base**            | **base→dev**         | **vllm→framework** | **vllm→runtime**   | **vllm→dev** | **local-dev** |
-|----------------------|---------------------|----------------------|--------------------|--------------------|--------------|--------------------|
-| **DYNAMO_HOME**      | ❌ Not set          | `/opt/dynamo`        | ❌ Not set         | `/opt/dynamo`      | `/workspace` ✅ **OVERRIDE** | `/workspace` (inherited) |
-| **WORKSPACE_DIR**    | ❌ Not set          | ❌ Not set           | ❌ Not set         | ❌ Not set         | `/workspace` | `/workspace` (inherited) |
-| **CARGO_TARGET_DIR** | ❌ Not set          | `/opt/dynamo/target` | ❌ Not set         | ❌ Not set         | `/workspace/target` ✅ **OVERRIDE** | `/workspace/target` (inherited) |
-| **VIRTUAL_ENV**      | `/opt/dynamo/venv`  | (inherited)          | `/opt/dynamo/venv` | `/opt/dynamo/venv` | `/opt/dynamo/venv` ✅ **REDEFINE** | `/opt/dynamo/venv` (inherited) |
-| **RUSTUP_HOME**      | `/usr/local/rustup` | (inherited)          | ❌ Not set         | ❌ Not set         | `/usr/local/rustup` | `/home/dynamo/.rustup` ✅ **OVERRIDE** |
-| **CARGO_HOME**       | `/usr/local/cargo`  | (inherited)          | ❌ Not set         | ❌ Not set         | `/usr/local/cargo` | `/home/dynamo/.cargo` ✅ **OVERRIDE** |
-| **USERNAME**         | ❌ Not set          | `dynamo`             | ❌ Not set         | `dynamo`           | ❌ Not set   | `dynamo` |
-| **HOME**             | (system default)    | `/home/dynamo`       | (system default)   | `/home/dynamo`     | (system default) | `/home/dynamo` |
-| **PATH**             | (includes cargo)    | (inherited)          | (system default)   | (includes venv, etcd, ucx) | `/usr/local/cargo/bin:$PATH` | `/home/dynamo/.cargo/bin:$PATH` ✅ **OVERRIDE** |
-
-### Key Insights
-
-**1. DYNAMO_HOME Dual Purpose:**
-- `base→dev` and `vllm→runtime`: `/opt/dynamo` - For **installed/packaged** Dynamo (CI, production)
-- `vllm→dev` and `local-dev`: `/workspace` - For **development** with source code mounted from host
-
-**2. Rust Toolchain Location:**
-- `dev` target: System-wide at `/usr/local/rustup` and `/usr/local/cargo` (suitable for root)
-- `local-dev` target: User-specific at `/home/dynamo/.rustup` and `/home/dynamo/.cargo` (proper UID/GID ownership)
-
-**3. Build Artifacts Location:**
-- `base→dev`: `/opt/dynamo/target` - Build artifacts with installed package
-- `vllm→dev` onward: `/workspace/target` - Build artifacts in mounted workspace for persistence
-
-**4. Variables That Stay Constant:**
-- `VIRTUAL_ENV`: Always `/opt/dynamo/venv` (ownership changes in local-dev via rsync)
-- `WORKSPACE_DIR`: Always `/workspace` once set in vllm→dev
-- `DYNAMO_HOME`: Always `/workspace` once overridden in vllm→dev (for development)
-
-**5. local-dev Specific Changes:**
-From `Dockerfile.local_dev`, the Rust toolchain is moved to user home because:
-- Workspace mount points may change, breaking toolchain paths
-- User needs ownership of cargo binaries and registry for package installation
-- Toolchain requires consistent system paths that don't depend on workspace location
-
-The Python venv ownership is also updated via rsync in local-dev to match the user's UID/GID, ensuring package installation permissions work correctly.
-
-**6. Non-Root User Architecture:**
-Dynamo containers implement a multi-stage user strategy:
-- **runtime stage**: Runs as non-root `dynamo` user (UID 1000, GID 0) for production workloads
-- **dev stage**: Runs as root for maximum development flexibility (builds on runtime but switches to root)
-- **local-dev stage**: Runs as `dynamo` user with UID/GID matched to host user for safe file system operations
-- **Security**: Runtime and local-dev use non-root execution to reduce attack surface
-- **File Ownership**: All application files, virtual environments, and build artifacts are owned by `dynamo:root` (1000:0) in runtime stage
-- **Environment Setup**: Launch banner moved to `/opt/dynamo/.launch_screen` (shared across all users) and venv activation configured in `/etc/bash.bashrc` for system-wide availability. This replaces the previous per-user `~/.launch_screen` and `~/.bashrc` approach.
+| Feature | **runtime + `run.sh`** | **local-dev (`run.sh` or Dev Container)** | **dev + `run.sh`** (legacy) |
+|---------|----------------------|-------------------------------------------|--------------------------|
+| **Usage** | Benchmarking inference and deployments, non-root | Development, compilation, testing locally | Legacy workflows, root user, use with caution |
+| **User** | dynamo (UID 1000) | dynamo (UID=host user) with sudo | root (UID 0, use with caution) |
+| **Home Directory** | `/home/dynamo` | `/home/dynamo` | `/root` |
+| **Working Directory** | `/workspace` (in-container or mounted) | `/workspace` (must be mounted w/ `--mount-workspace`) | `/workspace` (must be mounted w/ `--mount-workspace`) |
+| **Rust Toolchain** | None (uses pre-built wheels) | System install (`/usr/local/rustup`, `/usr/local/cargo`) | System install (`/usr/local/rustup`, `/usr/local/cargo`) |
+| **Cargo Target** | None | `/workspace/target` | `/workspace/target` |
+| **Python Env** | venv (`/opt/dynamo/venv`) for vllm/trtllm, system site-packages for sglang | venv (`/opt/dynamo/venv`) for vllm/trtllm, system site-packages for sglang | venv (`/opt/dynamo/venv`) for vllm/trtllm, system site-packages for sglang |
 
 ## Usage Guidelines
 
-- **Use runtime target**: for production deployments. Runs as non-root `dynamo` user (UID 1000, GID 0) for security
-- **Use dev + `run.sh`**: for command-line testing and inferencing. Runs as root for maximum flexibility
-- **Use local-dev + `run.sh`**: for command-line development and Docker mounted partitions. Runs as `dynamo` user with UID/GID matched to your local user. Add `-it` flag for interactive sessions
-- **Use local-dev + Dev Container**: VS Code/Cursor Dev Container Plugin, using `dynamo` user with UID/GID matched to your local user
+- **Use runtime target**: for benchmarking inference and deployments. Runs as non-root `dynamo` user (UID 1000, GID 0) for security
+- **Use local-dev + `run.sh`**: for command-line development and Docker mounted partitions. Runs as `dynamo` user with UID matched to your local user, GID 0. Add `-it` flag for interactive sessions
+- **Use local-dev + Dev Container**: VS Code/Cursor Dev Container Plugin, using `dynamo` user with UID matched to your local user, GID 0
+- **Use dev + `run.sh`**: Root user, use with caution. Runs as root for backward compatibility with early workflows
 
 ## Example Commands
 
-### 1. dev + `run.sh` (runs as root):
+### 1. runtime target (runs as non-root dynamo user):
 ```bash
-run.sh ...
+# Build runtime image
+./build.sh --framework vllm --target runtime
+
+# Run runtime container
+./run.sh --image dynamo:latest-vllm-runtime -it
 ```
 
 ### 2. local-dev + `run.sh` (runs as dynamo user with matched host UID/GID):
@@ -141,16 +73,7 @@ run.sh --mount-workspace -it --image dynamo:latest-vllm-local-dev ...
 ```
 
 ### 3. local-dev + Dev Container Extension:
-Use VS Code/Cursor Dev Container Extension with devcontainer.json configuration. The `dynamo` user UID/GID is automatically matched to your local user.
-
-### 4. runtime target (runs as non-root dynamo user):
-```bash
-# Build runtime image
-./build.sh --framework vllm --target runtime
-
-# Run runtime container
-./run.sh --image dynamo:latest-vllm-runtime
-```
+Use VS Code/Cursor Dev Container Extension with devcontainer.json configuration. The `dynamo` user UID is automatically matched to your local user.
 
 ## Build and Run Scripts Overview
 

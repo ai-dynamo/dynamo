@@ -53,12 +53,20 @@ type VolumeMount struct {
 	UseAsCompilationCache bool `json:"useAsCompilationCache,omitempty"`
 }
 
+// Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
+// with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+// for migration guidance. This field will be removed in a future API version.
 type Autoscaling struct {
-	Enabled     bool                                           `json:"enabled,omitempty"`
-	MinReplicas int                                            `json:"minReplicas,omitempty"`
-	MaxReplicas int                                            `json:"maxReplicas,omitempty"`
-	Behavior    *autoscalingv2.HorizontalPodAutoscalerBehavior `json:"behavior,omitempty"`
-	Metrics     []autoscalingv2.MetricSpec                     `json:"metrics,omitempty"`
+	// Deprecated: This field is ignored.
+	Enabled bool `json:"enabled,omitempty"`
+	// Deprecated: This field is ignored.
+	MinReplicas int `json:"minReplicas,omitempty"`
+	// Deprecated: This field is ignored.
+	MaxReplicas int `json:"maxReplicas,omitempty"`
+	// Deprecated: This field is ignored.
+	Behavior *autoscalingv2.HorizontalPodAutoscalerBehavior `json:"behavior,omitempty"`
+	// Deprecated: This field is ignored.
+	Metrics []autoscalingv2.MetricSpec `json:"metrics,omitempty"`
 }
 
 type SharedMemorySpec struct {
@@ -114,4 +122,16 @@ type ExtraPodMetadata struct {
 type ExtraPodSpec struct {
 	*corev1.PodSpec `json:",inline"`
 	MainContainer   *corev1.Container `json:"mainContainer,omitempty"`
+}
+
+// ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
+// for replica management. When enabled (default), the DGDSA owns the replicas field and
+// external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
+type ScalingAdapter struct {
+	// Disable indicates whether the ScalingAdapter should be disabled for this service.
+	// When false (default), a DGDSA is created and owns the replicas field.
+	// When true, no DGDSA is created and replicas can be modified directly in the DGD.
+	// +optional
+	// +kubebuilder:default=false
+	Disable bool `json:"disable,omitempty"`
 }

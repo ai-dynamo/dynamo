@@ -752,22 +752,14 @@ impl OpenAIPreprocessor {
         has_tools: bool,
     ) -> std::result::Result<bool, Error> {
         match (tool_call_parser, tool_choice, has_tools) {
-            // No parser but tools requested - error cases
-            (None, Some(ChatCompletionToolChoiceOption::Required), true) => {
-                tracing::warn!(
-                    "Tool choice 'required' specified but no tool parser configured; proceeding without jailing"
-                );
-                Ok(false)
-            }
+            // tool_choice=required/named work without parser (use Immediate jail mode)
+            (None, Some(ChatCompletionToolChoiceOption::Required), true) => Ok(true),
+            (None, Some(ChatCompletionToolChoiceOption::Named(_)), true) => Ok(true),
+
+            // tool_choice=auto requires a parser
             (None, Some(ChatCompletionToolChoiceOption::Auto), true) => {
                 tracing::warn!(
                     "Tool choice 'auto' specified but no tool parser configured; proceeding without jailing"
-                );
-                Ok(false)
-            }
-            (None, Some(ChatCompletionToolChoiceOption::Named(_)), _) => {
-                tracing::warn!(
-                    "Named tool choice specified but no tool parser configured; proceeding without jailing"
                 );
                 Ok(false)
             }
@@ -786,15 +778,38 @@ impl OpenAIPreprocessor {
 
     /// Apply tool calling jail to the stream if needed
     pub fn apply_tool_calling_jail<S>(
-        tool_call_parser: String,
+        tool_call_parser: Option<String>,
+        tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        let jail = JailedStream::builder()
-            .tool_call_parser(tool_call_parser)
-            .build();
+        use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
+
+        let mut builder = JailedStream::builder();
+
+        // Configure jail based on tool_choice
+        match tool_choice {
+            Some(ChatCompletionToolChoiceOption::Named(named)) => {
+                // Immediate jail mode for named tool choice
+                builder = builder.tool_choice_named(named.function.name.clone());
+            }
+            Some(ChatCompletionToolChoiceOption::Required) => {
+                // Immediate jail mode for required tool choice
+                builder = builder.tool_choice_required();
+            }
+            Some(ChatCompletionToolChoiceOption::Auto)
+            | Some(ChatCompletionToolChoiceOption::None)
+            | None => {
+                // Traditional marker-based jail for auto/none/unspecified
+                if let Some(parser) = tool_call_parser {
+                    builder = builder.tool_call_parser(parser);
+                }
+            }
+        }
+
+        let jail = builder.build();
         jail.apply_with_finish_reason(stream)
     }
 
@@ -957,11 +972,11 @@ impl
 
         // Apply jail conditionally
         let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
-            if let Some(parser) = self.tool_call_parser.clone() {
-                Box::pin(Self::apply_tool_calling_jail(parser, stream))
-            } else {
-                Box::pin(stream) // Should not happen due to should_jail check
-            }
+            Box::pin(Self::apply_tool_calling_jail(
+                self.tool_call_parser.clone(),
+                request.inner.tool_choice.clone(),
+                stream,
+            ))
         } else {
             Box::pin(stream)
         };
