@@ -125,6 +125,9 @@ NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 NIXL_GDRCOPY_REF=v2.5.1
 NIXL_LIBFABRIC_REF=v2.3.0
 
+# AWS EFA installer version
+EFA_VERSION=1.45.1
+
 NO_CACHE=""
 
 # KVBM (KV Cache Block Manager) - default disabled, enabled automatically for VLLM/TRTLLM
@@ -329,6 +332,14 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
+        --efa-version)
+            if [ "$2" ]; then
+                EFA_VERSION=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
         --no-tag-latest)
             NO_TAG_LATEST=true
             ;;
@@ -463,6 +474,7 @@ show_help() {
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
     echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
+    echo "  [--efa-version AWS EFA installer version (default: 1.45.1)]"
     echo "  [--no-tag-latest do not add latest-{framework} tag to built image]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
@@ -534,6 +546,8 @@ fi
 BUILD_ARGS+=" --build-arg NIXL_REF=${NIXL_REF} "
 # Add NIXL_LIBFABRIC_REF as a build argument
 BUILD_ARGS+=" --build-arg NIXL_LIBFABRIC_REF=${NIXL_LIBFABRIC_REF} "
+# Add EFA_VERSION as a build argument
+BUILD_ARGS+=" --build-arg EFA_VERSION=${EFA_VERSION} "
 
 # Function to build local-dev image
 build_local_dev_with_header() {
