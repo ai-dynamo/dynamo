@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Throughout this file, we make certain paths group-writable because this allows
+# both the dynamo user (UID 1000) and Dev Container users (UID != 1000) to work
+# properly without needing slow chown -R operations (which can add 2-10 extra
+# minutes).
+#
+# DEVELOPMENT PATHS THAT MUST BE GROUP-WRITABLE (for virtualenv containers):
+#   /workspace            - Users create/modify project files
+#   /home/dynamo          - Users create config/cache files
+#   /opt/dynamo/venv      - TensorRT-LLM uses venv, so entire venv must be writable for pip install
+#
+# HOW TO ACHIEVE GROUP-WRITABLE PERMISSIONS:
+# 1. SHELL + /etc/profile.d - Login shell sources umask 002 globally for all RUN commands (775/664)
+# 2. COPY --chmod=775       - Sets permissions on copied children (not destination)
+# 3. chmod g+w (no -R)      - Fixes destination dirs only (milliseconds vs minutes)
 
 # This section contains build arguments that are common and shared with
 # the plain Dockerfile, so they should NOT have a default. The source of truth is from build.sh.
@@ -238,8 +253,12 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
     && mkdir -p /home/dynamo/.cache /opt/dynamo \
-    && chown -R dynamo: /workspace /home/dynamo /opt/dynamo \
-    && chmod -R g+w /workspace /home/dynamo/.cache /opt/dynamo
+    # Non-recursive chown - only the directories themselves, not contents
+    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
+    # No chmod needed: umask 002 handles new files, COPY --chmod handles copied content
+    # Set umask globally for all subsequent RUN commands (must be done as root before USER dynamo)
+    # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
+    && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
 # Install Python, build-essential and python3-dev as apt dependencies
 ARG PYTHON_VERSION
@@ -291,6 +310,9 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
 # Switch to dynamo user
 USER dynamo
 ENV HOME=/home/dynamo
+# This picks up the umask 002 from the /etc/profile.d/00-umask.sh file for subsequent RUN commands
+SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
+
 ENV DYNAMO_HOME=/workspace
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
@@ -301,13 +323,14 @@ COPY --from=framework /usr/local/tensorrt /usr/local/tensorrt
 COPY --from=framework /usr/lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH_ALT}-linux-gnu/
 
 # Copy pre-built venv with PyTorch and TensorRT-LLM from framework stage
-COPY --chown=dynamo: --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
+COPY --chmod=775 --chown=dynamo:0 --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 # Copy UCX from framework image as plugin for NIXL
 # Copy NIXL source from framework image
-# Copy dynamo wheels for gitlab artifacts
-COPY --chown=dynamo: --from=dynamo_base /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo: --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+# Copy dynamo wheels for gitlab artifacts (read-only, no group-write needed)
+COPY --chown=dynamo:0 --from=dynamo_base /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo:0 --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
 
 ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib
 ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
@@ -324,12 +347,13 @@ $TENSORRT_LIB_DIR:\
 $LD_LIBRARY_PATH
 ENV OPAL_PREFIX=/opt/hpcx/ompi
 
-COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
-COPY --chown=dynamo: benchmarks/ /workspace/benchmarks/
+COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
+COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 ARG ENABLE_KVBM
-COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+COPY --chmod=775 --chown=dynamo:0 --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN uv pip install \
       --no-cache \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
@@ -344,7 +368,9 @@ RUN uv pip install \
         uv pip install --no-cache "$KVBM_WHEEL"; \
     fi && \
     cd /workspace/benchmarks && \
-    UV_GIT_LFS=1 uv pip install --no-cache .
+    UV_GIT_LFS=1 uv pip install --no-cache . && \
+    # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
+    chmod -R g+w /workspace/benchmarks
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
@@ -357,13 +383,14 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.test.txt \
         cupy-cuda13x
 
-# Copy tests, benchmarks, deploy and components for CI with correct ownership
-COPY --chown=dynamo: pyproject.toml /workspace/
-COPY --chown=dynamo: tests /workspace/tests
-COPY --chown=dynamo: examples /workspace/examples
-COPY --chown=dynamo: deploy /workspace/deploy
-COPY --chown=dynamo: components/ /workspace/components/
-COPY --chown=dynamo: recipes/ /workspace/recipes/
+# Copy tests, deploy and components for CI with correct ownership
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
+COPY --chmod=775 --chown=dynamo:0 pyproject.toml /workspace/
+COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
+COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
+COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
+COPY --chmod=775 --chown=dynamo:0 components/ /workspace/components/
+COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
 
 # Setup launch banner in common directory accessible to all users
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
@@ -371,7 +398,10 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
 
 # Setup environment for all users
 USER root
-RUN chmod 755 /opt/dynamo/.launch_screen && \
+# Fix directory permissions: COPY --chmod only affects contents, not the directory itself
+RUN chmod g+w ${VIRTUAL_ENV} /workspace /workspace/* /opt/dynamo /opt/dynamo/* && \
+    chown dynamo:0 ${VIRTUAL_ENV} /workspace /opt/dynamo/ && \
+    chmod 755 /opt/dynamo/.launch_screen && \
     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
@@ -432,6 +462,10 @@ RUN apt-get update -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# Set umask for group-writable files in dev stage (runs as root)
+RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
+SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
+
 # Set workspace directory variable
 ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     DYNAMO_HOME=${WORKSPACE_DIR} \
@@ -441,14 +475,17 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/usr/local/cargo/bin:$PATH
 
-COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
+# Copy rust installation from dynamo_base to avoid duplication efforts
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --from=dynamo_base --chmod=775 /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base --chmod=775 /usr/local/cargo /usr/local/cargo
+RUN chmod g+w /usr/local/rustup /usr/local/cargo
 
 # Install maturin, for maturin develop
 RUN uv pip install --no-cache maturin[patchelf]
 
 # Editable install of dynamo
-COPY README.md hatch_build.py /workspace/
+COPY pyproject.toml README.md hatch_build.py /workspace/
 RUN uv pip install --no-cache --no-deps -e .
 
 CMD []
