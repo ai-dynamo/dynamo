@@ -373,7 +373,7 @@ def setup_frontend_worker(
     # All frontends run the ingress server
     frontend_cmd = "python3 -m dynamo.frontend --http-port=8000"
     if run_in_ci:
-        frontend_cmd = "python3 -m pip install /configs/ai_dynamo_runtime-0.6.1-cp310-abi3-manylinux_2_28_aarch64.whl && python3 -m pip install /configs/ai_dynamo-0.6.1-py3-none-any.whl && python3 -m dynamo.frontend --http-port=8000"
+        frontend_cmd = "python3 -m pip install /configs/ai_dynamo_runtime-0.7.0-cp310-abi3-manylinux_2_28_aarch64.whl && python3 -m pip install /configs/ai_dynamo-0.7.0-py3-none-any.whl && python3 -m dynamo.frontend --http-port=8000"
     return run_command(frontend_cmd)
 
 

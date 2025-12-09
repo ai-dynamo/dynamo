@@ -1034,7 +1034,7 @@ func GenerateGrovePodCliqueSet(
 					PodSpec:      *podSpec,
 				},
 			}
-			labels, err := generateLabels(component, dynamoDeployment, r.Name)
+			labels, err := generateLabels(component, dynamoDeployment, serviceName)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
 			}
@@ -1075,6 +1075,7 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dyn
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDynamoComponentName(dynamoDeployment, componentName)
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+	labels[commonconsts.KubeLabelDynamoComponent] = componentName
 	if component.DynamoNamespace != nil {
 		labels[commonconsts.KubeLabelDynamoNamespace] = *component.DynamoNamespace
 	}

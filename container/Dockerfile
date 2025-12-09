@@ -1,6 +1,18 @@
 # syntax=docker/dockerfile:1.10.0
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# NOTE FOR dynamo_base AND wheel_builder STAGES:
+#
+# All changes to dynamo_base and wheel_builder stages should be replicated across
+# Dockerfile and Dockerfile.<framework> images.:
+#   - Dockerfile
+#   - Dockerfile.vllm
+#   - Dockerfile.sglang
+#   - Dockerfile.trtllm
+# This duplication was introduced purposely to quickly enable Docker layer caching and
+# deduplication. Please ensure these stages stay in sync until the duplication can be
+# addressed.
 
 ##################################
 ########## Build Arguments ########
