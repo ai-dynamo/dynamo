@@ -100,26 +100,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 		currentReplicas = *component.Replicas
 	}
 
-	// 4. Detect out-of-band DGD changes (Scenario 1: User manually edited DGD)
-	// If DGD replicas differ from adapter status, DGD was modified externally
-	if currentReplicas != adapter.Status.Replicas {
-		logger.Info("Detected out-of-band DGD change, syncing adapter from DGD",
-			"service", adapter.Spec.DGDRef.ServiceName,
-			"dgdReplicas", currentReplicas,
-			"adapterStatusReplicas", adapter.Status.Replicas)
-
-		// Sync adapter spec from DGD (treat DGD as source of truth for out-of-band changes)
-		adapter.Spec.Replicas = currentReplicas
-		if err := r.Update(ctx, adapter); err != nil {
-			logger.Error(err, "Failed to sync adapter spec from DGD")
-			return ctrl.Result{}, err
-		}
-
-		r.Recorder.Eventf(adapter, corev1.EventTypeNormal, "Synced",
-			"Synced adapter from DGD manual edit: replicas=%d", currentReplicas)
-	}
-
-	// 5. Update DGD if replicas changed
+	// 4. Update DGD if replicas changed (DGDSA is the source of truth)
 	if currentReplicas != adapter.Spec.Replicas {
 		// Update the service's replicas in DGD
 		component.Replicas = &adapter.Spec.Replicas
@@ -146,7 +127,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 		adapter.Status.LastScaleTime = &now
 	}
 
-	// 7. Update adapter status
+	// 5. Update adapter status
 	adapter.Status.Replicas = adapter.Spec.Replicas
 	adapter.Status.Selector = r.buildPodSelector(dgd, adapter.Spec.DGDRef.ServiceName)
 
