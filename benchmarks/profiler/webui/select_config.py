@@ -353,7 +353,7 @@ def pick_config_with_webui(prefill_data, decode_data, args):
             """
             **Two ways to select prefill and decode configs:**
             1. **Cost Analysis** (recommended): Click any row in the Cost Analysis table - automatically determines both prefill and decode
-            2. **Individual**: Click one row in Prefill table AND one row in Decode table
+            2. **Individual**: Click one row in the Prefill table AND one row in the Decode table
             The selection will be processed automatically once complete.
 
             > 📝 **Note:** The dotted red line in the prefill and decode charts are default TTFT and ITL SLAs if not specified.
