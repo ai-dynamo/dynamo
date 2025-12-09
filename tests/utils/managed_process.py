@@ -448,9 +448,16 @@ class ManagedProcess:
             elapsed = time.time() - start_time
 
         self._logger.error(
-            "FAILED: Check URL: %s (attempts=%d, elapsed=%.1fs)", url, attempt, elapsed
+            "TIMEOUT: Check URL: %s failed after %.1fs (attempts=%d, timeout=%.1fs)",
+            url,
+            elapsed,
+            attempt,
+            timeout,
         )
-        raise RuntimeError("FAILED: Check URL: %s" % url)
+        raise RuntimeError(
+            "TIMEOUT: Check URL: %s failed after %.1fs (timeout=%.1fs)"
+            % (url, elapsed, timeout)
+        )
 
     def _check_funcs(self, timeout):
         elapsed = 0.0

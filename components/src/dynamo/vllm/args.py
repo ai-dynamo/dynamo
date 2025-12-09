@@ -55,11 +55,15 @@ class Config:
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
 
+    # endpoint types to enable
+    dyn_endpoint_types: str = "chat,completions"
+
     # multimodal options
     multimodal_processor: bool = False
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
     multimodal_decode_worker: bool = False
+    enable_multimodal: bool = False
     multimodal_encode_prefill_worker: bool = False
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
     # dump config to file
@@ -135,6 +139,12 @@ def parse_args() -> Config:
         help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
     )
     parser.add_argument(
+        "--dyn-endpoint-types",
+        type=str,
+        default="chat,completions",
+        help="Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Default: 'chat,completions'. Use 'completions' for models without chat templates.",
+    )
+    parser.add_argument(
         "--multimodal-processor",
         action="store_true",
         help="Run as multimodal processor component for handling multimodal requests",
@@ -158,6 +168,11 @@ def parse_args() -> Config:
         "--multimodal-encode-prefill-worker",
         action="store_true",
         help="Run as unified encode+prefill+decode worker for models requiring integrated image encoding (e.g., Llama 4)",
+    )
+    parser.add_argument(
+        "--enable-multimodal",
+        action="store_true",
+        help="Enable multimodal processing. If not set, none of the multimodal components can be used.",
     )
     parser.add_argument(
         "--mm-prompt-template",
@@ -192,6 +207,24 @@ def parse_args() -> Config:
     args = parser.parse_args()
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
+    # Workaround for vLLM GIL contention bug with NIXL connector when using UniProcExecutor.
+    # With TP=1, vLLM defaults to UniProcExecutor which runs scheduler and worker in the same
+    # process. This causes a hot loop in _process_engine_step that doesn't release the GIL,
+    # blocking NIXL's add_remote_agent from completing. Using "mp" backend forces separate
+    # processes, avoiding the GIL contention.
+    # Note: Only apply for NIXL - other connectors (kvbm, lmcache) work fine with UniProcExecutor
+    # and forcing mp can expose race conditions in vLLM's scheduler.
+    # See: https://github.com/vllm-project/vllm/issues/29369
+    connector_list = [c.lower() for c in args.connector] if args.connector else []
+    uses_nixl = "nixl" in connector_list
+    tp_size = getattr(engine_args, "tensor_parallel_size", None) or 1
+    if uses_nixl and tp_size == 1 and engine_args.distributed_executor_backend is None:
+        logger.info(
+            "Setting --distributed-executor-backend=mp for TP=1 to avoid "
+            "UniProcExecutor GIL contention with NIXL connector"
+        )
+        engine_args.distributed_executor_backend = "mp"
+
     if engine_args.enable_prefix_caching is None:
         logger.debug(
             "--enable-prefix-caching or --no-enable-prefix-caching not specified. Defaulting to True (vLLM v1 default behavior)"
@@ -223,6 +256,9 @@ def parse_args() -> Config:
         raise ValueError(
             "Use only one of --multimodal-processor, --multimodal-encode-worker, --multimodal-worker, --multimodal-decode-worker, or --multimodal-encode-prefill-worker"
         )
+
+    if mm_flags == 1 and not args.enable_multimodal:
+        raise ValueError("Use --enable-multimodal to enable multimodal processing")
 
     # Set component and endpoint based on worker type
     if args.multimodal_processor:
@@ -257,11 +293,13 @@ def parse_args() -> Config:
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template
+    config.dyn_endpoint_types = args.dyn_endpoint_types
     config.multimodal_processor = args.multimodal_processor
     config.multimodal_encode_worker = args.multimodal_encode_worker
     config.multimodal_worker = args.multimodal_worker
     config.multimodal_decode_worker = args.multimodal_decode_worker
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
+    config.enable_multimodal = args.enable_multimodal
     config.mm_prompt_template = args.mm_prompt_template
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
@@ -444,7 +482,7 @@ def overwrite_args(config):
         # skip tokenizer initialisation.  Setting this to **False** avoids
         # a NoneType error when the processor accesses the tokenizer.
         "skip_tokenizer_init": False,
-        "disable_log_requests": True,
+        "enable_log_requests": False,
         "disable_log_stats": False,
     }
 

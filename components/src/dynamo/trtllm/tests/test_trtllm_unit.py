@@ -21,8 +21,9 @@ JINJA_TEMPLATE_PATH = str(
 
 pytestmark = [
     pytest.mark.unit,
-    pytest.mark.trtllm_marker,
+    pytest.mark.trtllm,
     pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
 ]
 
 

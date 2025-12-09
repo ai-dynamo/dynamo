@@ -278,11 +278,6 @@ impl Worker for KvConnectorWorker {
             self.maybe_finished_onboarding.insert(request_id);
         }
 
-        // delay offloading operations until the end of the forward pass
-        debug_assert!(
-            self.offloading_operations.is_empty(),
-            "offloading operations should be empty"
-        );
         self.offloading_operations = offloading_operations;
 
         Ok(())
@@ -304,15 +299,34 @@ impl Worker for KvConnectorWorker {
     /// Trigger block-wise completion signals afer last layer.
     fn save_kv_layer(&mut self, _layer_name: String) -> anyhow::Result<()> {
         self.layers_complete += 1;
+        tracing::debug!(
+            iteration = self.iteration,
+            layers_complete = self.layers_complete,
+            total_layers = self.kv_cache_layers.len(),
+            pending_offload_ops = self.offloading_operations.len(),
+            "save_kv_layer called"
+        );
         if self.layers_complete == self.kv_cache_layers.len() {
             let offloading_operations = std::mem::take(&mut self.offloading_operations);
+
+            tracing::info!(
+                iteration = self.iteration,
+                num_operations = offloading_operations.len(),
+                "All layers complete, enqueuing {} offload operations",
+                offloading_operations.len()
+            );
 
             // block on the the completion of the last layer
             // todo(ryan): capture the context, pass this to the scheduler to do the await on another thread
             // or put the event on a stream and use stream waits to keep it all on device.
             event_sync_blocking(self.layer_events[self.layers_complete - 1]);
-            for operation in offloading_operations {
-                self.connector.enqueue_request(operation);
+            for operation in &offloading_operations {
+                tracing::debug!(
+                    request_id = %operation.request_id,
+                    operation_id = %operation.uuid,
+                    "Enqueuing offload operation to scheduler"
+                );
+                self.connector.enqueue_request(operation.clone());
             }
         }
         Ok(())

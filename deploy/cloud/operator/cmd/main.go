@@ -578,6 +578,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err = (&controller.DynamoGraphDeploymentScalingAdapterReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("dgdscalingadapter"),
+		Config:   ctrlConfig,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DGDScalingAdapter")
+		os.Exit(1)
+	}
+
 	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
 		Client:      mgr.GetClient(),
 		Recorder:    mgr.GetEventRecorderFor("dynamographdeploymentrequest"),

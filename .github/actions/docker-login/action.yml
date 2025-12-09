@@ -1,0 +1,46 @@
+name: 'Docker Login'
+description: 'Login to multiple container registries (ECR, NGC, ACR)'
+
+inputs:
+  ngc_ci_access_token:
+    description: 'NGC CI Access Token'
+    required: false
+  aws_default_region:
+    description: 'AWS Default Region'
+    required: false
+  aws_account_id:
+    description: 'AWS Account ID'
+    required: false
+  azure_acr_hostname:
+    description: 'Azure ACR hostname'
+    required: false
+  azure_acr_user:
+    description: 'Azure ACR user'
+    required: false
+  azure_acr_password:
+    description: 'Azure ACR password'
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: ECR Login
+      shell: bash
+      if: ${{ inputs.aws_default_region != '' && inputs.aws_account_id != '' }}
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        set -euo pipefail
+        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
+    - name: NGC Login
+      if: ${{ inputs.ngc_ci_access_token != '' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "${{ inputs.ngc_ci_access_token }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+    - name: ACR Login
+      shell: bash
+      if: ${{ inputs.azure_acr_hostname != '' && inputs.azure_acr_user != '' && inputs.azure_acr_password != '' }}
+      run: |
+        set -euo pipefail
+        echo "${{ inputs.azure_acr_password }}" | docker login "${{ inputs.azure_acr_hostname }}" --username "${{ inputs.azure_acr_user }}" --password-stdin

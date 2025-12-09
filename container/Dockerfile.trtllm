@@ -1,12 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Throughout this file, we make certain paths group-writable because this allows
+# both the dynamo user (UID 1000) and Dev Container users (UID != 1000) to work
+# properly without needing slow chown -R operations (which can add 2-10 extra
+# minutes).
+#
+# DEVELOPMENT PATHS THAT MUST BE GROUP-WRITABLE (for virtualenv containers):
+#   /workspace            - Users create/modify project files
+#   /home/dynamo          - Users create config/cache files
+#   /opt/dynamo/venv      - TensorRT-LLM uses venv, so entire venv must be writable for pip install
+#
+# HOW TO ACHIEVE GROUP-WRITABLE PERMISSIONS:
+# 1. SHELL + /etc/profile.d - Login shell sources umask 002 globally for all RUN commands (775/664)
+# 2. COPY --chmod=775       - Sets permissions on copied children (not destination)
+# 3. chmod g+w (no -R)      - Fixes destination dirs only (milliseconds vs minutes)
 
-ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-ARG BASE_IMAGE_TAG="25.10-cuda13.0-devel-ubuntu24.04"
+# This section contains build arguments that are common and shared with
+# the plain Dockerfile, so they should NOT have a default. The source of truth is from build.sh.
+ARG BASE_IMAGE
+ARG BASE_IMAGE_TAG
+
+ARG PYTHON_VERSION
+ARG ENABLE_KVBM
 
 ARG PYTORCH_BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG PYTORCH_BASE_IMAGE_TAG="25.10-py3"
-ARG ENABLE_KVBM=false
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 ARG RUNTIME_IMAGE_TAG="25.10-cuda13.0-runtime-ubuntu24.04"
 
@@ -30,8 +49,6 @@ ARG GITHUB_TRTLLM_COMMIT
 # without adding if statements everywhere, so just define both as ARGs for now.
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
-# Python configuration
-ARG PYTHON_VERSION=3.12
 
 ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
 FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
@@ -55,15 +72,10 @@ FROM ${PYTORCH_BASE_IMAGE}:${PYTORCH_BASE_IMAGE_TAG} AS pytorch_base
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 
 ARG ARCH_ALT
-ARG PYTHON_VERSION
-ARG ENABLE_KVBM
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
 # Install minimal dependencies needed for TensorRT-LLM installation
+ARG PYTHON_VERSION
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         python${PYTHON_VERSION}-dev \
@@ -75,12 +87,12 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-
 # Create virtual environment
 RUN mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
+
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
 
 # Copy pytorch installation from NGC PyTorch
 ARG TORCH_VER=2.9.0a0+145a3a7bda.nv25.10
@@ -137,14 +149,14 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         # Install from local wheel directory in build context
         WHEEL_FILE="$(find /trtllm_wheel -name "*.whl" | head -n 1)"; \
         if [ -n "$WHEEL_FILE" ]; then \
-            uv pip install --no-cache "$WHEEL_FILE"; \
+            uv pip install --no-cache "$WHEEL_FILE" triton==3.5.0; \
         else \
             echo "No wheel file found in /trtllm_wheel directory."; \
             exit 1; \
         fi; \
     else \
         # Download and run install_tensorrt.sh from TensorRT-LLM GitHub before installing the wheel
-        TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -n 's/.*==\([0-9a-zA-Z\.\-]*\).*/\1/p') && \
+        TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/.*==([0-9a-zA-Z.+-]+).*/\1/') && \
         (curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/v${TRTLLM_VERSION}/docker/common/install_tensorrt.sh" || \
          curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/${GITHUB_TRTLLM_COMMIT}/docker/common/install_tensorrt.sh") && \
         # Modify the script to use virtual environment pip instead of system pip3
@@ -153,8 +165,14 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
         # TRTLLM 1.2.0rc2 has issues installing from pypi with uv, installing from direct wheel link works best
         # explicitly installing triton 3.5.0 as trtllm only lists triton as dependency on x64_64 for some reason
-        export TENSORRTLLM_PIP_WHEEL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-1.2.0rc2-cp312-cp312-linux_${ARCH_ALT}.whl"; \
-        uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" triton==3.5.0; \
+        if echo "${TENSORRTLLM_PIP_WHEEL}" | grep -q '^tensorrt-llm=='; then \
+            TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/tensorrt-llm==([0-9a-zA-Z.+-]+).*/\1/'); \
+            PYTHON_TAG="cp$(echo ${PYTHON_VERSION} | tr -d '.')"; \
+            DIRECT_URL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-${TRTLLM_VERSION}-${PYTHON_TAG}-${PYTHON_TAG}-linux_${ARCH_ALT}.whl"; \
+            uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${DIRECT_URL}" triton==3.5.0; \
+        else \
+            uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" triton==3.5.0; \
+        fi; \
     fi
 
 ##################################################
@@ -179,25 +197,71 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
 ARG ARCH_ALT
-ARG ENABLE_KVBM
-ARG PYTHON_VERSION
-
 WORKDIR /workspace
-
 ENV ENV=${ENV:-/etc/shinit_v2}
 ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # workaround for pickle lib issue
 ENV OMPI_MCA_coll_ucc_enable=0
-# Use UCX KVCACHE by default
-ENV TRTLLM_USE_UCX_KVCACHE=1
 
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+# Copy CUDA development tools (nvcc, headers, dependencies, etc.) from PyTorch base image
+COPY --from=pytorch_base /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
+COPY --from=pytorch_base /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
+COPY --from=pytorch_base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
+COPY --from=pytorch_base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
+COPY --from=pytorch_base /usr/local/cuda/include/ /usr/local/cuda/include/
+COPY --from=pytorch_base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
+COPY --from=pytorch_base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
+COPY --from=pytorch_base /usr/local/cuda/lib64/libcupti* /usr/local/cuda/lib64/
+COPY --from=pytorch_base /usr/local/lib/lib* /usr/local/lib/
+COPY --from=pytorch_base /usr/local/cuda/bin/cuobjdump /usr/local/cuda/bin/cuobjdump
+COPY --from=pytorch_base /usr/local/cuda/bin/nvdisasm /usr/local/cuda/bin/nvdisasm
+
+ENV CUDA_HOME=/usr/local/cuda \
+    TRITON_CUPTI_PATH=/usr/local/cuda/include \
+    TRITON_CUDACRT_PATH=/usr/local/cuda/include \
+    TRITON_CUOBJDUMP_PATH=/usr/local/cuda/bin/cuobjdump \
+    TRITON_NVDISASM_PATH=/usr/local/cuda/bin/nvdisasm \
+    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
+    TRITON_CUDART_PATH=/usr/local/cuda/include
+
+# Copy OpenMPI from PyTorch base image
+COPY --from=pytorch_base /opt/hpcx/ompi /opt/hpcx/ompi
+# Copy NUMA library from PyTorch base image
+COPY --from=pytorch_base /usr/lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
+
+# Copy UCX libraries, libucc.so is needed by pytorch. May not need to copy whole hpcx dir but only /opt/hpcx/ucc/
+COPY --from=pytorch_base /opt/hpcx /opt/hpcx
+# This is needed to make libucc.so visible so pytorch can use it.
+ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
+# Might not need to copy cusparseLt in the future once it's included in DLFW cuda container
+# networkx, packaging, setuptools get overridden by trtllm installation, so not copying them
+# pytorch-triton is copied after trtllm installation.
+COPY --from=pytorch_base /usr/local/cuda/lib64/libcusparseLt* /usr/local/cuda/lib64/
+
+# Copy nats and etcd from dynamo_base image
+COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
+ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
+
+# Copy uv to system /bin
+COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
+
+# Create dynamo user with group 0 for OpenShift compatibility
+RUN userdel -r ubuntu > /dev/null 2>&1 || true \
+    && useradd -m -s /bin/bash -g 0 dynamo \
+    && [ `id -u dynamo` -eq 1000 ] \
+    && mkdir -p /home/dynamo/.cache /opt/dynamo \
+    # Non-recursive chown - only the directories themselves, not contents
+    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
+    # No chmod needed: umask 002 handles new files, COPY --chmod handles copied content
+    # Set umask globally for all subsequent RUN commands (must be done as root before USER dynamo)
+    # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
+    && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
 # Install Python, build-essential and python3-dev as apt dependencies
+ARG PYTHON_VERSION
 RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         ARCH_FOR_GPG=${ARCH_ALT}; \
     else \
@@ -243,74 +307,32 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-ENV LD_LIBRARY_PATH="/usr/lib/${ARCH_ALT}-linux-gnu/nvshmem/13/:${LD_LIBRARY_PATH}"
+# Switch to dynamo user
+USER dynamo
+ENV HOME=/home/dynamo
+# This picks up the umask 002 from the /etc/profile.d/00-umask.sh file for subsequent RUN commands
+SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 
-# Copy CUDA development tools (nvcc, headers, dependencies, etc.) from PyTorch base image
-COPY --from=pytorch_base /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
-COPY --from=pytorch_base /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
-COPY --from=pytorch_base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
-COPY --from=pytorch_base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
-COPY --from=pytorch_base /usr/local/cuda/include/ /usr/local/cuda/include/
-COPY --from=pytorch_base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
-COPY --from=pytorch_base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
-COPY --from=pytorch_base /usr/local/cuda/lib64/libcupti* /usr/local/cuda/lib64/
-COPY --from=pytorch_base /usr/local/lib/lib* /usr/local/lib/
-COPY --from=pytorch_base /usr/local/cuda/bin/cuobjdump /usr/local/cuda/bin/cuobjdump
-COPY --from=pytorch_base /usr/local/cuda/bin/nvdisasm /usr/local/cuda/bin/nvdisasm
-
-ENV CUDA_HOME=/usr/local/cuda \
-    TRITON_CUPTI_PATH=/usr/local/cuda/include \
-    TRITON_CUDACRT_PATH=/usr/local/cuda/include \
-    TRITON_CUOBJDUMP_PATH=/usr/local/cuda/bin/cuobjdump \
-    TRITON_NVDISASM_PATH=/usr/local/cuda/bin/nvdisasm \
-    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
-    TRITON_CUDART_PATH=/usr/local/cuda/include
-
-# Copy nats and etcd from dynamo_base image
-COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
-COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
-ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
-
-# Copy OpenMPI from PyTorch base image
-COPY --from=pytorch_base /opt/hpcx/ompi /opt/hpcx/ompi
-# Copy NUMA library from PyTorch base image
-COPY --from=pytorch_base /usr/lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
-
-# Copy UCX libraries, libucc.so is needed by pytorch. May not need to copy whole hpcx dir but only /opt/hpcx/ucc/
-COPY --from=pytorch_base /opt/hpcx /opt/hpcx
-# This is needed to make libucc.so visible so pytorch can use it.
-ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
-# Might not need to copy cusparseLt in the future once it's included in DLFW cuda container
-COPY --from=pytorch_base /usr/local/cuda/lib64/libcusparseLt* /usr/local/cuda/lib64/
-
-# Copy uv to system /bin
-COPY --from=framework /bin/uv /bin/uvx /bin/
+ENV DYNAMO_HOME=/workspace
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
 # Copy libgomp.so from framework image
 COPY --from=framework /usr/local/tensorrt /usr/local/tensorrt
 COPY --from=framework /usr/lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH_ALT}-linux-gnu/
 
-# Create dynamo user with group 0 for OpenShift compatibility
-RUN userdel -r ubuntu > /dev/null 2>&1 || true \
-    && useradd -m -s /bin/bash -g 0 dynamo \
-    && [ `id -u dynamo` -eq 1000 ] \
-    && mkdir -p /home/dynamo/.cache /opt/dynamo \
-    && chown -R dynamo: /workspace /home/dynamo /opt/dynamo \
-    && chmod -R g+w /workspace /home/dynamo/.cache /opt/dynamo
-
-
-# Switch to dynamo user
-USER dynamo
-ENV HOME=/home/dynamo
-ENV DYNAMO_HOME=/workspace
+# Copy pre-built venv with PyTorch and TensorRT-LLM from framework stage
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
+COPY --chmod=775 --chown=dynamo:0 --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 # Copy UCX from framework image as plugin for NIXL
 # Copy NIXL source from framework image
-# Copy dynamo wheels for gitlab artifacts
-COPY --chown=dynamo: --from=dynamo_base /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo: --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+# Copy dynamo wheels for gitlab artifacts (read-only, no group-write needed)
+COPY --chown=dynamo:0 --from=dynamo_base /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo:0 --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
 
+ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib
 ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
 ENV LD_LIBRARY_PATH=\
 $NIXL_LIB_DIR:\
@@ -318,30 +340,37 @@ $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 /opt/hpcx/ompi/lib:\
+/usr/lib/${ARCH_ALT}-linux-gnu/nvshmem/13/:\
+$TENSORRT_LIB_DIR:\
+/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib:\
+/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt/lib:\
 $LD_LIBRARY_PATH
 ENV OPAL_PREFIX=/opt/hpcx/ompi
 
-# Copy pre-built venv with PyTorch and TensorRT-LLM from framework stage
-COPY --chown=dynamo: --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
-
-ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib
-ENV LD_LIBRARY_PATH=/opt/dynamo/venv/lib/python3.12/site-packages/torch/lib:/opt/dynamo/venv/lib/python3.12/site-packages/torch_tensorrt/lib:${TENSORRT_LIB_DIR}:${LD_LIBRARY_PATH}
+COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
+COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
-COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
-COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
+ARG ENABLE_KVBM
+COPY --chmod=775 --chown=dynamo:0 --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN uv pip install \
       --no-cache \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-      /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-    && if [ "${ENABLE_KVBM}" = "true" ]; then \
-        uv pip install --no-cache /opt/dynamo/wheelhouse/kvbm*.whl; \
-       fi \
-    && cd /opt/dynamo/benchmarks \
-    && UV_GIT_LFS=1 uv pip install --no-cache . \
-    && cd - \
-    && rm -rf /opt/dynamo/benchmarks
+      /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "${ENABLE_KVBM}" = "true" ]; then \
+        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
+        if [ -z "$KVBM_WHEEL" ]; then \
+            echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
+            exit 1; \
+        fi; \
+        uv pip install --no-cache "$KVBM_WHEEL"; \
+    fi && \
+    cd /workspace/benchmarks && \
+    UV_GIT_LFS=1 uv pip install --no-cache . && \
+    # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
+    chmod -R g+w /workspace/benchmarks
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
@@ -354,16 +383,14 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.test.txt \
         cupy-cuda13x
 
-# Copy tests, benchmarks, deploy and components for CI with correct ownership
-COPY --chown=dynamo: tests /workspace/tests
-COPY --chown=dynamo: examples /workspace/examples
-COPY --chown=dynamo: benchmarks /workspace/benchmarks
-COPY --chown=dynamo: deploy /workspace/deploy
-COPY --chown=dynamo: components/ /workspace/components/
-COPY --chown=dynamo: recipes/ /workspace/recipes/
-
-# Copy attribution files with correct ownership
-COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
+# Copy tests, deploy and components for CI with correct ownership
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
+COPY --chmod=775 --chown=dynamo:0 pyproject.toml /workspace/
+COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
+COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
+COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
+COPY --chmod=775 --chown=dynamo:0 components/ /workspace/components/
+COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
 
 # Setup launch banner in common directory accessible to all users
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
@@ -371,11 +398,17 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
 
 # Setup environment for all users
 USER root
-RUN chmod 755 /opt/dynamo/.launch_screen && \
+# Fix directory permissions: COPY --chmod only affects contents, not the directory itself
+RUN chmod g+w ${VIRTUAL_ENV} /workspace /workspace/* /opt/dynamo /opt/dynamo/* && \
+    chown dynamo:0 ${VIRTUAL_ENV} /workspace /opt/dynamo/ && \
+    chmod 755 /opt/dynamo/.launch_screen && \
     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
 USER dynamo
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 
@@ -429,6 +462,10 @@ RUN apt-get update -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# Set umask for group-writable files in dev stage (runs as root)
+RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
+SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
+
 # Set workspace directory variable
 ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     DYNAMO_HOME=${WORKSPACE_DIR} \
@@ -438,8 +475,11 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/usr/local/cargo/bin:$PATH
 
-COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
+# Copy rust installation from dynamo_base to avoid duplication efforts
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --from=dynamo_base --chmod=775 /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base --chmod=775 /usr/local/cargo /usr/local/cargo
+RUN chmod g+w /usr/local/rustup /usr/local/cargo
 
 # Install maturin, for maturin develop
 RUN uv pip install --no-cache maturin[patchelf]
