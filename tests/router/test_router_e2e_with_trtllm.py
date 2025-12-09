@@ -7,7 +7,13 @@ from typing import Any, Dict, Optional
 
 import pytest
 
-from tests.router.common import _test_router_basic, generate_random_suffix  # utilities
+from tests.router.common import (  # utilities
+    _test_router_basic,
+    _test_router_decisions,
+    _test_router_indexers_sync,
+    generate_random_suffix,
+    get_runtime,
+)
 from tests.utils.managed_process import ManagedProcess
 
 logger = logging.getLogger(__name__)
