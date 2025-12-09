@@ -14,6 +14,7 @@ use dynamo_parsers::tool_calling::{
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 use crate::utils::{MarkerMatcher, MatchResult};
 
@@ -874,6 +875,23 @@ impl JailedStream {
         }
     }
 
+    /// Helper to create a ChatCompletionMessageToolCallChunk
+    fn create_tool_call_chunk(
+        index: u32,
+        name: String,
+        arguments: String,
+    ) -> ChatCompletionMessageToolCallChunk {
+        ChatCompletionMessageToolCallChunk {
+            index,
+            id: Some(format!("call-{}", Uuid::new_v4())),
+            r#type: Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
+            function: Some(FunctionCallStream {
+                name: Some(name),
+                arguments: Some(arguments),
+            }),
+        }
+    }
+
     /// Parse tool_choice JSON output into tool call chunks
     fn parse_tool_choice_json(
         &self,
@@ -886,15 +904,11 @@ impl JailedStream {
             ToolChoiceFormat::SingleObject { tool_name } => {
                 // For named tool choice: JSON is the parameters object
                 if parsed.is_object() {
-                    Ok(vec![ChatCompletionMessageToolCallChunk {
-                        index: 0,
-                        id: Some("call-1".to_string()),
-                        r#type: Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
-                        function: Some(FunctionCallStream {
-                            name: Some(tool_name.clone()),
-                            arguments: Some(json_content.to_string()),
-                        }),
-                    }])
+                    Ok(vec![Self::create_tool_call_chunk(
+                        0,
+                        tool_name.clone(),
+                        json_content.to_string(),
+                    )])
                 } else {
                     Ok(vec![])
                 }
@@ -909,17 +923,7 @@ impl JailedStream {
                             let name = entry.get("name")?.as_str()?.to_string();
                             let parameters = entry.get("parameters")?;
                             let args = serde_json::to_string(parameters).ok()?;
-                            Some(ChatCompletionMessageToolCallChunk {
-                                index: idx as u32,
-                                id: Some(format!("call-{}", idx + 1)),
-                                r#type: Some(
-                                    dynamo_async_openai::types::ChatCompletionToolType::Function,
-                                ),
-                                function: Some(FunctionCallStream {
-                                    name: Some(name),
-                                    arguments: Some(args),
-                                }),
-                            })
+                            Some(Self::create_tool_call_chunk(idx as u32, name, args))
                         })
                         .collect();
                     Ok(chunks)
