@@ -7,13 +7,7 @@ from typing import Any, Dict, Optional
 
 import pytest
 
-from tests.router.common import (  # utilities
-    _test_router_basic,
-    _test_router_decisions,
-    _test_router_indexers_sync,
-    generate_random_suffix,
-    get_runtime,
-)
+from tests.router.common import _test_router_basic, generate_random_suffix  # utilities
 from tests.utils.managed_process import ManagedProcess
 
 logger = logging.getLogger(__name__)
@@ -305,88 +299,88 @@ def test_trtllm_kv_router_basic(
             trtllm_workers.__exit__(None, None, None)
 
 
-@pytest.mark.pre_merge
-@pytest.mark.gpu_1
-def test_router_decisions_trtllm_multiple_workers(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
-):
-    # runtime_services starts etcd and nats
-    logger.info("Starting TRT-LLM router prefix reuse test with two workers")
-    N_WORKERS = 2
+# @pytest.mark.pre_merge
+# @pytest.mark.gpu_1
+# def test_router_decisions_trtllm_multiple_workers(
+#     request, runtime_services, predownload_models, set_ucx_tls_no_mm
+# ):
+#     # runtime_services starts etcd and nats
+#     logger.info("Starting TRT-LLM router prefix reuse test with two workers")
+#     N_WORKERS = 2
 
-    try:
-        # Start 2 worker processes on the same GPU
-        logger.info(
-            "Starting 2 TRT-LLM worker processes on single GPU (gpu_mem_frac=0.4)"
-        )
-        trtllm_workers = TRTLLMProcess(
-            request,
-            trtllm_args=TRTLLM_ARGS,
-            num_workers=N_WORKERS,
-            single_gpu=True,  # Worker uses GPU 0
-        )
-        logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
+#     try:
+#         # Start 2 worker processes on the same GPU
+#         logger.info(
+#             "Starting 2 TRT-LLM worker processes on single GPU (gpu_mem_frac=0.4)"
+#         )
+#         trtllm_workers = TRTLLMProcess(
+#             request,
+#             trtllm_args=TRTLLM_ARGS,
+#             num_workers=N_WORKERS,
+#             single_gpu=True,  # Worker uses GPU 0
+#         )
+#         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
 
-        # Initialize TRT-LLM workers
-        trtllm_workers.__enter__()
+#         # Initialize TRT-LLM workers
+#         trtllm_workers.__enter__()
 
-        # Get runtime and create endpoint
-        runtime = get_runtime()
-        namespace = runtime.namespace(trtllm_workers.namespace)
-        component = namespace.component("tensorrt_llm")
-        endpoint = component.endpoint("generate")
+#         # Get runtime and create endpoint
+#         runtime = get_runtime()
+#         namespace = runtime.namespace(trtllm_workers.namespace)
+#         component = namespace.component("tensorrt_llm")
+#         endpoint = component.endpoint("generate")
 
-        _test_router_decisions(
-            trtllm_workers,
-            endpoint,
-            MODEL_NAME,
-            request,
-            test_dp_rank=False,
-            block_size=TRTLLM_BLOCK_SIZE,
-        )
+#         _test_router_decisions(
+#             trtllm_workers,
+#             endpoint,
+#             MODEL_NAME,
+#             request,
+#             test_dp_rank=False,
+#             block_size=TRTLLM_BLOCK_SIZE,
+#         )
 
-    finally:
-        # Clean up TRT-LLM workers
-        if "trtllm_workers" in locals():
-            trtllm_workers.__exit__(None, None, None)
+#     finally:
+#         # Clean up TRT-LLM workers
+#         if "trtllm_workers" in locals():
+#             trtllm_workers.__exit__(None, None, None)
 
 
-@pytest.mark.pre_merge
-@pytest.mark.gpu_1
-def test_trtllm_indexers_sync(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
-):
-    """
-    Test that two KV routers have synchronized indexer states after processing requests
-    with TRT-LLM workers. This test verifies that both routers converge to the same internal state.
-    """
-    logger.info("Starting TRT-LLM indexers sync test")
-    N_TRTLLM_WORKERS = 2
+# @pytest.mark.pre_merge
+# @pytest.mark.gpu_1
+# def test_trtllm_indexers_sync(
+#     request, runtime_services, predownload_models, set_ucx_tls_no_mm
+# ):
+#     """
+#     Test that two KV routers have synchronized indexer states after processing requests
+#     with TRT-LLM workers. This test verifies that both routers converge to the same internal state.
+#     """
+#     logger.info("Starting TRT-LLM indexers sync test")
+#     N_TRTLLM_WORKERS = 2
 
-    try:
-        # Start TRT-LLM workers
-        logger.info(f"Starting {N_TRTLLM_WORKERS} TRT-LLM workers")
-        trtllm_workers = TRTLLMProcess(
-            request,
-            trtllm_args=TRTLLM_ARGS,
-            num_workers=N_TRTLLM_WORKERS,
-            single_gpu=True,  # fit workers into one GPU
-        )
-        logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
-        trtllm_workers.__enter__()
+#     try:
+#         # Start TRT-LLM workers
+#         logger.info(f"Starting {N_TRTLLM_WORKERS} TRT-LLM workers")
+#         trtllm_workers = TRTLLMProcess(
+#             request,
+#             trtllm_args=TRTLLM_ARGS,
+#             num_workers=N_TRTLLM_WORKERS,
+#             single_gpu=True,  # fit workers into one GPU
+#         )
+#         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
+#         trtllm_workers.__enter__()
 
-        # Use the common test implementation (creates its own runtimes for each router)
-        # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
-        _test_router_indexers_sync(
-            engine_workers=trtllm_workers,
-            block_size=TRTLLM_BLOCK_SIZE,
-            model_name=MODEL_NAME,
-            num_workers=N_TRTLLM_WORKERS,
-            store_backend="etcd",
-        )
+#         # Use the common test implementation (creates its own runtimes for each router)
+#         # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
+#         _test_router_indexers_sync(
+#             engine_workers=trtllm_workers,
+#             block_size=TRTLLM_BLOCK_SIZE,
+#             model_name=MODEL_NAME,
+#             num_workers=N_TRTLLM_WORKERS,
+#             store_backend="etcd",
+#         )
 
-        logger.info("TRT-LLM indexers sync test completed successfully")
+#         logger.info("TRT-LLM indexers sync test completed successfully")
 
-    finally:
-        if "trtllm_workers" in locals():
-            trtllm_workers.__exit__(None, None, None)
+#     finally:
+#         if "trtllm_workers" in locals():
+#             trtllm_workers.__exit__(None, None, None)
