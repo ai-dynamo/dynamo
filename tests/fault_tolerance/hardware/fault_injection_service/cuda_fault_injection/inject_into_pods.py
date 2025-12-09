@@ -201,6 +201,18 @@ def _patch_service_for_injection(
             {"name": "cuda-fault-lib", "emptyDir": {}}
         )
 
+        # Add hostPath volume for persistent fault marker (survives pod restarts on same node)
+        # This simulates persistent hardware failure!
+        service["extraPodSpec"]["volumes"].append(
+            {
+                "name": "node-fault-marker",
+                "hostPath": {
+                    "path": "/var/lib/cuda-fault-test",
+                    "type": "DirectoryOrCreate",
+                },
+            }
+        )
+
         # Add init container to decode base64
         if "initContainers" not in service["extraPodSpec"]:
             service["extraPodSpec"]["initContainers"] = []
@@ -247,7 +259,7 @@ def _patch_service_for_injection(
             if vm.get("name") != "cuda-fault-lib"
         ]
 
-        # Add mount
+        # Add mount for compiled library
         service["extraPodSpec"]["mainContainer"]["volumeMounts"].append(
             {
                 "name": "cuda-fault-lib",
@@ -256,8 +268,18 @@ def _patch_service_for_injection(
             }
         )
 
+        # Add mount for persistent fault marker (hostPath)
+        service["extraPodSpec"]["mainContainer"]["volumeMounts"].append(
+            {
+                "name": "node-fault-marker",
+                "mountPath": "/host-fault",
+                "readOnly": False,  # Need write access
+            }
+        )
+
         print("      ✓ Added init container to compile library")
         print("      ✓ Added ConfigMap volume mount")
+        print("      ✓ Added hostPath volume for persistent fault marker")
 
     # Add node affinity to pin pods to target node (simulates real XID 79 behavior)
     if target_node and enable:
@@ -287,14 +309,15 @@ def _patch_service_for_injection(
             service["extraPodSpec"]["volumes"] = [
                 v
                 for v in service["extraPodSpec"]["volumes"]
-                if v.get("name") not in ["cuda-fault-lib", "cuda-fault-lib-source"]
+                if v.get("name")
+                not in ["cuda-fault-lib", "cuda-fault-lib-source", "node-fault-marker"]
             ]
 
         if "volumeMounts" in service["extraPodSpec"].get("mainContainer", {}):
             service["extraPodSpec"]["mainContainer"]["volumeMounts"] = [
                 vm
                 for vm in service["extraPodSpec"]["mainContainer"]["volumeMounts"]
-                if vm.get("name") != "cuda-fault-lib"
+                if vm.get("name") not in ["cuda-fault-lib", "node-fault-marker"]
             ]
 
         # Remove init container
@@ -323,6 +346,7 @@ def patch_deployment_env(
     use_configmap=True,
     target_node=None,
     xid_type=79,
+    passthrough_mode=False,
 ):
     """Patch deployment to add/remove LD_PRELOAD environment variable.
 
@@ -334,6 +358,8 @@ def patch_deployment_env(
         target_node: If provided, adds node affinity to pin pods to this node
                     (simulates real XID where pods crash on the faulty node)
         xid_type: XID error type to simulate (79, 48, 94, 95, 43, 74). Default: 79
+        passthrough_mode: If True, set CUDA_FAULT_INJECTION_ENABLED=0 (library loaded but disabled)
+                         Allows baseline testing before enabling faults via toggle
     """
     custom_api = client.CustomObjectsApi()
     apps_api = client.AppsV1Api()
@@ -385,9 +411,14 @@ def patch_deployment_env(
             # Prepare environment variables
             new_envs = []
             if enable:
+                # Set CUDA_FAULT_INJECTION_ENABLED based on passthrough_mode
+                fault_enabled_value = "0" if passthrough_mode else "1"
                 new_envs = [
                     {"name": "LD_PRELOAD", "value": lib_path},
-                    {"name": "CUDA_FAULT_INJECTION_ENABLED", "value": "1"},
+                    {
+                        "name": "CUDA_FAULT_INJECTION_ENABLED",
+                        "value": fault_enabled_value,
+                    },
                     {"name": "CUDA_XID_TYPE", "value": str(xid_type)},
                 ]
 
@@ -399,6 +430,28 @@ def patch_deployment_env(
             services = spec.get("services", {}) if spec else {}
             available_services = list(services.keys())
             print(f"    → Available services: {available_services}")
+
+            # Set aggressive update strategy when enabling (allow all pods to update at once)
+            # This ensures all pods get CUDA faults, not just the first few
+            if enable:
+                if "updateStrategy" not in spec:
+                    spec["updateStrategy"] = {}
+                if "rollingUpdate" not in spec["updateStrategy"]:
+                    spec["updateStrategy"]["rollingUpdate"] = {}
+
+                # Allow all pods to be unavailable during update
+                spec["updateStrategy"]["rollingUpdate"]["maxUnavailable"] = "100%"
+                # Don't create surge pods
+                spec["updateStrategy"]["rollingUpdate"]["maxSurge"] = 0
+                print("    → Set update strategy: maxUnavailable=100%, maxSurge=0")
+                print("       (All pods will update simultaneously)")
+            else:
+                # Restore default update strategy when disabling
+                if "updateStrategy" in spec:
+                    spec["updateStrategy"] = {
+                        "rollingUpdate": {"maxUnavailable": "25%", "maxSurge": "25%"}
+                    }
+                    print("    → Restored default update strategy (maxUnavailable=25%)")
 
             for service_name in services_to_patch:
                 if service_name in services:
@@ -465,6 +518,38 @@ def patch_deployment_env(
             print(f"    Services patched: {', '.join(patched_services)}")
             if use_configmap and enable:
                 print(f"    Library mounted at: {lib_path}")
+
+            # Force restart all worker pods when enabling to apply changes immediately
+            if enable:
+                print(
+                    "    → Force-deleting all worker pods to apply changes immediately..."
+                )
+                core_api = client.CoreV1Api()
+                try:
+                    worker_pods = core_api.list_namespaced_pod(
+                        namespace=namespace,
+                        label_selector=f"nvidia.com/dynamo-graph-deployment-name={deployment_name},nvidia.com/dynamo-component-type=worker",
+                    )
+                    deleted_count = 0
+                    for pod in worker_pods.items:
+                        try:
+                            core_api.delete_namespaced_pod(
+                                name=pod.metadata.name,
+                                namespace=namespace,
+                                grace_period_seconds=0,
+                            )
+                            deleted_count += 1
+                        except Exception as e:
+                            print(
+                                f"      ⚠ Could not delete pod {pod.metadata.name}: {e}"
+                            )
+                    print(
+                        f"    ✓ Deleted {deleted_count} pod(s) - they will restart with CUDA library"
+                    )
+                except Exception as e:
+                    print(f"      ⚠ Could not list/delete pods: {e}")
+                    print("         Pods will eventually restart, but may take longer")
+
             return True
 
         except ApiException as e:
@@ -505,11 +590,15 @@ def patch_deployment_env(
 
         if enable:
             # Add new env vars
+            # Set CUDA_FAULT_INJECTION_ENABLED based on passthrough_mode
+            fault_enabled_value = "0" if passthrough_mode else "1"
             container.env.append(
                 client.V1EnvVar(name="LD_PRELOAD", value="/tmp/cuda_intercept.so")
             )
             container.env.append(
-                client.V1EnvVar(name="CUDA_FAULT_INJECTION_ENABLED", value="1")
+                client.V1EnvVar(
+                    name="CUDA_FAULT_INJECTION_ENABLED", value=fault_enabled_value
+                )
             )
             container.env.append(
                 client.V1EnvVar(name="CUDA_XID_TYPE", value=str(xid_type))

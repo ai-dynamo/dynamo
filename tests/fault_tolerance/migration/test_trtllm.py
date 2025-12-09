@@ -28,7 +28,7 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.pre_merge,  # can be moved to nightly once stable for a week
+    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
 ]
 
 
@@ -57,6 +57,11 @@ class DynamoWorkerProcess(ManagedProcess):
         # Set debug logging environment
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
+        # Disable canary health check - these tests expect full control over requests
+        # sent to the workers where canary health check intermittently sends dummy
+        # requests to workers interfering with the test process which may cause
+        # intermittent failures
+        env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = f"808{worker_id[-1]}"
 
@@ -104,8 +109,9 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
+@pytest.mark.timeout(290)  # 3x average
 def test_request_migration_trtllm_worker_failure(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with migration support using TRT-LLM.
@@ -149,7 +155,7 @@ def test_request_migration_trtllm_worker_failure(
 
 @pytest.mark.skip(reason="TRT-LLM graceful shutdown not yet implemented")
 def test_request_migration_trtllm_graceful_shutdown(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration support using TRT-LLM.
@@ -195,8 +201,9 @@ def test_request_migration_trtllm_graceful_shutdown(
                 verify_migration_occurred(frontend)
 
 
+@pytest.mark.timeout(185)  # 3x average
 def test_no_request_migration_trtllm_worker_failure(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with migration disabled using TRT-LLM.
@@ -256,7 +263,7 @@ def test_no_request_migration_trtllm_worker_failure(
 
 @pytest.mark.skip(reason="TRT-LLM graceful shutdown not yet implemented")
 def test_no_request_migration_trtllm_graceful_shutdown(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration disabled using TRT-LLM.

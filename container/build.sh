@@ -125,6 +125,10 @@ NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
 NO_CACHE=""
 
+# KVBM (KV Cache Block Manager) - default disabled, enabled automatically for VLLM/TRTLLM
+# or can be explicitly enabled via --enable-kvbm flag
+ENABLE_KVBM=false
+
 # sccache configuration for S3
 USE_SCCACHE=""
 SCCACHE_BUCKET=""
@@ -296,6 +300,9 @@ get_options() {
             ;;
         --enable-kvbm)
             ENABLE_KVBM=true
+            ;;
+        --enable-media-nixl)
+            ENABLE_MEDIA_NIXL=true
             ;;
         --make-efa)
             NIXL_UCX_REF=$NIXL_UCX_EFA_REF
@@ -469,6 +476,7 @@ show_help() {
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
+    echo "  [--enable-media-nixl Enable media processing with NIXL support (default: true for frameworks, false for none)]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
@@ -798,17 +806,29 @@ fi
 
 # ENABLE_KVBM: Used in base Dockerfile for block-manager feature.
 #              Declared but not currently used in Dockerfile.{vllm,trtllm}.
+# Force KVBM to be enabled for VLLM and TRTLLM frameworks
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
     echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
     ENABLE_KVBM=true
-else
-    ENABLE_KVBM=false
 fi
+# For other frameworks, ENABLE_KVBM defaults to false unless --enable-kvbm flag was provided
 
-if [  ! -z ${ENABLE_KVBM} ]; then
-    echo "Enabling the KVBM in the dynamo image"
+if [[ ${ENABLE_KVBM} == "true" ]]; then
+    echo "Enabling KVBM in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
 fi
+
+# ENABLE_MEDIA_NIXL: Enable media processing with NIXL support
+# Used in base Dockerfile for maturin build feature flag.
+# Can be explicitly overridden with --enable-media-nixl flag
+if [ -z "${ENABLE_MEDIA_NIXL}" ]; then
+    if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
+        ENABLE_MEDIA_NIXL=true
+    else
+        ENABLE_MEDIA_NIXL=false
+    fi
+fi
+BUILD_ARGS+=" --build-arg ENABLE_MEDIA_NIXL=${ENABLE_MEDIA_NIXL} "
 
 # NIXL_UCX_REF: Used in base Dockerfile only.
 #               Passed to framework Dockerfile.{vllm,sglang,...} where it's NOT used.
@@ -882,7 +902,7 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         # Use BuildKit for enhanced metadata
         if [ -z "$RUN_PREFIX" ]; then
             if docker buildx version &>/dev/null; then
-                docker buildx build --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                docker buildx build --builder default --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
                 BUILD_EXIT_CODE=${PIPESTATUS[0]}
             else
                 DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
@@ -908,7 +928,7 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         # Use BuildKit for enhanced metadata
         if [ -z "$RUN_PREFIX" ]; then
             if docker buildx version &>/dev/null; then
-                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
+                docker buildx build --builder default --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
                 BUILD_EXIT_CODE=${PIPESTATUS[0]}
             else
                 DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
@@ -930,7 +950,7 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         # Use BuildKit for enhanced metadata
         if [ -z "$RUN_PREFIX" ]; then
             if docker buildx version &>/dev/null; then
-                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+                docker buildx build --builder default --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
                 BUILD_EXIT_CODE=${PIPESTATUS[0]}
             else
                 DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"

@@ -40,12 +40,18 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
 
 
 # vLLM test configurations
+# NOTE: pytest.mark.gpu_1 tests take ~5.5 minutes total to run sequentially (with models pre-cached)
+# TODO: Parallelize these tests to reduce total execution time
 vllm_configs = {
     "aggregated": VLLMConfig(
         name="aggregated",
         directory=vllm_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(300),  # 3x measured time (43s) + download time (150s)
+        ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(),
@@ -57,7 +63,11 @@ vllm_configs = {
         name="aggregated_lmcache",
         directory=vllm_dir,
         script_name="agg_lmcache.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
+        ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(),
@@ -70,7 +80,10 @@ vllm_configs = {
         name="aggregated_lmcache_multiproc",
         directory=vllm_dir,
         script_name="agg_lmcache_multiproc.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
+        ],
         model="Qwen/Qwen3-0.6B",
         env={
             "PROMETHEUS_MULTIPROC_DIR": f"/tmp/prometheus_multiproc_test_{os.getpid()}_{random.randint(0, 10000)}"
@@ -86,7 +99,11 @@ vllm_configs = {
         name="agg-request-plane-tcp",
         directory=vllm_dir,
         script_name="agg_request_planes.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(300),  # 3x measured time (43s) + download time (150s)
+        ],
         model="Qwen/Qwen3-0.6B",
         script_args=["--tcp"],
         request_payloads=[
@@ -98,7 +115,11 @@ vllm_configs = {
         name="agg-request-plane-http",
         directory=vllm_dir,
         script_name="agg_request_planes.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(300),  # 3x measured time (43s) + download time (150s)
+        ],
         model="Qwen/Qwen3-0.6B",
         script_args=["--http"],
         request_payloads=[
@@ -416,7 +437,12 @@ vllm_configs = {
         name="completions_only",
         directory=vllm_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.timeout(
+                420
+            ),  # 3x estimated time (60s) + download time (240s) for 7B model
+        ],
         model="deepseek-ai/deepseek-llm-7b-base",
         script_args=[
             "--model",
@@ -426,6 +452,66 @@ vllm_configs = {
         ],
         request_payloads=[
             completion_payload_default(),
+        ],
+    ),
+    "guided_decoding_json": VLLMConfig(
+        name="guided_decoding_json",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload(
+                "Generate a person with name and age",
+                repeat_count=1,
+                expected_response=['"name"', '"age"'],
+                temperature=0.0,
+                max_tokens=100,
+                extra_body={
+                    "guided_json": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "age": {"type": "integer"},
+                        },
+                        "required": ["name", "age"],
+                    }
+                },
+            )
+        ],
+    ),
+    "guided_decoding_regex": VLLMConfig(
+        name="guided_decoding_regex",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload(
+                "Generate a color name (red, blue, or green)",
+                repeat_count=1,
+                expected_response=["red", "blue", "green"],
+                temperature=0.0,
+                max_tokens=20,
+                extra_body={"guided_regex": r"(red|blue|green)"},
+            )
+        ],
+    ),
+    "guided_decoding_choice": VLLMConfig(
+        name="guided_decoding_choice",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload(
+                "Generate a color name (red, blue, or green)",
+                repeat_count=1,
+                expected_response=["red", "blue", "green"],
+                temperature=0.0,
+                max_tokens=20,
+                extra_body={"guided_choice": ["red", "blue", "green"]},
+            )
         ],
     ),
 }

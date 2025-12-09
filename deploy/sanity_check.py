@@ -92,6 +92,7 @@ Options:
     --thorough-check  Enable thorough checking (file permissions, directory sizes, HuggingFace model details)
     --terse           Enable terse output mode (show only essential info and errors)
     --runtime-check   Skip compile-time dependency checks (Rust, Cargo, Maturin) for runtime containers
+                      and validate ai-dynamo packages (ai-dynamo-runtime and ai-dynamo)
 """
 
 import datetime
@@ -299,10 +300,12 @@ class SystemInfo(NodeInfo):
         thorough_check: bool = False,
         terse: bool = False,
         runtime_check: bool = False,
+        no_gpu_check: bool = False,
     ):
         self.thorough_check = thorough_check
         self.terse = terse
         self.runtime_check = runtime_check
+        self.no_gpu_check = no_gpu_check
         if hostname is None:
             hostname = platform.node()
 
@@ -325,9 +328,10 @@ class SystemInfo(NodeInfo):
         self.add_child(OSInfo())
         self.add_child(UserInfo())
 
-        # Add GPU info (always show, even if not found)
-        gpu_info = GPUInfo()
-        self.add_child(gpu_info)
+        # Add GPU info (always show, even if not found) unless --no-gpu-check
+        if not self.no_gpu_check:
+            gpu_info = GPUInfo()
+            self.add_child(gpu_info)
 
         # Add Framework info (vllm, sglang, tensorrt_llm)
         self.add_child(FrameworkInfo())
@@ -359,7 +363,11 @@ class SystemInfo(NodeInfo):
             self._add_error_only_components()
 
         # Add Dynamo workspace info (always show, even if not found)
-        self.add_child(DynamoInfo(thorough_check=self.thorough_check))
+        self.add_child(
+            DynamoInfo(
+                thorough_check=self.thorough_check, runtime_check=self.runtime_check
+            )
+        )
 
     def _get_ip_address(self) -> Optional[str]:
         """Get the primary IP address of the system."""
@@ -1094,13 +1102,23 @@ class FilePermissionsInfo(NodeInfo):
         dynamo_root = DynamoInfo.find_workspace()
 
         if not dynamo_root:
-            self.add_child(
-                NodeInfo(
-                    label="Dynamo workspace",
-                    desc="workspace not found",
-                    status=NodeStatus.ERROR,
+            # In runtime check mode, workspace not being found is expected
+            if self.runtime_check:
+                self.add_child(
+                    NodeInfo(
+                        label="Dynamo workspace",
+                        desc="not needed for runtime container",
+                        status=NodeStatus.INFO,
+                    )
                 )
-            )
+            else:
+                self.add_child(
+                    NodeInfo(
+                        label="Dynamo workspace",
+                        desc="workspace not found",
+                        status=NodeStatus.ERROR,
+                    )
+                )
             return
 
         if not DynamoInfo.is_dynamo_workspace(dynamo_root):
@@ -1840,24 +1858,77 @@ class FrameworkInfo(NodeInfo):
         ]
 
         frameworks_found = 0
+        gpu_dependent_found = 0
 
         for module_name, display_name in frameworks_to_check:
-            # Regular import for all frameworks
+            # First check if module exists without importing (for GPU-dependent modules)
+            import importlib.metadata
+            import importlib.util
+
+            spec = importlib.util.find_spec(module_name)
+            if not spec:
+                # Module not installed at all
+                continue
+
+            # Module exists, try to get version from metadata (doesn't require import)
+            version = None
             try:
-                module = __import__(module_name)
-                version = getattr(module, "__version__", "installed")
-                frameworks_found += 1
+                version = importlib.metadata.version(module_name)
+            except Exception:
+                # Try alternative package names
+                alt_names = {
+                    "tensorrt_llm": "tensorrt-llm",
+                    "sglang": "sglang",
+                    "vllm": "vllm",
+                }
+                if module_name in alt_names:
+                    try:
+                        version = importlib.metadata.version(alt_names[module_name])
+                    except Exception:
+                        pass
 
-                # Get module path
-                module_path = None
-                if hasattr(module, "__file__") and module.__file__:
-                    module_path = self._replace_home_with_var(module.__file__)
+            # Get module path from spec
+            module_path = None
+            if spec.origin:
+                module_path = self._replace_home_with_var(spec.origin)
 
-                # Get executable path
-                exec_path = None
-                exec_path_raw = shutil.which(module_name)
+            # Get executable path (special handling for each framework)
+            exec_path = None
+            exec_names = {
+                "vllm": "vllm",
+                "sglang": "sglang",
+                "tensorrt_llm": "trtllm-build",
+            }
+            if module_name in exec_names:
+                exec_path_raw = shutil.which(exec_names[module_name])
                 if exec_path_raw:
                     exec_path = self._replace_home_with_var(exec_path_raw)
+
+            # Now try to import to get runtime version if needed
+            gpu_required = False
+            try:
+                module = __import__(module_name)
+                # Get version from module if not already found
+                if not version:
+                    version = getattr(module, "__version__", "installed")
+            except ImportError as e:
+                # Check if it's a GPU-related error
+                error_msg = str(e).lower()
+                if "libcuda" in error_msg or "cuda" in error_msg:
+                    gpu_required = True
+                    gpu_dependent_found += 1
+            except Exception:
+                pass
+
+            # If we found the module (either importable or just installed)
+            if spec:
+                frameworks_found += 1
+                if not version:
+                    version = "installed"
+
+                # Add status indicator to version for GPU-dependent modules
+                if gpu_required:
+                    version = f"{version} (requires GPU)"
 
                 package_info = PythonPackageInfo(
                     package_name=display_name,
@@ -1868,9 +1939,6 @@ class FrameworkInfo(NodeInfo):
                     is_installed=True,
                 )
                 self.add_child(package_info)
-            except (ImportError, Exception):
-                # Framework not installed - don't add it
-                pass
 
         # If no frameworks found, set status to ERROR (X) and show what's missing
         if frameworks_found == 0:
@@ -1881,6 +1949,9 @@ class FrameworkInfo(NodeInfo):
                 missing_frameworks.append(f"no {module_name}")
             missing_text = ", ".join(missing_frameworks)
             self.desc = missing_text
+        elif gpu_dependent_found > 0:
+            # At least one framework needs GPU
+            self.status = NodeStatus.WARNING
 
 
 class PythonPackageInfo(NodeInfo):
@@ -1962,8 +2033,14 @@ class PythonPathInfo(NodeInfo):
 class DynamoRuntimeInfo(NodeInfo):
     """Dynamo runtime components information"""
 
-    def __init__(self, workspace_dir: str, thorough_check: bool = False):
+    def __init__(
+        self,
+        workspace_dir: Optional[str],
+        thorough_check: bool = False,
+        runtime_check: bool = False,
+    ):
         self.thorough_check = thorough_check
+        self.runtime_check = runtime_check
         # Try to get package version
         import importlib.metadata
 
@@ -1993,13 +2070,22 @@ class DynamoRuntimeInfo(NodeInfo):
             if pth_file:
                 self.add_child(pth_file)
 
-        # Check for multiple _core*.so files
-        multiple_so_warning = self._check_multiple_core_so(workspace_dir)
-        if multiple_so_warning:
-            self.add_child(multiple_so_warning)
+        # Check for multiple _core*.so files (only if workspace exists)
+        if workspace_dir:
+            multiple_so_warning = self._check_multiple_core_so(workspace_dir)
+            if multiple_so_warning:
+                self.add_child(multiple_so_warning)
 
         # Discover runtime components from source
         components = self._discover_runtime_components(workspace_dir)
+
+        # For runtime check, always try to import the core modules
+        if self.runtime_check:
+            # Force check of essential runtime modules
+            essential_components = ["dynamo._core", "dynamo.runtime"]
+            for comp in essential_components:
+                if comp not in components:
+                    components.append(comp)
 
         # Find where each component actually is and add them
         if components:
@@ -2007,6 +2093,7 @@ class DynamoRuntimeInfo(NodeInfo):
             max_len = max(len(comp) for comp in components)
 
             components_found = False
+            import_failures = []
             for component in components:
                 try:
                     # Try to import to find actual location
@@ -2041,16 +2128,31 @@ class DynamoRuntimeInfo(NodeInfo):
                         label=padded_name, desc=error_msg, status=NodeStatus.ERROR
                     )
                     self.add_child(module_node)
+                    import_failures.append(component)
                     # Don't set components_found to True for failed imports
 
             # Update status and value based on whether we found components
             if components_found:
-                self.status = NodeStatus.OK
+                # For runtime check, fail if any essential component failed to import
+                if self.runtime_check and import_failures:
+                    essential_failed = any(
+                        comp in import_failures
+                        for comp in ["dynamo._core", "dynamo.runtime"]
+                    )
+                    if essential_failed:
+                        self.status = NodeStatus.ERROR
+                        self.desc = "ai-dynamo-runtime - FAILED (essential modules not importable)"
+                    else:
+                        self.status = NodeStatus.OK
+                else:
+                    self.status = NodeStatus.OK
                 # If not installed but components work via PYTHONPATH, update the message
-                if not is_installed:
+                if not is_installed and self.status == NodeStatus.OK:
                     self.desc = "ai-dynamo-runtime (via PYTHONPATH)"
             else:
                 self.status = NodeStatus.ERROR
+                if self.runtime_check:
+                    self.desc = "ai-dynamo-runtime - FAILED (no components found)"
         else:
             # No components discovered at all
             self.status = NodeStatus.ERROR
@@ -2102,7 +2204,7 @@ class DynamoRuntimeInfo(NodeInfo):
 
         return None
 
-    def _discover_runtime_components(self, workspace_dir: str) -> list:
+    def _discover_runtime_components(self, workspace_dir: Optional[str]) -> list:
         """Discover ai-dynamo-runtime components from filesystem.
 
         Returns:
@@ -2195,8 +2297,14 @@ class DynamoRuntimeInfo(NodeInfo):
 class DynamoFrameworkInfo(NodeInfo):
     """Dynamo framework components information"""
 
-    def __init__(self, workspace_dir: str, thorough_check: bool = False):
+    def __init__(
+        self,
+        workspace_dir: Optional[str],
+        thorough_check: bool = False,
+        runtime_check: bool = False,
+    ):
         self.thorough_check = thorough_check
+        self.runtime_check = runtime_check
         # Try to get package version
         import importlib.metadata
 
@@ -2248,6 +2356,16 @@ class DynamoFrameworkInfo(NodeInfo):
         # Discover framework components from source
         components = self._discover_framework_components(workspace_dir)
 
+        # For runtime check, always try to import at least one framework component
+        if self.runtime_check and not components:
+            # Try common framework components even if not discovered
+            components = [
+                "dynamo.frontend",
+                "dynamo.vllm",
+                "dynamo.sglang",
+                "dynamo.trtllm",
+            ]
+
         # Find where each component actually is and add them
         if components:
             # Sort components for consistent output
@@ -2257,6 +2375,7 @@ class DynamoFrameworkInfo(NodeInfo):
             max_len = max(len(comp) for comp in components)
 
             components_found = False
+            import_failures = []
             for component in components:
                 try:
                     # Try to import to find actual location
@@ -2281,21 +2400,29 @@ class DynamoFrameworkInfo(NodeInfo):
                         label=padded_name, desc=error_msg, status=NodeStatus.ERROR
                     )
                     self.add_child(component_node)
+                    import_failures.append(component)
                     # Don't set components_found to True for failed imports
 
             # Update status and value based on whether we found components
             if components_found:
-                self.status = NodeStatus.OK
+                # For runtime check, we need at least one component to work
+                if self.runtime_check and len(import_failures) == len(components):
+                    self.status = NodeStatus.ERROR
+                    self.desc = "ai-dynamo - FAILED (no components importable)"
+                else:
+                    self.status = NodeStatus.OK
                 # If not installed but components work via PYTHONPATH, update the message
-                if not is_installed:
+                if not is_installed and self.status == NodeStatus.OK:
                     self.desc = "ai-dynamo (via PYTHONPATH)"
             else:
                 self.status = NodeStatus.ERROR
+                if self.runtime_check:
+                    self.desc = "ai-dynamo - FAILED (no components found)"
         else:
             # No components discovered at all
             self.status = NodeStatus.ERROR
 
-    def _discover_framework_components(self, workspace_dir: str) -> list:
+    def _discover_framework_components(self, workspace_dir: Optional[str]) -> list:
         """Discover ai-dynamo framework components from filesystem.
 
         Returns:
@@ -2326,11 +2453,36 @@ class DynamoFrameworkInfo(NodeInfo):
 class DynamoInfo(NodeInfo):
     """Dynamo workspace information"""
 
-    def __init__(self, thorough_check: bool = False):
+    def __init__(self, thorough_check: bool = False, runtime_check: bool = False):
         self.thorough_check = thorough_check
+        self.runtime_check = runtime_check
 
         # Find workspace directory
         workspace_dir = DynamoInfo.find_workspace()
+
+        # For runtime check, we don't need a workspace - just check packages
+        if self.runtime_check and not workspace_dir:
+            super().__init__(
+                label="Dynamo",
+                desc="Runtime container - checking installed packages",
+                status=NodeStatus.INFO,
+            )
+            # Check runtime components even without workspace
+            runtime_info = DynamoRuntimeInfo(
+                None,
+                thorough_check=self.thorough_check,
+                runtime_check=self.runtime_check,
+            )
+            self.add_child(runtime_info)
+
+            # Check framework components even without workspace
+            framework_info = DynamoFrameworkInfo(
+                None,
+                thorough_check=self.thorough_check,
+                runtime_check=self.runtime_check,
+            )
+            self.add_child(framework_info)
+            return
 
         if not workspace_dir:
             # Show error when workspace is not found
@@ -2368,13 +2520,17 @@ class DynamoInfo(NodeInfo):
 
         # Always add runtime components
         runtime_info = DynamoRuntimeInfo(
-            workspace_dir, thorough_check=self.thorough_check
+            workspace_dir,
+            thorough_check=self.thorough_check,
+            runtime_check=self.runtime_check,
         )
         self.add_child(runtime_info)
 
         # Always add framework components
         framework_info = DynamoFrameworkInfo(
-            workspace_dir, thorough_check=self.thorough_check
+            workspace_dir,
+            thorough_check=self.thorough_check,
+            runtime_check=self.runtime_check,
         )
         self.add_child(framework_info)
 
@@ -2513,8 +2669,14 @@ def main():
     )
     parser.add_argument(
         "--runtime-check",
+        "--runtime",
         action="store_true",
-        help="Skip compile-time dependency checks (Rust, Cargo, Maturin) for runtime containers",
+        help="Skip compile-time dependency checks (Rust, Cargo, Maturin) for runtime containers and validate ai-dynamo packages",
+    )
+    parser.add_argument(
+        "--no-gpu-check",
+        action="store_true",
+        help="Skip GPU detection and information collection (useful for CI environments without GPU access)",
     )
     args = parser.parse_args()
 
@@ -2527,6 +2689,7 @@ def main():
         thorough_check=args.thorough_check,
         terse=args.terse,
         runtime_check=args.runtime_check,
+        no_gpu_check=args.no_gpu_check,
     )
     tree.print_tree()
 
