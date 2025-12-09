@@ -67,7 +67,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
 # Check available models
 curl http://localhost:8000/v1/models | jq .
 
-# Load LoRA to instnaces using s3 uri
+# Load LoRA to instances using s3 uri
 curl -s  -X POST http://localhost:8081/v1/loras \
        -H "Content-Type: application/json" \
        -d '{"lora_name": "codelion/Qwen3-0.6B-accuracy-recovery-lora",
