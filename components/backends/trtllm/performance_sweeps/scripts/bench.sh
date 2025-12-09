@@ -232,26 +232,6 @@ for concurrency in ${concurrency_list}; do
     	    -H 'Authorization: Bearer NOT USED' \
     	    -H 'Accept: text/event-stream'    
     fi
-    python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
-        --served-model-name ${model} \
-        --model ${model_path} \
-        --dataset-name random \
-        --num-prompts "$num_prompts" \
-        --random-input-len ${isl} \
-        --random-output-len ${osl} \
-        --random-range-ratio 0.8 \
-        --use-chat-template \
-        --ignore-eos \
-        --use-chat-template \
-        --backend "dynamo" \
-        --endpoint "/v1/completions" \
-        --percentile-metrics ttft,tpot,itl,e2el \
-        --max-concurrency "$concurrency" \
-        --host ${hostname} \
-        --port ${port} \
-        --save-result \
-        --result-dir "${log_path}/results" \
-        --result-filename "results_concurrency_${original_concurrency}_gpus_${total_gpus}_ctx_${prefill_gpus}_gen_${decode_gpus}.json"
 
     echo "Benchmark with concurrency ${concurrency} done"
 done
