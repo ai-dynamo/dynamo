@@ -9,7 +9,7 @@ import re
 import signal
 from contextlib import contextmanager
 from multiprocessing.context import SpawnProcess
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 
@@ -463,6 +463,7 @@ async def test_fault_scenario(
     if image:
         scenario.deployment.set_image(image)
 
+    model: Optional[str] = None
     if scenario.model:
         scenario.deployment.set_model(scenario.model)
         model = scenario.model

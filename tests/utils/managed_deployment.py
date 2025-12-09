@@ -57,6 +57,14 @@ class ServiceSpec:
         except KeyError:
             return None
 
+    @image.setter
+    def image(self, value: str):
+        if "extraPodSpec" not in self._spec:
+            self._spec["extraPodSpec"] = {"mainContainer": {}}
+        if "mainContainer" not in self._spec["extraPodSpec"]:
+            self._spec["extraPodSpec"]["mainContainer"] = {}
+        self._spec["extraPodSpec"]["mainContainer"]["image"] = value
+
     @property
     def envs(self) -> list[dict[str, str]]:
         """Environment variables for the service"""
@@ -65,14 +73,6 @@ class ServiceSpec:
     @envs.setter
     def envs(self, value: list[dict[str, str]]):
         self._spec["envs"] = value
-
-    @image.setter
-    def image(self, value: str):
-        if "extraPodSpec" not in self._spec:
-            self._spec["extraPodSpec"] = {"mainContainer": {}}
-        if "mainContainer" not in self._spec["extraPodSpec"]:
-            self._spec["extraPodSpec"]["mainContainer"] = {}
-        self._spec["extraPodSpec"]["mainContainer"]["image"] = value
 
     # ----- Replicas -----
     @property
@@ -729,7 +729,7 @@ class ManagedDeployment:
                 "service_names cannot be empty for trigger_rolling_upgrade"
             )
 
-        patch_body = {"spec": {"services": {}}}
+        patch_body: dict[str, Any] = {"spec": {"services": {}}}
 
         for service_name in service_names:
             self.deployment_spec.set_service_env_var(

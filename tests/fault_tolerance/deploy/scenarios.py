@@ -199,7 +199,7 @@ class RollingUpgradeFailure(Failure):
 
     async def execute(
         self, deployment: ManagedDeployment, logger: logging.Logger
-    ) -> None:
+    ) -> list[str]:
         """Execute rolling upgrade failure injection."""
         await deployment.trigger_rolling_upgrade(self.service_names)
 
@@ -225,7 +225,7 @@ class DeletePodFailure(Failure):
 
     async def execute(
         self, deployment: ManagedDeployment, logger: logging.Logger
-    ) -> None:
+    ) -> list[str]:
         """Execute pod deletion failure injection."""
         service_pod_dict = deployment.get_pods(self.service_names)
         pod_names: list[str] = []
@@ -276,7 +276,7 @@ class TerminateProcessFailure(Failure):
 
     async def execute(
         self, deployment: ManagedDeployment, logger: logging.Logger
-    ) -> None:
+    ) -> list[str]:
         """Execute process termination failure injection."""
         service_pod_dict = deployment.get_pods(self.service_names)
         pod_names: list[str] = []
@@ -323,7 +323,7 @@ class TokenOverflowFailure(Failure):
 
     async def execute(
         self, deployment: ManagedDeployment, logger: logging.Logger
-    ) -> None:
+    ) -> list[str]:
         """Token overflow is handled client-side, so this is a no-op."""
         # The actual overflow is handled by the client configuration
         # which uses the input_token_length from the Load config

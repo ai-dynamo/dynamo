@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from kr8s.objects import Pod
 
 from tests.utils.managed_deployment import ManagedDeployment
 
@@ -45,7 +46,7 @@ def get_frontend_port(
     deployment_spec: Any,
     pod_ports: Dict[str, Any],
     logger: logging.Logger,
-) -> Tuple[Optional[str], Optional[int], Optional[str]]:
+) -> Tuple[Optional[str], Optional[int], Optional[Pod]]:
     """
     Select a frontend pod using round-robin and setup port forwarding.
 
