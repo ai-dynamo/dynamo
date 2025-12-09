@@ -504,6 +504,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
     export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
     export CMAKE_CUDA_COMPILER_LAUNCHER="sccache" && \
+    nvcc --version && echo ${LD_LIBRARY_PATH} && \
     cd /sgl-workspace/nvshmem && \
     if [ "$GRACE_BLACKWELL" = true ]; then CUDA_ARCH="90;100;120"; else CUDA_ARCH="90"; fi && \
     NVSHMEM_SHMEM_SUPPORT=0 \
@@ -611,6 +612,7 @@ ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:${HOME}/.local/bin:$PATH
 
 # Install Dynamo wheels from wheel_builder wheelhouse
 COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
+COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 RUN python3 -m pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \

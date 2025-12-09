@@ -601,6 +601,7 @@ COPY --chown=dynamo: benchmarks/ /workspace/benchmarks/
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
 ARG ENABLE_KVBM
+COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 RUN uv pip install \
       --no-cache \
