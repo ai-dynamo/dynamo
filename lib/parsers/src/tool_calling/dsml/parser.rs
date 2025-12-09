@@ -18,7 +18,6 @@ use super::super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 /// ...
 /// </｜DSML｜invoke>
 /// </｜DSML｜function_calls>
-
 /// Check if a chunk contains the start of a DSML tool call
 pub fn detect_tool_call_start_dsml(chunk: &str, config: &DsmlParserConfig) -> bool {
     let start_token = &config.function_calls_start;
@@ -400,7 +399,7 @@ mod tests {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="calculate">
 <｜DSML｜parameter name="integer" string="false">42</｜DSML｜parameter>
-<｜DSML｜parameter name="float" string="false">3.14</｜DSML｜parameter>
+<｜DSML｜parameter name="float" string="false">2.7</｜DSML｜parameter>
 <｜DSML｜parameter name="negative" string="false">-100</｜DSML｜parameter>
 </｜DSML｜invoke>
 </｜DSML｜function_calls>"#;
@@ -411,7 +410,7 @@ mod tests {
 
         let (_, args) = extract_name_and_args(calls[0].clone());
         assert_eq!(args["integer"], 42);
-        assert_eq!(args["float"], 3.14);
+        assert_eq!(args["float"], 2.7);
         assert_eq!(args["negative"], -100);
     }
 
