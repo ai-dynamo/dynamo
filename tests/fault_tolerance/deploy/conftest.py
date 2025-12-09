@@ -35,6 +35,27 @@ def pytest_addoption(parser):
         help="Include tests that require custom builds (e.g., MoE models). "
         "By default, these tests are excluded.",
     )
+    # Hardware fault injection options
+    parser.addoption(
+        "--enable-hw-faults",
+        action="store_true",
+        default=False,
+        help="Enable hardware fault injection tests (GPU failures, CUDA errors). "
+        "Requires fault injection infrastructure.",
+    )
+    parser.addoption(
+        "--hw-fault-xid",
+        type=int,
+        default=79,
+        choices=[79, 48, 94, 95, 43, 74],
+        help="XID error type for hardware fault injection (default: 79 - GPU fell off bus)",
+    )
+    parser.addoption(
+        "--hw-fault-target-node",
+        type=str,
+        default=None,
+        help="Target node for hardware fault injection (auto-detect if not specified)",
+    )
 
 
 def pytest_generate_tests(metafunc):
@@ -109,3 +130,21 @@ def namespace(request):
 def client_type(request):
     """Get client type from command line or use scenario default."""
     return request.config.getoption("--client-type")
+
+
+@pytest.fixture
+def hw_fault_config(request):
+    """
+    Get hardware fault configuration from command line options.
+    
+    Returns None if --enable-hw-faults is not set, allowing tests to skip.
+    Returns a config dict if enabled.
+    """
+    if not request.config.getoption("--enable-hw-faults"):
+        return None
+    
+    return {
+        "enabled": True,
+        "xid_type": request.config.getoption("--hw-fault-xid"),
+        "target_node": request.config.getoption("--hw-fault-target-node"),
+    }
