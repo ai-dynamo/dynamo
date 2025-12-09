@@ -358,7 +358,7 @@ def pick_config_with_webui(prefill_data, decode_data, args):
 
             > 📝 **Note:** The dotted red line in the prefill and decode charts are default TTFT and ITL SLAs if not specified.
 
-            > ⚠️ **Warning:** TTFT is ideal case when requests arrives uniformly so that queueing is minimized. Real-world TTFT may be higher than profiling results. To mitigate the issue, turn on correction factor in planner.
+            > ⚠️ **Warning:** The TTFT values here represent the ideal case when requests arrive uniformly, minimizing queueing. Real-world TTFT may be higher than profiling results. To mitigate the issue, turn on correction factor in planner.
             """
         )
 
