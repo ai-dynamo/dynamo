@@ -231,6 +231,15 @@ pub(crate) struct TransferState {
     pub(crate) notifiers: TransferNotifiers,
     /// Cancel state updater
     pub(crate) cancel_updater: CancelStateUpdater,
+    /// Total blocks expected in this transfer (set by PolicyEvaluator)
+    pub(crate) total_expected_blocks: usize,
+    /// Blocks that have been processed through policy evaluation (for sentinel flush)
+    pub(crate) blocks_processed: usize,
+    /// Precondition event that must be satisfied before processing this transfer.
+    /// Set by the caller when enqueuing offload operations. BatchCollector will
+    /// attach this to the TransferBatch, and PreconditionAwaiter will await it
+    /// before forwarding to TransferExecutor.
+    pub(crate) precondition: Option<dynamo_nova::events::EventHandle>,
 }
 
 #[allow(dead_code)]
@@ -263,6 +272,9 @@ impl TransferState {
             error: None,
             notifiers,
             cancel_updater,
+            total_expected_blocks: 0, // Set by PolicyEvaluator when transfer starts
+            blocks_processed: 0,
+            precondition: None, // Set by caller via enqueue_with_precondition
         };
 
         let handle = TransferHandle {

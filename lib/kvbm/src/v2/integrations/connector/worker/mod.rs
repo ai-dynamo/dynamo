@@ -143,6 +143,9 @@ struct SharedWorkerState {
     service: OnceLock<NovaWorkerService>,
     gpu_info: OnceLock<GpuInfo>,
     finished_state: FinishedState,
+    /// Current iteration's forward pass event handle (if any).
+    /// Loaded from KvConnectorMetadata, triggered in clear_connector_metadata.
+    forward_pass_event: Mutex<Option<dynamo_nova::events::EventHandle>>,
 }
 
 /// Connector worker implementation that uses Nova for communication and
@@ -167,6 +170,7 @@ impl ConnectorWorker {
             service: OnceLock::new(),
             gpu_info: OnceLock::new(),
             finished_state: FinishedState::new(),
+            forward_pass_event: Mutex::new(None),
         });
 
         let nova = state.runtime.nova.clone();
@@ -362,11 +366,41 @@ impl ConnectorWorkerInterface for ConnectorWorker {
     }
 
     fn bind_connector_metadata(&self, metadata: KvConnectorMetadata) -> Result<()> {
-        tracing::debug!("metadata: {:#?}", metadata);
+        tracing::debug!(iteration = metadata.iteration, "Binding connector metadata");
+
+        // Load forward pass event if present
+        if let Some(event_map) = metadata.forward_pass_events {
+            let my_instance_id = self.state.runtime.nova().instance_id();
+
+            if let Some(&event_handle) = event_map.get(&my_instance_id) {
+                tracing::debug!(?event_handle, "Loaded forward pass event");
+                *self.state.forward_pass_event.lock().unwrap() = Some(event_handle);
+            }
+        }
+
         Ok(())
     }
 
     fn clear_connector_metadata(&self) -> Result<()> {
+        tracing::debug!("Clearing connector metadata");
+
+        // Trigger forward pass completion event if present
+        if let Some(event_handle) = self.state.forward_pass_event.lock().unwrap().take() {
+            tracing::debug!(?event_handle, "Triggering forward pass event");
+
+            // Fire-and-forget: spawn task to trigger event
+            // If this fails, the instance is likely crashing anyway
+            let nova = self.state.runtime.nova().clone();
+            self.state.runtime.nova().tracker().spawn_on(
+                async move {
+                    if let Err(e) = nova.events().trigger(event_handle).await {
+                        tracing::error!("Failed to trigger forward pass event: {}", e);
+                    }
+                },
+                &self.state.runtime.tokio(),
+            );
+        }
+
         Ok(())
     }
 
@@ -379,10 +413,12 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip(self), ret)]
     fn get_finished(&self) -> (HashSet<String>, HashSet<String>) {
         self.state.finished_state.take_finished()
     }
 
+    #[tracing::instrument(level = "debug", skip(self), ret)]
     fn get_failed_onboarding(&self) -> HashSet<usize> {
         self.state.finished_state.take_failed_onboarding()
     }

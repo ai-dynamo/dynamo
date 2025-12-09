@@ -80,10 +80,22 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
 
         let inner_clone = inner.clone();
         let return_fn = Arc::new(move |block: Arc<Block<T, Registered>>| {
-            let mut inner = inner_clone.write();
+            let seq_hash = block.sequence_hash();
+            let strong_count = Arc::strong_count(&block);
 
-            if let Ok(block) = Arc::try_unwrap(block) {
-                inner.backend.insert(block);
+            let mut inner = inner_clone.write();
+            match Arc::try_unwrap(block) {
+                Ok(block) => {
+                    inner.backend.insert(block);
+                    tracing::debug!(?seq_hash, "Block returned to inactive pool");
+                }
+                Err(_block) => {
+                    tracing::warn!(
+                        ?seq_hash,
+                        strong_count,
+                        "Arc::try_unwrap failed - block NOT returned to pool"
+                    );
+                }
             }
         }) as Arc<dyn Fn(Arc<Block<T, Registered>>) + Send + Sync>;
 

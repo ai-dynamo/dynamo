@@ -86,6 +86,25 @@ impl OffloadEngine {
         self.enqueue_to_pipeline(pipeline, blocks.into())
     }
 
+    /// Enqueue blocks for G1→G2 offload with a precondition event.
+    ///
+    /// The precondition event must be satisfied before the batch is processed
+    /// by the transfer executor. This enables coordination with worker forward passes.
+    ///
+    /// Returns a `TransferHandle` for tracking progress and cancellation.
+    pub fn enqueue_g1_to_g2_with_precondition(
+        &self,
+        blocks: impl Into<SourceBlocks<G1>>,
+        precondition: Option<dynamo_nova::events::EventHandle>,
+    ) -> Result<TransferHandle> {
+        let pipeline = self
+            .g1_to_g2
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("G1→G2 pipeline not configured"))?;
+
+        self.enqueue_to_pipeline_with_precondition(pipeline, blocks.into(), precondition)
+    }
+
     /// Enqueue blocks for G2→G3 offload.
     ///
     /// Returns a `TransferHandle` for tracking progress and cancellation.
@@ -130,6 +149,41 @@ impl OffloadEngine {
         // Enqueue source blocks directly to pipeline
         // PolicyEvaluator handles different source types
         // TransferExecutor does upgrade stage just before transfer
+        let queued = pipeline.enqueue(transfer_id, source, state);
+        if !queued {
+            // Transfer was already cancelled before enqueueing
+            tracing::warn!("Transfer {} was cancelled before enqueueing", transfer_id);
+        }
+
+        Ok(handle)
+    }
+
+    /// Internal: enqueue to a specific pipeline with a precondition.
+    fn enqueue_to_pipeline_with_precondition<Src: BlockMetadata, Dst: BlockMetadata>(
+        &self,
+        pipeline: &Pipeline<Src, Dst>,
+        source: SourceBlocks<Src>,
+        precondition: Option<dynamo_nova::events::EventHandle>,
+    ) -> Result<TransferHandle> {
+        // Extract block IDs for state tracking (External/Strong only, Weak has None)
+        let input_block_ids = self.extract_block_ids(&source);
+
+        // Create transfer state and handle
+        let transfer_id = TransferId::new();
+        let (mut state, handle) = TransferState::new(transfer_id, input_block_ids);
+
+        // Set precondition on the transfer state
+        state.precondition = precondition;
+
+        let state = Arc::new(std::sync::Mutex::new(state));
+
+        // Store transfer state
+        self.transfers.insert(transfer_id, state.clone());
+
+        // Enqueue source blocks directly to pipeline
+        // PolicyEvaluator handles different source types
+        // BatchCollector will extract precondition and attach to batches
+        // PreconditionAwaiter will await the event before processing
         let queued = pipeline.enqueue(transfer_id, source, state);
         if !queued {
             // Transfer was already cancelled before enqueueing
@@ -280,10 +334,9 @@ impl OffloadEngineBuilder {
         let runtime = self.runtime.unwrap_or_else(|| self.leader.runtime());
 
         // Build G1→G2 pipeline if configured
+        // Note: G1 is externally owned (vLLM GPU cache), so no G1 manager needed.
+        // Pipeline works with ExternalBlock<G1> which contains block_id + sequence_hash.
         let mut g1_to_g2 = if let Some(config) = self.g1_to_g2_config {
-            let g1_manager = self
-                .g1_manager
-                .ok_or_else(|| anyhow::anyhow!("G1 manager required for G1→G2 pipeline"))?;
             let g2_manager = self
                 .g2_manager
                 .clone()
@@ -292,7 +345,6 @@ impl OffloadEngineBuilder {
             Some(Pipeline::new(
                 config,
                 registry.clone(),
-                g1_manager,
                 g2_manager,
                 self.leader.clone(),
                 LogicalLayoutHandle::G1,
@@ -305,10 +357,6 @@ impl OffloadEngineBuilder {
 
         // Build G2→G3 pipeline if configured
         let g2_to_g3 = if let Some(config) = self.g2_to_g3_config {
-            let g2_manager = self
-                .g2_manager
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("G2 manager required for G2→G3 pipeline"))?;
             let g3_manager = self
                 .g3_manager
                 .ok_or_else(|| anyhow::anyhow!("G3 manager required for G2→G3 pipeline"))?;
@@ -316,7 +364,6 @@ impl OffloadEngineBuilder {
             Some(Pipeline::new(
                 config,
                 registry.clone(),
-                g2_manager,
                 g3_manager,
                 self.leader.clone(),
                 LogicalLayoutHandle::G2,
@@ -329,9 +376,6 @@ impl OffloadEngineBuilder {
 
         // Build G2→G4 pipeline if configured
         let g2_to_g4 = if let Some(config) = self.g2_to_g4_config {
-            let g2_manager = self
-                .g2_manager
-                .ok_or_else(|| anyhow::anyhow!("G2 manager required for G2→G4 pipeline"))?;
             let g4_manager = self
                 .g4_manager
                 .ok_or_else(|| anyhow::anyhow!("G4 manager required for G2→G4 pipeline"))?;
@@ -339,7 +383,6 @@ impl OffloadEngineBuilder {
             Some(Pipeline::new(
                 config,
                 registry.clone(),
-                g2_manager,
                 g4_manager,
                 self.leader.clone(),
                 LogicalLayoutHandle::G2,

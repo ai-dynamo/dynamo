@@ -292,10 +292,10 @@ impl TransferManager {
     /// use an extension on TransferOptions to pass in the "rank/part" of the the object in a
     /// multi-worker/multi-tp scenario.
     pub fn execute_g4_offload(
-        src_handle: LayoutHandle,
-        src_blocks: &[BlockId],
-        dst_object: &[SequenceHash],
-        options: TransferOptions, // add rank/part to the options
+        _src_handle: LayoutHandle,
+        _src_blocks: &[BlockId],
+        _dst_object: &[SequenceHash],
+        _options: TransferOptions, // add rank/part to the options
     ) -> Result<TransferCompleteNotification> {
         // check registration cache for the remote object, if it's not found, register it with nixl
         // register all non-registered blocks with nixl in parallel

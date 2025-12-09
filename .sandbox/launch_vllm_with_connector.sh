@@ -43,6 +43,7 @@ source "$VENV_PATH/bin/activate"
 
 # Ensure our kvbm package is in the path
 export PYTHONPATH="$REPO_ROOT/lib/bindings/kvbm/python:$PYTHONPATH"
+export VLLM_SERVER_DEV_MODE=1
 
 # =============================================================================
 # Rust Logging Configuration

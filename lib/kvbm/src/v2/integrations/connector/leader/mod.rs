@@ -146,7 +146,7 @@ impl ConnectorLeader {
     ///
     /// The first call for a request starts the find operation. Subsequent calls check
     /// the status of the operation and return results when complete.
-    #[tracing::instrument(level = "debug", skip(self), fields(?request_id))]
+    #[tracing::instrument(level = "debug", skip(self), fields(?request_id), ret)]
     pub fn get_num_new_matched_tokens(
         &self,
         request_id: &str,

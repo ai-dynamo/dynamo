@@ -177,7 +177,7 @@ class SchedulerConnectorWorker:
         """
         Clear connector metadata - no-op.
         """
-        pass
+        self.worker.clear_connector_metadata()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """
@@ -222,6 +222,7 @@ class SchedulerConnectorWorker:
         Returns:
             (None, None): No finished sends/receives
         """
+        print(f"SchedulerConnectorWorker.get_finished called with {len(finished_req_ids)} finished requests")
         return self.worker.get_finished()
 
     def get_block_ids_with_load_errors(self) -> set[int]:

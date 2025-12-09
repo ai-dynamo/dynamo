@@ -120,10 +120,20 @@ impl BlockRegistry {
         seq_hashes
             .iter()
             .map(|&seq_hash| {
-                let present = self
-                    .match_sequence_hash(seq_hash, false) // touch=false, no frequency tracking
+                let handle_result = self.match_sequence_hash(seq_hash, false); // touch=false, no frequency tracking
+                let present = handle_result
+                    .as_ref()
                     .map(|handle| handle.has_block::<T>())
                     .unwrap_or(false);
+
+                tracing::debug!(
+                    ?seq_hash,
+                    type_name = std::any::type_name::<T>(),
+                    handle_found = handle_result.is_some(),
+                    present,
+                    "check_presence result"
+                );
+
                 (seq_hash, present)
             })
             .collect()

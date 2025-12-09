@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use dynamo_tokens::TokenBlockSequence;
 
 use super::Request;
 use crate::distributed::leader::FindMatchesResult;
-use crate::distributed::offload::{TransferHandle, TransferId};
-use crate::v2::SequenceHash;
+use crate::distributed::offload::TransferHandle;
+use crate::v2::{BlockId, SequenceHash};
 
 // ============================================================================
 // Error Types
@@ -43,13 +43,18 @@ pub struct OnboardingState {
 /// Data associated with offloading operations.
 ///
 /// This struct holds all the state needed for offloading KV cache blocks to remote storage.
-#[derive(Debug)]
+/// The presence of this state indicates we're in the scheduler-output-driven phase,
+/// not necessarily actively transferring.
+#[derive(Debug, Default)]
 pub struct OffloadingState {
-    /// The sequence hashes of the blocks that have been sent to the offload engine.
-    pub sequence_hashes: HashSet<SequenceHash>,
+    /// Mapping from external BlockId (from vLLM) to SequenceHash for blocks we've processed.
+    /// The count of entries indicates how many blocks have been mapped; the next token_block
+    /// index to evaluate is `block_mappings.len()`.
+    pub block_mappings: HashMap<BlockId, SequenceHash>,
 
-    /// The transfer handle for the offload operation.
-    pub handles: HashMap<TransferId, TransferHandle>,
+    /// Transfer handles for inflight offload operations.
+    /// We keep appending handles and don't evaluate completion until request_finished.
+    pub handles: Vec<TransferHandle>,
 }
 
 /// Wrapper enum for state data that can be recovered from error states.
@@ -465,6 +470,11 @@ pub struct RequestSlot {
 
     /// The number of token blocks that have been evaluated by our offloading policies.
     evaluated_blocks: usize,
+
+    /// Whether we've stopped evaluating new blocks for offload.
+    /// Set when: block_ids exceed token_blocks OR request was paused/resumed/evicted.
+    /// This is a slot-level flag that persists across phases.
+    finished_evaluating: bool,
 }
 
 impl RequestSlot {
@@ -480,6 +490,7 @@ impl RequestSlot {
             sequence,
             state: SlotStateMachine::new(),
             evaluated_blocks: 0,
+            finished_evaluating: false,
         })
     }
 
@@ -512,6 +523,22 @@ impl RequestSlot {
             .iter()
             .map(|b| b.positional_sequence_hash())
             .collect()
+    }
+
+    /// Check if we've stopped evaluating new blocks for offload.
+    ///
+    /// This is set when block_ids exceed token_blocks OR request was paused/resumed/evicted.
+    pub fn is_finished_evaluating(&self) -> bool {
+        self.finished_evaluating
+    }
+
+    /// Mark that we've stopped evaluating new blocks for offload.
+    ///
+    /// Called when:
+    /// - block_ids from vLLM exceed our token knowledge
+    /// - request was paused/resumed/evicted
+    pub fn mark_finished_evaluating(&mut self) {
+        self.finished_evaluating = true;
     }
 
     // ------------------------------------------------------------------------
@@ -550,11 +577,7 @@ impl RequestSlot {
     ///
     /// Only valid when in `Inactive` state and slot is not marked for deletion.
     pub fn txn_start_offloading(&mut self) -> Result<(), StateTransitionError> {
-        let state = OffloadingState {
-            sequence_hashes: HashSet::new(),
-            handles: HashMap::new(),
-        };
-        self.state.txn_start_offloading(state)
+        self.state.txn_start_offloading(OffloadingState::default())
     }
 
     /// Take the offloading state, transitioning to Inactive.
@@ -618,12 +641,8 @@ impl RequestSlot {
 
     pub fn get_or_create_offloading_state(&mut self) -> &mut OffloadingState {
         if self.state.offloading_state().is_none() {
-            let state = OffloadingState {
-                sequence_hashes: HashSet::new(),
-                handles: HashMap::new(),
-            };
             self.state
-                .txn_start_offloading(state)
+                .txn_start_offloading(OffloadingState::default())
                 .expect("get_or_create_offloading_state called in invalid state");
         }
 
@@ -641,12 +660,12 @@ impl RequestSlot {
         outcome: Result<MatchCheckOutcome, anyhow::Error>,
     ) -> Result<(Option<usize>, bool), anyhow::Error> {
         // Verify we're in the expected state
-        if !matches!(self.txn_state(), TransactionState::PreparingToOnboard(_)) {
-            return Err(anyhow::anyhow!(
-                "finalize_match_check called in unexpected state: {}",
-                self.txn_state().name()
-            ));
-        }
+        // if !matches!(self.txn_state(), TransactionState::PreparingToOnboard(_)) {
+        //     return Err(anyhow::anyhow!(
+        //         "finalize_match_check called in unexpected state: {}",
+        //         self.txn_state().name()
+        //     ));
+        // }
 
         match outcome {
             Ok(MatchCheckOutcome::InProgress) => {
@@ -663,8 +682,11 @@ impl RequestSlot {
             }
             Ok(MatchCheckOutcome::Found { matched_tokens }) => {
                 if matched_tokens > 0 {
-                    // Transition to Onboarding
-                    self.state.txn_start_onboarding()?;
+                    tracing::debug!(
+                        "Found {} matched tokens for request ID: {}",
+                        matched_tokens,
+                        self.request_id()
+                    );
                 } else {
                     // No matches - go back to Inactive
                     self.state.txn_to_inactive();
@@ -690,12 +712,17 @@ impl RequestSlot {
     // Offloading Methods
     // ------------------------------------------------------------------------
 
-    pub fn offload_blocks(
+    /// Record block mappings and store transfer handle for offloading.
+    ///
+    /// # Arguments
+    /// * `block_mappings` - Pairs of (BlockId, SequenceHash) to record
+    /// * `handle` - The transfer handle for this offload batch
+    pub fn record_offload(
         &mut self,
-        sequence_hashes: &[SequenceHash],
+        block_mappings: Vec<(BlockId, SequenceHash)>,
         handle: TransferHandle,
     ) -> Result<(), anyhow::Error> {
-        // the state must be active, not marked for deletion, and the txn_state
+        // The state must be active, not marked for deletion, and the txn_state
         // must be inactive or offloading
         if self.is_marked_for_deletion() {
             return Err(anyhow::anyhow!("Slot is marked for deletion"));
@@ -708,14 +735,30 @@ impl RequestSlot {
             return Err(anyhow::anyhow!("Invalid transaction state"));
         }
 
-        // create or get the offloading state
-        let mut offloading_state = self.get_or_create_offloading_state();
+        // Create or get the offloading state
+        let offloading_state = self.get_or_create_offloading_state();
 
-        // check that the sequence hashes provides are not already in the set
-        // add the sequence hashes to the set
-        // add the transfer handle to the hashmap
+        // Add all block mappings
+        for (block_id, sequence_hash) in block_mappings {
+            offloading_state
+                .block_mappings
+                .insert(block_id, sequence_hash);
+        }
 
-        unimplemented!()
+        // Store the transfer handle
+        offloading_state.handles.push(handle);
+
+        Ok(())
+    }
+
+    /// Get the number of blocks that have been mapped for offloading.
+    ///
+    /// This indicates the next token_block index to evaluate.
+    pub fn mapped_block_count(&self) -> usize {
+        self.state
+            .offloading_state()
+            .map(|s| s.block_mappings.len())
+            .unwrap_or(0)
     }
 }
 

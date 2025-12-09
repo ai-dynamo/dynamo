@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dynamo_nova::events::EventHandle;
 use tokio::sync::{mpsc, watch};
 
 use crate::v2::logical::blocks::BlockMetadata;
@@ -95,19 +96,33 @@ impl<T: BlockMetadata> std::fmt::Debug for QueuedBlock<T> {
 pub struct TransferBatch<T: BlockMetadata> {
     /// Blocks in this batch
     pub blocks: Vec<QueuedBlock<T>>,
+    /// Optional precondition event that must be satisfied before processing.
+    /// If Some, the pipeline will await this event before executing the transfer.
+    pub precondition: Option<EventHandle>,
 }
 
 impl<T: BlockMetadata> TransferBatch<T> {
     /// Create a new empty batch.
     pub fn new() -> Self {
-        Self { blocks: Vec::new() }
+        Self {
+            blocks: Vec::new(),
+            precondition: None,
+        }
     }
 
     /// Create with pre-allocated capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             blocks: Vec::with_capacity(capacity),
+            precondition: None,
         }
+    }
+
+    /// Set the precondition event for this batch.
+    #[allow(dead_code)]
+    pub fn with_precondition(mut self, precondition: EventHandle) -> Self {
+        self.precondition = Some(precondition);
+        self
     }
 
     /// Add a block to this batch.
@@ -288,7 +303,14 @@ impl<T: BlockMetadata> BatchCollector<T> {
     }
 
     /// Handle an evaluation result.
+    ///
+    /// Adds passed blocks to the current batch and flushes when:
+    /// - max_batch_size is reached, OR
+    /// - all blocks for a transfer have been processed (per-transfer sentinel flush)
     async fn handle_eval_result(&mut self, result: EvalResult<T>) {
+        // Count blocks processed in this eval result (both passed and filtered)
+        let blocks_in_eval = result.passed_blocks.len() + result.filtered_ids.len();
+
         // Add passed blocks to current batch
         for block in result.passed_blocks {
             self.current_batch.push(block);
@@ -297,6 +319,24 @@ impl<T: BlockMetadata> BatchCollector<T> {
             if self.current_batch.len() >= self.config.max_batch_size {
                 self.flush().await;
             }
+        }
+
+        // Update transfer state and check if transfer is complete (sentinel flush)
+        let should_flush = {
+            let mut state = result.state.lock().unwrap();
+            state.blocks_processed += blocks_in_eval;
+            // Flush when all blocks for this transfer have been processed
+            state.blocks_processed >= state.total_expected_blocks && state.total_expected_blocks > 0
+        };
+
+        // Flush immediately when a transfer completes to avoid waiting for min_batch_size
+        if should_flush && !self.current_batch.is_empty() {
+            tracing::debug!(
+                transfer_id = %result.transfer_id,
+                batch_size = self.current_batch.len(),
+                "Per-transfer sentinel flush"
+            );
+            self.flush().await;
         }
     }
 
@@ -320,10 +360,26 @@ impl<T: BlockMetadata> BatchCollector<T> {
             return;
         }
 
-        let batch = std::mem::replace(
+        let mut batch = std::mem::replace(
             &mut self.current_batch,
             TransferBatch::with_capacity(self.config.max_batch_size),
         );
+
+        // Extract precondition from blocks' transfer states
+        // If all blocks share the same precondition, set it on the batch
+        let precondition = batch.blocks.first().and_then(|first_block| {
+            let first_precondition = first_block.state.lock().unwrap().precondition;
+
+            // Check if all blocks share the same precondition
+            let all_same = batch.blocks.iter().all(|block| {
+                let state = block.state.lock().unwrap();
+                state.precondition == first_precondition
+            });
+
+            if all_same { first_precondition } else { None }
+        });
+
+        batch.precondition = precondition;
 
         // Send to transfer executor
         if self.output_tx.send(batch).await.is_err() {
@@ -380,7 +436,14 @@ impl<T: BlockMetadata> BatchCollectorQueue<T> {
     }
 
     /// Handle an evaluation result.
+    ///
+    /// Adds passed blocks to the current batch and flushes when:
+    /// - max_batch_size is reached, OR
+    /// - all blocks for a transfer have been processed (per-transfer sentinel flush)
     async fn handle_eval_result(&mut self, result: EvalResult<T>) {
+        // Count blocks processed in this eval result (both passed and filtered)
+        let blocks_in_eval = result.passed_blocks.len() + result.filtered_ids.len();
+
         // Add passed blocks to current batch
         for block in result.passed_blocks {
             self.current_batch.push(block);
@@ -389,6 +452,24 @@ impl<T: BlockMetadata> BatchCollectorQueue<T> {
             if self.current_batch.len() >= self.config.max_batch_size {
                 self.flush().await;
             }
+        }
+
+        // Update transfer state and check if transfer is complete (sentinel flush)
+        let should_flush = {
+            let mut state = result.state.lock().unwrap();
+            state.blocks_processed += blocks_in_eval;
+            // Flush when all blocks for this transfer have been processed
+            state.blocks_processed >= state.total_expected_blocks && state.total_expected_blocks > 0
+        };
+
+        // Flush immediately when a transfer completes to avoid waiting for min_batch_size
+        if should_flush && !self.current_batch.is_empty() {
+            tracing::debug!(
+                transfer_id = %result.transfer_id,
+                batch_size = self.current_batch.len(),
+                "Per-transfer sentinel flush"
+            );
+            self.flush().await;
         }
     }
 
@@ -412,10 +493,26 @@ impl<T: BlockMetadata> BatchCollectorQueue<T> {
             return;
         }
 
-        let batch = std::mem::replace(
+        let mut batch = std::mem::replace(
             &mut self.current_batch,
             TransferBatch::with_capacity(self.config.max_batch_size),
         );
+
+        // Extract precondition from blocks' transfer states
+        // If all blocks share the same precondition, set it on the batch
+        let precondition = batch.blocks.first().and_then(|first_block| {
+            let first_precondition = first_block.state.lock().unwrap().precondition;
+
+            // Check if all blocks share the same precondition
+            let all_same = batch.blocks.iter().all(|block| {
+                let state = block.state.lock().unwrap();
+                state.precondition == first_precondition
+            });
+
+            if all_same { first_precondition } else { None }
+        });
+
+        batch.precondition = precondition;
 
         // Send to transfer executor
         if self.output_tx.send(batch).await.is_err() {

@@ -314,6 +314,14 @@ impl InstanceLeader {
         &self.registry
     }
 
+    /// Get a reference to the Nova instance.
+    ///
+    /// This provides access to the Nova distributed system for features
+    /// like event coordination and cross-instance communication.
+    pub fn nova(&self) -> &Arc<Nova> {
+        &self.nova
+    }
+
     /// Get the tokio runtime handle from Nova.
     ///
     /// This handle should be used for spawning background tasks that need to

@@ -8,6 +8,6 @@ curl -X POST http://127.0.0.1:8000/v1/completions \
   -d '{
     "model": "gpt2",
     "prompt": "what is a dynamo? and how did it signify the start of the industrial revolution?",
-    "max_tokens": 16,
+    "max_tokens": 32,
     "temperature": 0
   }'

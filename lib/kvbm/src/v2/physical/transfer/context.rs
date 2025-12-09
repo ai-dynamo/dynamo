@@ -4,6 +4,7 @@
 //! Transfer context.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use cudarc::driver::{CudaContext, CudaEvent, CudaStream};
@@ -209,6 +210,10 @@ pub(crate) struct TransferContext {
     cuda_context: Arc<CudaContext>,
     d2h_stream: Arc<CudaStream>,
     h2d_stream: Arc<CudaStream>,
+    d2h_streams: Vec<Arc<CudaStream>>,
+    h2d_streams: Vec<Arc<CudaStream>>,
+    current_d2h_stream: Arc<AtomicUsize>,
+    current_h2d_stream: Arc<AtomicUsize>,
     #[allow(dead_code)]
     tokio_runtime: TokioRuntime,
     capabilities: TransferCapabilities,
@@ -263,12 +268,30 @@ impl TransferContext {
             event_system.clone(),
         ));
 
+        let d2h_streams: Vec<Arc<CudaStream>> = (0..4)
+            .map(|_| cuda_context.new_stream())
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let h2d_streams: Vec<Arc<CudaStream>> = (0..4)
+            .map(|_| cuda_context.new_stream())
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let d2h_stream = d2h_streams[0].clone();
+        let h2d_stream = h2d_streams[0].clone();
+
+        let current_d2h_stream = Arc::new(AtomicUsize::new(0));
+        let current_h2d_stream = Arc::new(AtomicUsize::new(0));
+
         Ok(Self {
             worker_id: event_system.worker_id(),
             nixl_agent,
             cuda_context: cuda_context.clone(),
-            d2h_stream: cuda_context.new_stream()?,
-            h2d_stream: cuda_context.new_stream()?,
+            d2h_stream,
+            h2d_stream,
+            d2h_streams,
+            h2d_streams,
+            current_d2h_stream,
+            current_h2d_stream,
             tokio_runtime,
             capabilities,
             operational_backend,
@@ -288,13 +311,28 @@ impl TransferContext {
         &self.cuda_context
     }
 
-    #[deprecated(since = "0.1.0", note = "Use the d2h_stream method instead")]
+    // Provides the same d2h stream per invocation
+    #[allow(dead_code)]
     pub(crate) fn d2h_stream(&self) -> &Arc<CudaStream> {
         &self.d2h_stream
     }
 
+    // Provides the same h2d stream per invocation
+    #[allow(dead_code)]
     pub(crate) fn h2d_stream(&self) -> &Arc<CudaStream> {
         &self.h2d_stream
+    }
+
+    // Provides the next d2h stream in a round-robin fashion
+    pub(crate) fn next_d2h_streams(&self) -> Arc<CudaStream> {
+        let current_d2h_stream = self.current_d2h_stream.fetch_add(1, Ordering::Relaxed);
+        self.d2h_streams[current_d2h_stream % self.d2h_streams.len()].clone()
+    }
+
+    // Provides the next h2d stream in a round-robin fashion
+    pub(crate) fn next_h2d_streams(&self) -> Arc<CudaStream> {
+        let current_h2d_stream = self.current_h2d_stream.fetch_add(1, Ordering::Relaxed);
+        self.h2d_streams[current_h2d_stream % self.h2d_streams.len()].clone()
     }
 
     #[allow(dead_code)]

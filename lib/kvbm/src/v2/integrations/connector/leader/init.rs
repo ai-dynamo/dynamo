@@ -9,12 +9,12 @@ use super::ConnectorLeader;
 use crate::distributed::leader::InstanceLeader;
 use crate::distributed::worker::{LeaderLayoutConfig, NovaWorkerClient, Worker};
 use crate::integrations::connector::worker::ConnectorWorkerClient;
-use crate::logical::blocks::BlockRegistry;
+use crate::logical::blocks::{BlockDuplicationPolicy, BlockRegistry};
 use crate::logical::manager::{BlockManager, FrequencyTrackingCapacity};
 use crate::v2::distributed::offload::{
     OffloadEngine, PendingTracker, PipelineBuilder, create_policy_from_config,
 };
-use crate::{G2, G3, InstanceId};
+use crate::{G1, G2, G3, InstanceId};
 
 use anyhow::{Context, Result, anyhow, bail};
 use dynamo_nova_backend::{PeerInfo, WorkerAddress};
@@ -324,6 +324,7 @@ impl ConnectorLeader {
                 .block_size(reference_config.page_size)
                 .registry(registry.clone())
                 .with_lru_backend()
+                .duplication_policy(BlockDuplicationPolicy::Reject)
                 .build()
                 .expect("Should build G2 manager"),
         );
@@ -342,6 +343,7 @@ impl ConnectorLeader {
                     .block_size(reference_config.page_size)
                     .registry(registry.clone())
                     .with_lru_backend()
+                    .duplication_policy(BlockDuplicationPolicy::Reject)
                     .build()
                     .expect("Should build G3 manager"),
             )
@@ -406,11 +408,45 @@ impl ConnectorLeader {
         let offload_config = &self.runtime.config().offload;
         let runtime_handle = self.runtime.tokio();
 
-        // Build G2→G3 policy from config (G1 managers are on workers, not on leader)
-        // Create shared pending tracker for duplicate prevention
+        // Build G1→G2 policy from config (or defaults if not configured)
+        // G1 is externally owned by vLLM (GPU KV cache), accessed via ExternalBlock<G1>
+        // Default: Presence filter to prevent duplicate transfers (pending auto-wired)
+        let g1_to_g2_config = if offload_config.g1_to_g2.policies.is_empty() {
+            tracing::debug!("No G1→G2 policies configured, using default: [Presence]");
+            dynamo_kvbm_config::TierOffloadConfig {
+                policies: vec![dynamo_kvbm_config::PolicyType::Presence],
+                ..Default::default()
+            }
+        } else {
+            offload_config.g1_to_g2.clone()
+        };
+        let g1_to_g2_pending = Arc::new(PendingTracker::new());
+        let g1_to_g2_policy = create_policy_from_config::<G1, G2>(
+            &g1_to_g2_config,
+            registry_for_offload.clone(),
+            Some(g1_to_g2_pending.clone()),
+        );
+        // Auto-chain G1→G2 completions to G2→G3 if G3 exists
+        let g1_to_g2_pipeline = PipelineBuilder::<G1, G2>::new()
+            .policy(g1_to_g2_policy)
+            .pending_tracker(g1_to_g2_pending)
+            .auto_chain(g3_manager_for_offload.is_some())
+            .build();
+
+        // Build G2→G3 policy from config (or defaults if not configured)
+        // Default: PresenceLfu filter for presence + LFU frequency check (pending auto-wired)
+        let g2_to_g3_config = if offload_config.g2_to_g3.policies.is_empty() {
+            tracing::debug!("No G2→G3 policies configured, using default: [PresenceLfu]");
+            dynamo_kvbm_config::TierOffloadConfig {
+                policies: vec![dynamo_kvbm_config::PolicyType::PresenceLfu],
+                ..Default::default()
+            }
+        } else {
+            offload_config.g2_to_g3.clone()
+        };
         let g2_to_g3_pending = Arc::new(PendingTracker::new());
         let g2_to_g3_policy = create_policy_from_config::<G2, G3>(
-            &offload_config.g2_to_g3,
+            &g2_to_g3_config,
             registry_for_offload.clone(),
             Some(g2_to_g3_pending.clone()),
         );
@@ -422,7 +458,8 @@ impl ConnectorLeader {
         let mut engine_builder = OffloadEngine::builder(Arc::new(leader))
             .with_registry(registry_for_offload)
             .with_g2_manager(g2_manager_for_offload)
-            .with_runtime(runtime_handle);
+            .with_runtime(runtime_handle)
+            .with_g1_to_g2_pipeline(g1_to_g2_pipeline);
 
         // Conditionally add G3 pipeline if G3 manager exists
         if let Some(g3_mgr) = g3_manager_for_offload {

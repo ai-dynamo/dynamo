@@ -10,7 +10,7 @@ repository.workspace = true
 keywords.workspace = true
 
 [features]
-default = ["ucx", "http", "nats", "grpc"]
+default = ["http", "nats", "grpc"]
 ucx = ["dep:async-ucx"]
 http = ["dep:axum", "dep:reqwest"]
 nats = ["dep:async-nats", "dep:bs58"]

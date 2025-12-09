@@ -97,7 +97,7 @@ impl Default for PresenceLfuFilterConfig {
 pub struct TierOffloadConfig {
     /// Ordered list of policies to apply (implicit AND).
     ///
-    /// If empty, defaults to pass-all behavior.
+    /// If empty, tier-specific defaults are applied by the engine.
     /// Policies are evaluated in order; a block must pass all to be transferred.
     #[serde(default)]
     pub policies: Vec<PolicyType>,
@@ -140,6 +140,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = OffloadConfig::default();
+        // Empty policies - engine applies tier-specific defaults
         assert!(config.g1_to_g2.policies.is_empty());
         assert!(config.g2_to_g3.policies.is_empty());
         assert_eq!(config.g2_to_g3.presence_lfu.min_lfu_count, 8);

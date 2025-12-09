@@ -14,7 +14,6 @@ impl WorkerClients {
         Ok(())
     }
 
-    #[expect(dead_code)] // Will be used when offload integration is complete
     pub async fn mark_offloading_complete(&self, request_id: String) -> Result<()> {
         let futures = self
             .worker_connector_clients

@@ -8,6 +8,13 @@
 //! 2. **BatchCollector**: Accumulates passing blocks into batches
 //! 3. **TransferExecutor**: Executes the actual data transfer
 //!
+//! # TODO: Event-Based Preconditioning
+//!
+//! The pipeline supports precondition events on TransferBatch (see `batch.rs`).
+//! A **PreconditionAwaiter** component should be added between BatchCollector and TransferExecutor
+//! to await these events before processing batches. This prevents offloads from starting before
+//! workers complete their forward pass. See implementation plan for details.
+//!
 //! # Cancellation Architecture
 //!
 //! Unlike mpsc-based pipelines where cancellation only happens at dequeue boundaries,
@@ -82,6 +89,12 @@ pub struct PipelineConfig<Src: BlockMetadata, Dst: BlockMetadata> {
     /// If provided, this tracker is used. If None, the pipeline creates its own.
     /// Share this tracker with presence-based policies to prevent duplicate transfers.
     pub pending_tracker: Option<Arc<PendingTracker>>,
+    /// Maximum number of concurrent precondition awaits.
+    ///
+    /// This controls how many batches can be awaiting their preconditions simultaneously.
+    /// Allows multiple iterations to be in-flight without blocking the pipeline.
+    /// Default: 8 (allows ~8 iterations in-flight concurrently)
+    pub max_concurrent_precondition_awaits: usize,
     /// Marker
     _marker: PhantomData<(Src, Dst)>,
 }
@@ -100,6 +113,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Default for PipelineConfig<Src, Dst
             skip_transfers: false,
             max_concurrent_transfers: 1,
             pending_tracker: None,
+            max_concurrent_precondition_awaits: 8,
             _marker: PhantomData,
         }
     }
@@ -257,7 +271,6 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
     /// # Arguments
     /// * `config` - Pipeline configuration
     /// * `registry` - Block registry for policy evaluation
-    /// * `src_manager` - Source tier block manager
     /// * `dst_manager` - Destination tier block manager
     /// * `leader` - Instance leader for transfer execution
     /// * `src_layout` - Source logical layout handle
@@ -267,7 +280,6 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
     pub fn new(
         config: PipelineConfig<Src, Dst>,
         _registry: Arc<BlockRegistry>,
-        _src_manager: Arc<BlockManager<Src>>,
         dst_manager: Arc<BlockManager<Dst>>,
         leader: Arc<InstanceLeader>,
         src_layout: LogicalLayoutHandle,
@@ -285,8 +297,11 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
         // Create watch channel for cancelled transfer IDs
         let (cancel_tx, cancel_rx) = watch::channel(HashSet::new());
 
-        // Create batch output channel (mpsc for transfer executor)
+        // Create batch output channel (BatchCollector → PreconditionAwaiter)
         let (batch_tx, batch_rx) = mpsc::channel(config.transfer_input_capacity);
+
+        // Create precondition output channel (PreconditionAwaiter → TransferExecutor)
+        let (precond_tx, precond_rx) = mpsc::channel(config.transfer_input_capacity);
 
         // Create chain output channel if auto_chain is enabled
         let (chain_tx, chain_rx) = if config.auto_chain {
@@ -330,9 +345,20 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
             collector.run().await;
         });
 
-        // Spawn transfer executor
+        // Spawn precondition awaiter (reads from batch_rx, outputs to precond_tx)
+        let awaiter_leader = leader.clone();
+        let precond_handle = runtime.spawn(async move {
+            let awaiter = PreconditionAwaiter {
+                input_rx: batch_rx,
+                output_tx: precond_tx,
+                leader: awaiter_leader,
+            };
+            awaiter.run().await;
+        });
+
+        // Spawn transfer executor (reads from precond_rx)
         let executor = TransferExecutor {
-            input_rx: batch_rx,
+            input_rx: precond_rx,
             leader,
             dst_manager,
             src_layout,
@@ -368,7 +394,13 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
             chain_rx,
             cancel_tx,
             pending_tracker,
-            _task_handles: vec![eval_handle, batch_handle, transfer_handle, sweeper_handle],
+            _task_handles: vec![
+                eval_handle,
+                batch_handle,
+                precond_handle,
+                transfer_handle,
+                sweeper_handle,
+            ],
             _marker: PhantomData,
         }
     }
@@ -511,6 +543,13 @@ impl<T: BlockMetadata> PolicyEvaluator<T> {
     async fn evaluate(&self, input: PipelineInput<T>) {
         let transfer_id = input.transfer_id;
 
+        // Set total_expected_blocks for per-transfer sentinel flush
+        let total_blocks = input.source.len();
+        {
+            let mut state = input.state.lock().unwrap();
+            state.total_expected_blocks = total_blocks;
+        }
+
         // Check if already cancelled (via queue or via handle)
         {
             let state = input.state.lock().unwrap();
@@ -529,20 +568,34 @@ impl<T: BlockMetadata> PolicyEvaluator<T> {
         // Process blocks based on source type
         match input.source {
             SourceBlocks::External(external_blocks) => {
-                // External blocks bypass policy evaluation - caller explicitly chose these
+                // External blocks (e.g., G1 from vLLM) still need policy evaluation
+                // to check presence in destination tier
                 for ext in external_blocks {
-                    // Create pending guard for duplicate prevention
-                    let pending_guard = self.pending_tracker.guard(ext.sequence_hash);
-                    passed.push(QueuedBlock {
-                        transfer_id,
-                        block_id: Some(ext.block_id),
-                        sequence_hash: ext.sequence_hash,
-                        source: SourceBlock::External(ext),
-                        state: input.state.clone(),
-                        pending_guard: Some(pending_guard),
-                    });
+                    // Check for cancellation between blocks
+                    if self.check_cancelled(&input.state, transfer_id) {
+                        return;
+                    }
+
+                    // Create context with sequence_hash - block_id is known for External
+                    let ctx = EvalContext::from_external(ext.block_id, ext.sequence_hash);
+                    let pass = self.evaluate_policies(&ctx).await;
+
+                    if pass {
+                        // Create pending guard for duplicate prevention
+                        let pending_guard = self.pending_tracker.guard(ext.sequence_hash);
+                        passed.push(QueuedBlock {
+                            transfer_id,
+                            block_id: Some(ext.block_id),
+                            sequence_hash: ext.sequence_hash,
+                            source: SourceBlock::External(ext),
+                            state: input.state.clone(),
+                            pending_guard: Some(pending_guard),
+                        });
+                    } else {
+                        filtered.push(ext.block_id);
+                    }
                 }
-                tracing::debug!(%transfer_id, passed = passed.len(), "External blocks bypass policy evaluation");
+                tracing::debug!(%transfer_id, passed = passed.len(), filtered = filtered.len(), "External blocks evaluated");
             }
             SourceBlocks::Strong(strong_blocks) => {
                 // Strong blocks get full policy evaluation
@@ -710,6 +763,92 @@ struct ResolvedBlock<T: BlockMetadata> {
     state: Arc<std::sync::Mutex<TransferState>>,
 }
 
+/// Precondition awaiter stage.
+///
+/// Sits between BatchCollector and TransferExecutor, awaiting precondition events
+/// before forwarding batches. Spawns unbounded tasks to ensure all preconditions
+/// are awaited - event awaiting is cheap (just waiting, no compute), so we never
+/// skip awaiting a precondition to prevent deadlock scenarios.
+struct PreconditionAwaiter<T: BlockMetadata> {
+    input_rx: BatchOutputRx<T>,
+    output_tx: mpsc::Sender<TransferBatch<T>>,
+    leader: Arc<InstanceLeader>,
+}
+
+impl<T: BlockMetadata> PreconditionAwaiter<T> {
+    async fn run(mut self) {
+        // NO SEMAPHORE - spawn unbounded tasks
+        // Event awaiting is cheap, we must never skip awaiting a precondition
+        while let Some(batch) = self.input_rx.recv().await {
+            let output_tx = self.output_tx.clone();
+            let nova = self.leader.nova().clone();
+
+            // Spawn task for each batch - unbounded
+            tokio::spawn(async move {
+                if let Some(event_handle) = batch.precondition {
+                    tracing::debug!(?event_handle, "Awaiting precondition for batch");
+
+                    // Create awaiter (returns Result<LocalEventWaiter, Error>)
+                    let awaiter_result = nova.events().awaiter(event_handle);
+
+                    match awaiter_result {
+                        Ok(awaiter) => {
+                            // Now await the LocalEventWaiter with timeout
+                            match tokio::time::timeout(Duration::from_secs(30), awaiter).await {
+                                Ok(Ok(())) => {
+                                    tracing::debug!(?event_handle, "Precondition satisfied");
+                                }
+                                Ok(Err(poison)) => {
+                                    tracing::error!(
+                                        ?event_handle,
+                                        ?poison,
+                                        "Precondition poisoned, marking all blocks as failed"
+                                    );
+                                    // Mark all blocks as failed
+                                    for queued in batch.blocks {
+                                        let mut state = queued.state.lock().unwrap();
+                                        state.set_error(format!(
+                                            "precondition poisoned: {:?}",
+                                            poison
+                                        ));
+                                    }
+                                    return;
+                                }
+                                Err(_) => {
+                                    tracing::error!(
+                                        ?event_handle,
+                                        "Precondition timeout after 30s"
+                                    );
+                                    // Mark all blocks as failed
+                                    for queued in batch.blocks {
+                                        let mut state = queued.state.lock().unwrap();
+                                        state.set_error("precondition timeout".to_string());
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(?event_handle, ?e, "Failed to create awaiter");
+                            // Mark all blocks as failed
+                            for queued in batch.blocks {
+                                let mut state = queued.state.lock().unwrap();
+                                state.set_error(format!("failed to create awaiter: {}", e));
+                            }
+                            return;
+                        }
+                    }
+                }
+
+                // Forward batch to transfer executor
+                if let Err(e) = output_tx.send(batch).await {
+                    tracing::error!("Failed to forward batch after precondition: {}", e);
+                }
+            });
+        }
+    }
+}
+
 /// Transfer executor stage.
 struct TransferExecutor<Src: BlockMetadata, Dst: BlockMetadata> {
     input_rx: BatchOutputRx<Src>,
@@ -832,26 +971,24 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> TransferExecutor<Src, Dst> {
                         state: queued.state,
                     });
                 }
-                SourceBlock::Weak(weak) => {
-                    match weak.upgrade() {
-                        Some(block) => {
-                            resolved.push(ResolvedBlock {
-                                transfer_id: queued.transfer_id,
-                                block_id: block.block_id(),
-                                sequence_hash: queued.sequence_hash,
-                                guard: Some(block),
-                                state: queued.state,
-                            });
-                        }
-                        None => {
-                            tracing::debug!(
-                                sequence_hash = ?queued.sequence_hash,
-                                "Weak block evicted before transfer"
-                            );
-                            evicted_sequence_hashes.push(queued.sequence_hash);
-                        }
+                SourceBlock::Weak(weak) => match weak.upgrade() {
+                    Some(block) => {
+                        resolved.push(ResolvedBlock {
+                            transfer_id: queued.transfer_id,
+                            block_id: block.block_id(),
+                            sequence_hash: queued.sequence_hash,
+                            guard: Some(block),
+                            state: queued.state,
+                        });
                     }
-                }
+                    None => {
+                        tracing::debug!(
+                            sequence_hash = ?queued.sequence_hash,
+                            "Weak block evicted before transfer"
+                        );
+                        evicted_sequence_hashes.push(queued.sequence_hash);
+                    }
+                },
             }
         }
 

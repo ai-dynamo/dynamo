@@ -45,7 +45,7 @@ echo "Build mode: dev (default)"
 echo ""
 
 # Build with maturin develop
-maturin develop
+maturin develop --release
 
 echo ""
 echo "✅ Build complete!"

@@ -219,7 +219,7 @@ where
     // for object, if there is no device_id or device_id is 0, then we need to register
     // alternatively, the object storage holds it's own internal metadata but does not
     // expose as a nixl descriptor, thus ObjectStorag will by default like all other storage
-    // types have a None for nixl_descriptor(), and we will use the internal 
+    // types have a None for nixl_descriptor(), and we will use the internal
     if storage.nixl_descriptor().is_some() {
         return Ok(NixlRegistered {
             storage,

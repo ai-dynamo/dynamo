@@ -62,8 +62,10 @@ pub fn execute_cuda_transfer(
 
     // Get appropriate CUDA stream based on transfer direction
     let stream = match strategy {
-        TransferStrategy::CudaAsyncD2H | TransferStrategy::CudaBlockingD2H => ctx.d2h_stream(),
-        _ => ctx.h2d_stream(), // H2D and D2D use h2d_stream
+        TransferStrategy::CudaAsyncD2H | TransferStrategy::CudaBlockingD2H => {
+            ctx.next_d2h_streams()
+        }
+        _ => ctx.next_h2d_streams(), // H2D and D2D use h2d_stream
     };
 
     // Perform CUDA transfers based on strategy

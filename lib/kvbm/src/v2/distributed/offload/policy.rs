@@ -115,6 +115,18 @@ impl<T: BlockMetadata> EvalContext<T> {
             block: None,
         }
     }
+
+    /// Create a context for external block evaluation.
+    ///
+    /// Used when evaluating external blocks (e.g., G1 from vLLM) - we have
+    /// the block_id and sequence_hash but no ImmutableBlock reference.
+    pub fn from_external(block_id: BlockId, sequence_hash: SequenceHash) -> Self {
+        Self {
+            block_id,
+            sequence_hash,
+            block: None,
+        }
+    }
 }
 
 /// Trait for offload policies that filter blocks.
