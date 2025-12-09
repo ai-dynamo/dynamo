@@ -801,56 +801,6 @@ class Connector:
         return conn
 
 
-class SerializedDescriptor(BaseModel):
-    """
-    Pydantic serialization type for memory descriptors.
-    """
-
-    model_config = ConfigDict(
-        extra="forbid",
-        frozen=True,
-        arbitrary_types_allowed=True,
-    )
-
-    device: str = "cpu"
-    ptr: int = 0
-    size: int = 0
-
-    def to_descriptor(self) -> Descriptor:
-        """
-        Deserialize the serialized descriptor into a `Descriptor` object.
-        """
-        return Descriptor(data=(self.ptr, self.size, self.device, None))
-
-    @field_validator("device")
-    @classmethod
-    def validate_device(cls, v: str) -> str:
-        if not isinstance(v, str):
-            raise TypeError("Argument `device` must be `str`.")
-        v = v.strip().lower()
-        if not (v.startswith("cuda") or v == "cpu"):
-            raise ValueError(
-                "Argument `device` must be one of 'cpu' or 'cuda:<device_id>'."
-            )
-        return v
-
-    @field_validator("ptr")
-    @classmethod
-    def validate_ptr(cls, v: int) -> int:
-        if v == 0:
-            raise ValueError("Argument `ptr` cannot be zero (aka `null` or `None`).")
-        return v
-
-    @field_validator("size")
-    @classmethod
-    def validate_size(cls, v: int) -> int:
-        if v < 0:
-            raise ValueError(
-                "Argument `size` must be an integer greater than or equal to zero."
-            )
-        return v
-
-
 class Descriptor:
     """
     Memory descriptor that ensures memory is registered w/ NIXL, used for transferring data between workers.
@@ -913,6 +863,7 @@ class Descriptor:
         # Member fields for managing NIXL memory registration.
         # Note: ONLY local descriptors should be registered with NIXL,
         #      remote descriptors do not have a valid memory address and registration will fault.
+
         self._connection: Optional[Connection] = None
         self._nixl_hndl: Optional[nixl_bindings.nixlRegDList] = None
 
@@ -1078,11 +1029,13 @@ class Descriptor:
             raise TypeError(
                 "Argument `connection` must be `dynamo.nixl_connect.Connection`."
             )
+
         if connection != self._connection:
-            raise RuntimeError(
-                "Descriptor can only be deregistered from the connection it was registered with. "
+            logger.warning(
+                f"dynamo.nixl_connect.{self.__class__.__name__}: Descriptor can only be deregistered from the connection it was registered with. "
                 f"Existing connection: {self._connection.name if self._connection is not None else None}, requested connection: {connection.name}."
             )
+            return
 
         if self._nixl_hndl is None:
             logger.warning(
@@ -1757,6 +1710,56 @@ class Remote:
         Gets the name of the remote worker.
         """
         return self._name
+
+
+class SerializedDescriptor(BaseModel):
+    """
+    Pydantic serialization type for memory descriptors.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        arbitrary_types_allowed=True,
+    )
+
+    device: str = "cpu"
+    ptr: int = 0
+    size: int = 0
+
+    def to_descriptor(self) -> Descriptor:
+        """
+        Deserialize the serialized descriptor into a `Descriptor` object.
+        """
+        return Descriptor(data=(self.ptr, self.size, self.device, None))
+
+    @field_validator("device")
+    @classmethod
+    def validate_device(cls, v: str) -> str:
+        if not isinstance(v, str):
+            raise TypeError("Argument `device` must be `str`.")
+        v = v.strip().lower()
+        if not (v.startswith("cuda") or v == "cpu"):
+            raise ValueError(
+                "Argument `device` must be one of 'cpu' or 'cuda:<device_id>'."
+            )
+        return v
+
+    @field_validator("ptr")
+    @classmethod
+    def validate_ptr(cls, v: int) -> int:
+        if v == 0:
+            raise ValueError("Argument `ptr` cannot be zero (aka `null` or `None`).")
+        return v
+
+    @field_validator("size")
+    @classmethod
+    def validate_size(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(
+                "Argument `size` must be an integer greater than or equal to zero."
+            )
+        return v
 
 
 class WritableOperation(PassiveOperation):
