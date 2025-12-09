@@ -116,6 +116,9 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    load_lora_endpoint = component.endpoint("load_lora")
+    unload_lora_endpoint = component.endpoint("unload_lora")
+    list_loras_endpoint = component.endpoint("list_loras")
 
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes only run scheduler processes and expose metrics
@@ -169,7 +172,13 @@ async def init(runtime: DistributedRuntime, config: Config):
     ready_event = asyncio.Event()
 
     handler = DecodeWorkerHandler(
-        component, engine, config, publisher, prefill_client, prefill_router_client
+        component,
+        engine,
+        config,
+        publisher,
+        prefill_client,
+        prefill_router_client,
+        generate_endpoint,
     )
 
     health_check_payload = SglangHealthCheckPayload(engine).to_dict()
@@ -189,12 +198,24 @@ async def init(runtime: DistributedRuntime, config: Config):
     try:
         # Start endpoint immediately and register model concurrently
         # Requests queue until ready_event is set (TODO: Part of new PR)
-        await asyncio.gather(
+        tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
+            ),
+            load_lora_endpoint.serve_endpoint(
+                handler.load_lora,
+                metrics_labels=metrics_labels,
+            ),
+            unload_lora_endpoint.serve_endpoint(
+                handler.unload_lora,
+                metrics_labels=metrics_labels,
+            ),
+            list_loras_endpoint.serve_endpoint(
+                handler.list_loras,
+                metrics_labels=metrics_labels,
             ),
             register_llm_with_readiness_gate(
                 engine,
@@ -204,7 +225,8 @@ async def init(runtime: DistributedRuntime, config: Config):
                 output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
                 readiness_gate=ready_event,
             ),
-        )
+        ]
+        await asyncio.gather(*tasks)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
@@ -235,6 +257,9 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     )
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    load_lora_endpoint = component.endpoint("load_lora")
+    unload_lora_endpoint = component.endpoint("unload_lora")
+    list_loras_endpoint = component.endpoint("list_loras")
 
     # Handle non-leader nodes (multi-node tensor parallelism)
     # Non-leader nodes only run scheduler processes and expose metrics
@@ -272,20 +297,42 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     if engine.server_args.enable_metrics:
         setup_prometheus_registry(engine, generate_endpoint)
 
-    handler = PrefillWorkerHandler(component, engine, config, publisher)
+    handler = PrefillWorkerHandler(
+        component, engine, config, publisher, generate_endpoint
+    )
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
-    tasks = [
-        generate_endpoint.serve_endpoint(
-            handler.generate,
-            graceful_shutdown=True,
-            metrics_labels=metrics_labels,
-            health_check_payload=health_check_payload,
-        )
-    ]
-
     try:
+        tasks = [
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=metrics_labels,
+                health_check_payload=health_check_payload,
+            ),
+            load_lora_endpoint.serve_endpoint(
+                handler.load_lora,
+                metrics_labels=metrics_labels,
+            ),
+            unload_lora_endpoint.serve_endpoint(
+                handler.unload_lora,
+                metrics_labels=metrics_labels,
+            ),
+            list_loras_endpoint.serve_endpoint(
+                handler.list_loras,
+                metrics_labels=metrics_labels,
+            ),
+            register_llm_with_readiness_gate(
+                engine,
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                input_type=ModelInput.Tokens,
+                output_type=ModelType.Prefill,
+                readiness_gate=ready_event,
+            ),
+        ]
         await asyncio.gather(*tasks)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")

@@ -8,7 +8,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
-from dynamo._core import Client, Component, Context
+from dynamo._core import Client, Component, Context, Endpoint
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.protocol import DisaggPreprocessedRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -26,6 +26,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         publisher: DynamoSglangPublisher,
         prefill_client: Optional[Client] = None,
         prefill_router_client: Optional[Client] = None,
+        generate_endpoint: Optional[Endpoint] = None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -36,6 +37,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             publisher: Metrics publisher for the worker.
             prefill_client: Optional client for prefill worker in disaggregated mode.
             prefill_router_client: Optional client for prefill router in disaggregated mode.
+            generate_endpoint: Optional endpoint for LoRA registration.
 
         Raises:
             ValueError: If prefill_client is not provided in decode serving mode.
@@ -46,6 +48,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config,
             publisher,
             prefill_client,
+            generate_endpoint,
         )
         if self.serving_mode == DisaggregationMode.DECODE:
             if self.prefill_client is None:
@@ -115,6 +118,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
+        # Extract LoRA request if present
+        # Check if model name matches a loaded LoRA adapter
+        lora_path = None
+        model_name = request.get("model")
+
+        if model_name and model_name in self.lora_id_for_name:
+            lora_path = self.lora_name_to_path.get(model_name)
+            logging.info(
+                f"Decode request {context.id()} will use LoRA adapter: {model_name}, "
+                f"path: {lora_path}"
+            )
+        else:
+            logging.debug(
+                f"Decode request {context.id()} has no LoRA specified (model: {model_name})"
+            )
+
         if self.serving_mode == DisaggregationMode.DECODE:
             # request the bootstrap info from the target prefill worker
             if (
@@ -154,14 +173,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if not bootstrap_info:
                 raise RuntimeError("No bootstrap info received from prefill worker")
 
-            decode = await self.engine.async_generate(
+            # Build generation kwargs with optional LoRA path
+            generate_kwargs = {
                 **input_param,
-                sampling_params=sampling_params,
-                stream=True,
-                bootstrap_host=bootstrap_info["bootstrap_host"],
-                bootstrap_port=bootstrap_info["bootstrap_port"],
-                bootstrap_room=bootstrap_info["bootstrap_room"],
-            )
+                "sampling_params": sampling_params,
+                "stream": True,
+                "bootstrap_host": bootstrap_info["bootstrap_host"],
+                "bootstrap_port": bootstrap_info["bootstrap_port"],
+                "bootstrap_room": bootstrap_info["bootstrap_room"],
+            }
+            if lora_path:
+                generate_kwargs["lora_path"] = lora_path
+
+            decode = await self.engine.async_generate(**generate_kwargs)
 
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(decode, context):
@@ -170,11 +194,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(decode, context):
                     yield out
         else:
-            agg = await self.engine.async_generate(
+            # Build generation kwargs with optional LoRA path
+            generate_kwargs = {
                 **input_param,
-                sampling_params=sampling_params,
-                stream=True,
-            )
+                "sampling_params": sampling_params,
+                "stream": True,
+            }
+            if lora_path:
+                generate_kwargs["lora_path"] = lora_path
+
+            agg = await self.engine.async_generate(**generate_kwargs)
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):
                     yield out
