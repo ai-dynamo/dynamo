@@ -20,8 +20,8 @@ MINIO_SECRET_KEY="minioadmin"
 BUCKET_NAME="my-loras"
 
 # Default LoRA to download (can be overridden)
-HF_LORA_REPO="${HF_LORA_REPO:-Neural-Hacker/Qwen3-Math-Reasoning-LoRA}"
-LORA_NAME="${LORA_NAME:-Neural-Hacker/Qwen3-Math-Reasoning-LoRA}"
+HF_LORA_REPO="${HF_LORA_REPO:-codelion/Qwen3-0.6B-accuracy-recovery-lora}"
+LORA_NAME="${LORA_NAME:-codelion/Qwen3-0.6B-accuracy-recovery-lora}"
 # TEMP_DIR will be created using mktemp when needed
 TEMP_DIR=""
 
@@ -63,8 +63,8 @@ show_help() {
     echo "  --help, -h    Show this help message"
     echo ""
     echo "Environment Variables:"
-    echo "  HF_LORA_REPO  Hugging Face repository (default: ${HF_LORA_REPO:-Neural-Hacker/Qwen3-Math-Reasoning-LoRA})"
-    echo "  LORA_NAME     Local name for the LoRA (default: ${LORA_NAME:-Neural-Hacker/Qwen3-Math-Reasoning-LoRA})"
+    echo "  HF_LORA_REPO  Hugging Face repository (default: ${HF_LORA_REPO:-codelion/Qwen3-0.6B-accuracy-recovery-lora})"
+    echo "  LORA_NAME     Local name for the LoRA (default: ${LORA_NAME:-codelion/Qwen3-0.6B-accuracy-recovery-lora})"
     echo ""
     echo "Examples:"
     echo "  $0                                    # Full setup"
@@ -173,6 +173,7 @@ download_lora_from_hf() {
 
     print_success "LoRA downloaded to ${TEMP_DIR}"
 
+    rm -rf "${TEMP_DIR}/.cache"
     # List downloaded files
     echo "Downloaded files:"
     ls -lh "${TEMP_DIR}"

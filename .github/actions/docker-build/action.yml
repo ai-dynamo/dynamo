@@ -49,6 +49,12 @@ inputs:
   torch_backend:
     description: 'Optional override for TORCH_BACKEND build-arg (e.g., cu129)'
     required: false
+  enable_kvbm:
+    description: 'Enable KVBM support (optional)'
+    required: false
+  dynamo_base_image:
+    description: 'Pre-built Dynamo base image to use instead of building from scratch'
+    required: false
 
 outputs:
   image_tag:
@@ -72,14 +78,9 @@ runs:
         aws ecr get-login-password --region ${{ inputs.aws_default_region }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
     - name: Login to NGC
       if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
-      shell: bash
-      run: |
-        echo "${{ inputs.ngc_ci_access_token }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
-    - name: Cleanup
-      if: always()
-      shell: bash
-      run: |
-        docker system prune -af
+      uses: ./.github/actions/docker-login
+      with:
+        ngc_ci_access_token: ${{ inputs.ngc_ci_access_token }}
     - name: Build image
       id: build
       shell: bash
@@ -125,6 +126,12 @@ runs:
         if [ -n "${{ inputs.torch_backend }}" ]; then
           EXTRA_ARGS+=" --build-arg TORCH_BACKEND=${{ inputs.torch_backend }}"
         fi
+        if [ -n "${{ inputs.dynamo_base_image }}" ]; then
+          EXTRA_ARGS+=" --dynamo-base-image ${{ inputs.dynamo_base_image }}"
+        fi
+        if [ -n "${{ inputs.enable_kvbm }}" ]; then
+          EXTRA_ARGS+=" --build-arg ENABLE_KVBM=${{ inputs.enable_kvbm }}"
+        fi
 
         # Execute build and capture output (show on console AND save to file)
         ./container/build.sh --tag "$IMAGE_TAG" \
@@ -143,6 +150,26 @@ runs:
 
         # Exit with the build's exit code
         exit ${BUILD_EXIT_CODE}
+
+    - name: Run Sanity Check on Runtime Image
+      if: inputs.target == 'runtime'
+      shell: bash
+      run: |
+        IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+        echo "Running sanity check on image: $IMAGE_TAG"
+
+        # Run the sanity check script inside the container
+        # The script is located in /workspace/deploy/sanity_check.py in runtime containers
+        set +e
+        docker run --rm "$IMAGE_TAG" python /workspace/deploy/sanity_check.py --runtime-check --no-gpu-check
+        SANITY_CHECK_EXIT_CODE=$?
+        set -e
+        if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+          echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+          exit ${SANITY_CHECK_EXIT_CODE}
+        else
+          echo "✅ Sanity check passed"
+        fi
 
     - name: Capture Build Metrics
       id: metrics
@@ -289,7 +316,7 @@ runs:
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        name: build-metrics-${{ inputs.framework }}-${{ inputs.target }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: build-metrics/build-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
         retention-days: 7
 

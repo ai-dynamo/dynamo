@@ -72,11 +72,13 @@ jobs:
         with:
           driver: docker
       - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Linter
         shell: bash
         env:
@@ -120,7 +122,7 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: dynamo-operator:latest
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
           aws_push: 'false'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -165,11 +167,18 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
           # OPS-1145: Switch aws_push to true
           aws_push: 'false'
           azure_push: 'true'
@@ -223,11 +232,18 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
           # OPS-1145: Switch aws_push to true
           aws_push: 'false'
           azure_push: 'true'
@@ -281,11 +297,18 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
           # OPS-1145: Switch aws_push to true
           aws_push: 'false'
           azure_push: 'true'
@@ -396,6 +419,7 @@ jobs:
           export KUBECONFIG=$(pwd)/.kubeconfig
           kubectl config set-context --current --namespace=$NAMESPACE
       - name: Run Fault Tolerance Tests
+        id: run-ft-tests
         run: |
           set -x
           export KUBECONFIG=$(pwd)/.kubeconfig
@@ -417,14 +441,49 @@ jobs:
           pip install -r container/deps/requirements.test.txt
           pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
 
-          # Run the pytest command (tests orchestrate K8s, don't need dynamo package)
+          # Create test-results directory
+          mkdir -p test-results
+
+          # Run the pytest command with JUnit XML output
+          set +e  # Don't exit on test failures
           pytest tests/fault_tolerance/deploy/test_deployment.py \
             -m 'k8s and fault_tolerance' \
             -k '${{ matrix.framework.test_scenario }}' \
             -s -v \
             --namespace ${NAMESPACE} \
             --image ${IMAGE} \
-            --client-type legacy
+            --client-type legacy \
+            --junitxml=test-results/pytest_ft_report.xml \
+            --tb=short
+
+          TEST_EXIT_CODE=$?
+          echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+          echo "🧪 Fault tolerance tests completed with exit code: ${TEST_EXIT_CODE}"
+
+          exit ${TEST_EXIT_CODE}
+        continue-on-error: true
+
+      - name: Process Fault Tolerance Test Results
+        if: always()
+        run: |
+          set -x
+
+          # Rename JUnit XML with unique naming if it exists
+          if [ -f "test-results/pytest_ft_report.xml" ]; then
+            mv "test-results/pytest_ft_report.xml" "test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml"
+            echo "✅ JUnit XML report renamed with unique identifier"
+          else
+            echo "⚠️  JUnit XML report not found"
+          fi
+
+      - name: Upload Fault Tolerance Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.framework.name }}-fault_tolerance-amd64-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml
+          retention-days: 7
+
       - name: Cleanup
         if: always()
         timeout-minutes: 5
@@ -447,56 +506,6 @@ jobs:
           echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
           kubectl delete namespace $NAMESPACE || true
           echo "Namespace $NAMESPACE completed."
-
-  # Upload metrics for this workflow and all its jobs
-  upload-workflow-metrics:
-    name: Upload Workflow Metrics
-    runs-on: gitlab
-    if: always()  # Always run, even if other jobs fail
-    needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-
-      - name: Download build metrics
-        uses: actions/download-artifact@v4
-        with:
-          pattern: build-metrics-*
-          path: build-metrics/
-          merge-multiple: true
-        continue-on-error: true  # Don't fail if artifacts don't exist
-
-      - name: Download test results
-        uses: actions/download-artifact@v4
-        with:
-          pattern: test-results-*
-          path: test-results/
-          merge-multiple: true
-        continue-on-error: true  # Don't fail if artifacts don't exist
-
-      - name: Upload Complete Workflow Metrics
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WORKFLOW_INDEX: ${{ secrets.WORKFLOW_INDEX }}
-          JOB_INDEX: ${{ secrets.JOB_INDEX }}
-          STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
-          # Container and test index configuration
-          CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
-          TEST_INDEX: ${{ secrets.TEST_INDEX }}
-        run: |
-          # Upload complete workflow metrics including container metrics
-          python3 .github/workflows/upload_complete_workflow_metrics.py
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
@@ -617,12 +626,16 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
         kubectl config get-contexts
     - name: Run Tests
+      id: run-tests
       env:
         NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
       run: |
         set -x
         export KUBECONFIG=$(pwd)/.kubeconfig
         kubectl config set-context --current --namespace=$NAMESPACE
+
+        # Redirect all output to a log file while still showing it
+        exec > >(tee -a test-output.log) 2>&1
 
         cd examples/backends/$FRAMEWORK
         export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
@@ -716,6 +729,32 @@ jobs:
           echo "Test passed: Response matches expected format and content"
         fi
         exit $TEST_RESULT
+      continue-on-error: true
+
+    - name: Process Deployment Test Results
+      if: always()
+      run: |
+        set -x
+
+        # Create test-results directory
+        mkdir -p test-results
+
+        # Copy and rename the test output log with unique naming
+        if [ -f "test-output.log" ]; then
+          cp test-output.log "test-results/deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log"
+          echo "✅ Test output log copied to test-results/"
+        else
+          echo "⚠️  test-output.log not found"
+        fi
+
+    - name: Upload Deployment Test Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results-${{ env.FRAMEWORK }}-deploy-${{ matrix.profile }}-amd64-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log
+        retention-days: 7
+
     - name: Cleanup
       if: always()
       timeout-minutes: 5
