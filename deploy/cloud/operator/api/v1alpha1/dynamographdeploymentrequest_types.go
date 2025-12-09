@@ -129,10 +129,14 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:validation:Required
 	Model string `json:"model"`
 
-	// Backend specifies the inference backend to use.
+	// Backend specifies the inference backend to deploy.
 	// The controller automatically sets this value in profilingConfig.config.engine.backend.
+	// Profiling always runs on real GPUs or via AIC simulation to collect performance data.
+	// For real backends (vllm, sglang, trtllm): the deployment runs actual inference engines on GPUs.
+	// For mocker: the deployment uses simulated engines (no GPU required) that use the profiling
+	// data to simulate realistic timing behavior. Mocker is available in all backend images.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
+	// +kubebuilder:validation:Enum=vllm;sglang;trtllm;mocker
 	Backend string `json:"backend"`
 
 	// EnableGpuDiscovery controls whether the profiler should automatically discover GPU
@@ -157,14 +161,6 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// Users can then manually create a DGD using the generated spec.
 	// +kubebuilder:default=false
 	AutoApply bool `json:"autoApply,omitempty"`
-
-	// DeployMocker indicates whether to automatically create a mocker DynamoGraphDeployment
-	// after profiling completes. The mocker deployment uses simulated engines that don't require
-	// GPUs, making it useful for testing planner behavior and infrastructure without GPU resources.
-	// When true, a mocker DGD named "<dgdr-name>-mocker" is created. The mocker DGD uses
-	// profiling data for realistic timing simulation.
-	// +kubebuilder:default=false
-	DeployMocker bool `json:"deployMocker,omitempty"`
 
 	// DeploymentOverrides allows customizing metadata for the auto-created DGD.
 	// Only applicable when AutoApply is true.
@@ -221,29 +217,16 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// including metadata, based on profiling results. Users can extract this to create
 	// a DGD manually, or it's used automatically when autoApply is true.
 	// Stored as RawExtension to preserve all fields including metadata.
+	// For mocker backends, this contains the mocker DGD spec.
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:EmbeddedResource
 	GeneratedDeployment *runtime.RawExtension `json:"generatedDeployment,omitempty"`
 
-	// GeneratedMockerDeployment contains the generated mocker DynamoGraphDeployment
-	// specification for testing purposes. The mocker uses simulated engines that don't
-	// require GPUs, using profiling data for realistic timing simulation.
-	// Created automatically when deployMocker is true.
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:pruning:PreserveUnknownFields
-	// +kubebuilder:validation:EmbeddedResource
-	GeneratedMockerDeployment *runtime.RawExtension `json:"generatedMockerDeployment,omitempty"`
-
 	// Deployment tracks the auto-created DGD when AutoApply is true.
 	// Contains name, namespace, state, and creation status of the managed DGD.
 	// +kubebuilder:validation:Optional
 	Deployment *DeploymentStatus `json:"deployment,omitempty"`
-
-	// MockerDeployment tracks the auto-created mocker DGD when DeployMocker is true.
-	// The mocker deployment uses simulated engines that don't require GPUs.
-	// +kubebuilder:validation:Optional
-	MockerDeployment *DeploymentStatus `json:"mockerDeployment,omitempty"`
 }
 
 // DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.

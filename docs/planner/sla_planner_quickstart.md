@@ -196,7 +196,6 @@ curl http://localhost:8000/v1/models
 |-------|------|-------------|
 | `spec.deploymentOverrides.workersImage` | string | Container image for DGD worker components. If omitted, uses image from base config file. |
 | `spec.autoApply` | boolean | Automatically deploy DGD after profiling (default: false) |
-| `spec.deployMocker` | boolean | Deploy a mocker DGD (no GPU required) for testing planner behavior (default: false) |
 | `spec.deploymentOverrides` | object | Customize metadata (name, namespace, labels, annotations) and image for auto-created DGD |
 
 ### SLA Configuration
@@ -339,16 +338,23 @@ For details about the profiling process, performance plots, and interpolation da
 
 ### Mocker Deployment
 
-The `deployMocker` option enables deploying a mocker DGD alongside (or instead of) the real deployment. The mocker uses simulated engines that don't require GPUs.
+Instead of a real DGD that uses GPU resources, you can deploy a `mocker` deployment that uses simulated engines rather than GPUs. Mocker is available in all backend images and uses profiling data to simulate realistic GPU timing behavior. It is useful for:
+- Large-scale experiments without GPU resources
+- Testing Planner behavior and infrastructure
+- Validating deployment configurations
 
-**Enable mocker deployment:**
+Within the DGDR workflow, `mocker` is treated like a backend. To use mocker:
 
 ```yaml
 spec:
-  deployMocker: true
-```
+  model: <model-name>
+  backend: mocker
 
-The mocker DGD uses profiling data for realistic timing simulation. It's created with the name `<dgdr-name>-mocker` and can run alongside the real deployment since they use different resources.
+  profilingConfig:
+    profilerImage: "nvcr.io/nvidia/dynamo/<backend>-runtime:<image-tag>"
+    ...
+  autoApply: true
+```
 
 ### DGDR Immutability
 
