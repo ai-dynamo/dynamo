@@ -1,0 +1,349 @@
+# syntax=docker/dockerfile:1.10.0
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: 2025 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+ARG BASE_IMAGE="intel/deep-learning-essentials"
+ARG BASE_IMAGE_TAG="2025.1.3-0-devel-ubuntu24.04"
+ARG ENABLE_KVBM=false
+ARG RUNTIME_IMAGE="intel/deep-learning-essentials"
+ARG RUNTIME_IMAGE_TAG="2025.1.3-0-devel-ubuntu24.04"
+
+# Make sure to update the dependency version in pyproject.toml when updating this
+ARG VLLM_REF="v0.10.2"
+
+# sccache configuration - inherit from base build
+ARG USE_SCCACHE
+ARG SCCACHE_BUCKET=""
+ARG SCCACHE_REGION=""
+
+# Define general architecture ARGs for supporting both x86 and aarch64 builds.
+#   ARCH: Used for package suffixes (e.g., amd64, arm64)
+#   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
+#
+# Default values are for x86/amd64:
+#   --build-arg ARCH=amd64 --build-arg ARCH_ALT=x86_64
+#
+# For arm64/aarch64, build with:
+#   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
+#
+# NOTE: There isn't an easy way to define one of these values based on the other value
+# without adding if statements everywhere, so just define both as ARGs for now.
+ARG ARCH=amd64
+ARG ARCH_ALT=x86_64
+# Python configuration
+ARG PYTHON_VERSION=3.12
+
+ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
+FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
+
+########################################################
+########## Framework Development Image ################
+########################################################
+#
+# PURPOSE: Framework development and vLLM compilation
+#
+# This stage builds and compiles framework dependencies including:
+# - vLLM inference engine with XPU support
+# - All necessary build tools and compilation dependencies
+# - Framework-level Python packages and extensions
+#
+# Use this stage when you need to:
+# - Build vLLM from source with custom modifications
+# - Develop or debug framework-level components
+# - Create custom builds with specific optimization flags
+#
+
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
+
+ARG PYTHON_VERSION
+
+RUN apt-get update -y \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        # Python runtime - CRITICAL for virtual environment to work
+        python${PYTHON_VERSION}-dev \
+        build-essential \
+        # vLLM build dependencies
+        cmake \
+        ibverbs-providers \
+        ibverbs-utils \
+        libibumad-dev \
+        libibverbs-dev \
+        libnuma-dev \
+        librdmacm-dev \
+        rdma-core \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+### VIRTUAL ENVIRONMENT SETUP ###
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# Create virtual environment
+RUN mkdir -p /opt/dynamo/venv && \
+    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
+
+# Activate virtual environment
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
+
+ARG ARCH
+# Install vllm - keep this early in Dockerfile to avoid
+# rebuilds from unrelated source code changes
+ARG VLLM_REF
+ARG VLLM_GIT_URL
+
+ARG MAX_JOBS=16
+ENV MAX_JOBS=$MAX_JOBS
+
+RUN wget https://raw.githubusercontent.com/intel/llm-scaler/main/vllm/patches/ai-dynamo-xpu/patches/vllm-xpu.patch -O /tmp/vllm-xpu.patch
+
+# Install sccache if requested
+COPY container/use-sccache.sh /tmp/use-sccache.sh
+# Install sccache if requested
+ARG USE_SCCACHE
+ARG ARCH_ALT
+ARG SCCACHE_BUCKET
+ARG SCCACHE_REGION
+
+ENV ARCH_ALT=${ARCH_ALT}
+RUN if [ "$USE_SCCACHE" = "true" ]; then \
+        /tmp/use-sccache.sh install; \
+    fi
+
+# Set environment variables - they'll be empty strings if USE_SCCACHE=false
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
+    CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
+    CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
+    CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
+# Install VLLM and related dependencies
+ENV VLLM_TARGET_DEVICE=xpu
+ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+RUN --mount=type=bind,source=./container/xpu/deps/,target=/tmp/deps \
+    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+        cp /tmp/deps/vllm/install_vllm.xpu.sh /tmp/install_vllm.xpu.sh && \
+        chmod +x /tmp/install_vllm.xpu.sh && \
+        /tmp/install_vllm.xpu.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt && \
+        /tmp/use-sccache.sh show-stats "vLLM";
+
+##################################################
+########## Runtime Image ########################
+##################################################
+#
+# PURPOSE: Production runtime environment
+#
+# This stage creates a lightweight production-ready image containing:
+# - vLLM and framework dependencies
+# - Dynamo runtime libraries and Python packages
+# - Essential runtime dependencies and configurations
+# - Optimized for inference workloads and deployment
+#
+# Use this stage when you need:
+# - Production deployment of Dynamo with vLLM
+# - Minimal runtime footprint without build tools
+# - Ready-to-run inference server environment
+# - Base for custom application containers
+#
+
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+
+RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
+    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
+    add-apt-repository -y ppa:kobuk-team/intel-graphics
+
+WORKDIR /workspace
+ENV DYNAMO_HOME=/opt/dynamo
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+ARG ARCH_ALT
+ARG PYTHON_VERSION
+ARG ENABLE_KVBM
+ENV NIXL_PREFIX=/opt/intel/intel_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+
+# Install Python, build-essential and python3-dev as apt dependencies
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        # Python runtime - CRITICAL for virtual environment to work
+        python${PYTHON_VERSION}-dev \
+        build-essential \
+        # jq and curl for polling various endpoints and health checks
+        jq \
+        git \
+        git-lfs \
+        curl \
+        # Libraries required by UCX to find RDMA devices
+        libibverbs1 rdma-core ibverbs-utils libibumad3 \
+        libnuma1 librdmacm1 ibverbs-providers \
+        # JIT Kernel Compilation, flashinfer
+        ninja-build \
+        g++ \
+        # prometheus dependencies
+        ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends --fix-missing \
+    curl \
+    ffmpeg \
+    libsndfile1 \
+    libsm6 \
+    libxext6 \
+    libgl1 \
+    lsb-release \
+    numactl \
+    wget \
+    vim \
+    linux-libc-dev && \
+    # Install Intel GPU runtime packages
+    apt-get update -y && \
+    apt-get install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN wget https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.6/intel-oneccl-2021.15.6.2_offline.sh
+RUN bash intel-oneccl-2021.15.6.2_offline.sh -a --silent --eula accept && echo "source /opt/intel/oneapi/setvars.sh --force" >> /root/.bashrc
+
+### COPY NATS & ETCD ###
+# Copy nats and etcd from dev image
+COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+# Add ETCD to PATH
+ENV PATH=/usr/local/bin/etcd/:$PATH
+
+# Copy UCX from dev image as plugin for NIXL
+# Copy NIXL source from devr image
+# Copy dynamo wheels for gitlab artifacts
+COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
+COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+ENV PATH=/usr/local/ucx/bin:$PATH
+
+# Copies vllm (all editable installs)
+COPY --from=framework /opt/vllm /opt/vllm
+
+ENV LD_LIBRARY_PATH=\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+$LD_LIBRARY_PATH
+
+### VIRTUAL ENVIRONMENT SETUP ###
+
+# Copy uv and entire virtual environment from framework container
+COPY --from=framework /bin/uv /bin/uvx /bin/
+COPY --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+
+# Install dynamo, NIXL, and dynamo-specific dependencies
+COPY benchmarks/ /opt/dynamo/benchmarks/
+COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+RUN uv pip install \
+      /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+      /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+      /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+    && if [ "${ENABLE_KVBM}" = "true" ]; then \
+        uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
+       fi \
+    && cd /opt/dynamo/benchmarks \
+    && UV_GIT_LFS=1 uv pip install --no-cache . \
+    && cd - \
+    && rm -rf /opt/dynamo/benchmarks
+
+# Install common and test dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    UV_GIT_LFS=1 uv pip install \
+        --no-cache \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
+
+# Copy benchmarks, examples, and tests for CI
+COPY . /workspace/
+
+# Copy attribution files
+COPY ATTRIBUTION* LICENSE /workspace/
+# Copy launch banner
+RUN --mount=type=bind,source=./container/xpu/launch_message/runtime.xpu.txt,target=/workspace/runtime.xpu.txt \
+    sed '/^#\s/d' /workspace/runtime.xpu.txt > ~/.launch_screen && \
+    echo "cat ~/.launch_screen" >> ~/.bashrc && \
+    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
+
+SHELL ["bash", "-c"]
+CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
+
+###########################################################
+########## Development (run.sh, runs as root user) ########
+###########################################################
+#
+# PURPOSE: Local development environment for use with run.sh (not Dev Container plug-in)
+#
+# This stage runs as root and provides:
+# - Development tools and utilities for local debugging
+# - Support for vscode/cursor development outside the Dev Container plug-in
+#
+# Use this stage if you need a full-featured development environment with extra tools,
+# but do not use it with the Dev Container plug-in.
+
+FROM runtime AS dev
+
+# Don't want ubuntu to be editable, just change uid and gid.
+ARG WORKSPACE_DIR=/workspace
+
+# Install utilities as root
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends  \
+    # Install utilities
+    nvtop \
+    wget \
+    tmux \
+    vim \
+    git \
+    openssh-client \
+    iproute2 \
+    rsync \
+    zip \
+    unzip \
+    htop \
+    ucx-utils \
+    # Build Dependencies
+    autoconf \
+    automake \
+    cmake \
+    libtool \
+    meson \
+    net-tools \
+    pybind11-dev \
+    # Rust build dependencies
+    clang \
+    libclang-dev \
+    protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set workspace directory variable
+ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
+    DYNAMO_HOME=${WORKSPACE_DIR} \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/workspace/target \
+    VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH=/usr/local/cargo/bin:$PATH
+
+COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
+
+# Install maturin, for maturin develop
+# Editable install of dynamo
+RUN uv pip install maturin[patchelf] && \
+    uv pip install --no-deps -e .
+
+RUN uv pip uninstall triton pytorch-triton-xpu && \ 
+    uv pip install pytorch-triton-xpu==3.4.0 --extra-index-url=https://download.pytorch.org/whl/xpu && \
+    uv pip uninstall oneccl && \
+    uv pip uninstall oneccl-devel
+
+SHELL ["bash", "-c"]
+CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
