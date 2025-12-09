@@ -121,7 +121,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
 								commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamographdeployment",
 							},
-							Autoscaling: nil,
 						},
 					},
 				},
@@ -153,7 +152,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Custom: map[string]string{},
 								},
 							},
-							Autoscaling: nil,
 						},
 					},
 				},
@@ -229,7 +227,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
 								commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamographdeployment",
 							},
-							Autoscaling: nil,
 						},
 					},
 				},
@@ -261,7 +258,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Custom: map[string]string{},
 								},
 							},
-							Autoscaling: nil,
 						},
 					},
 				},
@@ -341,7 +337,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
 								commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamographdeployment",
 							},
-							Autoscaling: nil,
 							Ingress: &v1alpha1.IngressSpec{
 								Enabled: true,
 								Host:    "test-dynamographdeployment",
@@ -377,7 +372,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Custom: map[string]string{},
 								},
 							},
-							Autoscaling: nil,
 						},
 					},
 				},
@@ -465,7 +459,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
 								commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamographdeployment",
 							},
-							Autoscaling: nil,
 							Envs: []corev1.EnvVar{
 								{
 									Name:  "DYN_DEPLOYMENT_CONFIG",
@@ -503,7 +496,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Custom: map[string]string{},
 								},
 							},
-							Autoscaling: nil,
 							Envs: []corev1.EnvVar{
 								{
 									Name:  "DYN_DEPLOYMENT_CONFIG",
@@ -599,7 +591,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
 								commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamographdeployment",
 							},
-							Autoscaling: nil,
 							ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 								MainContainer: &corev1.Container{
 									Command: []string{"sh", "-c"},
@@ -644,7 +635,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Custom: map[string]string{},
 								},
 							},
-							Autoscaling: nil,
 							Envs: []corev1.EnvVar{
 								{
 									Name:  "TEST_ENV",
@@ -1307,6 +1297,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Name: "frontend",
 								Labels: map[string]string{
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-frontend",
+									commonconsts.KubeLabelDynamoComponent:           "Frontend",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
 									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
@@ -1483,6 +1474,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Labels: map[string]string{
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-planner",
+									commonconsts.KubeLabelDynamoComponent:           "Planner",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
@@ -1884,8 +1876,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
 									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
-									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-ldr",
+									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoComponent:           "worker",
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
@@ -2059,8 +2052,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
 									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
-									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-wkr",
+									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoComponent:           "worker",
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
@@ -2200,6 +2194,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-frontend",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoComponent:           "Frontend",
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
 								},
 								Annotations: map[string]string{},
@@ -2358,6 +2353,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Name: "planner",
 								Labels: map[string]string{
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-planner",
+									commonconsts.KubeLabelDynamoComponent:           "Planner",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
@@ -2779,7 +2775,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 							{
 								Name: "worker-ldr",
 								Labels: map[string]string{
-									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-ldr",
+									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker",
+									commonconsts.KubeLabelDynamoComponent:           "worker",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
@@ -2943,7 +2940,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Labels: map[string]string{
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
-									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-wkr",
+									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker",
+									commonconsts.KubeLabelDynamoComponent:           "worker",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
@@ -3084,6 +3082,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-frontend",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoComponent:           "Frontend",
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
 								},
 								Annotations: map[string]string{},
@@ -3243,6 +3242,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Labels: map[string]string{
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-planner",
+									commonconsts.KubeLabelDynamoComponent:           "Planner",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
