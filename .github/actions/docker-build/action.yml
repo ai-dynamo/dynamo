@@ -254,8 +254,7 @@ runs:
         chmod +x .github/scripts/parse_buildkit_output.py
 
         # Check for build logs and build stage arguments dynamically
-        BASE_BUILD_LOG="build-logs/base-image-build.log"
-        FRAMEWORK_BUILD_LOG="build-logs/framework-${FRAMEWORK_LOWER}-build.log"
+        BUILD_LOG="build-logs/single-stage-build.log"
 
         # Path to container metadata created in previous step
         CONTAINER_METADATA="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
@@ -268,18 +267,11 @@ runs:
         # Build stage arguments dynamically based on which logs exist
         STAGE_ARGS=()
 
-        if [ -f "$BASE_BUILD_LOG" ]; then
-          echo "  ✓ Found base image log: ${BASE_BUILD_LOG}"
-          STAGE_ARGS+=("base:${BASE_BUILD_LOG}")
+        if [ -f "$BUILD_LOG" ]; then
+          echo "  ✓ Found base image log: ${BUILD_LOG}"
+          STAGE_ARGS+=("runtime:${BUILD_LOG}")
         else
-          echo "  ℹ️  No base image log found"
-        fi
-
-        if [ -f "$FRAMEWORK_BUILD_LOG" ]; then
-          echo "  ✓ Found framework log: ${FRAMEWORK_BUILD_LOG}"
-          STAGE_ARGS+=("runtime:${FRAMEWORK_BUILD_LOG}")
-        else
-          echo "  ℹ️  No framework log found"
+          echo "  ℹ️  No image log found"
         fi
 
         # Check for any additional stage logs (e.g., build-logs/stage3-*.log)

@@ -880,61 +880,26 @@ fi
 
 # Skip Build 1 and Build 2 if DEV_IMAGE_INPUT is set (we'll handle it at the bottom)
 if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
-    if [[ $FRAMEWORK != "NONE" ]]; then
-        # Different frameworks require different base configurations:
-        # - VLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=cuda-dl-base
-        # - SGLANG: Python 3.10, BASE_IMAGE=cuda-dl-base
-        # - TRTLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=pytorch
+    # Create build log directory for BuildKit reports
+    BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
+    mkdir -p "${BUILD_LOG_DIR}"
+    SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
 
-        # Create build log directory for BuildKit reports
-        BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
-        mkdir -p "${BUILD_LOG_DIR}"
-
-        # Start framework build
-        echo "======================================"
-        echo "Starting Build: Framework Image"
-        echo "======================================"
-
-        FRAMEWORK_BUILD_LOG="${BUILD_LOG_DIR}/framework-${FRAMEWORK,,}-build.log"
-
-        # Use BuildKit for enhanced metadata
-        if [ -z "$RUN_PREFIX" ]; then
-            if docker buildx version &>/dev/null; then
-                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            else
-                DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            fi
-
-            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
-                exit ${BUILD_EXIT_CODE}
-            fi
+    # Use BuildKit for enhanced metadata
+    if [ -z "$RUN_PREFIX" ]; then
+        if docker buildx version &>/dev/null; then
+            docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+            BUILD_EXIT_CODE=${PIPESTATUS[0]}
         else
-            $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+            DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+            BUILD_EXIT_CODE=${PIPESTATUS[0]}
+        fi
+
+        if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+            exit ${BUILD_EXIT_CODE}
         fi
     else
-        # Create build log directory for BuildKit reports
-        BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
-        mkdir -p "${BUILD_LOG_DIR}"
-        SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
-
-        # Use BuildKit for enhanced metadata
-        if [ -z "$RUN_PREFIX" ]; then
-            if docker buildx version &>/dev/null; then
-                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            else
-                DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            fi
-
-            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
-                exit ${BUILD_EXIT_CODE}
-            fi
-        else
-            $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-        fi
+        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
     fi
 fi
 
