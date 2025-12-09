@@ -22,7 +22,7 @@ The NVIDIA Dynamo project uses containerized development and deployment to maint
 
 <details>
 <summary>Show Stage Summary Table</summary>
-#### Dockerfile.${FRAMEWORK} General Structure
+**Dockerfile.${FRAMEWORK} General Structure**
 
 Below is a summary of the general file structure for the framework Dockerfile stages. Some exceptions exist.
 

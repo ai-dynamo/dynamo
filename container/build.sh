@@ -122,6 +122,7 @@ SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
 NIXL_REF=0.7.1
 NIXL_UCX_REF=v1.19.0
 NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
+NIXL_GDRCOPY_REF=v2.5.1
 
 NO_CACHE=""
 
@@ -830,10 +831,15 @@ if [ -z "${ENABLE_MEDIA_NIXL}" ]; then
 fi
 BUILD_ARGS+=" --build-arg ENABLE_MEDIA_NIXL=${ENABLE_MEDIA_NIXL} "
 
-# NIXL_UCX_REF: Used in base Dockerfile only.
-#               Passed to framework Dockerfile.{vllm,sglang,...} where it's NOT used.
+# NIXL_UCX_REF: Used in dynamo base stages.
 if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
+fi
+
+# NIXL_GDRCOPY_REF: Used in dynamo base stages.
+if [ -n "${NIXL_GDRCOPY_REF}" ]; then
+    BUILD_ARGS+=" --build-arg NIXL_GDRCOPY_REF=${NIXL_GDRCOPY_REF} "
+
 fi
 
 # MAX_JOBS is only used by Dockerfile.vllm
