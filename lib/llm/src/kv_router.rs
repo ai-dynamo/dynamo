@@ -690,7 +690,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         // Always inject worker_id in first item's disaggregated_params
                         // This is needed for:
                         // 1. PrefillRouter to know which prefill worker was chosen
-                        // 2. Client response when extra_fields contains "worker_id"
+                        // 2. Client response when observability_fields contains "worker_id"
                         if first_item {
                             first_item = false;
 

@@ -97,10 +97,10 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
 
-    /// Extra fields requested to be included in the response's nvext
+    /// Observability fields requested to be included in the response's nvext
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra_fields: Option<Vec<String>>,
+    pub observability_fields: Option<Vec<String>>,
 
     /// Timestamp when the request was received by the frontend (seconds since epoch)
     /// Used for timing metrics to track end-to-end latency

@@ -227,9 +227,9 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 # Update the prompt token id in the decode request to the one
                 # in response, which has image templated filled in. So that
                 # the decode worker will fetch correct amount of KV blocks.
-                decode_request.engine_prompt[
-                    "prompt_token_ids"
-                ] = prefill_response.prompt_token_ids
+                decode_request.engine_prompt["prompt_token_ids"] = (
+                    prefill_response.prompt_token_ids
+                )
                 logger.debug(
                     f"Prefill response kv_transfer_params: {prefill_response.kv_transfer_params}"
                 )

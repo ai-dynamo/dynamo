@@ -58,7 +58,7 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 /// Injects `request_completed_seconds` into the nvext timing_metrics field.
 /// This captures the exact moment when the response is about to leave the server.
-/// Only injects if timing_metrics already exists (i.e., the user requested it via extra_fields).
+/// Only injects if timing_metrics already exists (i.e., the user requested it via observability_fields).
 fn inject_request_completed_seconds(nvext: &mut Option<serde_json::Value>) {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)

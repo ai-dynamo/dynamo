@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for extra_fields handling in vLLM handlers."""
+"""Unit tests for observability_fields handling in vLLM handlers."""
 
 import asyncio
 import warnings
@@ -33,18 +33,18 @@ pytestmark = [
 class TestShouldIncludeTimingMetrics:
     """Tests for _request_contains_timing_metrics helper function."""
 
-    def test_returns_true_with_multiple_extra_fields(self):
+    def test_returns_true_with_multiple_observability_fields(self):
         """Timing metrics should be included when explicitly requested."""
-        request = {"extra_fields": ["worker_id", "timing_metrics", "other_field"]}
+        request = {"observability_fields": ["worker_id", "timing_metrics", "other_field"]}
         assert _request_contains_timing_metrics(request) is True
 
-    def test_returns_false_when_extra_fields_is_none(self):
-        """Timing metrics should not be included when extra_fields is None."""
-        request = {"extra_fields": None}
+    def test_returns_false_when_observability_fields_is_none(self):
+        """Timing metrics should not be included when observability_fields is None."""
+        request = {"observability_fields": None}
         assert _request_contains_timing_metrics(request) is False
 
-    def test_returns_false_when_extra_fields_missing(self):
-        """Timing metrics should not be included when extra_fields key is absent."""
+    def test_returns_false_when_observability_fields_missing(self):
+        """Timing metrics should not be included when observability_fields key is absent."""
         request: dict[str, list[str]] = {}
         assert _request_contains_timing_metrics(request) is False
 
@@ -145,7 +145,7 @@ class TestDecodeWorkerHandlerTiming:
             "token_ids": [1, 2, 3],
             "sampling_options": {},
             "stop_conditions": {},
-            "extra_fields": ["timing_metrics"],
+            "observability_fields": ["timing_metrics"],
             "request_received_seconds": 1000.0,
             "prefill_result": {
                 "disaggregated_params": {
@@ -192,7 +192,7 @@ class TestPrefillWorkerHandlerTiming:
             "token_ids": [1, 2, 3],
             "sampling_options": {},
             "stop_conditions": {},
-            "extra_fields": ["timing_metrics"],
+            "observability_fields": ["timing_metrics"],
             "request_received_seconds": 1000.0,
         }
 

@@ -75,11 +75,11 @@ def build_sampling_params(
 
 
 def _request_contains_timing_metrics(request: Dict[str, Any]) -> bool:
-    """Check if timing_metrics is requested in extra_fields."""
-    extra_fields: Optional[List[str]] = request.get("extra_fields")
-    if extra_fields is None:
+    """Check if timing_metrics is requested in observability_fields."""
+    observability_fields: Optional[List[str]] = request.get("observability_fields")
+    if observability_fields is None:
         return False
-    return "timing_metrics" in extra_fields
+    return "timing_metrics" in observability_fields
 
 
 class BaseWorkerHandler(ABC):
@@ -259,10 +259,10 @@ class BaseWorkerHandler(ABC):
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res,
+                        out["completion_usage"] = (
+                            BaseWorkerHandler._build_completion_usage(
+                                request_output=res,
+                            )
                         )
                     if output.stop_reason:
                         out["stop_reason"] = output.stop_reason
@@ -309,9 +309,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         include_timing = _request_contains_timing_metrics(request)
 
         # Initialize timing metrics using request_received_seconds from frontend (passed via PreprocessedRequest)
-        # NOTE: If frontend, prefill workers, and decode workers are running on different machines,
-        # there may be slight clock drifts between them. As a result, timing values recorded on
-        # different machines may not be perfectly synchronized and could show minor inconsistencies.
+        #
+        # TIMING METRICS:
+        # - Reliable durations: Use same-machine timestamps (e.g., decode_end - decode_start).
+        #   We use time.perf_counter() for intra-worker duration calculations to ensure monotonic,
+        #   high-resolution timing that's immune to system clock adjustments.
+        # - Cross-machine calculations (e.g., prefill_start - request_received) assume perfect NTP
+        #   synchronization and should be used with UTMOST CAUTION due to clock drift. Even with NTP,
+        #   clocks can drift by milliseconds each day, leading to negative durations or misleading latency values.
+        #   These cross-machine metrics are useful for rough end-to-end analysis but should not be
+        #   relied upon for precise performance measurements.
+        # - TODO: Measure actual overhead (network, queueing, etc.) - expected to be low but needs
+        #   benchmarking
         timing_metrics: Dict[str, float] = {}
         if include_timing:
             # Use request_received_seconds from the request (set by frontend) if available
@@ -371,6 +380,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Record decode start time
                 if include_timing:
                     decode_start_seconds = time.time()
+                    decode_start_perf_counter = time.perf_counter()
                     # If this is aggregated mode (no prefill_result), prefill_start == decode_start
                     if prefill_result is None:
                         timing_metrics["prefill_start_seconds"] = decode_start_seconds
@@ -396,7 +406,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     # On finish, record decode_end_seconds and inject timing_metrics
                     # Note: request_finish_seconds is set in the Rust HTTP layer when the response actually leaves the server
                     if tok.get("finish_reason") is not None and include_timing:
-                        timing_metrics["decode_end_seconds"] = time.time()
+                        timing_metrics["decode_end_seconds"] = decode_start_seconds + (
+                            time.perf_counter() - decode_start_perf_counter
+                        )
 
                         # Inject timing_metrics into disaggregated_params
                         if (
@@ -442,9 +454,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         include_timing = _request_contains_timing_metrics(request)
 
         # Initialize timing metrics using request_received_seconds from frontend (passed via PreprocessedRequest)
-        # NOTE: If frontend, prefill workers, and decode workers are running on different machines,
-        # there may be slight clock drifts between them. As a result, timing values recorded on
-        # different machines may not be perfectly synchronized and could show minor inconsistencies.
+        # See DecodeWorkerHandler.generate() for timing metrics documentation
         timing_metrics: Dict[str, float] = {}
         if include_timing:
             # Use request_received_seconds from the request (set by frontend) if available
@@ -453,7 +463,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 timing_metrics["request_received_seconds"] = frontend_received
 
             # Record prefill_start as when we start processing in the prefill worker
-            timing_metrics["prefill_start_seconds"] = time.time()
+            prefill_start_seconds = time.time()
+            prefill_start_perf_counter = time.perf_counter()
+            timing_metrics["prefill_start_seconds"] = prefill_start_seconds
 
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(request)
@@ -511,12 +523,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     disaggregated_params: Optional[Dict[str, Any]] = {}
 
                     if res.kv_transfer_params:
-                        disaggregated_params[
-                            "kv_transfer_params"
-                        ] = res.kv_transfer_params
+                        disaggregated_params["kv_transfer_params"] = (
+                            res.kv_transfer_params
+                        )
 
                     if include_timing and timing_metrics:
-                        timing_metrics["prefill_end_seconds"] = time.time()
+                        timing_metrics["prefill_end_seconds"] = (
+                            prefill_start_seconds
+                            + (time.perf_counter() - prefill_start_perf_counter)
+                        )
                         disaggregated_params["timing_metrics"] = timing_metrics
 
                     output: Dict[str, Any] = {

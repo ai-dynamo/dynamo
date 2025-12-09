@@ -9,13 +9,15 @@ export PYTHONHASHSEED=0
 
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
-BLOCK_SIZE=64
+BLOCK_SIZE=16
+NUM_GPU_BLOCKS=20000
 
 # Start frontend with KV routing
 # The frontend will automatically detect prefill workers and activate an internal prefill router
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend \
     --router-mode kv \
+    --enforce-disagg \
     --router-reset-states &
 
 # two decode workers
@@ -24,6 +26,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
+    --num-gpu-blocks-override $NUM_GPU_BLOCKS \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'&
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
@@ -31,6 +34,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
+    --num-gpu-blocks-override $NUM_GPU_BLOCKS \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
 
 # two prefill workers
@@ -42,6 +46,7 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.vllm \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
     --is-prefill-worker \
+    --num-gpu-blocks-override $NUM_GPU_BLOCKS \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082","enable_kv_cache_events":true}'&
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
@@ -50,4 +55,5 @@ CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.vllm \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
     --is-prefill-worker \
+    --num-gpu-blocks-override $NUM_GPU_BLOCKS \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20083","enable_kv_cache_events":true}'

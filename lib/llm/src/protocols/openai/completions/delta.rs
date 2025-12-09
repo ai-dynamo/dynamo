@@ -41,7 +41,7 @@ impl NvCreateCompletionRequest {
                 .map(|opts| opts.include_usage)
                 .unwrap_or(false),
             enable_logprobs: self.inner.logprobs.unwrap_or(0) > 0,
-            extra_fields: self.nvext.as_ref().and_then(|nv| nv.extra_fields.clone()),
+            observability_fields: self.nvext.as_ref().and_then(|nv| nv.observability_fields.clone()),
         };
 
         DeltaGenerator::new(self.inner.model.clone(), options, request_id)
@@ -53,7 +53,7 @@ pub struct DeltaGeneratorOptions {
     pub enable_usage: bool,
     pub enable_logprobs: bool,
     /// Extra fields to include in response nvext (e.g., "worker_id", "timing_metrics")
-    pub extra_fields: Option<Vec<String>>,
+    pub observability_fields: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -227,9 +227,9 @@ impl DeltaGenerator {
     }
 
     /// Check if an extra field is requested
-    fn is_extra_field_requested(&self, field: &str) -> bool {
+    fn is_observability_field_requested(&self, field: &str) -> bool {
         self.options
-            .extra_fields
+            .observability_fields
             .as_ref()
             .map(|fields| fields.iter().any(|f| f == field))
             .unwrap_or(false)
@@ -278,19 +278,19 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         let mut response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
 
         // Extract worker_id and timing_metrics from disaggregated_params and inject into nvext
-        // Only include fields that were explicitly requested via extra_fields
+        // Only include fields that were explicitly requested via observability_fields
         if let Some(ref disaggregated_params) = delta.disaggregated_params {
             let mut nvext_obj = serde_json::Map::new();
 
             // Extract worker_id if present and requested
-            if self.is_extra_field_requested("worker_id")
+            if self.is_observability_field_requested("worker_id")
                 && let Some(worker_id_json) = disaggregated_params.get("worker_id")
             {
                 nvext_obj.insert("worker_id".to_string(), worker_id_json.clone());
             }
 
             // Extract timing_metrics if present and requested
-            if self.is_extra_field_requested("timing_metrics")
+            if self.is_observability_field_requested("timing_metrics")
                 && let Some(timing_metrics_json) = disaggregated_params.get("timing_metrics")
             {
                 nvext_obj.insert("timing_metrics".to_string(), timing_metrics_json.clone());
@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn test_completions_delta_extracts_timing_metrics_from_disaggregated_params() {
         let options = DeltaGeneratorOptions {
-            extra_fields: Some(vec!["worker_id".to_string(), "timing_metrics".to_string()]),
+            observability_fields: Some(vec!["worker_id".to_string(), "timing_metrics".to_string()]),
             ..Default::default()
         };
         let mut generator = DeltaGenerator::new(

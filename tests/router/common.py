@@ -1573,7 +1573,7 @@ def _test_router_disagg_decisions(
                     # Each iteration adds more content to extend the prefix
                     progressive_content = " ".join([base_content] * (i + 1))
 
-                    # Create payload with worker_id in extra_fields to get prefill/decode worker IDs
+                    # Create payload with worker_id in observability_fields to get prefill/decode worker IDs
                     payload = {
                         **test_payload,
                         "messages": [
@@ -1582,7 +1582,7 @@ def _test_router_disagg_decisions(
                                 "content": progressive_content,
                             }
                         ],
-                        "nvext": {"extra_fields": ["worker_id"]},
+                        "nvext": {"observability_fields": ["worker_id"]},
                         "stream": True,
                     }
 
@@ -1653,7 +1653,7 @@ def _test_router_disagg_decisions(
         # Verify we got worker IDs from all requests
         assert len(prefill_ids) == 4, (
             f"Expected 4 prefill_worker_ids, got {len(prefill_ids)}. "
-            f"Make sure nvext.extra_fields=['worker_id'] is being processed."
+            f"Make sure nvext.observability_fields=['worker_id'] is being processed."
         )
 
         # Verify all prefill_worker_ids are the same (prefix reuse)
