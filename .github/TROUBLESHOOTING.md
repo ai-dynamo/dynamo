@@ -26,6 +26,17 @@ If you see checks stuck at "Waiting for status to be reported" or no CI runs at 
 ⏳ pre-commit              Expected — Waiting for status to be reported
 ```
 
+### Understanding Which Checks Run When
+
+| Check | Runs on direct PR? | Requires copy-pr-bot? |
+|-------|-------------------|----------------------|
+| `pre-commit` | ✅ Yes | No |
+| `copyright-checks` | ✅ Yes | No |
+| `Build and Test - dynamo` | ✅ Yes | No |
+| `backend-status-check` | ❌ No | **Yes** |
+
+If only `backend-status-check` is stuck at "Waiting", this is expected - it requires a maintainer to trigger via copy-pr-bot.
+
 ### Internal NVIDIA PRs: GPG Signing Required
 
 **Symptom**: CI checks show "Waiting for status" and never start for PRs from NVIDIA employees.
