@@ -78,11 +78,48 @@ class KubernetesAPI:
                 )
             raise
 
-    def update_graph_replicas(
-        self, graph_deployment_name: str, component_name: str, replicas: int
+    def update_service_replicas(
+        self, graph_deployment_name: str, service_name: str, replicas: int
     ) -> None:
-        """Update the replicas count for a component in a DynamoGraphDeployment"""
-        patch = {"spec": {"services": {component_name: {"replicas": replicas}}}}
+        """
+        Update replicas for a service using Scale subresource when DGDSA exists.
+        Falls back to DGD patch for backward compatibility with older operators.
+
+        Args:
+            graph_deployment_name: Name of the DynamoGraphDeployment
+            service_name: Name of the service in DGD.spec.services
+            replicas: Desired number of replicas
+        """
+        # DGDSA naming convention: <dgd-name>-<lowercase-service-name>
+        adapter_name = f"{graph_deployment_name}-{service_name.lower()}"
+
+        try:
+            # Try to scale via DGDSA Scale subresource
+            self.custom_api.patch_namespaced_custom_object_scale(
+                group="nvidia.com",
+                version="v1alpha1",
+                namespace=self.current_namespace,
+                plural="dynamographdeploymentscalingadapters",
+                name=adapter_name,
+                body={"spec": {"replicas": replicas}},
+            )
+            logger.info(f"Scaled DGDSA {adapter_name} to {replicas} replicas")
+
+        except client.ApiException as e:
+            if e.status == 404:
+                # DGDSA doesn't exist - fall back to DGD patch (old operator)
+                logger.info(
+                    f"DGDSA {adapter_name} not found, falling back to DGD update"
+                )
+                self._update_dgd_replicas(graph_deployment_name, service_name, replicas)
+            else:
+                raise
+
+    def _update_dgd_replicas(
+        self, graph_deployment_name: str, service_name: str, replicas: int
+    ) -> None:
+        """Update replicas directly in DGD (fallback for old operators)"""
+        patch = {"spec": {"services": {service_name: {"replicas": replicas}}}}
         self.custom_api.patch_namespaced_custom_object(
             group="nvidia.com",
             version="v1alpha1",
@@ -91,6 +128,20 @@ class KubernetesAPI:
             name=graph_deployment_name,
             body=patch,
         )
+        logger.info(
+            f"Updated DGD {graph_deployment_name} service {service_name} to {replicas} replicas"
+        )
+
+    def update_graph_replicas(
+        self, graph_deployment_name: str, component_name: str, replicas: int
+    ) -> None:
+        """
+        Update replicas for a service. Now uses DGDSA when available.
+
+        Deprecated: Use update_service_replicas() instead for clarity.
+        This method is kept for backward compatibility.
+        """
+        self.update_service_replicas(graph_deployment_name, component_name, replicas)
 
     def is_deployment_ready(self, deployment: dict) -> bool:
         """Check if a graph deployment is ready"""

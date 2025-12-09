@@ -136,7 +136,7 @@ def chat_payload(
     max_tokens: int = 300,
     temperature: Optional[float] = None,
     stream: bool = False,
-    logprobs: Optional[int] = None,
+    logprobs: bool = False,
     top_logprobs: Optional[int] = None,
     extra_body: Optional[Dict[str, Any]] = None,
 ) -> ChatPayload:
@@ -149,6 +149,7 @@ def chat_payload(
         ],
         "max_tokens": max_tokens,
         "stream": stream,
+        "logprobs": logprobs,
     }
     if temperature is not None:
         body["temperature"] = temperature
@@ -157,15 +158,26 @@ def chat_payload(
     if top_logprobs is not None:
         body["top_logprobs"] = top_logprobs
 
+    if top_logprobs is not None:
+        body["top_logprobs"] = top_logprobs
+
     if extra_body:
         body.update(extra_body)
 
-    return ChatPayload(
-        body=body,
-        repeat_count=repeat_count,
-        expected_log=expected_log or [],
-        expected_response=expected_response or [],
-    )
+    if logprobs:
+        return ChatPayloadWithLogprobs(
+            body=body,
+            repeat_count=repeat_count,
+            expected_log=expected_log or [],
+            expected_response=expected_response or [],
+        )
+    else:
+        return ChatPayload(
+            body=body,
+            repeat_count=repeat_count,
+            expected_log=expected_log or [],
+            expected_response=expected_response or [],
+        )
 
 
 def completion_payload(
@@ -186,13 +198,19 @@ def completion_payload(
     }
     if logprobs is not None:
         body["logprobs"] = logprobs
-
-    return CompletionPayload(
-        body=body,
-        repeat_count=repeat_count,
-        expected_log=expected_log or [],
-        expected_response=expected_response or [],
-    )
+        return CompletionPayloadWithLogprobs(
+            body=body,
+            repeat_count=repeat_count,
+            expected_log=expected_log or [],
+            expected_response=expected_response or [],
+        )
+    else:
+        return CompletionPayload(
+            body=body,
+            repeat_count=repeat_count,
+            expected_log=expected_log or [],
+            expected_response=expected_response or [],
+        )
 
 
 def embedding_payload_default(
