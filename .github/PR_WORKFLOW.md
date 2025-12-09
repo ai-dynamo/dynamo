@@ -26,6 +26,7 @@ flowchart TD
     subgraph Always["Always Run"]
         B[pre-commit<br/>Code formatting & linting]
         C[copyright-checks<br/>Header validation]
+        I[Build and Test - dynamo<br/>Core container build & tests]
         D[lint-pr-title<br/>Conventional commits]
         E[DCO Check<br/>Signed commits]
         F[CodeQL<br/>Security analysis]
@@ -34,25 +35,23 @@ flowchart TD
 
     subgraph Conditional["Conditional - Based on Changed Files"]
         H{has_code_changes?}
-        I[Build and Test - dynamo<br/>Core container build & tests]
         J[vLLM build & tests]
         K[SGLang build & tests]
         L[TRT-LLM build & tests]
         M[backend-status-check<br/>Aggregates backend results]
     end
 
-    A --> B & C & D & E & F & G
+    A --> B & C & I & D & E & F & G
     A --> H
-    H -->|Yes| I
     H -->|Yes + vllm files| J
     H -->|Yes + sglang files| K
     H -->|Yes + trtllm files| L
     J & K & L --> M
 
-    style B fill:#90EE90
-    style C fill:#90EE90
-    style I fill:#90EE90
-    style M fill:#90EE90
+    style B fill:#1f6feb,color:#fff
+    style C fill:#1f6feb,color:#fff
+    style I fill:#1f6feb,color:#fff
+    style M fill:#1f6feb,color:#fff
 ```
 
 ---
@@ -178,7 +177,7 @@ flowchart TD
     
     V2 & V3 & S2 & S3 & T2 & T3 & O2 --> Check[backend-status-check]
     
-    style Check fill:#90EE90
+    style Check fill:#1f6feb,color:#fff
 ```
 
 Each framework build:
