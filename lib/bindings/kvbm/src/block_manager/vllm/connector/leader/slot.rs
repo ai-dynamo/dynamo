@@ -1036,32 +1036,32 @@ impl Slot for VllmConnectorSlot {
 
         // Limit object matches to transfer batch size
         // Object→GPU transfers use host pool blocks as bounce buffers
-        // let blocks_per_batch = dynamo_llm::block_manager::offload::max_transfer_batch_size();
+        let blocks_per_batch = dynamo_llm::block_manager::offload::max_transfer_batch_size();
 
-        // let object_lookup_slice = &sequence_hashes[search_offset..];
-        // let object_lookup_limit = object_lookup_slice.len().min(blocks_per_batch);
+        let object_lookup_slice = &sequence_hashes[search_offset..];
+        let object_lookup_limit = object_lookup_slice.len().min(blocks_per_batch);
 
-        // if object_lookup_limit < object_lookup_slice.len() {
-        //     tracing::debug!(
-        //         request_id = %self.request_id,
-        //         requested = object_lookup_slice.len(),
-        //         limit = object_lookup_limit,
-        //         blocks_per_batch = blocks_per_batch,
-        //         "Limiting object storage matching to batch size"
-        //     );
-        // }
+        if object_lookup_limit < object_lookup_slice.len() {
+            tracing::debug!(
+                request_id = %self.request_id,
+                requested = object_lookup_slice.len(),
+                limit = object_lookup_limit,
+                blocks_per_batch = blocks_per_batch,
+                "Limiting object storage matching to batch size"
+            );
+        }
 
-        // // Check object storage for remaining blocks (limited to batch size)
-        // let object_matches = self
-        //     .object_registry
-        //     .match_sequence_hashes(&object_lookup_slice[..object_lookup_limit]);
+        // Check object storage for remaining blocks (limited to batch size)
+        let object_matches = self
+            .object_registry
+            .match_sequence_hashes(&object_lookup_slice[..object_lookup_limit]);
 
-        // let num_matched_object_blocks = object_matches.len();
-        // self.record_cached_object_tokens(num_matched_object_blocks * block_size);
+        let num_matched_object_blocks = object_matches.len();
+        self.record_cached_object_tokens(num_matched_object_blocks * block_size);
 
-        let object_matches: Vec<(u64, u64)> = Vec::new();
-        let num_matched_object_blocks = 0;
-        let _ = search_offset; // silence unused variable warning
+        // let object_matches: Vec<(u64, u64)> = Vec::new();
+        // let num_matched_object_blocks = 0;
+        // let _ = search_offset; // silence unused variable warning
 
         let num_matched_blocks =
             num_matched_host_blocks + num_matched_disk_blocks + num_matched_object_blocks;

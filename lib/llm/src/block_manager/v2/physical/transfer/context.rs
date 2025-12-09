@@ -232,9 +232,10 @@ impl TransferContext {
         unsafe { cuda_context.disable_event_tracking() };
 
         // Create channels for background notification handlers
-        let (tx_nixl_status, rx_nixl_status) = mpsc::channel(64);
-        let (tx_cuda_event, rx_cuda_event) = mpsc::channel(64);
-        let (tx_nixl_events, rx_nixl_events) = mpsc::channel(64);
+        // Use larger capacity to handle high-throughput object storage transfers
+        let (tx_nixl_status, rx_nixl_status) = mpsc::channel(4096);
+        let (tx_cuda_event, rx_cuda_event) = mpsc::channel(4096);
+        let (tx_nixl_events, rx_nixl_events) = mpsc::channel(4096);
 
         // Spawn background handlers
         let handle = tokio_runtime.handle();
@@ -316,8 +317,14 @@ impl TransferContext {
             done: done_tx,
         };
 
-        // Send to background handler (ignore error if receiver dropped)
-        let _ = self.tx_nixl_status.try_send(notification);
+        // Send to background handler
+        if let Err(e) = self.tx_nixl_status.try_send(notification) {
+            tracing::error!(
+                "Failed to register NIXL transfer notification: channel full or closed. \
+                 Consider increasing channel capacity. Error: {}",
+                e
+            );
+        }
 
         TransferCompleteNotification { status: done_rx }
     }
@@ -335,8 +342,13 @@ impl TransferContext {
             done: done_tx,
         };
 
-        // Send to background handler (ignore error if receiver dropped)
-        let _ = self.tx_cuda_event.try_send(notification);
+        // Send to background handler
+        if let Err(e) = self.tx_cuda_event.try_send(notification) {
+            tracing::error!(
+                "Failed to register CUDA event notification: channel full or closed. Error: {}",
+                e
+            );
+        }
 
         TransferCompleteNotification { status: done_rx }
     }
@@ -359,8 +371,13 @@ impl TransferContext {
             done: done_tx,
         };
 
-        // Send to background handler (ignore error if receiver dropped)
-        let _ = self.tx_nixl_events.try_send(notification);
+        // Send to background handler
+        if let Err(e) = self.tx_nixl_events.try_send(notification) {
+            tracing::error!(
+                "Failed to register NIXL event notification: channel full or closed. Error: {}",
+                e
+            );
+        }
 
         TransferCompleteNotification { status: done_rx }
     }
