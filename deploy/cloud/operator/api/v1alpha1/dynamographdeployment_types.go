@@ -54,6 +54,43 @@ type DynamoGraphDeploymentStatus struct {
 	// Conditions contains the latest observed conditions of the graph deployment.
 	// The slice is merged by type on patch updates.
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+	// Services contains per-service replica status information.
+	// The map key is the service name from spec.services.
+	// +optional
+	Services map[string]ServiceReplicaStatus `json:"services,omitempty"`
+}
+
+// ServiceReplicaStatus contains replica information for a single service.
+type ServiceReplicaStatus struct {
+	// ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet").
+	ComponentKind string `json:"componentKind"`
+	// ComponentName is the name of the underlying resource.
+	ComponentName string `json:"componentName"`
+
+	// Replicas is the total number of non-terminated replicas.
+	// Always populated for all component kinds.
+	// +optional
+	Replicas int32 `json:"replicas"`
+
+	// UpdatedReplicas is the number of replicas at the current/desired revision.
+	// Always populated for all component kinds.
+	// +optional
+	UpdatedReplicas int32 `json:"updatedReplicas"`
+
+	// ReadyReplicas is the number of ready replicas.
+	// Populated for PodClique, Deployment, and LeaderWorkerSet.
+	// Not available for PodCliqueScalingGroup.
+	// When nil, the field is omitted from the API response.
+	// +optional
+	ReadyReplicas *int32 `json:"readyReplicas,omitempty"`
+
+	// AvailableReplicas is the number of available replicas.
+	// For Deployment: replicas ready for >= minReadySeconds.
+	// For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.
+	// Not available for PodClique or LeaderWorkerSet.
+	// When nil, the field is omitted from the API response.
+	// +optional
+	AvailableReplicas *int32 `json:"availableReplicas,omitempty"`
 }
 
 // +kubebuilder:object:root=true
