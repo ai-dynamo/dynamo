@@ -16,7 +16,7 @@ use crate::block_manager::{
 use crate::get_current_tokio_handle;
 
 use dynamo_llm::block_manager::{
-    BasicMetadata, DiskStorage, ImmutableBlock, PinnedStorage,
+    DiskStorage, ImmutableBlock,
     block::{
         data::logical::distributed_leader_worker::DistributedLeaderWorkerResources,
         locality::Logical,
@@ -108,6 +108,10 @@ impl KvConnectorLeader {
             kvbm_metrics_endpoint_enabled(),
             parse_kvbm_metrics_port(),
         );
+
+        // Spawn periodic stats logger (logs every 30 seconds)
+        kvbm_metrics.spawn_periodic_stats_logger(std::time::Duration::from_secs(30));
+
         let kvbm_metrics_clone = kvbm_metrics.clone();
 
         let slot_manager_cell = Arc::new(OnceLock::new());
@@ -353,6 +357,7 @@ impl Leader for KvConnectorLeader {
 
             md.create_slot(request_id.clone());
 
+            // Take any pending operations (e.g., onboarding transfers) and add to metadata
             if let Some(pending_ops) = slot.take_pending_operations() {
                 tracing::debug!("adding {} pending onboarding operations", pending_ops.len());
                 md.add_operations(pending_ops);
@@ -401,9 +406,10 @@ impl Leader for KvConnectorLeader {
 
             slot.apply_scheduler_output(&[], &[], new_req.num_computed_tokens, scheduled_tokens)?;
 
+            // Take any pending operations (e.g., offload transfers) and add to metadata
             if let Some(pending_ops) = slot.take_pending_operations() {
                 tracing::debug!(
-                    "adding {} pending operations for slot {}",
+                    "adding {} pending operations for new slot {}",
                     pending_ops.len(),
                     new_req.request_id
                 );
@@ -463,9 +469,10 @@ impl Leader for KvConnectorLeader {
                 scheduled_tokens,
             )?;
 
+            // Take any pending operations (e.g., offload transfers) and add to metadata
             if let Some(pending_ops) = slot.take_pending_operations() {
                 tracing::debug!(
-                    "adding {} pending operations for slot {}",
+                    "adding {} pending operations for cached slot {}",
                     pending_ops.len(),
                     request_id
                 );
@@ -473,6 +480,7 @@ impl Leader for KvConnectorLeader {
             }
         }
 
+        let unscheduled_count = inflight_requests.len();
         for unscheduled_req in inflight_requests.iter() {
             let shared_slot = self.slot_manager().get_slot(unscheduled_req)?;
             let mut slot_guard = shared_slot
@@ -485,6 +493,28 @@ impl Leader for KvConnectorLeader {
                 .ok_or_else(|| anyhow::anyhow!("Expected VllmConnectorSlot, got different type"))?;
 
             slot.mark_as_skipped()?;
+        }
+
+        // Log summary of build_connector_metadata for debugging stalls
+        let total_inflight = self.inflight_requests.len();
+        let total_operations = md.operations.len();
+        if total_inflight > 0 || unscheduled_count > 0 || total_operations > 0 {
+            tracing::debug!(
+                target: "build_connector_metadata",
+                iteration = self.iteration_counter,
+                total_inflight = total_inflight,
+                new_requests = scheduler_output.new_requests.len(),
+                cached_requests = scheduler_output.cached_requests.len(),
+                unscheduled = unscheduled_count,
+                operations = total_operations,
+                "BUILD_METADATA: iteration={} | inflight={} | new={} | cached={} | unscheduled={} | operations={}",
+                self.iteration_counter,
+                total_inflight,
+                scheduler_output.new_requests.len(),
+                scheduler_output.cached_requests.len(),
+                unscheduled_count,
+                total_operations
+            );
         }
 
         tracing::debug!("metadata: {md:#?}");
@@ -551,7 +581,7 @@ impl Leader for KvConnectorLeader {
         self.slot_manager()
             .create_slot(&request.request_id, tokens, request.salt_hash)?;
 
-        self.inflight_requests.insert(request.request_id);
+        self.inflight_requests.insert(request.request_id.clone());
 
         Ok(())
     }
