@@ -75,9 +75,13 @@ class BaseWorkerHandler(ABC):
         pass
 
     def _get_input_param(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        return self.input_param_manager.get_input_param(
+        request_input = self.input_param_manager.get_input_param(
             request, use_tokenizer=not self.skip_tokenizer_init
         )
+
+        return {
+            "prompt" if isinstance(request_input, str) else "input_ids": request_input
+        }
 
     @staticmethod
     def _generate_bootstrap_room() -> int:

@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Final
 
-from vllm.inputs import TokensPrompt, TextPrompt
+from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams

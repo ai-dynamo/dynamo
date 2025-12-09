@@ -323,7 +323,9 @@ class HandlerBase:
                 stop_token_ids = stop_conditions.get("stop_token_ids_hidden")
                 if stop_token_ids:
                     existing = sampling_params.stop_token_ids or []
-                    sampling_params.stop_token_ids = list(set(existing).union(stop_token_ids))
+                    sampling_params.stop_token_ids = list(
+                        set(existing).union(stop_token_ids)
+                    )
 
         # TODO: Instead of True, we should use streaming from the request.
         # However, currently dynamo run does not send streaming in the request.

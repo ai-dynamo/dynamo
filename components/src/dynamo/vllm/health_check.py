@@ -8,11 +8,14 @@ This module defines the default health check payload for vLLM backends.
 """
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from dynamo.health_check import HealthCheckPayload
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.v1.engine.async_llm import AsyncLLM
 
 
 def _get_bos_token_id_from_engine(engine_client) -> int:
@@ -45,8 +48,10 @@ def _get_bos_token_id_from_engine(engine_client) -> int:
     logger.debug("Using default BOS token ID (1) for health check")
     return 1
 
-def _make_default_payload(engine_client: Optional["AsyncLLM"], use_text_input: bool) -> dict:
 
+def _make_default_payload(
+    engine_client: Optional["AsyncLLM"], use_text_input: bool
+) -> dict:
     sampling_options = {
         "temperature": 0.0,
     }
@@ -72,7 +77,7 @@ def _make_default_payload(engine_client: Optional["AsyncLLM"], use_text_input: b
             "sampling_options": sampling_options,
             "stop_conditions": stop_conditions,
         }
-    
+
 
 class VllmHealthCheckPayload(HealthCheckPayload):
     """

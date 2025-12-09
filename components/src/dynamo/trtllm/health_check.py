@@ -47,6 +47,7 @@ def _get_bos_token_id_from_tokenizer(tokenizer) -> int:
     logger.debug("Using default BOS token ID (1) for health check")
     return 1
 
+
 def _make_default_payload(tokenizer, use_text_input: bool) -> dict:
     default_payload = {
         "stop_conditions": {
@@ -76,6 +77,7 @@ def _make_default_payload(tokenizer, use_text_input: bool) -> dict:
         default_payload["token_ids"] = [bos_token_id]
 
     return default_payload
+
 
 class TrtllmHealthCheckPayload(HealthCheckPayload):
     """
