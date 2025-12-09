@@ -626,23 +626,18 @@ class BaseWorkerHandler(ABC):
             actual_token_id = output.token_ids[num_output_tokens_so_far + token_idx]
 
             # Extract log probability for the selected token
-            if actual_token_id in token_logprobs_dict:
-                selected_logprob = token_logprobs_dict[actual_token_id]
-                log_probs.append(float(selected_logprob.logprob))
-            else:
-                # Fallback: use the first logprob if selected token not found
-                first_logprob = next(iter(token_logprobs_dict.values()), None)
-                if first_logprob:
-                    log_probs.append(float(first_logprob.logprob))
+            # vLLM guarantees the selected token is always in the logprobs dict
+            selected_logprob = token_logprobs_dict[actual_token_id]
+            log_probs.append(float(selected_logprob.logprob))
 
             # Build top_logprobs list for this token position
             token_top_logprobs = []
             for tok_id, logprob_info in token_logprobs_dict.items():
                 token_top_logprobs.append(
                     {
-                        "rank": logprob_info.rank
-                        if hasattr(logprob_info, "rank")
-                        else 0,
+                        "rank": (
+                            logprob_info.rank if hasattr(logprob_info, "rank") else 0
+                        ),
                         "token_id": tok_id,
                         "token": (
                             logprob_info.decoded_token
