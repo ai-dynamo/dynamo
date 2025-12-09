@@ -949,6 +949,7 @@ class Descriptor:
             # Deregister the memory with NIXL.
             self._connection._nixl.deregister_memory(self._nixl_hndl)
             self._nixl_hndl = None
+            self._connection = None
 
         if self._data_ref is not None:
             # Release the reference to the data.
