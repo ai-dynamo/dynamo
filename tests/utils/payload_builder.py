@@ -138,6 +138,7 @@ def chat_payload(
     stream: bool = False,
     logprobs: Optional[int] = None,
     top_logprobs: Optional[int] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> ChatPayload:
     body: Dict[str, Any] = {
         "messages": [
@@ -155,6 +156,9 @@ def chat_payload(
         body["logprobs"] = logprobs
     if top_logprobs is not None:
         body["top_logprobs"] = top_logprobs
+
+    if extra_body:
+        body.update(extra_body)
 
     return ChatPayload(
         body=body,
