@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Run aggregated tests in parallel: pytest tests/serve/test_trtllm.py -k "aggregated and not disagg" -n auto
+# Speedup: ~2x (57s parallel vs 113s serial for 3 tests)
+
 import logging
 import os
 from dataclasses import dataclass, field
@@ -178,7 +181,9 @@ def test_deployment(trtllm_config_test, request, runtime_services, predownload_m
     """
     config = trtllm_config_test
     extra_env = {"MODEL_PATH": config.model, "SERVED_MODEL_NAME": config.model}
-    run_serve_deployment(config, request, extra_env=extra_env)
+    run_serve_deployment(
+        config, request, extra_env=extra_env, runtime_services=runtime_services
+    )
 
 
 # TODO make this a normal guy

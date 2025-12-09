@@ -101,6 +101,7 @@ pub struct RuntimeConfig {
     /// Set to 0 to bind to a random available port
     /// Set to a positive port number (e.g. 8081) to bind to a specific port
     /// Set this at runtime with environment variable DYN_SYSTEM_PORT
+    /// TODO: Change type from i16 to u16 to support full port range (0-65535)
     #[builder(default = "DEFAULT_SYSTEM_PORT")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub system_port: i16,

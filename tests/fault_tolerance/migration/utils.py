@@ -97,7 +97,7 @@ def start_completion_request() -> tuple:
 
 def determine_request_receiving_worker(
     worker1: ManagedProcess, worker2: ManagedProcess, receiving_pattern: str
-) -> tuple:
+) -> tuple[ManagedProcess, str]:
     """
     Determine which worker received the request using parallel polling.
 
@@ -158,8 +158,10 @@ def determine_request_receiving_worker(
         return worker2, "Worker 2"
     elif worker1_received and worker2_received:
         pytest.fail("Both workers received the request")
+        raise AssertionError("Unreachable")  # For mypy: pytest.fail() raises
     else:
         pytest.fail("Neither worker received the request")
+        raise AssertionError("Unreachable")  # For mypy: pytest.fail() raises
 
 
 def validate_completion_response(

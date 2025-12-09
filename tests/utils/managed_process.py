@@ -559,6 +559,10 @@ class ManagedProcess:
             hasattr(self, "proc") and self.proc is not None and self.proc.poll() is None
         )
 
+    def get_pid(self) -> int | None:
+        """Get the PID of the managed process."""
+        return self.proc.pid if self.proc else None
+
     def subprocesses(self) -> list[psutil.Process]:
         """Find child processes of the current process."""
         if (
@@ -604,10 +608,6 @@ class DynamoFrontendProcess(ManagedProcess):
             terminate_existing=True,
             log_dir=log_dir,
         )
-
-    def get_pid(self) -> int | None:
-        """Get the PID of the worker process"""
-        return self.proc.pid if self.proc else None
 
 
 def main():
