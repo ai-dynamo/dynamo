@@ -99,6 +99,9 @@ fn extract_tool_calls(
     let mut tool_calls = Vec::new();
 
     // Find all function_calls blocks
+    // Matches: <｜DSML｜function_calls> ... </｜DSML｜function_calls>
+    // Pattern: (?s) = dot matches newlines
+    //          \s*(.*?)\s* = capture content between start/end tags (non-greedy)
     let block_pattern = format!(
         r"(?s){}\s*(.*?)\s*{}",
         regex::escape(&config.function_calls_start),
