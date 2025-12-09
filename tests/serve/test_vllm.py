@@ -454,6 +454,66 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "guided_decoding_json": VLLMConfig(
+        name="guided_decoding_json",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload(
+                "Generate a person with name and age",
+                repeat_count=1,
+                expected_response=['"name"', '"age"'],
+                temperature=0.0,
+                max_tokens=100,
+                extra_body={
+                    "guided_json": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "age": {"type": "integer"},
+                        },
+                        "required": ["name", "age"],
+                    }
+                },
+            )
+        ],
+    ),
+    "guided_decoding_regex": VLLMConfig(
+        name="guided_decoding_regex",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload(
+                "Generate a color name (red, blue, or green)",
+                repeat_count=1,
+                expected_response=["red", "blue", "green"],
+                temperature=0.0,
+                max_tokens=20,
+                extra_body={"guided_regex": r"(red|blue|green)"},
+            )
+        ],
+    ),
+    "guided_decoding_choice": VLLMConfig(
+        name="guided_decoding_choice",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload(
+                "Generate a color name (red, blue, or green)",
+                repeat_count=1,
+                expected_response=["red", "blue", "green"],
+                temperature=0.0,
+                max_tokens=20,
+                extra_body={"guided_choice": ["red", "blue", "green"]},
+            )
+        ],
+    ),
 }
 
 

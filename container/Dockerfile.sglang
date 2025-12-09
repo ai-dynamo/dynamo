@@ -1,6 +1,21 @@
 # syntax=docker/dockerfile:1.10.0
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Throughout this file, we make certain paths group-writable because this allows
+# both the dynamo user (UID 1000) and Dev Container users (UID != 1000) to work
+# properly without needing slow chown -R operations (which can add 2-10 extra
+# minutes).
+#
+# DEVELOPMENT PATHS THAT MUST BE GROUP-WRITABLE (for non-virtualenv containers):
+#   /workspace            - Users create/modify project files
+#   /home/dynamo          - Users create config/cache files
+#   /home/dynamo/.local   - SGLang uses $HOME/.local/lib/python3.10/site-packages for pip install
+#
+# HOW TO ACHIEVE GROUP-WRITABLE PERMISSIONS:
+# 1. SHELL + /etc/profile.d - Login shell sources umask 002 globally for all RUN commands (775/664)
+# 2. COPY --chmod=775       - Sets permissions on copied children (not destination)
+# 3. chmod g+w (no -R)      - Fixes destination dirs only (milliseconds vs minutes)
 
 # This section contains build arguments that are common and shared with
 # the plain Dockerfile, so they should NOT have a default. The source of truth is from build.sh.
@@ -190,18 +205,25 @@ RUN git clone --depth 1 --branch ${GDRCOPY_COMMIT} https://github.com/NVIDIA/gdr
 # Fix DeepEP IBGDA symlink
 RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
 
-# Create dynamo user EARLY - before copying files, with group 0 for OpenShift compatibility
+# Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
     && mkdir -p /workspace /home/dynamo/.cache /opt/dynamo \
-    && chown -R dynamo: /sgl-workspace /workspace /home/dynamo /opt/dynamo \
-    && chmod -R g+w /sgl-workspace /workspace /home/dynamo/.cache /opt/dynamo
+    # Non-recursive chown - only the directories themselves, not contents
+    && chown dynamo:0 /sgl-workspace /workspace /home/dynamo /home/dynamo/.cache /opt/dynamo \
+    # No chmod needed: umask 002 handles new files, COPY --chmod handles copied content
+    # Set umask globally for all subsequent RUN commands (must be done as root before USER dynamo)
+    # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
+    && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
 USER dynamo
 ENV HOME=/home/dynamo
+# This picks up the umask 002 from the /etc/profile.d/00-umask.sh file for subsequent RUN commands
+SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 
-# Install SGLang (requires CUDA 12.8.1 or 12.9.1)
+# Install SGLang (requires CUDA 12.8.1 or 12.9.1). Note that when system-wide packages is not writable,
+# so it gets installed to ~/.local/lib/python<version>/site-packages.
 RUN python3 -m pip install --no-cache-dir --ignore-installed pip==25.3 setuptools==80.9.0 wheel==0.45.1 html5lib==1.1 six==1.17.0 \
     && git clone --depth 1 --branch v${SGLANG_COMMIT} https://github.com/sgl-project/sglang.git \
     && cd sglang \
@@ -279,8 +301,10 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST="9.0;10.0" pip install --no-build-isolation .
 
 # Copy rust installation from dynamo_base to avoid duplication efforts
-COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
+# Pattern: COPY --chmod=775 <path>; RUN chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --from=dynamo_base --chown=dynamo:0 --chmod=775 /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base --chown=dynamo:0 --chmod=775 /usr/local/cargo /usr/local/cargo
+RUN chmod g+w /usr/local/rustup /usr/local/cargo
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
@@ -341,8 +365,9 @@ COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
 ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:${HOME}/.local/bin:$PATH
 
 # Install Dynamo wheels from dynamo_base wheelhouse
-COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
-COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
+COPY --chmod=775 --chown=dynamo:0 benchmarks/ /opt/dynamo/benchmarks/
+COPY --chmod=775 --chown=dynamo:0 --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN python3 -m pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
@@ -361,7 +386,17 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.test.txt
 
 ## Copy attribution files and launch banner with correct ownership
-COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
+COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
+
+# Copy tests, benchmarks, deploy and components for CI with correct ownership
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
+COPY --chmod=775 --chown=dynamo:0 pyproject.toml /workspace/
+COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
+COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
+COPY --chmod=775 --chown=dynamo:0 benchmarks /workspace/benchmarks
+COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
+COPY --chmod=775 --chown=dynamo:0 components/ /workspace/components/
+COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
 
 # Setup launch banner in common directory accessible to all users
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
@@ -369,21 +404,16 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
 
 # Setup environment for all users
 USER root
-RUN chmod 755 /opt/dynamo/.launch_screen && \
+# Fix directory permissions: COPY --chmod only affects contents, not the directory itself
+RUN chmod g+w /workspace /workspace/* /opt/dynamo /opt/dynamo/* && \
+    chown dynamo:0 /workspace /opt/dynamo/ && \
+    chmod 755 /opt/dynamo/.launch_screen && \
     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
 USER dynamo
 
 # Copy tests, benchmarks, deploy and components for CI with correct ownership
-COPY --chown=dynamo: pyproject.toml /workspace/
-COPY --chown=dynamo: tests /workspace/tests
-COPY --chown=dynamo: examples /workspace/examples
-COPY --chown=dynamo: benchmarks /workspace/benchmarks
-COPY --chown=dynamo: deploy /workspace/deploy
-COPY --chown=dynamo: components/ /workspace/components/
-COPY --chown=dynamo: recipes/ /workspace/recipes/
-
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
@@ -420,6 +450,8 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
 USER root
+# venv permissions are handled by umask 002 set earlier
+
 # Install development tools and utilities
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends  \
@@ -478,7 +510,7 @@ RUN curl --retry 3 --retry-delay 2 -LSso /usr/local/bin/clang-format https://git
     && rm -rf clangd_18.1.3 clangd.zip
 
 # Editable install of dynamo
-COPY README.md hatch_build.py /workspace/
+COPY --chmod=664 pyproject.toml README.md hatch_build.py /workspace/
 RUN python3 -m pip install --no-deps -e .
 
 # Install Python development packages
