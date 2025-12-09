@@ -520,8 +520,9 @@ COPY --chown=dynamo: --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 COPY --chown=dynamo: --from=framework /opt/vllm /opt/vllm
 
 # Copy UCX and NIXL to system directories
-COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx /usr/local/ucx
+COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
 COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
+COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 ENV PATH=/usr/local/ucx/bin:$PATH
 
 ENV LD_LIBRARY_PATH=\
