@@ -7,11 +7,13 @@
 | `pre-commit` | Direct |
 | `copyright-checks` | Direct |
 | `Build and Test - dynamo` | Direct |
-| `backend-status-check` | copy-pr-bot |
+| `backend-status-check` | Via `pull-request/N` branch |
 
 ---
 
 ## PR Flow
+
+**Direct checks** run immediately when a PR is opened or updated. **Backend builds and GitLab CI** only run when a maintainer triggers copy-pr-bot, which creates a `pull-request/N` branch - the push to that branch triggers the workflows.
 
 ```mermaid
 flowchart TD
@@ -29,7 +31,7 @@ flowchart TD
         G[docs-link-check]
     end
 
-    subgraph CopyPR["Via copy-pr-bot"]
+    subgraph CopyPR["Via pull-request/N branch"]
         H{has_code_changes?}
         J[vLLM build & tests]
         K[SGLang build & tests]
@@ -39,10 +41,9 @@ flowchart TD
     end
 
     A --> B & C & I & D & E & F & G
-    A -.->|copy-pr-bot| H
+    A -.->|copy-pr-bot creates branch| H & N
     H -->|Yes| J & K & L
     J & K & L --> M
-    H -.-> N
 
     style B fill:#1f6feb,color:#fff
     style C fill:#1f6feb,color:#fff
@@ -53,7 +54,9 @@ flowchart TD
 
 ---
 
-## Core Dynamo Build
+## Core Dynamo Build (`container-validation-dynamo.yml`)
+
+Runs on **all PRs** directly. Builds the core Dynamo container and runs Rust checks + pytest.
 
 ```mermaid
 flowchart LR
@@ -67,9 +70,9 @@ flowchart LR
 
 ---
 
-## Backend Builds
+## Backend Builds (`container-validation-backends.yml`)
 
-> ⚠️ Only runs via copy-pr-bot (`pull-request/N` branches)
+Only runs when code is pushed to `pull-request/N` branches (created by copy-pr-bot) or `main`/`release/*`. Uses `filters.yaml` to check if `has_code_changes` is true.
 
 ```mermaid
 flowchart TD
@@ -96,19 +99,22 @@ flowchart TD
     end
     
     V2 & V3 & S2 & S3 & T2 & T3 & O2 --> Check[backend-status-check]
+    Check --> FT[Fault Tolerance Tests]
     
     style Check fill:#1f6feb,color:#fff
 ```
 
 ---
 
-## copy-pr-bot Flow
+## copy-pr-bot
+
+copy-pr-bot **creates a `pull-request/N` branch** when triggered by a maintainer. It does not directly trigger workflows - the **push to that branch** is what triggers backend builds and GitLab CI.
 
 ```mermaid
 flowchart LR
-    A[PR Opened] --> B{Maintainer triggers<br/>copy-pr-bot}
-    B -->|Comment| C[Bot creates<br/>pull-request/N branch]
-    C --> D[Backend builds +<br/>GitLab CI run]
+    A[PR Opened] --> B{Maintainer comments<br/>to trigger bot}
+    B --> C[Bot creates<br/>pull-request/N branch]
+    C --> D[Push triggers<br/>backend builds + GitLab CI]
     D --> E[Results reported<br/>to PR]
 
     style D fill:#1f6feb,color:#fff
@@ -116,7 +122,24 @@ flowchart LR
 
 ---
 
+## Path Filters (`filters.yaml`)
+
+Workflows use `filters.yaml` to conditionally run based on changed files:
+
+| Filter | Used By | Paths |
+|--------|---------|-------|
+| `has_code_changes` | Backend builds | `components/**`, `lib/**`, `tests/**`, `container/**`, `*.py`, `*.rs`, etc. |
+| `vllm` | GitLab CI | `Dockerfile.vllm`, `components/dynamo/vllm/**` |
+| `sglang` | GitLab CI | `Dockerfile.sglang`, `components/dynamo/sglang/**` |
+| `trtllm` | GitLab CI | `Dockerfile.trtllm`, `components/dynamo/trtllm/**` |
+
+GitLab CI always runs (skips only `.md`/`.rst` changes) but uses framework filters to tell GitLab *which* frameworks to test.
+
+---
+
 ## Post-Merge
+
+After merge to `main` or `release/*`, workflows trigger on push (no copy-pr-bot needed).
 
 ```mermaid
 flowchart TD
@@ -144,15 +167,15 @@ flowchart TD
 
 | Aspect | PR | Post-Merge |
 |--------|-----|------------|
-| Rust checks | On `*.rs` changes | Always |
-| Docs link check | Offline mode | Full external |
-| Fault tolerance | ❌ | ✅ |
-| GitLab CI | Via copy-pr-bot | Always |
+| Rust checks | On `*.rs` changes only | Always |
+| Docs link check | Offline mode | Full external links |
+| Fault tolerance | Via `pull-request/N` branch | ✅ Always |
+| GitLab CI | Via `pull-request/N` branch | Always |
 
 ---
 
 ## Related
 
-- [README](./README.md) - Workflow details
-- [Nightly Workflow](./NIGHTLY_WORKFLOW.md)
-- [Troubleshooting](./TROUBLESHOOTING.md)
+- [README](./README.md) - Workflow details and configuration
+- [Nightly Workflow](./NIGHTLY_WORKFLOW.md) - Scheduled builds
+- [Troubleshooting](./TROUBLESHOOTING.md) - Common CI issues

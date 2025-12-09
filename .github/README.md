@@ -98,9 +98,9 @@ GitHub Actions workflows and configuration for the Dynamo CI/CD system.
 After PRs merge to `main` or `release/*`:
 
 - **All backend builds** run (not just changed frameworks)
-- **Fault tolerance tests** run on Kubernetes (pod failure recovery)
 - **Docs link check** runs in full mode (external links)
 - **GitLab CI** triggers additional internal tests
+- **Rust checks** always run (not just on `*.rs` changes)
 
 ---
 

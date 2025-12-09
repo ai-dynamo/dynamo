@@ -1,6 +1,9 @@
 # Nightly CI Workflow
 
-**Schedule**: Daily at 12:00 AM PST (08:00 UTC)
+**Schedule**: Daily at 12:00 AM PST (08:00 UTC)  
+**Workflow**: `nightly-ci.yml`
+
+The nightly pipeline builds all frameworks for both architectures and runs comprehensive test suites. Unlike PR builds, nightly builds all frameworks regardless of what changed.
 
 ---
 
@@ -51,7 +54,11 @@ flowchart TD
 
 ---
 
-## Build Matrix
+## Build Stage
+
+Each framework builds two images:
+- **Framework image**: Build dependencies, used as cache for subsequent builds
+- **Runtime image**: Deployable container with all components
 
 ```mermaid
 flowchart LR
@@ -85,7 +92,9 @@ flowchart LR
 
 ---
 
-## Test Matrix
+## Test Stage
+
+Tests wait for their corresponding build to complete. If a build fails, tests fail immediately (no wasted GPU time).
 
 ```mermaid
 flowchart TD
@@ -117,7 +126,7 @@ flowchart TD
 | E2E Single GPU | 120 min | `{framework} and e2e and gpu_1` |
 | E2E Multi GPU | 150 min | `e2e and gpu_2` |
 
-> ARM64 tests run in dry-run mode (collect-only) - no GPU runners available.
+> **Note**: ARM64 tests run in dry-run mode (collect-only) since no GPU runners are available for ARM64.
 
 ---
 
@@ -141,11 +150,11 @@ flowchart LR
     B2 -->|check status| T3
 ```
 
-Tests fail immediately if their build failed (no wasted GPU time).
-
 ---
 
 ## Image Tags
+
+Images are pushed to AWS ECR and Azure ACR with the following tag patterns:
 
 | Tag Pattern | Example | Purpose |
 |-------------|---------|---------|
@@ -215,6 +224,6 @@ flowchart TB
 
 ## Related
 
-- [README](./README.md) - Workflow details
-- [PR Workflow](./PR_WORKFLOW.md)
-- [Troubleshooting](./TROUBLESHOOTING.md)
+- [README](./README.md) - Workflow details and configuration
+- [PR Workflow](./PR_WORKFLOW.md) - Pull request CI
+- [Troubleshooting](./TROUBLESHOOTING.md) - Common CI issues
