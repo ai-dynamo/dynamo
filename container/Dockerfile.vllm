@@ -704,7 +704,7 @@ CMD []
 
 FROM runtime AS runtime-aws
 
-ARG EFA_VERSION=1.45.1
+ARG EFA_VERSION
 
 USER root
 
@@ -740,7 +740,7 @@ CMD []
 
 FROM dev AS dev-aws
 
-ARG EFA_VERSION=1.45.1
+ARG EFA_VERSION
 
 # Install AWS EFA installer with bundled libfabric and aws-ofi-nccl
 # Flags explanation:
