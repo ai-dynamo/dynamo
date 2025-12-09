@@ -101,8 +101,8 @@ fn build_with_prebuilt_kernels() {
         }
 
         // Read and validate hashes
-        let stored_hashes_content =
-            fs::read_to_string(&md5_path).expect(&format!("Failed to read {}", md5_path.display()));
+        let stored_hashes_content = fs::read_to_string(&md5_path)
+            .unwrap_or_else(|_| panic!("Failed to read {}", md5_path.display()));
         let stored_hashes: Vec<&str> = stored_hashes_content.lines().collect();
 
         if stored_hashes.len() != 3 {
