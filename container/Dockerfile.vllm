@@ -698,16 +698,9 @@ CMD []
 ########## Runtime with AWS EFA ##########################
 ###########################################################
 #
-# PURPOSE: Production runtime environment with AWS EFA support
+# This stage extends the runtime stage with AWS EFA installer which includes: libfabric and aws-ofi-nccl plugin
 #
-# This stage extends the runtime stage with AWS EFA installer which includes:
-# - AWS-optimized libfabric with EFA provider support
-# - aws-ofi-nccl plugin for optimal NCCL performance on EFA
-# - Updated RDMA and ibverbs packages configured for AWS networking
-# - All AWS best practices for EFA-enabled instances
-#
-# Use this stage when deploying on AWS EC2 instances with EFA support
-# (e.g., p4d.24xlarge, p5.48xlarge, etc.)
+# Use this stage when deploying on AWS infrastructure with EFA support
 
 FROM runtime AS runtime-aws
 
@@ -736,75 +729,34 @@ USER dynamo
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 
-###########################################################
-########## Development with AWS EFA ######################
-###########################################################
+########################################################################
+########## Development with AWS EFA (run.sh, runs as root user) ########
+########################################################################
 #
 # PURPOSE: Development environment with AWS EFA support
 #
 # This stage extends runtime-aws with development tools for building and
 # debugging on EFA-enabled AWS instances.
 
-FROM runtime-aws AS dev-aws
+FROM dev AS dev-aws
 
-# Switch to root for system package installation
-USER root
+ARG EFA_VERSION=1.45.1
 
-# Install utilities as root
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends  \
-    # Install utilities
-    nvtop \
-    wget \
-    tmux \
-    vim \
-    git \
-    openssh-client \
-    iproute2 \
-    rsync \
-    zip \
-    unzip \
-    htop \
-    # Build Dependencies
-    autoconf \
-    automake \
-    cmake \
-    libtool \
-    meson \
-    net-tools \
-    pybind11-dev \
-    # Rust build dependencies
-    clang \
-    libclang-dev \
-    protobuf-compiler && \
-    rm -rf /var/lib/apt/lists/*
-
-# Set umask for group-writable files in dev stage (runs as root)
-RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
-SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
-
-ARG WORKSPACE_DIR=/workspace
-
-# Set workspace directory variable
-ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
-    DYNAMO_HOME=${WORKSPACE_DIR} \
-    RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/workspace/target \
-    VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH=/usr/local/cargo/bin:$PATH
-
-# Copy rust installation from dynamo_base to avoid duplication efforts
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
-COPY --from=dynamo_base --chmod=775 /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base --chmod=775 /usr/local/cargo /usr/local/cargo
-RUN chmod g+w /usr/local/rustup /usr/local/cargo
-
-# Install maturin, for maturin develop
-# Editable install of dynamo
-COPY pyproject.toml README.md hatch_build.py /workspace/
-RUN uv pip install maturin[patchelf] && \
-    uv pip install --no-deps -e .
+# Install AWS EFA installer with bundled libfabric and aws-ofi-nccl
+# Flags explanation:
+#   --skip-kmod: Skip kernel module installation (handled by host)
+#   --skip-limit-conf: Skip ulimit configuration (handled by container runtime)
+#   --no-verify: Skip GPG verification (optional, can be removed if verification is needed)
+RUN mkdir -p /tmp/efa && \
+    cd /tmp/efa && \
+    curl --retry 3 --retry-delay 2 -fsSL -o aws-efa-installer-${EFA_VERSION}.tar.gz \
+        https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_VERSION}.tar.gz && \
+    tar -xf aws-efa-installer-${EFA_VERSION}.tar.gz && \
+    cd aws-efa-installer && \
+    apt-get update && \
+    ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify && \
+    rm -rf /tmp/efa && \
+    ldconfig
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
