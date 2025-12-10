@@ -718,6 +718,7 @@ def lora_chat_payload(
 @pytest.mark.gpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
+@pytest.mark.nightly
 def test_lora_aggregated(
     request, runtime_services, predownload_models, minio_lora_service
 ):
@@ -760,6 +761,7 @@ def test_lora_aggregated(
 @pytest.mark.gpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
+@pytest.mark.nightly
 def test_lora_aggregated_router(
     request, runtime_services, predownload_models, minio_lora_service
 ):
