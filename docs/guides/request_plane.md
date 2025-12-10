@@ -21,8 +21,8 @@ limitations under the License.
 
 Dynamo supports multiple transport mechanisms for its request plane (the communication layer between services). You can choose from three different request plane modes based on your deployment requirements:
 
-- **NATS** (default): Message broker-based request plane
-- **TCP**: Direct TCP connection for optimal performance
+- **TCP** (default): Direct TCP connection for optimal performance
+- **NATS**: Message broker-based request plane
 - **HTTP**: HTTP/2-based request plane
 
 This guide explains how to configure and use request plane in your Dynamo deployment.
@@ -59,51 +59,27 @@ export DYN_REQUEST_PLANE=<mode>
 ```
 
 Where `<mode>` is one of:
-- `nats` (default)
-- `tcp`
+- `tcp` (default)
+- `nats`
 - `http`
 
 The value is case-insensitive.
 
 ### Default Behavior
 
-If `DYN_REQUEST_PLANE` is not set or contains an invalid value, Dynamo defaults to `nats`.
+If `DYN_REQUEST_PLANE` is not set or contains an invalid value, Dynamo defaults to `tcp`.
 
 ## Usage Examples
 
-### Using NATS (Default)
+### Using TCP (Default)
 
-NATS is the default request plane and provides the most flexibility for complex deployments.
-
-**Prerequisites:**
-- NATS server must be running and accessible
-- Configure NATS connection via standard Dynamo NATS environment variables
-
-```bash
-# Explicitly set to NATS (optional, as it's the default)
-
-# Run your Dynamo service
-DYN_REQUEST_PLANE=nats python -m dynamo.frontend --http-port=8000 &
-DYN_REQUEST_PLANE=nats python -m dynamo.vllm --model Qwen/Qwen3-0.6B
-```
-
-**When to use NATS:**
-- Production deployments with service discovery
-- Currently (HA) highly available routers require durable messages persisted in NATS message broker. If you want to completely disable NATS, KV based routing won't be available
-- Multiple frontends and backends
-- Need for message replay and persistence features
-
-Limitations:
-- NATS does not support payloads beyond 16MB (use TCP for larger payloads)
-
-### Using TCP
-
-TCP provides direct, low-latency communication between services.
+TCP is the default request plane and provides direct, low-latency communication between services.
 
 **Configuration:**
 
 ```bash
-# Set request plane to TCP
+# TCP is the default, so no need to set DYN_REQUEST_PLANE explicitly
+# But you can explicitly set it if desired:
 export DYN_REQUEST_PLANE=tcp
 
 # Optional: Configure TCP server host and port
@@ -170,6 +146,32 @@ Additional HTTP-specific environment variables:
 - `DYN_HTTP2_KEEP_ALIVE_TIMEOUT_SECS`: Keep-alive timeout for HTTP client (default: 10 seconds)
 - `DYN_HTTP2_ADAPTIVE_WINDOW`: Enable adaptive flow control (default: true)
 
+### Using NATS
+
+NATS provides the most flexibility for complex deployments with advanced routing.
+
+**Prerequisites:**
+- NATS server must be running and accessible
+- Configure NATS connection via standard Dynamo NATS environment variables
+
+```bash
+# Explicitly set to NATS
+export DYN_REQUEST_PLANE=nats
+
+# Run your Dynamo service
+DYN_REQUEST_PLANE=nats python -m dynamo.frontend --http-port=8000 &
+DYN_REQUEST_PLANE=nats python -m dynamo.vllm --model Qwen/Qwen3-0.6B
+```
+
+**When to use NATS:**
+- Production deployments with service discovery
+- Currently (HA) highly available routers require durable messages persisted in NATS message broker. If you want to completely disable NATS, KV based routing won't be available
+- Multiple frontends and backends
+- Need for message replay and persistence features
+
+Limitations:
+- NATS does not support payloads beyond 16MB (use TCP for larger payloads)
+
 ## Complete Example
 
 Here's a complete example showing how to launch a Dynamo deployment with different request planes:
@@ -219,7 +221,7 @@ This abstraction means your application code doesn't need to change when switchi
 
 Request plane configuration is loaded from environment variables at startup and cached globally. The configuration hierarchy is:
 
-1. **Mode Selection**: `DYN_REQUEST_PLANE` (defaults to `nats`)
+1. **Mode Selection**: `DYN_REQUEST_PLANE` (defaults to `tcp`)
 2. **Transport-Specific Config**: Mode-specific environment variables (e.g., `DYN_TCP_*`, `DYN_HTTP2_*`)
 
 ## Migration Guide

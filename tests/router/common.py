@@ -332,12 +332,12 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8)
     return False
 
 
-def get_runtime(store_backend="etcd", request_plane="nats"):
+def get_runtime(store_backend="etcd", request_plane="tcp"):
     """Create a DistributedRuntime instance for testing.
 
     Args:
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-        request_plane: How frontend talks to backend ("tcp", "http" or "nats"). Defaults to "nats".
+        request_plane: How frontend talks to backend ("tcp", "http" or "nats"). Defaults to "tcp".
     """
     try:
         # Try to get running loop (works in async context)
