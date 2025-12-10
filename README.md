@@ -32,10 +32,10 @@ High-throughput, low-latency inference framework designed for serving generative
 
 | Feature                                                                                           | [vLLM](docs/backends/vllm/README.md) | [SGLang](docs/backends/sglang/README.md) | [TensorRT-LLM](docs/backends/trtllm/README.md) |
 | ------------------------------------------------------------------------------------------------- | ---- | ------ | ------------ |
-| [**Disaggregated Serving**](/docs/design_docs/disagg_serving.md)                                 | ✅   | ✅     | ✅           |
-| [**KV-Aware Routing**](/docs/router/kv_cache_routing.md)                                    | ✅   | ✅     | ✅           |
-| [**SLA-Based Planner**](docs/planner/sla_planner.md)                                        | ✅   | ✅     | ✅           |
-| [**KVBM**](docs/kvbm/kvbm_architecture.md)                                               | ✅   | 🚧     | ✅           |
+| [**Disaggregated Serving**](/docs/design_docs/disagg_serving.md)                                  | ✅   | ✅     | ✅           |
+| [**KV-Aware Routing**](/docs/router/kv_cache_routing.md)                                          | ✅   | ✅     | ✅           |
+| [**SLA-Based Planner**](docs/planner/sla_planner.md)                                              | ✅   | ✅     | ✅           |
+| [**KVBM**](docs/kvbm/kvbm_architecture.md)                                                        | ✅   | 🚧     | ✅           |
 
 ## Latest News
 
