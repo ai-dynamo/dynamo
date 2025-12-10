@@ -96,17 +96,13 @@ spec:
                   type: boolean
                 backend:
                   description: |-
-                    Backend specifies the inference backend to deploy.
+                    Backend specifies the inference backend for profiling.
                     The controller automatically sets this value in profilingConfig.config.engine.backend.
-                    Profiling always runs on real GPUs or via AIC simulation to collect performance data.
-                    For real backends (vllm, sglang, trtllm): the deployment runs actual inference engines on GPUs.
-                    For mocker: the deployment uses simulated engines (no GPU required) that use the profiling
-                    data to simulate realistic timing behavior. Mocker is available in all backend images.
+                    Profiling runs on real GPUs or via AIC simulation to collect performance data.
                   enum:
                     - vllm
                     - sglang
                     - trtllm
-                    - mocker
                   type: string
                 deploymentOverrides:
                   description: |-
@@ -309,6 +305,15 @@ spec:
                   required:
                     - profilerImage
                   type: object
+                useMocker:
+                  default: false
+                  description: |-
+                    UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of
+                    a real backend deployment. When true, the deployment uses simulated engines that
+                    don't require GPUs, using the profiling data to simulate realistic timing behavior.
+                    Mocker is available in all backend images and useful for large-scale experiments.
+                    Profiling still runs against the real backend (specified above) to collect performance data.
+                  type: boolean
               required:
                 - backend
                 - model

@@ -357,23 +357,26 @@ For details about the profiling process, performance plots, and interpolation da
 
 ### Mocker Deployment
 
-Instead of a real DGD that uses GPU resources, you can deploy a `mocker` deployment that uses simulated engines rather than GPUs. Mocker is available in all backend images and uses profiling data to simulate realistic GPU timing behavior. It is useful for:
+Instead of a real DGD that uses GPU resources, you can deploy a mocker deployment that uses simulated engines rather than GPUs. Mocker is available in all backend images and uses profiling data to simulate realistic GPU timing behavior. It is useful for:
 - Large-scale experiments without GPU resources
 - Testing Planner behavior and infrastructure
 - Validating deployment configurations
 
-Within the DGDR workflow, `mocker` is treated like a backend. To use mocker:
+To deploy mocker instead of the real backend, set `useMocker: true`:
 
 ```yaml
 spec:
   model: <model-name>
-  backend: mocker
+  backend: trtllm  # Real backend for profiling (vllm, sglang, or trtllm)
+  useMocker: true  # Deploy mocker instead of real backend
 
   profilingConfig:
-    profilerImage: "nvcr.io/nvidia/dynamo/<backend>-runtime:<image-tag>"
+    profilerImage: "nvcr.io/nvidia/dynamo/trtllm-runtime:<image-tag>"
     ...
   autoApply: true
 ```
+
+Profiling still runs against the real backend (via GPUs or AIC) to collect performance data. The mocker deployment then uses this data to simulate realistic timing behavior.
 
 ### DGDR Immutability
 
