@@ -98,7 +98,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0.post1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.1
           workingDir: /workspace/examples/backends/trtllm
           command:
           - python3
@@ -130,7 +130,7 @@ spec:
             - name: nvidia-config
               mountPath: /workspace/
               readOnly: true
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0.post1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.1
           workingDir: /workspace/
           command:
           - python3
@@ -168,7 +168,7 @@ spec:
             - name: nvidia-config
               mountPath: /workspace/
               readOnly: true
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0.post1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.1
           workingDir: /workspace/
           command:
           - python3
