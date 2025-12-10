@@ -125,7 +125,7 @@ class VllmEncodeWorker:
             request.embeddings_shape = tuple(embeddings.shape)
             descriptor = connect.Descriptor(embeddings)
 
-            with self._connector.create_readable(descriptor) as readable:
+            with await self._connector.create_readable(descriptor) as readable:
                 request.serialized_request = readable.metadata()
                 # Clear the image URL as hint that the image is passed as embeddings.
                 request.multimodal_input.image_url = None
@@ -158,7 +158,6 @@ class VllmEncodeWorker:
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.
         self._connector = connect.Connector()
-        await self._connector.initialize()
 
         logger.info("Startup completed.")
 
