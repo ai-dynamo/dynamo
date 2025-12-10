@@ -6,6 +6,7 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
+from typing import Optional
 
 import pytest
 
@@ -603,8 +604,8 @@ class LoraTestChatPayload(ChatPayload):
         s3_uri: str,
         system_port: int = 8081,
         repeat_count: int = 1,
-        expected_response: list = None,
-        expected_log: list = None,
+        expected_response: Optional[list] = None,
+        expected_log: Optional[list] = None,
         timeout: int = 60,
     ):
         super().__init__(
@@ -680,8 +681,8 @@ def lora_chat_payload(
     s3_uri: str,
     system_port: int = 8081,
     repeat_count: int = 2,
-    expected_response: list = None,
-    expected_log: list = None,
+    expected_response: Optional[list] = None,
+    expected_log: Optional[list] = None,
     max_tokens: int = 100,
     temperature: float = 0.0,
 ) -> LoraTestChatPayload:

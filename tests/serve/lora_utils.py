@@ -158,6 +158,7 @@ class MinioService:
                 f"s3://{self.config.bucket}",
             ],
             capture_output=True,
+            text=True,
             env=env,
         )
 
@@ -174,6 +175,7 @@ class MinioService:
                     f"s3://{self.config.bucket}",
                 ],
                 capture_output=True,
+                text=True,
                 env=env,
             )
             if result.returncode != 0:
@@ -237,6 +239,7 @@ class MinioService:
                 "*.git*",
             ],
             capture_output=True,
+            text=True,
             env=env,
         )
 
