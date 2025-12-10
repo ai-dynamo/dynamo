@@ -237,6 +237,8 @@ class BaseWorkerHandler(ABC):
         generate_endpoint=None,
         config=None,
         use_vllm_tokenizer: bool = False,
+        isl_histogram=None,
+        osl_histogram=None,
     ):
         self.runtime = runtime
         self.component = component
@@ -261,6 +263,17 @@ class BaseWorkerHandler(ABC):
         if use_vllm_tokenizer and hasattr(engine, "tokenizer"):
             tokenizer = engine.tokenizer
         self.input_param_manager = InputParamManager(tokenizer)
+
+        # Metrics
+        self.isl_histogram = isl_histogram
+        self.osl_histogram = osl_histogram
+
+    def _observe_sequence_lengths(self, isl: int, osl: int) -> None:
+        """Record ISL and OSL metrics."""
+        if self.isl_histogram:
+            self.isl_histogram.observe(float(isl))
+        if self.osl_histogram:
+            self.osl_histogram.observe(float(osl))
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -801,6 +814,10 @@ class BaseWorkerHandler(ABC):
                         ] = BaseWorkerHandler._build_completion_usage(
                             request_output=res
                         )
+                        # Record ISL/OSL metrics
+                        isl = len(res.prompt_token_ids) if res.prompt_token_ids else 0
+                        osl = len(output.token_ids)
+                        self._observe_sequence_lengths(isl, osl)
                         # Log completion with LoRA info (debug level to avoid log spam)
                         if lora_request:
                             logger.debug(
@@ -842,6 +859,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         generate_endpoint=None,
         config=None,
         use_vllm_tokenizer: bool = False,
+        isl_histogram=None,
+        osl_histogram=None,
     ):
         super().__init__(
             runtime,
@@ -853,6 +872,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             generate_endpoint,
             config,
             use_vllm_tokenizer,
+            isl_histogram,
+            osl_histogram,
         )
 
     async def generate(self, request, context):
@@ -1032,6 +1053,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         generate_endpoint=None,
         config=None,
         use_vllm_tokenizer: bool = False,
+        isl_histogram=None,
+        osl_histogram=None,
     ):
         super().__init__(
             runtime,
@@ -1043,6 +1066,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             generate_endpoint,
             config,
             use_vllm_tokenizer,
+            isl_histogram,
+            osl_histogram,
         )
 
     async def generate(self, request, context):
@@ -1149,6 +1174,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                             request_output=res
                         ),
                     }
+
+                    # Record ISL/OSL metrics
+                    isl = len(res.prompt_token_ids) if res.prompt_token_ids else 0
+                    osl = len(token_ids)
+                    self._observe_sequence_lengths(isl, osl)
 
                     # Log prefill completion with LoRA info
                     if lora_request:

@@ -45,6 +45,7 @@ from dynamo.llm import (
     ModelType,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
+    prometheus_names,
     register_llm,
 )
 from dynamo.runtime import DistributedRuntime
@@ -69,6 +70,32 @@ from dynamo.trtllm.utils.trtllm_utils import (
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 configure_dynamo_logging()
+
+
+def create_sequence_length_metrics(endpoint, model_name: str):
+    """Create ISL and OSL histogram metrics on the endpoint.
+
+    Args:
+        endpoint: The Dynamo endpoint to create metrics on.
+        model_name: The model name to use as a label.
+
+    Returns:
+        Tuple of (isl_histogram, osl_histogram).
+    """
+    worker_id = str(endpoint.connection_id())
+    const_labels = [("model", model_name or "unknown"), ("worker_id", worker_id)]
+
+    isl_histogram = endpoint.metrics.create_histogram(
+        f"worker_{prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS}",
+        "Input sequence length in tokens (worker-side)",
+        const_labels,
+    )
+    osl_histogram = endpoint.metrics.create_histogram(
+        f"worker_{prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS}",
+        "Output sequence length in tokens (worker-side)",
+        const_labels,
+    )
+    return isl_histogram, osl_histogram
 
 
 async def graceful_shutdown(runtime):
@@ -396,6 +423,12 @@ async def init(runtime: DistributedRuntime, config: Config):
                     f"Failed to initialize TensorRT-LLM Prometheus metrics: {e}"
                 )
 
+        # Create ISL/OSL metrics
+        model_name_for_metrics = config.served_model_name or config.model_path
+        isl_histogram, osl_histogram = create_sequence_length_metrics(
+            endpoint, model_name_for_metrics
+        )
+
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
             component=component,
@@ -409,6 +442,8 @@ async def init(runtime: DistributedRuntime, config: Config):
             runtime=runtime,  # Pass runtime for graceful shutdown
             metrics_collector=metrics_collector,
             kv_block_size=config.kv_block_size,
+            isl_histogram=isl_histogram,
+            osl_histogram=osl_histogram,
         )
 
         # Register the model with runtime config
