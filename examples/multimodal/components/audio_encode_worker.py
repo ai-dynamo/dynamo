@@ -168,7 +168,7 @@ class VllmEncodeWorker:
             with torch.no_grad():
                 audio_embeddings = self.get_audio_embeddings(audio_features)
             descriptor = connect.Descriptor(audio_embeddings)
-            with self._connector.create_readable(descriptor) as readable:
+            with await self._connector.create_readable(descriptor) as readable:
                 request.serialized_request = readable.metadata()
                 # Clear the audio URL as hint that the audio is passed as embeddings.
                 request.multimodal_input.audio_url = None

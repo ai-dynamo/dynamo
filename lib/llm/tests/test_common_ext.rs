@@ -92,7 +92,7 @@ fn test_chat_completions_guided_decoding_from_common() {
     );
     assert_eq!(
         request.get_guided_json(),
-        Some(&serde_json::json!({"key": "value"}))
+        Some(serde_json::json!({"key": "value"}))
     );
 
     // Test guided_regex can be specified at root level
