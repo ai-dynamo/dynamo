@@ -10,7 +10,6 @@ use ffmpeg_next::ffi::{AVPixelFormat, av_image_copy_to_buffer};
 use memfile::{CreateOptions, MemFile, Seal};
 use ndarray::Array4;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
 use video_rs::frame::RawFrame;
 use video_rs::{Location, Time};
 
@@ -25,19 +24,19 @@ const FRAME_TIME_BUFFER_SECS: f64 = 0.001;
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VideoDecoder {
-    // sample N frames per second
+    /// sample N frames per second
     #[serde(default)]
     pub(crate) fps: Option<f64>,
-    // sample at most N frames (used with fps)
+    /// sample at most N frames (used with fps)
     #[serde(default)]
     pub(crate) max_frames: Option<u64>,
-    // sample N frames in total (linspace)
+    /// sample N frames in total (linspace)
     #[serde(default)]
     pub(crate) num_frames: Option<u64>,
-    // fail if some frames fail to decode
+    /// fail if some frames fail to decode
     #[serde(default)]
     pub(crate) strict: bool,
-    // maximum allowed total allocation of the decoded frames in bytes
+    /// maximum allowed total allocation of the decoded frames in bytes
     #[serde(default)]
     pub(crate) max_alloc: Option<u64>,
 }
@@ -135,7 +134,6 @@ fn decode_frame_at_timestamp(
 ) -> Result<f64> {
     let target_timestamp = target_time.as_secs() as f64;
     let time_base = decoder.time_base();
-    debug!("Decoding frame at timestamp {target_timestamp:.3}s");
 
     // Decode until we reach or pass the target timestamp
     // Caller is responsible for seeking to the appropriate position
@@ -148,7 +146,6 @@ fn decode_frame_at_timestamp(
             Ok(ts) => ts,
             Err(_) => continue,
         };
-        debug!("Scanning frame at {timestamp:.3}s");
 
         // If we reached the target time or passed it
         if timestamp >= target_timestamp {
@@ -177,7 +174,6 @@ fn decode_frame_at_timestamp(
                 );
             }
 
-            debug!("Successfully decoded frame at {timestamp:.3}s");
             return Ok(timestamp);
         }
     }
@@ -199,7 +195,7 @@ impl Decoder for VideoDecoder {
 
         // video-rs wants a file path, we use memfile for in-memory file
         let mut mem_file = MemFile::create("video", CreateOptions::new().allow_sealing(true))?;
-        mem_file.write_all(&data.into_bytes()?)?;
+        mem_file.write_all(&data.into_bytes()?)?; // one-liner so result of into_bytes will be dropped asap
         mem_file.add_seals(Seal::Write | Seal::Shrink | Seal::Grow)?;
         let fd_path = format!("/proc/self/fd/{}", mem_file.as_raw_fd());
         let location = Location::File(fd_path.into());
@@ -235,11 +231,6 @@ impl Decoder for VideoDecoder {
             // Try to seek if not in sequential mode
             if !sequential_mode {
                 if let Err(e) = decoder.seek((time.as_secs() * 1000.0) as i64) {
-                    debug!(
-                        "Seek failed for timestamp {:.3}s: {}, switching to sequential mode",
-                        time.as_secs(),
-                        e
-                    );
                     sequential_mode = true;
                     // Re-establish decoder position at last known good position
                     decoder.seek((last_successful_time.as_secs() * 1000.0) as i64)?;
