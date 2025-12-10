@@ -418,8 +418,17 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     # Register prefill model with ModelType.Prefill
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
+        # Determine model input type based on tokenizer configuration
+        if config.use_vllm_tokenizer:
+            model_input = ModelInput.Text
+            logger.info(
+                "Using vLLM's built-in tokenizer (--use-vllm-tokenizer) for prefill worker."
+            )
+        else:
+            model_input = ModelInput.Tokens
+
         await register_vllm_model(
-            ModelInput.Tokens,
+            model_input,
             ModelType.Prefill,
             generate_endpoint,
             config,
@@ -543,8 +552,20 @@ async def init(runtime: DistributedRuntime, config: Config):
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
+        # Determine model input type based on tokenizer configuration
+        if config.use_vllm_tokenizer:
+            model_input = ModelInput.Text
+            # When using vLLM's tokenizer, only Chat endpoint is supported
+            model_type = ModelType.Chat
+            logger.info(
+                "Using vLLM's built-in tokenizer (--use-vllm-tokenizer). "
+                "Only /v1/chat/completions endpoint will be available."
+            )
+        else:
+            model_input = ModelInput.Tokens
+
         await register_vllm_model(
-            ModelInput.Tokens,
+            model_input,
             model_type,
             generate_endpoint,
             config,
