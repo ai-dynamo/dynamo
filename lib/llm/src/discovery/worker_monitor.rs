@@ -57,19 +57,23 @@ impl WorkerLoadState {
         // Check if ALL dp_ranks are busy
         all_dp_ranks.iter().all(|&dp_rank| {
             // First check: prefill tokens threshold
+            // Skip if max_tokens is 0 (no capacity means threshold check is meaningless)
             if let (Some(&active_tokens), Some(&max_tokens)) = (
                 self.active_prefill_tokens.get(&dp_rank),
                 self.max_num_batch_tokens.get(&dp_rank),
-            ) && (active_tokens as f64) > (tokens_threshold * max_tokens as f64)
+            ) && max_tokens > 0
+                && (active_tokens as f64) > (tokens_threshold * max_tokens as f64)
             {
                 return true; // This dp_rank is busy due to tokens
             }
 
             // Second check: blocks threshold
+            // Skip if total_blocks is 0 (no capacity means threshold check is meaningless)
             if let (Some(&active_blocks), Some(&total_blocks)) = (
                 self.kv_active_blocks.get(&dp_rank),
                 self.kv_total_blocks.get(&dp_rank),
-            ) && (active_blocks as f64) > (blocks_threshold * total_blocks as f64)
+            ) && total_blocks > 0
+                && (active_blocks as f64) > (blocks_threshold * total_blocks as f64)
             {
                 return true; // This dp_rank is busy due to blocks
             }
