@@ -113,6 +113,7 @@ FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 ARG ARCH
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
+ARG ENABLE_MEDIA_FFMPEG
 
 WORKDIR /workspace
 
@@ -156,10 +157,10 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         librdmacm-devel \
         numactl-devel
 
-RUN if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
+RUN echo $ENABLE_MEDIA_FFMPEG && if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     dnf install -y epel-release && \
     dnf install -y --nogpgcheck https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-8.noarch.rpm && \
-    dnf install -y ffmpeg-devel; \
+    dnf install -y ffmpeg-devel pkg-config; \
 fi
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
