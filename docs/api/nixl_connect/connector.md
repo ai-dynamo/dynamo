@@ -47,7 +47,6 @@ The metadata contains required information (identifiers, keys, etc.) which enabl
     @async_on_start
     async def async_init(self):
       self.connector = dynamo.nixl_connect.Connector()
-      await self.connector.initialize()
 ```
 
 > [!Tip]
@@ -109,7 +108,7 @@ Use [`.wait_for_completion()`](write_operation.md#wait_for_completion) to block 
 ### `create_readable`
 
 ```python
-def create_readable(
+async def create_readable(
     self,
     local_descriptors: Descriptor | list[Descriptor],
 ) -> ReadableOperation:
@@ -130,7 +129,7 @@ Use [`.wait_for_completion()`](readable_operation.md#wait_for_completion) to blo
 ### `create_writable`
 
 ```python
-def create_writable(
+async def create_writable(
     self,
     local_descriptors: Descriptor | list[Descriptor],
 ) -> WritableOperation:
@@ -151,6 +150,15 @@ Use [`.wait_for_completion()`](writable_operation.md#wait_for_completion) to blo
 
 ## Properties
 
+### `hostname`
+
+```python
+@property
+def hostname(self) -> str:
+```
+
+Gets the name of the current worker's host.
+
 ### `is_cuda_available`
 
 ```python
@@ -169,22 +177,6 @@ def name(self) -> str | None:
 
 Gets the Dynamo component name used by the connector.
 
-### `namespace`
-
-```python
-@property
-def namespace(self) -> str:
-```
-
-Gets the Dynamo namespace used by the connector.
-
-### `runtime`
-
-```python
-def runtime(self) -> dynamo.runtime.DistributedRuntime:
-```
-
-Gets the Dynamo distributed runtime instance associated with the connector.
 
 ## Related Classes
 

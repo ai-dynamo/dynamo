@@ -156,6 +156,39 @@ class ChatPayload(BasePayload):
 
 
 @dataclass
+class ChatPayloadWithLogprobs(ChatPayload):
+    """Chat payload that validates logprobs in response."""
+
+    def validate(self, response: Any, content: str) -> None:
+        """Validate response contains logprobs fields."""
+        super().validate(response, content)
+
+        result = response.json()
+        choice = result["choices"][0]
+
+        # Validate logprobs field exists
+        assert "logprobs" in choice, "Missing 'logprobs' in choice"
+
+        logprobs_data = choice["logprobs"]
+        if logprobs_data is not None:
+            assert "content" in logprobs_data, "Missing 'content' in logprobs"
+            content_logprobs = logprobs_data["content"]
+
+            if content_logprobs:
+                # Validate structure of logprobs
+                for item in content_logprobs:
+                    assert "token" in item, "Missing 'token' in logprobs content"
+                    assert "logprob" in item, "Missing 'logprob' in logprobs content"
+                    assert (
+                        "top_logprobs" in item
+                    ), "Missing 'top_logprobs' in logprobs content"
+
+                logger.info(
+                    f"✓ Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
+                )
+
+
+@dataclass
 class ToolCallingChatPayload(ChatPayload):
     """ChatPayload that validates tool calls in the response."""
 
@@ -218,6 +251,39 @@ class CompletionPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return CompletionPayload.extract_text(response)
+
+
+@dataclass
+class CompletionPayloadWithLogprobs(CompletionPayload):
+    """Completion payload that validates logprobs in response."""
+
+    def validate(self, response: Any, content: str) -> None:
+        """Validate response contains logprobs fields."""
+        super().validate(response, content)
+
+        result = response.json()
+        choice = result["choices"][0]
+
+        # Validate logprobs field exists
+        assert "logprobs" in choice, "Missing 'logprobs' in choice"
+
+        logprobs_data = choice["logprobs"]
+        if logprobs_data is not None:
+            assert (
+                "token_logprobs" in logprobs_data
+            ), "Missing 'token_logprobs' in logprobs"
+            assert "tokens" in logprobs_data, "Missing 'tokens' in logprobs"
+
+            token_logprobs = logprobs_data["token_logprobs"]
+            tokens = logprobs_data["tokens"]
+
+            if token_logprobs:
+                assert len(token_logprobs) == len(
+                    tokens
+                ), "Mismatch between token_logprobs and tokens length"
+                logger.info(
+                    f"✓ Logprobs validation passed: found {len(token_logprobs)} tokens with logprobs"
+                )
 
 
 @dataclass
