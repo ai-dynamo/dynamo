@@ -99,7 +99,34 @@ class LLMServerManager:
             )
 
     def _set_up_vllm_config(self, gpu_cache_blocks):
+        import json
+
         self.env["VLLM_SERVER_DEV_MODE"] = "1"
+
+        # Detect if we should use v2 based on env var
+        use_v2 = os.environ.get("KVBM_USE_V2", "0") == "1"
+
+        if use_v2:
+            module_path = "kvbm.v2.vllm.schedulers.connector"
+            # V2 connector reads DYN_KVBM_* env vars via same infrastructure
+            # We can pass additional config via kv_connector_extra_config
+            extra_config = {
+                "leader": {"tokio": {"worker_threads": 2}},
+                "worker": {
+                    "nixl": {"backends": {"UCX": {}, "POSIX": {}}},
+                    "tokio": {"worker_threads": 1},
+                },
+            }
+        else:
+            module_path = "kvbm.vllm_integration.connector"
+            extra_config = {}
+
+        kv_transfer_config = {
+            "kv_connector": "DynamoConnector",
+            "kv_role": "kv_both",
+            "kv_connector_module_path": module_path,
+            "kv_connector_extra_config": extra_config,
+        }
 
         # Construct serve command
         self.server_cmd = [
@@ -110,7 +137,7 @@ class LLMServerManager:
             "--port",
             str(self.port),
             "--kv-transfer-config",
-            '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}',
+            json.dumps(kv_transfer_config),
             os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
             "--max-model-len",
             "8000",  # required to fit on L4 GPU when using 8b model
@@ -288,10 +315,20 @@ class AggDeterminismTester(DeterminismTester):
         super().__init__(base_url, model_id, server_type)
 
     def reset_prefix_cache(self):
-        """Reset the prefix cache."""
-        print("Resetting prefix cache...")
+        """Reset the prefix cache.
+
+        NOTE: vLLM's /reset_prefix_cache endpoint only resets G1 (GPU cache).
+        G2 (host/CPU) and G3 (disk) caches are NOT reset by this endpoint.
+
+        For determinism testing, this is acceptable since we're primarily
+        testing GPU cache behavior, and G2/G3 are offload tiers that shouldn't
+        affect determinism.
+        """
+        print("Resetting prefix cache (G1 only)...")
+
         if self.server_type == ServerType.trtllm:
             # TRTLLM doesn't support reset_prefix_cache endpoint API
+            # Use eviction approach: send enough requests to evict the cache
             # 300 shakespeare content could evict the 0.1 x 80G (~1700 blocks) on-device cache
             shakespeare_count = 300
             for seq_idx in range(1, shakespeare_count + 1):
@@ -300,19 +337,35 @@ class AggDeterminismTester(DeterminismTester):
 
                 if content:
                     print(
-                        f"Resetting Shakespeare sequence {seq_idx} (words {start_word}-{start_word + self.word_count - 1})..."
+                        f"Evicting cache with Shakespeare sequence {seq_idx} (words {start_word}-{start_word + self.word_count - 1})..."
                     )
                     try:
                         self.make_request(content)
                     except Exception as e:
-                        print(f"Resetting request failed: {e}")
+                        print(f"Eviction request failed: {e}")
+            print("Cache eviction done")
         else:
-            response = requests.post(
-                f"{self.base_url}/reset_prefix_cache",
-                timeout=int(os.environ.get("KVBM_HTTP_TIMEOUT", "30")),
-            )
-            response.raise_for_status()
-        print("Cache reset done")
+            # vLLM supports /reset_prefix_cache endpoint
+            try:
+                response = requests.post(
+                    f"{self.base_url}/reset_prefix_cache",
+                    timeout=int(os.environ.get("KVBM_HTTP_TIMEOUT", "30")),
+                )
+                response.raise_for_status()
+                print("G1 (GPU) cache reset done")
+            except requests.exceptions.RequestException as e:
+                # If endpoint doesn't exist, fall back to eviction approach
+                print(f"Reset endpoint failed ({e}), using cache eviction...")
+                shakespeare_count = 300
+                for seq_idx in range(1, shakespeare_count + 1):
+                    start_word = (seq_idx - 1) * self.word_count
+                    content = self.get_shakespeare_content(start_word)
+                    if content:
+                        try:
+                            self.make_request(content)
+                        except Exception as e:
+                            print(f"Eviction request failed: {e}")
+                print("Cache eviction done")
 
 
 @pytest.fixture(scope="function")
@@ -611,6 +664,125 @@ class TestDeterminismAgg(BaseTestDeterminism):
         assert (
             success_rate == 1.0
         ), f"Determinism failed: {deterministic_count}/{total_compared} prompts deterministic"
+
+
+@pytest.fixture(scope="function")
+def llm_server_v2(request):
+    """Start and stop a LLM server for v2 tests (no runtime_services dependency).
+
+    V2 does not require NATS or etcd, so this fixture doesn't depend on runtime_services.
+
+    To parametrize, use:
+      @pytest.mark.parametrize("llm_server_v2", [{"cpu_blocks": 10000}], indirect=True)
+    """
+    logger = logging.getLogger("pytest")
+    logger.setLevel(logging.INFO)
+
+    cpu_blocks = getattr(request, "param", {}).get("cpu_blocks", None)
+    gpu_blocks = getattr(request, "param", {}).get("gpu_blocks", None)
+    port = getattr(request, "param", {}).get("port", None)
+
+    # Put logs in the per-test directory set up by tests/conftest.py
+    log_dir = Path(request.node.name)
+
+    if importlib.util.find_spec("vllm") is not None:
+        server_type = ServerType.vllm
+    elif importlib.util.find_spec("tensorrt_llm") is not None:
+        server_type = ServerType.trtllm
+    else:
+        raise Exception(
+            "Neither the vllm nor the tensorrt_llm module is available in the current environment."
+        )
+
+    server_manager = LLMServerManager(
+        port=port,
+        cpu_cache_blocks=cpu_blocks,
+        gpu_cache_blocks=gpu_blocks,
+        log_dir=log_dir,
+        server_type=server_type,
+    )
+
+    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "600"))
+    if not server_manager.start_server(timeout=start_timeout):
+        pytest.fail(
+            f"Failed to start {server_type} server (cpu_blocks={cpu_blocks}, gpu_blocks={gpu_blocks}, port={server_manager.port})"
+        )
+
+    yield server_manager
+
+    server_manager.stop_server()
+
+
+@pytest.fixture(scope="function")
+def tester_v2(llm_server_v2):
+    """Create determinism tester for v2 tests bound to the running server's base URL."""
+    t = AggDeterminismTester(
+        base_url=llm_server_v2.base_url, server_type=llm_server_v2.server_type
+    )
+    t.download_shakespeare_text()
+    return t
+
+
+class TestDeterminismAggV2(BaseTestDeterminism):
+    """Test class for v2 connector determinism validation.
+
+    This test class uses the v2 connector module path (kvbm.v2.vllm.schedulers.connector)
+    to test KVBM v2 architecture. All DYN_KVBM_* environment variables work unchanged
+    in v2 since they're read by the same underlying infrastructure.
+
+    IMPORTANT: KVBM_USE_V2=1 must be set in the shell environment BEFORE running pytest,
+    not via monkeypatch, because the llm_server_v2 fixture reads it during server startup.
+
+    Usage:
+        # For GPUs with limited memory (e.g., 5 GiB free), set gpu_blocks:
+        KVBM_USE_V2=1 KVBM_CPU_BLOCKS=10000 KVBM_GPU_BLOCKS=512 pytest tests/kvbm_integration/test_determinism_agg.py::TestDeterminismAggV2 -v -s -m kvbm_v2
+
+        # For larger GPUs, omit KVBM_GPU_BLOCKS to use default (90% utilization):
+        KVBM_USE_V2=1 KVBM_CPU_BLOCKS=10000 pytest tests/kvbm_integration/test_determinism_agg.py::TestDeterminismAggV2 -v -s -m kvbm_v2
+    """
+
+    @pytest.mark.parametrize(
+        "llm_server_v2",
+        [
+            {
+                "cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000")),
+                "gpu_blocks": int(os.environ.get("KVBM_GPU_BLOCKS", "512"))
+                if "KVBM_GPU_BLOCKS" in os.environ
+                else None,
+            },
+        ],
+        indirect=True,
+    )
+    @pytest.mark.kvbm_v2
+    def test_determinism_agg_v2_with_cache_reset(self, tester_v2, llm_server_v2):
+        """Test v2 connector determinism across cache reset.
+
+        This test enables the v2 connector via KVBM_USE_V2=1 environment variable,
+        which switches to the kvbm.v2.vllm.schedulers.connector module path.
+
+        IMPORTANT: KVBM_USE_V2=1 must be set in the shell environment BEFORE running pytest.
+        The llm_server_v2 fixture reads this variable during server startup, so it cannot
+        be set via monkeypatch inside the test method.
+
+        GPU Memory Configuration:
+            - Set KVBM_GPU_BLOCKS to limit GPU memory usage (default: 512 blocks if set, or 90% utilization if not set)
+            - Each block is approximately 10-20 KB for 8B models
+            - For GPUs with ~5 GiB free memory, use 256-512 blocks
+            - For larger GPUs, omit KVBM_GPU_BLOCKS to use default vLLM behavior (90% GPU utilization)
+
+        NOTE: V2 does not require NATS or etcd, so the runtime_services fixture
+        is not used for this test.
+        """
+        # Verify KVBM_USE_V2 is set (fixture needs it during startup)
+        if os.environ.get("KVBM_USE_V2") != "1":
+            pytest.skip(
+                "KVBM_USE_V2=1 must be set in shell environment before running pytest. "
+                "Cannot be set via monkeypatch because llm_server_v2 fixture needs it during startup."
+            )
+
+        # Call the base class implementation without runtime_services
+        # V2 doesn't need NATS/etcd
+        super().base_test_determinism_with_cache_reset(tester_v2, llm_server_v2, None)
 
 
 if __name__ == "__main__":

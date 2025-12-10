@@ -2746,6 +2746,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-kvbm-kernels"
+version = "0.7.0"
+dependencies = [
+ "cc",
+ "cudarc",
+ "dynamo-config",
+ "md5",
+ "once_cell",
+]
+
+[[package]]
 name = "dynamo-llm"
 version = "0.7.0"
 dependencies = [
@@ -6215,6 +6226,12 @@ dependencies = [
  "cfg-if 1.0.4",
  "digest",
 ]
+
+[[package]]
+name = "md5"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae960838283323069879657ca3de837e9f7bbb4c7bf6ea7f1b290d5e9476d2e0"
 
 [[package]]
 name = "memchr"

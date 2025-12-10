@@ -67,8 +67,8 @@ kv_transfer_config='{
   "kv_role": "kv_both",
   "kv_connector_module_path": "kvbm.v2.vllm.schedulers.connector",
   "kv_connector_extra_config": {
-    "leader": { 
-      "cache": { "host": { "cache_size_gb": 1.0 } },
+    "leader": {
+      "cache": { "host": { "cache_size_gb": 4.0 } },
       "tokio": { "worker_threads": 2 }
     },
     "worker": {
