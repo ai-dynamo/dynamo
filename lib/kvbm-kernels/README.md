@@ -48,7 +48,7 @@ blocks between three commonly used layouts:
 **Each allocation**: `[nt, nh, hd]` (NHD) or `[nh, nt, hd]` (HND)
 
 **Example** (32 layers, 128 tokens, 32 heads, 128 head_dim):
-```
+```text
 64 separate pointers:
   Layer 0, Keys   → GPU buffer at ptr[0]:  [128, 32, 128]
   Layer 0, Values → GPU buffer at ptr[1]:  [128, 32, 128]
@@ -66,7 +66,7 @@ each layer's K/V in separate allocations for efficient memory management.
 **Shape**: `[nl, no, inner]` where `inner = nt * nh * hd`
 
 **Example** (same 32-layer model):
-```
+```text
 1 contiguous buffer: [32, 2, 524288]
   where 524288 = 128 tokens × 32 heads × 128 head_dim
 
@@ -84,7 +84,7 @@ resharding is needed.
 **Shape**: `[nh, nl, no, nt, hd]` (heads in the outermost dimension)
 
 **Example** (same 32-layer model):
-```
+```text
 1 contiguous buffer: [32, 32, 2, 128, 128]
 
 Data organized with heads first:
@@ -153,7 +153,7 @@ with 128 blocks, that's the difference between 50μs and 5s of added latency per
 
 ### Repository Structure
 
-```
+```text
 .
 ├── Cargo.toml              # Rust lib/bin targets
 ├── build.rs                # NVCC build script (sm80+sm90 by default)
@@ -304,7 +304,7 @@ kernels.block_to_operational(blocks, operationals, backend="batch")  # or "async
 kernels.operational_to_block(operationals, blocks, backend="auto")
 ```
 
-All tensors must be CUDA accessible by the specificed device and match the expected
+All tensors must be CUDA accessible by the specified device and match the expected
 shapes and be contiguous in those shapes. The bindings validate shapes/dtypes, stage
 pointer tables on-device, and launch the appropriate CUDA kernel.
 
@@ -320,4 +320,5 @@ pointer tables on-device, and launch the appropriate CUDA kernel.
 | Wrong values when using HND layout    | Inner tensors not permuted to `[nh, nt, hd]` before passing in     |
 | Python bindings complain about dtype  | Mixed precision in a batch; convert tensors to a common dtype      |
 | Kernels take unexpected time          | Verify that `CUDA_ARCHS` matches your GPU to avoid JIT at runtime  |
+
 - `backend="auto"` defaults to the fused kernel, then `cudaMemcpyBatchAsync`, then `cudaMemcpyAsync`. Override if you want to benchmark a specific path.
