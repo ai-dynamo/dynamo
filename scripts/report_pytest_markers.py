@@ -70,6 +70,8 @@ STUB_MODULES = [
     "pytest_benchmark.plugin",
     "kubernetes",
     "kubernetes_asyncio",
+    "kubernetes_asyncio.client",
+    "kubernetes_asyncio.client.exceptions",
     "kubernetes.client",
     "kubernetes.config",
     "kubernetes.config.config_exception",
@@ -427,3 +429,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
