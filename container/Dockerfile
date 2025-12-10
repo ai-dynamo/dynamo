@@ -157,10 +157,32 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         librdmacm-devel \
         numactl-devel
 
-RUN echo $ENABLE_MEDIA_FFMPEG && if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-    dnf install -y epel-release && \
-    dnf install -y --nogpgcheck https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-8.noarch.rpm && \
-    dnf install -y ffmpeg-devel pkg-config; \
+# Build FFmpeg from source
+ARG FFMPEG_VERSION=7.1
+ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH}"
+RUN if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+    dnf install -y pkg-config && \
+    cd /tmp && \
+    curl -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    cd ffmpeg-${FFMPEG_VERSION} && \
+    ./configure \
+        --prefix=/usr/local \
+        --disable-programs \
+        --disable-doc \
+        --disable-static \
+        --disable-x86asm \
+        --disable-postproc \
+        --disable-network \
+        --disable-encoders \
+        --disable-muxers \
+        --disable-bsfs \
+        --disable-devices \
+        --enable-shared && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/ffmpeg-${FFMPEG_VERSION}*; \
 fi
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
