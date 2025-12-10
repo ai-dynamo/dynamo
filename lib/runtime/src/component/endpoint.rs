@@ -247,10 +247,9 @@ pub fn build_transport_type(
             let rpc_root =
                 std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/rpc".to_string());
 
-            let http_endpoint = format!(
-                "http://{http_host}:{http_port}{rpc_root}/{}",
-                endpoint_id.name
-            );
+            // Format host:port correctly for IPv6 addresses
+            let host_port = crate::utils::format_socket_addr(&http_host, http_port);
+            let http_endpoint = format!("http://{host_port}{rpc_root}/{}", endpoint_id.name);
 
             TransportType::Http(http_endpoint)
         }
@@ -263,7 +262,8 @@ pub fn build_transport_type(
 
             // Include endpoint name for proper TCP routing
             // TCP client parses this format and adds x-endpoint-path header for server-side routing
-            let tcp_endpoint = format!("{}:{}/{}", tcp_host, tcp_port, endpoint_id.name);
+            let tcp_endpoint =
+                crate::utils::format_socket_addr_with_path(&tcp_host, tcp_port, &endpoint_id.name);
 
             TransportType::Tcp(tcp_endpoint)
         }
