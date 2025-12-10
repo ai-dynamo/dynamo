@@ -18,15 +18,11 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:a-gaie-test
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
       envs:
         - name: HF_HOME
           value: /opt/models
-        - name: DYN_ROUTER_MODE
-          value: kv
-        - name: DYN_ROUTER_REPLICA_SYNC
-          value: "true"
       replicas: 1
     VllmPrefillWorker:
       componentType: worker
@@ -47,11 +43,11 @@ spec:
             - name: HF_HOME
               value: /opt/models
           args:
-            - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
           command:
-            - /bin/sh
-            - -c
-          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:a-gaie-test
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
 
           livenessProbe:

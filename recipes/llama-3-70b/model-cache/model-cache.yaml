@@ -10,4 +10,4 @@ spec:
   resources:
     requests:
       storage: 100Gi
-  storageClassName: nebius-shared-fs
+  storageClassName: "your-storage-class-name"
