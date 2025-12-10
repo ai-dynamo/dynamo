@@ -93,13 +93,7 @@ repos:
       pass_filenames: false
       additional_dependencies:
         - pytest
-        - pytest-benchmark
+        - tomli
         - pydantic
-        - attrs
-        - psutil
-        - aiohttp
-        - httpx
-        - kubernetes
-        - tabulate
-        - transformers
-        - huggingface_hub
+        - filelock
+        - pyyaml
