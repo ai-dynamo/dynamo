@@ -459,7 +459,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     fi && \
         cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
         chmod +x /tmp/install_vllm.sh && \
-        /tmp/install_vllm.sh --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} ${LMCACHE_REF:+--lmcache-ref "$LMCACHE_REF"} --cuda-version $CUDA_VERSION && \
+        /tmp/install_vllm.sh --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} ${LMCACHE_REF:+--lmcache-ref "$LMCACHE_REF"} --cuda-version $CUDA_VERSION || cat sccache.log && \
         /tmp/use-sccache.sh show-stats "vLLM";
 
 ENV LD_LIBRARY_PATH=\
