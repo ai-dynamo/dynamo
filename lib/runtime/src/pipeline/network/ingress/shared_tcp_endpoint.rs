@@ -101,6 +101,10 @@ impl SharedTcpServer {
 
     pub async fn unregister_endpoint(&self, endpoint_path: &str, endpoint_name: &str) {
         if let Some((_, handler)) = self.handlers.remove(endpoint_path) {
+            handler
+                .system_health
+                .lock()
+                .set_endpoint_health_status(endpoint_name, crate::HealthStatus::NotReady);
             tracing::info!(
                 endpoint_name = %endpoint_name,
                 endpoint_path = %endpoint_path,
