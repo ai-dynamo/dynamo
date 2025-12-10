@@ -303,18 +303,20 @@ impl KvScheduler {
                         break;
                     }
                     _ = interval.tick() => {
-                        // Query active blocks and tokens from all workers
-                        let active_blocks = slots_metrics.active_blocks().await;
+                        // Query active tokens and blocks from all workers
+                        // Note: active_tokens is always tracked, but active_blocks may be empty
+                        // if --no-track-active-blocks is set
                         let active_tokens = slots_metrics.active_tokens().await;
+                        let active_blocks = slots_metrics.active_blocks().await;
 
-                        // Publish ActiveLoad for each worker/dp_rank
-                        for (worker, blocks) in active_blocks.iter() {
-                            let tokens = active_tokens.get(worker).copied();
+                        // Publish ActiveLoad for each worker/dp_rank (iterate over tokens since always tracked)
+                        for (worker, tokens) in active_tokens.iter() {
+                            let blocks = active_blocks.get(worker).copied();
                             let active_load = ActiveLoad {
                                 worker_id: worker.worker_id,
                                 dp_rank: worker.dp_rank,
-                                kv_active_blocks: Some(*blocks as u64),
-                                active_prefill_tokens: tokens.map(|t| t as u64),
+                                kv_active_blocks: blocks.map(|b| b as u64),
+                                active_prefill_tokens: Some(*tokens as u64),
                             };
 
                             if let Err(e) = ns_metrics.publish(KV_METRICS_SUBJECT, &active_load).await {
