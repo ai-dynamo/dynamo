@@ -419,7 +419,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 
 	// If autoApply is enabled, transition to Deploying state
 	if dgdr.Spec.AutoApply {
-		logger.Info("Transitioning to Deploying state", "autoApply", dgdr.Spec.AutoApply)
+		logger.Info("AutoApply enabled, transitioning to Deploying state")
 		return r.updateStateWithCondition(ctx, dgdr, StateDeploying, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecGenerated)
 	}
 
@@ -437,35 +437,41 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleReadyState(ctx context.Co
 		return ctrl.Result{}, nil
 	}
 
-	// Monitor DGD if autoApply is enabled
-	if dgdr.Status.Deployment != nil && dgdr.Status.Deployment.Created {
-		dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{}
-		err := r.Get(ctx, types.NamespacedName{
-			Name:      dgdr.Status.Deployment.Name,
-			Namespace: dgdr.Status.Deployment.Namespace,
-		}, dgd)
+	// Check if DGD still exists and monitor its status
+	dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+	err := r.Get(ctx, types.NamespacedName{
+		Name:      dgdr.Status.Deployment.Name,
+		Namespace: dgdr.Status.Deployment.Namespace,
+	}, dgd)
 
-		if apierrors.IsNotFound(err) {
-			return r.handleDGDDeleted(ctx, dgdr)
-		} else if err != nil {
-			return ctrl.Result{}, err
-		}
+	if apierrors.IsNotFound(err) {
+		// DGD was deleted by user
+		return r.handleDGDDeleted(ctx, dgdr)
+	}
 
-		dgdr.Status.Deployment.State = dgd.Status.State
-		if dgd.Status.State != "Ready" {
-			logger.Info("DGD degraded, transitioning back to Deploying", "name", dgd.Name, "state", dgd.Status.State)
-			dgdr.Status.State = StateDeploying
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
-			r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonDeploymentDegraded,
-				fmt.Sprintf("Deployment %s degraded from Ready state", dgd.Name))
+	// Update deployment status
+	dgdr.Status.Deployment.State = dgd.Status.State
 
-			meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
-				Type:    ConditionTypeDeploymentReady,
-				Status:  metav1.ConditionFalse,
-				Reason:  EventReasonDeploymentDegraded,
-				Message: fmt.Sprintf("Deployment %s degraded from Ready state", dgd.Name),
-			})
-		}
+	// Check if DGD degraded from Ready
+	if dgd.Status.State != "Ready" {
+		logger.Info("DGD degraded, transitioning back to Deploying",
+			"dgdState", dgd.Status.State)
+
+		dgdr.Status.State = StateDeploying
+
+		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonDeploymentDegraded,
+			fmt.Sprintf(MessageDeploymentDegraded, dgd.Name, dgd.Status.State))
+
+		meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
+			Type:    ConditionTypeDeploymentReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  EventReasonDeploymentDegraded,
+			Message: fmt.Sprintf("Deployment degraded to %s", dgd.Status.State),
+		})
 	}
 
 	return ctrl.Result{}, r.Status().Update(ctx, dgdr)
@@ -474,7 +480,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleReadyState(ctx context.Co
 // handleDeployingState handles DGD creation and monitors deployment
 func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingState(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Handling deploying state", "name", dgdr.Name, "autoApply", dgdr.Spec.AutoApply)
+	logger.Info("Handling deploying state", "name", dgdr.Name)
 
 	if !dgdr.Spec.AutoApply {
 		// Shouldn't be in this state without autoApply
@@ -498,14 +504,18 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingState(ctx contex
 	if apierrors.IsNotFound(err) {
 		// DGD was deleted by user
 		return r.handleDGDDeleted(ctx, dgdr)
-	} else if err != nil {
+	}
+
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Update deployment status
 	dgdr.Status.Deployment.State = dgd.Status.State
+
+	// Check if DGD is Ready
 	if dgd.Status.State == "Ready" {
-		logger.Info("Deployment ready, transitioning to Ready state", "name", dgd.Name)
+		logger.Info("DGD is Ready, transitioning to Ready state")
 		dgdr.Status.State = StateReady
 
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonDeploymentReady,
@@ -550,7 +560,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDGDDeleted(ctx context.Co
 	return ctrl.Result{}, r.Status().Update(ctx, dgdr)
 }
 
-// createDGD creates a DynamoGraphDeployment with the generated spec.
+// createDGD creates a DynamoGraphDeployment with the generated spec
 func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
