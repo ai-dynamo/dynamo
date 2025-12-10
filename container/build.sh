@@ -122,6 +122,7 @@ SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
 NIXL_REF=0.7.1
 NIXL_UCX_REF=v1.19.0
 NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
+NIXL_GDRCOPY_REF=v2.5.1
 
 NO_CACHE=""
 
@@ -276,7 +277,7 @@ get_options() {
             ;;
         --cache-from)
             if [ "$2" ]; then
-                CACHE_FROM="--cache-from $2"
+                CACHE_FROM+="--cache-from $2 "
                 shift
             else
                 missing_requirement "$1"
@@ -284,7 +285,7 @@ get_options() {
             ;;
         --cache-to)
             if [ "$2" ]; then
-                CACHE_TO="--cache-to $2"
+                CACHE_TO+="--cache-to $2 "
                 shift
             else
                 missing_requirement "$1"
@@ -830,10 +831,15 @@ if [ -z "${ENABLE_MEDIA_NIXL}" ]; then
 fi
 BUILD_ARGS+=" --build-arg ENABLE_MEDIA_NIXL=${ENABLE_MEDIA_NIXL} "
 
-# NIXL_UCX_REF: Used in base Dockerfile only.
-#               Passed to framework Dockerfile.{vllm,sglang,...} where it's NOT used.
+# NIXL_UCX_REF: Used in dynamo base stages.
 if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
+fi
+
+# NIXL_GDRCOPY_REF: Used in dynamo base stages.
+if [ -n "${NIXL_GDRCOPY_REF}" ]; then
+    BUILD_ARGS+=" --build-arg NIXL_GDRCOPY_REF=${NIXL_GDRCOPY_REF} "
+
 fi
 
 # MAX_JOBS is only used by Dockerfile.vllm
@@ -880,89 +886,26 @@ fi
 
 # Skip Build 1 and Build 2 if DEV_IMAGE_INPUT is set (we'll handle it at the bottom)
 if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
-    # Follow 2-step build process for all frameworks
-    if [[ $FRAMEWORK != "NONE" ]]; then
-        # Define base image tag with framework suffix to prevent clobbering
-        # Different frameworks require different base configurations:
-        # - VLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=cuda-dl-base
-        # - SGLANG: Python 3.10, BASE_IMAGE=cuda-dl-base
-        # - TRTLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=pytorch
-        # Without unique tags, building different frameworks would overwrite each other's names
-        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}-${FRAMEWORK,,}"
-        # Start base image build
-        echo "======================================"
-        echo "Starting Build 1: Base Image"
-        echo "======================================"
+    # Create build log directory for BuildKit reports
+    BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
+    mkdir -p "${BUILD_LOG_DIR}"
+    SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
 
-        # Create build log directory for BuildKit reports
-        BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
-        mkdir -p "${BUILD_LOG_DIR}"
-        BASE_BUILD_LOG="${BUILD_LOG_DIR}/base-image-build.log"
-
-        # Use BuildKit for enhanced metadata
-        if [ -z "$RUN_PREFIX" ]; then
-            if docker buildx version &>/dev/null; then
-                docker buildx build --builder default --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            else
-                DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            fi
-
-            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
-                exit ${BUILD_EXIT_CODE}
-            fi
+    # Use BuildKit for enhanced metadata
+    if [ -z "$RUN_PREFIX" ]; then
+        if docker buildx version &>/dev/null; then
+            docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+            BUILD_EXIT_CODE=${PIPESTATUS[0]}
         else
-            $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+            DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+            BUILD_EXIT_CODE=${PIPESTATUS[0]}
         fi
 
-        # Start framework build
-        echo "======================================"
-        echo "Starting Build 2: Framework Image"
-        echo "======================================"
-
-        FRAMEWORK_BUILD_LOG="${BUILD_LOG_DIR}/framework-${FRAMEWORK,,}-build.log"
-
-        BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
-
-        # Use BuildKit for enhanced metadata
-        if [ -z "$RUN_PREFIX" ]; then
-            if docker buildx version &>/dev/null; then
-                docker buildx build --builder default --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            else
-                DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            fi
-
-            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
-                exit ${BUILD_EXIT_CODE}
-            fi
-        else
-            $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+            exit ${BUILD_EXIT_CODE}
         fi
     else
-        # Create build log directory for BuildKit reports
-        BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
-        mkdir -p "${BUILD_LOG_DIR}"
-        SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
-
-        # Use BuildKit for enhanced metadata
-        if [ -z "$RUN_PREFIX" ]; then
-            if docker buildx version &>/dev/null; then
-                docker buildx build --builder default --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            else
-                DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            fi
-
-            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
-                exit ${BUILD_EXIT_CODE}
-            fi
-        else
-            $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-        fi
+        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
     fi
 fi
 

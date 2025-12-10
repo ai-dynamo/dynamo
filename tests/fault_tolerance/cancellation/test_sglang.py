@@ -161,9 +161,7 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.timeout(160)  # 3x average
 @pytest.mark.gpu_1
 @pytest.mark.xfail(strict=False)
-def test_request_cancellation_sglang_aggregated(
-    request, runtime_services, predownload_models
-):
+def test_request_cancellation_sglang_aggregated(request, runtime_services):
     """
     End-to-end test for request cancellation functionality in aggregated mode.
 
@@ -247,9 +245,7 @@ def test_request_cancellation_sglang_aggregated(
 
 @pytest.mark.timeout(185)  # 3x average
 @pytest.mark.gpu_2
-def test_request_cancellation_sglang_decode_cancel(
-    request, runtime_services, predownload_models
-):
+def test_request_cancellation_sglang_decode_cancel(request, runtime_services):
     """
     End-to-end test for request cancellation during decode phase.
 

@@ -50,9 +50,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
-            pytest.mark.timeout(
-                180
-            ),  # ~5x measured time (39s), can take longer on HF donwload
+            pytest.mark.timeout(240),  # 3x measured time (39s) + download time (120s)
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
@@ -133,7 +131,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.nightly,
-            pytest.mark.timeout(60),  # 3x measured time (20s)
+            pytest.mark.timeout(240),  # 3x measured time (20s) + download time (180s)
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
@@ -181,7 +179,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.nightly,
-            pytest.mark.timeout(90),  # 3x measured time (29s)
+            pytest.mark.timeout(270),  # 3x measured time (29s) + download time (180s)
         ],
         model="Qwen/Qwen3-Embedding-4B",
         delayed_start=0,
@@ -217,8 +215,8 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.timeout(
-                160
-            ),  # Total test timeout: 2x measured average (79.36s)
+                420
+            ),  # Total test timeout: 2x measured average (79.36s) + download time (240s) for 7B model
         ],
         model="deepseek-ai/deepseek-llm-7b-base",
         script_args=[
