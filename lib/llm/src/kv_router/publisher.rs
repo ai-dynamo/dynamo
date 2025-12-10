@@ -310,8 +310,6 @@ async fn start_worker_kv_query_service(
     );
 
     // Receive query request from router, retrieve event(s) from LocalKvIndexer, return response
-    // TODO: currently just dumps all events from LocalKvIndexer; need to implement
-    // event selection logic from buffer
     loop {
         tokio::select! {
             _ = cancellation_token.cancelled() => {
@@ -353,20 +351,7 @@ async fn start_worker_kv_query_service(
                         }
                     }
                     _ => {
-                        let start_id = request.start_event_id.unwrap_or(0);
-                        let end_id = request.end_event_id.unwrap_or(u64::MAX);
-
-                        if start_id >= end_id {
-                            tracing::warn!(
-                                worker_id,
-                                start_id,
-                                end_id,
-                                "Invalid WorkerKvQueryRequest range; returning empty result"
-                            );
-                            Vec::new()
-                        } else {
-                            local_indexer.get_events_in_id_range(start_id, end_id)
-                        }
+                            local_indexer.get_events_in_id_range(request.start_event_id, request.end_event_id).await
                     }
                 };
 
@@ -1831,17 +1816,32 @@ mod tests_startup_helpers {
             "Router should only see 1 shared block (not the new block from event_2)"
         );
 
-        // === STEP 4 & 5: Recovery - Apply buffered events to router ===
-        // This simulates: router.query_worker_local_kv(worker_1_id)
-        // followed by applying the returned events
-        // TODO be able to identify which event id is the last that Router has,
-        // and query worker(s) for buffer starting after it
-        for router_event in buffered {
+        // === STEP 4 & 5: Recovery - Query last received event IDs and fetch missed events ===
+        // Step 4a: Router queries its last received event ID per worker
+        let last_ids = router_indexer.get_last_received_event_ids().await.unwrap();
+        let last_known_id = last_ids.get(&worker_1_id).copied().unwrap_or(0);
+        assert_eq!(
+            last_known_id, 1,
+            "Router should have last_received_event_id = 1 for worker (only event_1 was forwarded)"
+        );
+
+        // Step 4b: Query worker's local indexer for events after last_known_id
+        let missed_events = local_indexer_1
+            .get_events_in_id_range(Some(last_known_id + 1), None)
+            .await;
+        assert_eq!(
+            missed_events.len(),
+            1,
+            "Should get 1 missed event (event_2 with id=2)"
+        );
+
+        // Step 5: Apply missed events to router
+        for router_event in missed_events {
             router_indexer
                 .event_sender()
                 .send(router_event)
                 .await
-                .unwrap(); // TODO use apply_event() instead?
+                .unwrap();
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -1858,8 +1858,17 @@ mod tests_startup_helpers {
             "Router should now see both blocks after recovery"
         );
 
+        // assert: Router's last_received_event_id is updated after recovery
+        let last_ids_after = router_indexer.get_last_received_event_ids().await.unwrap();
+        assert_eq!(
+            last_ids_after.get(&worker_1_id),
+            Some(&2),
+            "Router should have last_received_event_id = 2 after recovery"
+        );
+
         token.cancel();
     }
+
 }
 
 #[cfg(test)]
@@ -2277,7 +2286,7 @@ mod test_integration_publisher {
 
         // Exactly one worker should have been routed requests. Find that worker
         for &worker_id in &worker_ids {
-            let response = kv_router.query_worker_local_kv(worker_id).await?;
+            let response = kv_router.query_worker_local_kv(worker_id, None, None).await?;
             if response.events.is_empty() {
                 continue;
             }
@@ -2305,7 +2314,229 @@ mod test_integration_publisher {
                 continue;
             }
 
-            let response = kv_router.query_worker_local_kv(worker_id).await?;
+            let response = kv_router.query_worker_local_kv(worker_id, None, None).await?;
+            assert!(
+                response.events.is_empty(),
+                "Worker {worker_id} should not report buffered KV events; best worker {best_worker_id} reported {best_worker_event_count}"
+            );
+        }
+
+        // === Cleanup ===
+        for handle in server_handles {
+            handle.abort();
+        }
+        distributed1.shutdown();
+        distributed2.shutdown();
+        router_distributed.shutdown();
+
+        Ok(())
+    }
+
+    /// Test fault tolerance recovery using last_received_event_id tracking.
+    ///
+    /// This test verifies that after a simulated outage, the router can:
+    /// 1. Query its last received event ID per worker
+    /// 2. Request only the missed events from workers (starting from last_id + 1)
+    /// 3. Apply those events to recover full state
+    ///
+    /// This is the worker-based recovery mechanism that can replace JetStream.
+    #[tokio::test]
+    #[ignore] // Requires NATS/etcd. Run with: cargo test --package dynamo-llm --lib --features integration test_fault_tolerance_with_event_id_tracking -- --ignored --nocapture
+    async fn test_fault_tolerance_with_event_id_tracking() -> anyhow::Result<()> {
+        use crate::kv_router::scheduler::DefaultWorkerSelector;
+        use crate::kv_router::{KvPushRouter, KvRouter, KvRouterConfig};
+        use crate::local_model::LocalModelBuilder;
+        use crate::local_model::runtime_config::ModelRuntimeConfig;
+        use crate::mocker::engine::MOCKER_COMPONENT;
+        use crate::mocker::engine::MockVllmEngine;
+        use crate::mocker::protocols::MockEngineArgs;
+        use crate::protocols::common::{
+            OutputOptions, SamplingOptions, StopConditions,
+            llm_backend::{LLMEngineOutput, PreprocessedRequest},
+        };
+        use dynamo_runtime::pipeline::{Context, PushRouter, RouterMode, network::Ingress};
+        use dynamo_runtime::protocols::annotated::Annotated;
+
+        const BLOCK_SIZE: u32 = 4;
+        const NUM_REQUESTS: usize = 4;
+
+        dynamo_runtime::logging::init();
+
+        // === SETUP: Distributed runtimes and namespaces ===
+        let shared_store_dir = tempfile::tempdir()?;
+        let shared_store_path = shared_store_dir.path().to_path_buf();
+
+        // Make both runtimes point at the same file-backed storage backend so worker
+        // registrations and heartbeats remain visible to every DRT instance.
+        let distributed1 = create_test_shared_drt_async(&shared_store_path).await;
+        let distributed2 = create_test_shared_drt_async(&shared_store_path).await;
+        let component1 = distributed1
+            .namespace("test_e2e_router")?
+            .component(MOCKER_COMPONENT)?;
+        let component2 = distributed2
+            .namespace("test_e2e_router")?
+            .component(MOCKER_COMPONENT)?;
+
+        // === SETUP: Start mocker workers  ===
+        let mocker_args = MockEngineArgs::builder()
+            .block_size(BLOCK_SIZE as usize)
+            .dp_size(1) // single worker per runtime
+            .enable_prefix_caching(true)
+            .enable_local_indexer(true) // affects scheduler/publisher args
+            .build()?;
+
+        let worker_components = vec![component1.clone(), component2.clone()];
+        let mut server_handles = Vec::new();
+        let mut worker_ids = Vec::new();
+
+        for comp in worker_components {
+            let engine = Arc::new(MockVllmEngine::new(mocker_args.clone()));
+            engine.start(comp.clone()).await?;
+            tracing::info!("MockVllmEngine started for {:?}", comp);
+
+            // Register MDC with runtime_config so router can discover enable_local_indexer.
+            // (Without this step, the MDC-based assert in query_worker() in worker_query.rs will fail.)
+            // This inlines code which in the Python path would be performed by:
+            // - local_model.rs: LocalModelBuilder::build() sets runtime_config from MockEngineArgs
+            // - entrypoint/input/endpoint.rs: LocalModel::attach() registers MDC via discovery
+            let endpoint = comp.endpoint("generate");
+            let mut runtime_config = ModelRuntimeConfig::default();
+            runtime_config.enable_local_indexer = true;
+            let mut builder = LocalModelBuilder::default();
+            builder
+                .model_name(Some("mock".to_string()))
+                .kv_cache_block_size(Some(BLOCK_SIZE))
+                .runtime_config(runtime_config);
+            let mut local_model = builder.build().await?;
+            local_model
+                .attach(
+                    &endpoint,
+                    crate::model_type::ModelType::Chat,
+                    crate::model_type::ModelInput::Tokens,
+                    None,
+                )
+                .await?;
+
+            let ingress = Ingress::for_engine(engine.clone())?;
+            let endpoint_component = comp.clone();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = endpoint_component
+                    .endpoint("generate")
+                    .endpoint_builder()
+                    .handler(ingress)
+                    .start()
+                    .await
+                {
+                    tracing::error!("Generate endpoint failed: {e}");
+                }
+            });
+            server_handles.push(handle);
+            worker_ids.push(comp.drt().connection_id());
+        }
+        tracing::info!("Generate endpoint servers launched");
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // === SETUP: Build KvPushRouter ===
+        let router_distributed = create_test_shared_drt_async(&shared_store_path).await;
+        let router_namespace = router_distributed.namespace("test_e2e_router")?;
+        let backend_component = router_namespace.component(MOCKER_COMPONENT)?;
+        let backend_endpoint = backend_component.endpoint("generate");
+        let client = backend_endpoint.client().await?;
+        let kv_router_config = KvRouterConfig::default();
+        let selector = Box::new(DefaultWorkerSelector::new(Some(kv_router_config)));
+        let consumer_id = format!("test-router-{}", router_distributed.connection_id());
+
+        let kv_router: Arc<KvRouter> = Arc::new(
+            KvRouter::new(
+                backend_endpoint.clone(),
+                client.clone(),
+                BLOCK_SIZE,
+                Some(selector),
+                Some(kv_router_config),
+                consumer_id,
+            )
+            .await?,
+        );
+
+        let push_router =
+            PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
+                client,
+                RouterMode::KV,
+                None,
+                None,
+            )
+            .await?;
+
+        let kv_push_router = KvPushRouter::new(push_router, kv_router.clone());
+
+        // ===== TEST PART 1: ROUTE & SEND REQUESTS TO WORKERS (ROUTER -> WORKER) =====
+        let create_request = |tokens: Vec<u32>| {
+            PreprocessedRequest::builder()
+                .model("mock".to_string())
+                .token_ids(tokens)
+                .stop_conditions(StopConditions {
+                    max_tokens: Some(10),
+                    ..Default::default()
+                })
+                .sampling_options(SamplingOptions::default())
+                .output_options(OutputOptions::default())
+                .build()
+                .unwrap()
+        }; // from mocker/engine.rs
+
+        for i in 0..NUM_REQUESTS {
+            tracing::info!("Sending routed request {}", i + 1);
+            let tokens = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, i as u32];
+            let request = create_request(tokens.clone());
+
+            let response_stream = kv_push_router.generate(Context::new(request)).await?;
+            let responses: Vec<Annotated<LLMEngineOutput>> = response_stream.collect().await;
+            assert!(
+                !responses.is_empty(),
+                "Request {} should produce at least one response",
+                i + 1
+            );
+        }
+
+        tracing::info!("KvPushRouter generate() succeeded for {NUM_REQUESTS} requests");
+
+        // ===== TEST PART 2: QUERY WORKER-LOCAL KVINDEXERS DIRECTLY =====
+        // TODO: This could be refactored as router function (e.g. router.refresh_from_worker(worker_id))
+        // (which should also update the global kvIndexer with the buffer from the local kvIndexer)
+        let mut best_worker_info: Option<(u64, usize)> = None;
+
+        // Exactly one worker should have been routed requests. Find that worker
+        for &worker_id in &worker_ids {
+            let response = kv_router.query_worker_local_kv(worker_id, None, None).await?;
+            if response.events.is_empty() {
+                continue;
+            }
+
+            let event_count = response.events.len();
+            tracing::info!(
+                worker_id,
+                events = event_count,
+                "Worker query on worker {worker_id} returned buffered KV events"
+            );
+            best_worker_info = Some((worker_id, event_count));
+            break;
+        }
+
+        // Verify that only one worker has KV events in buffer
+        let (best_worker_id, best_worker_event_count) =
+            best_worker_info.expect("At least one worker should have buffered KV events");
+
+        tracing::info!(
+            "Best worker is {best_worker_id} with {best_worker_event_count} buffered KV events"
+        );
+
+        for &worker_id in &worker_ids {
+            if worker_id == best_worker_id {
+                continue;
+            }
+
+            let response = kv_router.query_worker_local_kv(worker_id, None, None).await?;
             assert!(
                 response.events.is_empty(),
                 "Worker {worker_id} should not report buffered KV events; best worker {best_worker_id} reported {best_worker_event_count}"

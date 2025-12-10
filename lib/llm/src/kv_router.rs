@@ -81,7 +81,7 @@ pub const RADIX_STATE_FILE: &str = "radix-state";
 
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_QUERY_SUBJECT: &str = "worker_kv_indexer_query";
-pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 100; // store 100 most recent events in worker buffer
+pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
 
 // for router discovery registration
 pub const KV_ROUTER_COMPONENT: &str = "kv-router";
@@ -529,18 +529,22 @@ impl KvRouter {
         self.indexer.dump_events().await
     }
 
-    /// Query a specific worker's local KV indexer for its buffered events
+    /// Query a specific worker's local KV indexer for its events
+    /// (See documentation for `WorkerQueryClient.query_worker()`)
     pub async fn query_worker_local_kv(
         &self,
         worker_id: WorkerId,
+        start_event_id: Option<u64>,
+        end_event_id: Option<u64>,
     ) -> Result<WorkerKvQueryResponse> {
         let query_client = self
             .worker_query_client
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Worker query client not available (NATS required)"))?;
 
-        query_client.query_worker(worker_id).await
+        query_client.query_worker(worker_id, start_event_id, end_event_id).await
     }
+
 }
 
 // NOTE: KVRouter works like a PushRouter,
