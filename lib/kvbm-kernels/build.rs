@@ -108,36 +108,34 @@ fn build_with_prebuilt_kernels() {
             );
         }
 
-        // Read and validate hashes (.cu, .fatbin, and .a)
+        // Read and validate hashes (.cu and .fatbin only)
+        // Note: We don't validate .a hashes because static libraries are not reproducible
+        // across different build environments (timestamps, compiler metadata, etc.).
+        // If .cu and .fatbin match, the .a was built from the same source and is valid.
         let stored_hashes_content = fs::read_to_string(&md5_path)
             .unwrap_or_else(|_| panic!("Failed to read {}", md5_path.display()));
         let stored_hashes: Vec<&str> = stored_hashes_content.lines().collect();
 
-        if stored_hashes.len() != 3 {
+        if stored_hashes.len() < 2 {
             panic!(
-                "Invalid .md5 format for {} (expected 3 lines: .cu hash, .fatbin hash, .a hash)",
+                "Invalid .md5 format for {} (expected at least 2 lines: .cu hash, .fatbin hash)",
                 kernel_name
             );
         }
 
         let current_cu_hash = compute_file_hash(cu_path);
         let current_fatbin_hash = compute_file_hash(&fatbin_path);
-        let current_lib_hash = compute_file_hash(&lib_path);
 
-        // Validate hashes
-        if current_cu_hash != stored_hashes[0]
-            || current_fatbin_hash != stored_hashes[1]
-            || current_lib_hash != stored_hashes[2]
-        {
+        // Validate that .cu source and .fatbin GPU code match exactly.
+        // This ensures the source code and compiled GPU kernels are in sync.
+        if current_cu_hash != stored_hashes[0] || current_fatbin_hash != stored_hashes[1] {
             panic!(
-                "Hash mismatch for {}! Rebuild with nvcc.\n  .cu: current={}, stored={}\n  .fatbin: current={}, stored={}\n  .a: current={}, stored={}",
+                "Hash mismatch for {}! Rebuild with nvcc.\n  .cu: current={}, stored={}\n  .fatbin: current={}, stored={}",
                 kernel_name,
                 current_cu_hash,
                 stored_hashes[0],
                 current_fatbin_hash,
-                stored_hashes[1],
-                current_lib_hash,
-                stored_hashes[2]
+                stored_hashes[1]
             );
         }
 
@@ -326,13 +324,15 @@ fn generate_prebuilt_artifacts(cu_path: &Path, arch_flags: &[String], out_dir: &
     // Copy .a to prebuilt directory
     fs::copy(&temp_lib, &lib_path).expect("Failed to copy .a to cuda/prebuilt/");
 
-    // Generate MD5 hashes for consistency validation (.cu, .fatbin, and .a)
+    // Generate MD5 hashes for consistency validation (.cu and .fatbin only)
+    // Note: We don't hash .a files because they're not reproducible across different
+    // build environments (timestamps, compiler versions, etc.). If source and .fatbin
+    // match, the .a was built from the same source and is valid.
     let cu_hash = compute_file_hash(cu_path);
     let fatbin_hash = compute_file_hash(&fatbin_path);
-    let lib_hash = compute_file_hash(&lib_path);
 
-    // Write hashes (one per line: .cu hash, .fatbin hash, .a hash)
-    let hashes = format!("{}\n{}\n{}\n", cu_hash, fatbin_hash, lib_hash);
+    // Write hashes (one per line: .cu hash, .fatbin hash)
+    let hashes = format!("{}\n{}\n", cu_hash, fatbin_hash);
     fs::write(&md5_path, hashes).expect("Failed to write .md5 file");
 
     println!(
@@ -343,7 +343,6 @@ fn generate_prebuilt_artifacts(cu_path: &Path, arch_flags: &[String], out_dir: &
     );
     println!("cargo:warning=.cu source hash: {}", cu_hash);
     println!("cargo:warning=.fatbin hash: {}", fatbin_hash);
-    println!("cargo:warning=.a library hash: {}", lib_hash);
 }
 
 fn compute_file_hash(path: &Path) -> String {
