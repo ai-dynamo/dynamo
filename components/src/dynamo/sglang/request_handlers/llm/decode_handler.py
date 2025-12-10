@@ -112,6 +112,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             RuntimeError: If no bootstrap info received from prefill worker.
         """
         logging.debug(f"New Request ID: {context.id()}")
+        trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
@@ -154,6 +155,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if not bootstrap_info:
                 raise RuntimeError("No bootstrap info received from prefill worker")
 
+            if self.enable_trace:
+                self._propagate_trace_context_to_sglang(
+                    context, bootstrap_info["bootstrap_room"]
+                )
+
             decode = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
@@ -161,6 +167,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
+                rid=trace_id,
             )
 
             if self.skip_tokenizer_init:
@@ -170,10 +177,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(decode, context):
                     yield out
         else:
+            if self.enable_trace:
+                self._propagate_trace_context_to_sglang(context)
+
             agg = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
+                rid=trace_id,
             )
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):
