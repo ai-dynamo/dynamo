@@ -102,6 +102,13 @@ impl ObjectRegistry {
     /// If at capacity, TinyLFU eviction will remove the least valuable entry.
     /// This operation is lock-free (only touches the relevant shard).
     pub fn register(&self, sequence_hash: SequenceHash, object_key: ObjectKey) {
+        tracing::info!(
+            target: "kvbm_local_registry",
+            sequence_hash = %sequence_hash,
+            object_key = %object_key,
+            "LOCAL_REGISTER: hash={:#018x} key={:#018x}",
+            sequence_hash, object_key
+        );
         self.cache.insert(sequence_hash, object_key);
         self.total_registered.fetch_add(1, Ordering::Relaxed);
     }
@@ -131,12 +138,41 @@ impl ObjectRegistry {
     /// Returns longest contiguous prefix that exists.
     /// Each lookup is lock-free and updates frequency tracking.
     pub fn match_sequence_hashes(&self, hashes: &[SequenceHash]) -> Vec<(SequenceHash, ObjectKey)> {
-        hashes
+        tracing::info!(
+            target: "kvbm_local_registry",
+            num_hashes = hashes.len(),
+            first_hash = ?hashes.first().map(|h| format!("{:#018x}", h)),
+            "LOCAL_MATCH_QUERY: count={} first={:#018x?}",
+            hashes.len(), hashes.first()
+        );
+
+        let matched: Vec<(SequenceHash, ObjectKey)> = hashes
             .iter()
             .map_while(|hash| {
                 self.cache.get(hash).map(|key| (*hash, key))
             })
-            .collect()
+            .collect();
+
+        // Log each match
+        for (hash, key) in &matched {
+            tracing::info!(
+                target: "kvbm_local_registry",
+                sequence_hash = %hash,
+                object_key = %key,
+                "LOCAL_MATCH_HIT: hash={:#018x} key={:#018x}",
+                hash, key
+            );
+        }
+
+        tracing::info!(
+            target: "kvbm_local_registry",
+            matched = matched.len(),
+            queried = hashes.len(),
+            "LOCAL_MATCH_RESULT: matched={} of {}",
+            matched.len(), hashes.len()
+        );
+
+        matched
     }
 
     /// Find ALL matching sequence hashes (non-contiguous).
