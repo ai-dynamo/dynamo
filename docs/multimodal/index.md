@@ -45,7 +45,7 @@ SGLang Multimodal <sglang.md>
 | **[TRT-LLM](trtllm.md)** | ❌ | 🚧* | ✅ | ✅ | ✅ | ❌ | ❌ |
 | **[SGLang](sglang.md)** | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
 
-\* E/P/D supported with pre-computed embeddings only; image URL support is WIP ([PR #4668](https://github.com/ai-dynamo/dynamo/pull/4668))
+\* E/P/D supported in TRT-LLM with pre-computed embeddings only; image URL support is WIP ([PR #4668](https://github.com/ai-dynamo/dynamo/pull/4668))
 
 **Pattern Key:**
 
@@ -125,6 +125,11 @@ Response
 ### E/P/D - Full Disaggregation
 
 Full disaggregation with separate workers for encoding, prefill, and decode.
+There are two variants of this workflow:
+- Prefill-first, used by vLLM
+- Decode-first, used by SGlang
+
+Prefill-first:
 
 ```text
 HTTP Frontend (Rust)
@@ -133,6 +138,26 @@ Processor (Python)
     ↓ tokenizes, extracts media URL
 Encode Worker (Python)
     ↓ downloads media, generates embeddings, NIXL transfer
+Prefill Worker (Python)
+    ↓ receives embeddings via NIXL, prefill only, KV cache transfer
+Decode Worker (Python)
+    ↓ decode only, token generation
+Response
+```
+
+OR
+
+Decode-first:
+
+```text
+HTTP Frontend (Rust)
+    ↓
+Processor (Python)
+    ↓ tokenizes, extracts media URL
+Encode Worker (Python)
+    ↓ downloads media, generates embeddings, NIXL transfer
+Decode Worker (Python)
+    ↓ Bootstraps prefill worker
 Prefill Worker (Python)
     ↓ receives embeddings via NIXL, prefill only, KV cache transfer
 Decode Worker (Python)
