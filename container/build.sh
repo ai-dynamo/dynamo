@@ -121,7 +121,6 @@ SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
 
 NIXL_REF=0.7.1
 NIXL_UCX_REF=v1.19.0
-NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 NIXL_GDRCOPY_REF=v2.5.1
 NIXL_LIBFABRIC_REF=v2.3.0
 
@@ -301,7 +300,7 @@ get_options() {
             ENABLE_MEDIA_NIXL=true
             ;;
         --make-efa)
-            NIXL_UCX_REF=$NIXL_UCX_EFA_REF
+            MAKE_EFA=true
             ;;
         --use-sccache)
             USE_SCCACHE=true
@@ -359,12 +358,17 @@ get_options() {
     # Validate that --uid and --gid are only used with local-dev target
     if [[ -n "${CUSTOM_UID:-}" || -n "${CUSTOM_GID:-}" ]]; then
 <<<<<<< HEAD
+<<<<<<< HEAD
         if [[ "${TARGET:-}" != "local-dev" ]]; then
             error "ERROR: --uid and --gid can only be used with --target local-dev"
 =======
         if [[ -z "${DEV_IMAGE_INPUT:-}" && "${TARGET:-}" != "local-dev" && "${TARGET:-}" != "local-dev-aws" ]]; then
             error "ERROR: --uid and --gid can only be used with --dev-image or --target local-dev or --target local-dev-aws"
 >>>>>>> e951a215c (feat: Add option for --target local-dev-aws in addition to local-dev)
+=======
+        if [[ -z "${DEV_IMAGE_INPUT:-}" && "${TARGET:-}" != "local-dev" ]]; then
+            error "ERROR: --uid and --gid can only be used with --dev-image or --target local-dev"
+>>>>>>> b098a368a (fix: Simplify AWS container by adding dedicated Dockerfile.aws)
         fi
     fi
 
@@ -400,7 +404,7 @@ get_options() {
 
     if [ -z "$TAG" ]; then
         TAG="--tag dynamo:${VERSION}-${FRAMEWORK,,}"
-        if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ] && [ "${TARGET}" != "local-dev-aws" ]; then
+        if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
             TAG="${TAG}-${TARGET}"
         fi
     fi
@@ -472,7 +476,7 @@ show_help() {
     echo "  [--dry-run print docker commands without running]"
     echo "  [--build-context name=path to add build context]"
     echo "  [--release-build perform a release build]"
-    echo "  [--make-efa Enables EFA support for NIXL]"
+    echo "  [--make-efa Adds AWS EFA layer on top of the built image (works with any target)]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
     echo "  [--enable-media-nixl Enable media processing with NIXL support (default: true for frameworks, false for none)]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
@@ -613,17 +617,64 @@ build_local_dev_with_header() {
     echo "  $run_path --image $last_tag --mount-workspace ..."
 }
 
+# Function to build AWS EFA images from base runtime or dev images
+build_aws_with_header() {
+    local base_image="$1"
+    local tags="$2"
+    local aws_target="$3"  # runtime-aws or dev-aws
+    local success_msg="$4"
+
+    DOCKERFILE_AWS="${SOURCE_DIR}/Dockerfile.aws"
+
+    if [[ ! -f "$DOCKERFILE_AWS" ]]; then
+        echo "ERROR: Dockerfile.aws not found at: $DOCKERFILE_AWS"
+        exit 1
+    fi
+
+    echo ""
+    echo "Building AWS EFA image from base: $base_image"
+    echo "Target stage: $aws_target"
+
+    # Show the docker command being executed if not in dry-run mode
+    if [ -z "$RUN_PREFIX" ]; then
+        set -x
+    fi
+
+    if docker buildx version &>/dev/null; then
+        $RUN_PREFIX docker buildx build --progress=plain --load \
+            --build-arg BASE_IMAGE="$base_image" \
+            --build-arg EFA_VERSION="${EFA_VERSION}" \
+            --target "$aws_target" \
+            --file "$DOCKERFILE_AWS" \
+            $tags \
+            "$SOURCE_DIR" || {
+            { set +x; } 2>/dev/null
+            echo "ERROR: Failed to build AWS EFA image"
+            exit 1
+        }
+    else
+        DOCKER_BUILDKIT=1 $RUN_PREFIX docker build --progress=plain \
+            --build-arg BASE_IMAGE="$base_image" \
+            --build-arg EFA_VERSION="${EFA_VERSION}" \
+            --target "$aws_target" \
+            --file "$DOCKERFILE_AWS" \
+            $tags \
+            "$SOURCE_DIR" || {
+            { set +x; } 2>/dev/null
+            echo "ERROR: Failed to build AWS EFA image"
+            exit 1
+        }
+    fi
+
+    { set +x; } 2>/dev/null
+    echo "$success_msg"
+}
+
 
 # Handle local-dev target
 if [[ $TARGET == "local-dev" ]]; then
     LOCAL_DEV_BUILD=true
     TARGET_STR="--target dev"
-fi
-
-# Handle local-dev-aws target
-if [[ $TARGET == "local-dev-aws" ]]; then
-    LOCAL_DEV_AWS_BUILD=true
-    TARGET_STR="--target dev-aws"
 fi
 
 # BUILD DEV IMAGE
@@ -877,7 +928,7 @@ fi
 LATEST_TAG=""
 if [ -z "${NO_TAG_LATEST}" ]; then
     LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
-    if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ] && [ "${TARGET}" != "local-dev-aws" ]; then
+    if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
         LATEST_TAG="${LATEST_TAG}-${TARGET}"
     fi
 fi
@@ -903,6 +954,7 @@ if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
     exit ${BUILD_EXIT_CODE}
 fi
 
+<<<<<<< HEAD
 # Handle local-dev target
 if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
     # Use the first tag name (TAG) if available, otherwise use latest
@@ -929,32 +981,95 @@ if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
     # Extract first tag for success message
     FIRST_TAG=$(echo "$LOCAL_DEV_TAGS" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
     build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built $FIRST_TAG" "Building Local-Dev Image"
+=======
+# Handle --dev-image option (build local-dev from existing dev image)
+if [[ -n "${DEV_IMAGE_INPUT:-}" ]]; then
+    # Validate that the dev image is not already a local-dev image
+    if [[ "$DEV_IMAGE_INPUT" == *"-local-dev" ]]; then
+        echo "ERROR: Cannot use local-dev image as dev image input: '$DEV_IMAGE_INPUT'"
+        exit 1
+    fi
+
+    # Build tag arguments - always add -local-dev suffix for --dev-image
+    # Generate local-dev tag from input image
+    if [[ "$DEV_IMAGE_INPUT" == *:* ]]; then
+        LOCAL_DEV_TAG="--tag ${DEV_IMAGE_INPUT}-local-dev"
+    else
+        LOCAL_DEV_TAG="--tag ${DEV_IMAGE_INPUT}:latest-local-dev"
+    fi
+
+    build_local_dev_with_header "$DEV_IMAGE_INPUT" "$LOCAL_DEV_TAG" "Successfully built local-dev image: ${LOCAL_DEV_TAG#--tag }" "Building Local-Dev Image"
+>>>>>>> b098a368a (fix: Simplify AWS container by adding dedicated Dockerfile.aws)
 fi
 
-# Handle --target local-dev-aws
-if [[ "${LOCAL_DEV_AWS_BUILD:-}" == "true" ]]; then
-    # Use the first tag name (TAG) if available, otherwise use latest
-    if [[ -n "$TAG" ]]; then
-        DEV_AWS_IMAGE=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev-aws$//')
+# Handle --make-efa flag: add AWS EFA layer on top of the built image
+# This runs BEFORE local-dev so the flow is: dev -> dev-aws -> local-dev-aws
+if [[ "${MAKE_EFA:-}" == "true" ]]; then
+    # Get the base image that was just built (dev or runtime)
+    BASE_IMAGE_FOR_EFA=$(echo "$TAG" | sed 's/--tag //')
+
+    # Determine the EFA stage based on the target
+    # runtime target -> runtime-aws stage
+    # dev/local-dev target -> dev-aws stage
+    if [[ "${TARGET:-dev}" == "runtime" ]]; then
+        EFA_STAGE="runtime-aws"
     else
-        DEV_AWS_IMAGE="dynamo:latest-${FRAMEWORK,,}-dev-aws"
+        EFA_STAGE="dev-aws"
     fi
 
-    # Build local-dev-aws tags from existing tags
-    LOCAL_DEV_AWS_TAGS=""
+    # Build AWS tags by appending -aws to existing tags
+    AWS_TAGS=""
     if [[ -n "$TAG" ]]; then
-        # Extract tag name, remove any existing -local-dev-aws suffix, then add -local-dev-aws
-        TAG_NAME=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev-aws$//')
-        LOCAL_DEV_AWS_TAGS+=" --tag ${TAG_NAME}-local-dev-aws"
+        AWS_TAG=$(echo "$TAG" | sed 's/--tag //')
+        AWS_TAGS+=" --tag ${AWS_TAG}-aws"
     fi
-
     if [[ -n "$LATEST_TAG" ]]; then
-        # Extract tag name, remove any existing -local-dev-aws suffix, then add -local-dev-aws
-        LATEST_TAG_NAME=$(echo "$LATEST_TAG" | sed 's/--tag //' | sed 's/-local-dev-aws$//')
-        LOCAL_DEV_AWS_TAGS+=" --tag ${LATEST_TAG_NAME}-local-dev-aws"
+        AWS_LATEST_TAG=$(echo "$LATEST_TAG" | sed 's/--tag //')
+        AWS_TAGS+=" --tag ${AWS_LATEST_TAG}-aws"
     fi
 
-    build_local_dev_with_header "$DEV_AWS_IMAGE" "$LOCAL_DEV_AWS_TAGS" "Successfully built local-dev-aws images" "Starting Build 3: Local-Dev-AWS Image"
+    build_aws_with_header "$BASE_IMAGE_FOR_EFA" "$AWS_TAGS" "$EFA_STAGE" "Successfully built ${EFA_STAGE} image"
+fi
+
+# Handle local-dev build
+if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
+    if [[ "${MAKE_EFA:-}" == "true" ]]; then
+        # With EFA: build local-dev-aws from dev-aws
+        DEV_AWS_IMAGE=$(echo "$AWS_TAGS" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
+
+        LOCAL_DEV_AWS_TAGS=""
+        if [[ -n "$TAG" ]]; then
+            TAG_NAME=$(echo "$TAG" | sed 's/--tag //')
+            LOCAL_DEV_AWS_TAGS+=" --tag ${TAG_NAME}-local-dev-aws"
+        fi
+        if [[ -n "$LATEST_TAG" ]]; then
+            LATEST_TAG_NAME=$(echo "$LATEST_TAG" | sed 's/--tag //')
+            LOCAL_DEV_AWS_TAGS+=" --tag ${LATEST_TAG_NAME}-local-dev-aws"
+        fi
+
+        build_local_dev_with_header "$DEV_AWS_IMAGE" "$LOCAL_DEV_AWS_TAGS" "Successfully built local-dev-aws image" "Building Local-Dev-AWS Image"
+    else
+        # Without EFA: build regular local-dev from dev
+        if [[ -n "$TAG" ]]; then
+            DEV_IMAGE=$(echo "$TAG" | sed 's/--tag //')
+        else
+            DEV_IMAGE="dynamo:latest-${FRAMEWORK,,}"
+        fi
+
+        LOCAL_DEV_TAGS=""
+        if [[ -n "$TAG" ]]; then
+            TAG_NAME=$(echo "$TAG" | sed 's/--tag //')
+            LOCAL_DEV_TAGS+=" --tag ${TAG_NAME}-local-dev"
+        fi
+        if [[ -n "$LATEST_TAG" ]]; then
+            LATEST_TAG_NAME=$(echo "$LATEST_TAG" | sed 's/--tag //')
+            LOCAL_DEV_TAGS+=" --tag ${LATEST_TAG_NAME}-local-dev"
+        fi
+
+        # Extract first tag for success message
+        FIRST_TAG=$(echo "$LOCAL_DEV_TAGS" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
+        build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built $FIRST_TAG" "Building Local-Dev Image"
+    fi
 fi
 
 
