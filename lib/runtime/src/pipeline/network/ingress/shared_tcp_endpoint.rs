@@ -542,7 +542,9 @@ mod tests {
             let server = server.clone();
             let endpoint_path = endpoint_path.clone();
             async move {
-                server.unregister_endpoint(&endpoint_path, "test_endpoint").await;
+                server
+                    .unregister_endpoint(&endpoint_path, "test_endpoint")
+                    .await;
                 Instant::now()
             }
         });
