@@ -408,9 +408,9 @@ impl ModelWatcher {
             let worker_monitor = if self.router_config.blocks_threshold.is_some()
                 || self.router_config.tokens_threshold.is_some()
             {
-                // Default thresholds: blocks=1.0 (disabled), tokens=f64::MAX (disabled)
+                // Default thresholds: blocks=1.0 (disabled), tokens=1000.0 (effectively disabled)
                 let blocks = self.router_config.blocks_threshold.unwrap_or(1.0);
-                let tokens = self.router_config.tokens_threshold.unwrap_or(f64::MAX);
+                let tokens = self.router_config.tokens_threshold.unwrap_or(1000.0);
                 Some(self.manager.get_or_create_worker_monitor(
                     card.name(),
                     client.clone(),
