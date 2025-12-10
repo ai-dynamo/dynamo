@@ -77,7 +77,6 @@ class EmbeddingsProcessor:
     async def initialize(self):
         """Initialize the connector for embeddings processing"""
         self._connector = connect.Connector()
-        await self._connector.initialize()
 
     async def process_embeddings(self, request: SglangMultimodalRequest):
         """Process embeddings from serialized request"""
@@ -103,7 +102,6 @@ class EmbeddingsProcessor:
                 "Connector is None - this should not happen after initialization"
             )
             self._connector = connect.Connector()
-            await self._connector.initialize()
 
         read_op = await self._connector.begin_read(
             request.serialized_request, descriptor

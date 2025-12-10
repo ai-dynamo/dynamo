@@ -158,7 +158,8 @@ async fn parse_response_stream(
     > = if tool_parse_enable {
         if let Some(tool_parser) = tool_parser_str {
             Box::pin(OpenAIPreprocessor::apply_tool_calling_jail(
-                tool_parser,
+                Some(tool_parser),
+                None, // No tool_choice in this test
                 stream,
             ))
         } else {

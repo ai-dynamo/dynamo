@@ -271,13 +271,13 @@ where
     // Link with prefill chooser including backward edge for response flow
     let engine = frontend
         .link(preprocessor_op.forward_edge())?
-        .link(backend.forward_edge())?
         .link(migration.forward_edge())?
+        .link(backend.forward_edge())?
         .link(prefill_op.forward_edge())?
         .link(service_backend)?
         .link(prefill_op.backward_edge())?
-        .link(migration.backward_edge())?
         .link(backend.backward_edge())?
+        .link(migration.backward_edge())?
         .link(preprocessor_op.backward_edge())?
         .link(frontend)?;
 

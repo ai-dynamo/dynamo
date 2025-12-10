@@ -8,6 +8,11 @@ inputs:
   push_tags:
     description: 'Target Name:Tag (newline-separated list for multiple tags)'
     required: true
+  # There isn't a clean way to have an additional tag that is conditional
+  # Adding this to handle this use-case (we want multiple tags for main builds)
+  conditional_tag:
+    description: 'Optional tag for conditionals'
+    required: false
   aws_push:
     description: 'Push to AWS Boolean'
     required: false
@@ -22,20 +27,8 @@ inputs:
   aws_default_region:
     description: 'AWS Default Region'
     required: false
-  aws_access_key_id:
-    description: 'AWS Access Key ID'
-    required: false
-  aws_secret_access_key:
-    description: 'AWS Secret Access Key'
-    required: false
   azure_acr_hostname:
     description: 'Azure ACR hostname'
-    required: false
-  azure_acr_user:
-    description: 'Azure ACR user'
-    required: false
-  azure_acr_password:
-    description: 'Azure ACR password'
     required: false
 
 outputs:
@@ -48,16 +41,20 @@ runs:
   steps:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-
     - name: ECR Tag and Push
       shell: bash
       if: ${{ inputs.aws_push == 'true' }}
       env:
         LOCAL_IMAGE: ${{ inputs.local_image }}
         PUSH_TAGS: ${{ inputs.push_tags }}
+        CONDITIONAL_TAG: ${{ inputs.conditional_tag }}
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
         set -euo pipefail
+        if [[ ${CONDITIONAL_TAG} != '' ]]; then
+            docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${CONDITIONAL_TAG}
+            docker push ${ECR_HOSTNAME}/${CONDITIONAL_TAG}
+        fi
         while IFS= read -r TAG; do
           if [ -z "$TAG" ]; then
             continue
@@ -66,7 +63,6 @@ runs:
           docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${TAG}"
           docker push "${ECR_HOSTNAME}/${TAG}"
         done <<< "$PUSH_TAGS"
-
     - name: ACR Tag and Push
       shell: bash
       if: ${{ inputs.azure_push == 'true' }}

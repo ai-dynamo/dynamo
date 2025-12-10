@@ -111,7 +111,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(290)  # 3x average
 def test_request_migration_trtllm_worker_failure(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with migration support using TRT-LLM.
@@ -155,7 +155,7 @@ def test_request_migration_trtllm_worker_failure(
 
 @pytest.mark.skip(reason="TRT-LLM graceful shutdown not yet implemented")
 def test_request_migration_trtllm_graceful_shutdown(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration support using TRT-LLM.
@@ -203,7 +203,7 @@ def test_request_migration_trtllm_graceful_shutdown(
 
 @pytest.mark.timeout(185)  # 3x average
 def test_no_request_migration_trtllm_worker_failure(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with migration disabled using TRT-LLM.
@@ -263,7 +263,7 @@ def test_no_request_migration_trtllm_worker_failure(
 
 @pytest.mark.skip(reason="TRT-LLM graceful shutdown not yet implemented")
 def test_no_request_migration_trtllm_graceful_shutdown(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration disabled using TRT-LLM.

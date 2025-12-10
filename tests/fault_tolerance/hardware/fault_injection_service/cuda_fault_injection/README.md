@@ -6,13 +6,16 @@
 
 ## What This Does
 
-Makes CUDA calls return error codes to simulate various GPU failures. Uses LD_PRELOAD to intercept CUDA library calls.
+Intercepts CUDA calls to simulate GPU failures using LD_PRELOAD. Faults persist across pod restarts via hostPath volumes, enabling realistic hardware failure testing.
 
 ```
-Pod calls cudaMalloc() → LD_PRELOAD intercepts → Returns error → Pod crashes
+Pod calls cudaMalloc() → LD_PRELOAD intercepts → Checks /host-fault/cuda_fault_enabled → Returns error → Pod crashes
 ```
 
-**Result**: Realistic GPU failure testing without hardware damage.
+**Key Features**:
+- **Persistent faults**: hostPath volume (`/var/lib/cuda-fault-test`) survives pod restarts on same node
+- **Runtime toggle**: Enable/disable faults without pod restarts via `/host-fault/cuda_fault_enabled`
+- **Node-specific**: Faults only on target node, healthy nodes unaffected
 
 ## Scope
 
@@ -35,13 +38,20 @@ This library simulates **software/orchestration-level failures** that occur when
 | **43** | GPU stopped responding | `CUDA_ERROR_LAUNCH_TIMEOUT` | Hung kernel |
 | **74** | NVLink error | `CUDA_ERROR_PEER_ACCESS_UNSUPPORTED` | Multi-GPU communication failure |
 
+## How It Works
+
+1. **Deployment patching**: Adds hostPath volume + init container to compile library
+2. **LD_PRELOAD injection**: Environment variable loads library before CUDA
+3. **Runtime control**: Toggle file (`/host-fault/cuda_fault_enabled`) controls fault state
+4. **Node persistence**: hostPath ensures faults survive pod restarts on same node
+
 ## Files in This Directory
 
 | File | Purpose |
 |------|---------|
-| `cuda_intercept.c` | C library source that intercepts CUDA calls |
-| `inject_into_pods.py` | Helper functions for patching Kubernetes deployments |
-| `Makefile` | Builds the `.so` library locally (optional, for standalone testing) |
+| `cuda_intercept.c` | C library that intercepts CUDA calls and checks fault markers |
+| `inject_into_pods.py` | Kubernetes deployment patcher (adds hostPath volume + library) |
+| `Makefile` | Local build (optional, for testing) |
 
 ## Prerequisites
 

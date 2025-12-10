@@ -67,7 +67,7 @@ Now that your environment is ready, start the aggregated server with **speculati
 
 ```bash
 # Requires only one GPU
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/agg_spec_decoding.sh
 ```
 

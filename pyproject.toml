@@ -181,6 +181,8 @@ filterwarnings = [
     "ignore:Support for class-based `config`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:Using extra keyword arguments on `Field`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:The `schema` method is deprecated.*:pydantic.warnings.PydanticDeprecatedSince20",
+    # Pydantic warning about field shadowing in tensorrt_llm.serve.openai_protocol.ResponseFormat
+    'ignore:Field name "schema" in "ResponseFormat" shadows an attribute in parent:UserWarning',
     # pytest-benchmark automatically disables when xdist is active, ignore the warning
     "ignore:.*Benchmarks are automatically disabled.*:pytest_benchmark.logger.PytestBenchmarkWarning",
 ]

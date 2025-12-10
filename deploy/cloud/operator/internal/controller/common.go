@@ -53,3 +53,43 @@ type dockerSecretRetriever interface {
 	// returns a list of secret names associated with the docker registry
 	GetSecrets(namespace, registry string) ([]string, error)
 }
+
+// getServiceKeys returns the keys of the services map for logging purposes
+func getServiceKeys(services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) []string {
+	keys := make([]string, 0, len(services))
+	for k := range services {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// servicesEqual compares two services maps to detect changes in replica counts
+func servicesEqual(old, new map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
+	if len(old) != len(new) {
+		return false
+	}
+
+	for key, oldSvc := range old {
+		newSvc, exists := new[key]
+		if !exists {
+			return false
+		}
+
+		// Compare replicas
+		oldReplicas := int32(1)
+		if oldSvc.Replicas != nil {
+			oldReplicas = *oldSvc.Replicas
+		}
+
+		newReplicas := int32(1)
+		if newSvc.Replicas != nil {
+			newReplicas = *newSvc.Replicas
+		}
+
+		if oldReplicas != newReplicas {
+			return false
+		}
+	}
+
+	return true
+}

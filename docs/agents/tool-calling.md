@@ -38,6 +38,7 @@ Parser to Model Mapping
 | deepseek_v3 | deepseek-ai/DeepSeek-V3, deepseek-ai/DeepSeek-R1, deepseek-ai/DeepSeek-R1-0528 |
 | deepseek_v3_1 | deepseek-ai/DeepSeek-V3.1 |
 | pythonic |  meta-llama/Llama-4-* |
+| jamba |  ai21labs/AI21-Jamba-*-1.5, ai21labs/AI21-Jamba-*-1.6, ai21labs/AI21-Jamba-*-1.7, |
 
 
 ## Examples

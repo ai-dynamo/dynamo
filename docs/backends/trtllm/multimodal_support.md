@@ -92,23 +92,50 @@ In general, disaggregated serving can run on a single node, provided the model f
 
 To deploy `Llama-4-Maverick-17B-128E-Instruct` in disaggregated mode, you will need to follow the multi-node setup instructions, which can be found [here](./multinode/multinode-multimodal-example.md).
 
-## Using Pre-computed Embeddings (Experimental)
+## Pre-computed Embeddings with EPD Flow
 
-Dynamo with TensorRT-LLM supports providing pre-computed embeddings directly in an inference request. This bypasses the need for the model to process an image and generate embeddings itself, which is useful for performance optimization or when working with custom, pre-generated embeddings.
+For high-performance multimodal inference, Dynamo supports pre-computed embeddings with an **Encode-Prefill-Decode (EPD)** flow using **NIXL (RDMA)** for zero-copy tensor transfer.
 
-### How to Use
+### Enabling the Feature
 
-Once the container is built, you can send requests with paths to local embedding files.
+This is an experimental feature that requires using a specific TensorRT-LLM commit.
+To enable it build the dynamo container with the `--tensorrtllm-commit` flag:
 
--   **Format:** Provide the embedding as part of the `messages` array, using the `image_url` content type.
--   **URL:** The `url` field should contain the absolute or relative path to your embedding file on the local filesystem.
--   **File Types:** Supported embedding file extensions are `.pt`, `.pth`, and `.bin`. Dynamo will automatically detect these extensions.
+```bash
+./container/build.sh --framework trtllm --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM.git --tensorrtllm-commit v1.2.0rc3
+```
 
-When a request with a supported embedding file is received, Dynamo will load the tensor from the file and pass it directly to the model for inference, skipping the image-to-embedding pipeline.
+### Supported File Types
+
+- `.pt` - PyTorch tensor files
+- `.pth` - PyTorch checkpoint files
+- `.bin` - Binary tensor files
+
+### How to Launch
+
+```bash
+cd $DYNAMO_HOME/examples/backends/trtllm
+
+# Launch 3-worker EPD flow with NIXL
+./launch/epd_disagg.sh
+```
+
+> **Note:** This script is designed for 8-node H200 with `Llama-4-Scout-17B-16E-Instruct` model and assumes you have a model-specific embedding file ready.
+
+### Configuration
+
+```bash
+# Encode endpoint for Prefill → Encode communication
+export ENCODE_ENDPOINT="dyn://dynamo.tensorrt_llm_encode.generate"
+
+# Security: Allowed directory for embedding files (default: /tmp)
+export ALLOWED_LOCAL_MEDIA_PATH="/tmp"
+
+# Security: Max file size to prevent DoS attacks (default: 50MB)
+export MAX_FILE_SIZE_MB=50
+```
 
 ### Example Request
-
-Here is an example of how to send a request with a pre-computed embedding file.
 
 ```bash
 curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
@@ -117,27 +144,47 @@ curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '
         {
             "role": "user",
             "content": [
-                {
-                    "type": "text",
-                    "text": "Describe the content represented by the embeddings"
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": "/path/to/your/embedding.pt"
-                    }
-                }
+                {"type": "text", "text": "Describe the image"},
+                {"type": "image_url", "image_url": {"url": "/path/to/embedding.pt"}}
             ]
         }
     ],
-    "stream": false,
     "max_tokens": 160
 }'
 ```
-## Encode-Prefill-Decode (EPD) Flow with NIXL
 
-Dynamo with the TensorRT-LLM backend supports multimodal models in Encode -> Decode -> Prefill fashion, enabling you to process embeddings seperately in a seperate worker. For detailed setup instructions, example requests, and best practices, see the [Multimodal EPD Support Guide](./multimodal_epd.md).
+### Architecture
+
+The EPD flow implements a **3-worker architecture**:
+
+- **Encode Worker**: Loads pre-computed embeddings, transfers via NIXL
+- **Prefill Worker**: Receives embeddings, handles context processing and KV-cache generation
+- **Decode Worker**: Performs streaming token generation
+
+### Request Flow
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Frontend
+    participant PrefillWorker as "Prefill Worker"
+    participant EncodeWorker as "Encode Worker"
+    participant DecodeWorker as "Decode Worker"
+    participant NIXL as "NIXL (RDMA)"
+
+    Client->>Frontend: POST /v1/chat/completions
+    Frontend->>PrefillWorker: Route to prefill worker
+    PrefillWorker->>EncodeWorker: Send request (embedding paths)
+    EncodeWorker->>NIXL: Create readable operation
+    EncodeWorker->>PrefillWorker: Send metadata + NIXL info
+    PrefillWorker->>NIXL: Begin read operation
+    NIXL-->>PrefillWorker: Zero-copy transfer complete
+    PrefillWorker->>Frontend: Return prefill response
+    Frontend->>DecodeWorker: Route to decode worker
+    DecodeWorker->>Frontend: Stream response chunks
+    Frontend->>Client: Stream response
+```
 
 ## Supported Multimodal Models
 
-Multimodel models listed [here](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/inputs/utils.py#L221) are supported by dynamo.
+Multimodal models listed in [TensorRT-LLM supported models](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/models/supported-models.md) are supported by Dynamo.

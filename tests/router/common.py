@@ -87,6 +87,47 @@ def generate_random_suffix() -> str:
     return "".join(random.choices(string.ascii_lowercase, k=10))  # noqa: S311
 
 
+def verify_response_worker_ids(
+    response_worker_ids: list[dict[str, Optional[int]]],
+    key: str,
+    expected_worker_id: int,
+) -> None:
+    """Verify that all responses have the same worker ID for a given key.
+
+    Args:
+        response_worker_ids: List of dicts with worker ID info from responses.
+        key: The key to check (e.g., "decode_worker_id" or "prefill_worker_id").
+        expected_worker_id: The expected worker ID value.
+
+    Raises:
+        AssertionError: If any response is missing the key, values differ, or don't match expected.
+    """
+    worker_ids = [r.get(key) for r in response_worker_ids]
+    logger.info(f"Response {key}s: {worker_ids}")
+
+    # All responses should have the key
+    assert all(
+        wid is not None for wid in worker_ids
+    ), f"Expected all {len(response_worker_ids)} responses to have {key}, got: {worker_ids}"
+
+    # All values should be the same (due to prefix reuse routing)
+    unique_ids = set(worker_ids)
+    assert len(unique_ids) == 1, (
+        f"Expected all responses to have the same {key} (due to prefix reuse), "
+        f"but found {len(unique_ids)} unique values: {unique_ids}"
+    )
+
+    # The value should match the expected worker ID
+    actual_worker_id = worker_ids[0]
+    assert actual_worker_id == expected_worker_id, (
+        f"Expected {key}={expected_worker_id} (forced in first request), "
+        f"but got {key}={actual_worker_id}"
+    )
+    logger.info(
+        f"✓ Verified all {len(response_worker_ids)} responses have {key}={actual_worker_id}"
+    )
+
+
 ########################################################
 # Utility functions
 ########################################################
@@ -420,9 +461,17 @@ async def send_request_via_python_kv_router(
         int
     ] = None,  # If None, Router will select the best available worker
     dp_rank: Optional[int] = None,  # Data parallel rank (defaults to 0)
-) -> bool:
+    return_worker_ids: bool = False,  # If True, return worker IDs from response
+) -> bool | dict[str, Optional[int]]:
     """Send a request to the specified worker instance.
-    Returns True if workers respond, otherwise raises or returns False.
+
+    Args:
+        return_worker_ids: If True, returns a dict with prefill_worker_id and decode_worker_id.
+                          If False, returns True on success or False on failure.
+
+    Returns:
+        If return_worker_ids=False: True if workers respond, otherwise raises or returns False.
+        If return_worker_ids=True: Dict with 'prefill_worker_id' and 'decode_worker_id' keys.
     """
 
     wait_time = initial_wait
@@ -463,8 +512,11 @@ async def send_request_via_python_kv_router(
                     f"Failed to connect to workers after {max_retries + 1} attempts"
                 ) from e
 
-    # Collect tokens from the SSE stream
+    # Collect tokens and worker IDs from the SSE stream
     generated_tokens = []
+    prefill_worker_id: Optional[int] = None
+    decode_worker_id: Optional[int] = None
+
     async for response in stream:
         if isinstance(response, dict):
             # Check if response has token_ids
@@ -479,6 +531,17 @@ async def send_request_via_python_kv_router(
                 logger.debug(
                     f"Stream finished with reason: {response['finish_reason']}"
                 )
+
+            # Extract worker IDs from disaggregated_params if present
+            if return_worker_ids and "disaggregated_params" in response:
+                disagg_params = response["disaggregated_params"]
+                if isinstance(disagg_params, dict) and "worker_id" in disagg_params:
+                    worker_id_info = disagg_params["worker_id"]
+                    if isinstance(worker_id_info, dict):
+                        if "prefill_worker_id" in worker_id_info:
+                            prefill_worker_id = worker_id_info["prefill_worker_id"]
+                        if "decode_worker_id" in worker_id_info:
+                            decode_worker_id = worker_id_info["decode_worker_id"]
 
     # Verify if expected number of tokens are generated if max_tokens specified and ignore_eos is True
     logger.debug(f"Total generated tokens: {len(generated_tokens)}")
@@ -497,9 +560,14 @@ async def send_request_via_python_kv_router(
         logger.debug(
             f"Successfully verified {max_tokens} tokens generated as expected via KvPushRouter with ignore_eos=True"
         )
-        return True
 
-    return False
+    if return_worker_ids:
+        return {
+            "prefill_worker_id": prefill_worker_id,
+            "decode_worker_id": decode_worker_id,
+        }
+
+    return True
 
 
 ########################################################
@@ -1498,7 +1566,7 @@ def _test_router_indexers_sync(
     logger.info("Indexers sync test completed successfully")
 
 
-def _test_router_disagg_decisions(
+def _test_router_decisions_disagg(
     prefill_workers,
     decode_workers,
     block_size: int,
@@ -1743,6 +1811,7 @@ def _test_router_decisions(
 
         # Send 4 progressive requests with overlapping prefixes
         cumulative_tokens = []
+        response_worker_ids: list[dict[str, Optional[int]]] = []
 
         for i in range(4):
             # Add BLOCK_SIZE new random tokens
@@ -1764,7 +1833,7 @@ def _test_router_decisions(
                     log_msg += f" - FORCING worker_id={worker_id_override}"
             logger.info(log_msg)
 
-            await send_request_via_python_kv_router(
+            result = await send_request_via_python_kv_router(
                 kv_python_router=kv_push_router,
                 model_name=model_name,
                 token_ids=cumulative_tokens.copy(),
@@ -1776,6 +1845,13 @@ def _test_router_decisions(
                 },
                 worker_id=worker_id_override,
                 dp_rank=dp_rank_override,
+                return_worker_ids=True,
+            )
+            assert isinstance(result, dict), f"Expected dict result, got {type(result)}"
+            response_worker_ids.append(result)
+            logger.info(
+                f"Request {i + 1} response: prefill_worker_id={result.get('prefill_worker_id')}, "
+                f"decode_worker_id={result.get('decode_worker_id')}"
             )
 
             # Wait a bit between requests
@@ -1787,10 +1863,23 @@ def _test_router_decisions(
 
         # Dump events from the router
         events_json = await kv_push_router.dump_events()
-        return events_json, forced_worker_id, forced_dp_rank
+        return events_json, forced_worker_id, forced_dp_rank, response_worker_ids
 
     # Run the async test
-    events_json, expected_worker_id, expected_dp_rank = asyncio.run(test_sync())
+    (
+        events_json,
+        expected_worker_id,
+        expected_dp_rank,
+        response_worker_ids,
+    ) = asyncio.run(test_sync())
+
+    # Verify worker IDs from responses
+    verify_response_worker_ids(
+        response_worker_ids, "decode_worker_id", expected_worker_id
+    )
+    verify_response_worker_ids(
+        response_worker_ids, "prefill_worker_id", expected_worker_id
+    )
 
     # Parse events and count by worker routing key (worker_id or (worker_id, dp_rank))
     events = json.loads(events_json)

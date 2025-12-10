@@ -77,12 +77,13 @@ spec:
                     (such as Pod, Service, and Ingress when applicable).
                   type: object
                 autoscaling:
-                  description: Autoscaling config for this component (replica range, target utilization, etc.).
+                  description: |-
+                    Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
+                    with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+                    for migration guidance. This field will be removed in a future API version.
                   properties:
                     behavior:
-                      description: |-
-                        HorizontalPodAutoscalerBehavior configures the scaling behavior of the target
-                        in both Up and Down directions (scaleUp and scaleDown fields respectively).
+                      description: 'Deprecated: This field is ignored.'
                       properties:
                         scaleDown:
                           description: |-
@@ -231,10 +232,13 @@ spec:
                           type: object
                       type: object
                     enabled:
+                      description: 'Deprecated: This field is ignored.'
                       type: boolean
                     maxReplicas:
+                      description: 'Deprecated: This field is ignored.'
                       type: integer
                     metrics:
+                      description: 'Deprecated: This field is ignored.'
                       items:
                         description: |-
                           MetricSpec specifies how to scale based on a single metric
@@ -665,6 +669,7 @@ spec:
                         type: object
                       type: array
                     minReplicas:
+                      description: 'Deprecated: This field is ignored.'
                       type: integer
                   type: object
                 backendFramework:
@@ -10184,8 +10189,12 @@ spec:
                       type: integer
                   type: object
                 replicas:
-                  description: Replicas is the desired number of Pods for this component when autoscaling is not used.
+                  description: |-
+                    Replicas is the desired number of Pods for this component.
+                    When scalingAdapter is enabled (default), this field is managed by the
+                    DynamoGraphDeploymentScalingAdapter and should not be modified directly.
                   format: int32
+                  minimum: 0
                   type: integer
                 resources:
                   description: |-
@@ -10263,6 +10272,20 @@ spec:
                           description: Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi")
                           type: string
                       type: object
+                  type: object
+                scalingAdapter:
+                  description: |-
+                    ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
+                    When enabled (default), replicas are managed via DGDSA and external autoscalers can scale
+                    the service using the Scale subresource. When disabled, replicas can be modified directly.
+                  properties:
+                    disable:
+                      default: false
+                      description: |-
+                        Disable indicates whether the ScalingAdapter should be disabled for this service.
+                        When false (default), a DGDSA is created and owns the replicas field.
+                        When true, no DGDSA is created and replicas can be modified directly in the DGD.
+                      type: boolean
                   type: object
                 serviceName:
                   description: The name of the component

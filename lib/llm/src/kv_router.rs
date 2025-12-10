@@ -22,6 +22,8 @@ use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::protocols::openai::nvext::WorkerIdInfo;
+
 pub mod approx;
 pub mod indexer;
 pub mod prefill_router;
@@ -646,13 +648,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
         backend_input.dp_rank = Some(dp_rank);
 
-        // Get prefill worker ID if available (stored by PrefillRouter)
-        // In aggregated mode, prefill_worker_id is None, so we use decode_worker_id for both
+        // Get prefill worker ID from prefill_result if available
+        // In aggregated mode, prefill_result is None, so we use decode_worker_id for both
         let decode_worker_id = instance_id;
-        let prefill_worker_id = context
-            .get::<u64>("prefill_worker_id")
-            .ok()
-            .map(|arc| *arc)
+        let prefill_worker_id = backend_input
+            .prefill_result
+            .as_ref()
+            .and_then(|prefill_result| {
+                prefill_result
+                    .disaggregated_params
+                    .get("worker_id")
+                    .and_then(|v| serde_json::from_value::<WorkerIdInfo>(v.clone()).ok())
+                    .and_then(|info| info.prefill_worker_id)
+            })
             .or(Some(decode_worker_id)); // Use decode_worker_id if no separate prefill worker
 
         let updated_request = context.map(|_| backend_input);
@@ -699,12 +707,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 continue;
                             };
 
-                            // prefill_worker_id comes from context (set by PrefillRouter) or falls back to instance_id
+                            // prefill_worker_id comes from prefill_result.disaggregated_params or falls back to instance_id
                             // decode_worker_id is always the current instance_id
-                            let worker_id_json = json!({
-                                "prefill_worker_id": prefill_worker_id,
-                                "decode_worker_id": decode_worker_id,
-                            });
+                            let worker_id_info = WorkerIdInfo {
+                                prefill_worker_id,
+                                decode_worker_id: Some(decode_worker_id),
+                            };
+                            let worker_id_json = serde_json::to_value(&worker_id_info)
+                                .expect("WorkerIdInfo serialization should not fail");
 
                             if let Some(obj) = data.disaggregated_params.as_mut().and_then(|p| p.as_object_mut()) {
                                 obj.insert("worker_id".to_string(), worker_id_json);

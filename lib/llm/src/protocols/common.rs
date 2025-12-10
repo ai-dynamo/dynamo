@@ -254,7 +254,6 @@ pub struct StopConditions {
 impl StopConditions {
     pub fn apply_ignore_eos(&mut self) {
         if self.ignore_eos.unwrap_or(false) {
-            self.min_tokens = self.max_tokens;
             self.stop = None;
             self.stop_token_ids_hidden = None;
         }

@@ -115,7 +115,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(290)  # 3x average
 def test_request_migration_vllm_worker_failure(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with migration support.
@@ -159,7 +159,7 @@ def test_request_migration_vllm_worker_failure(
 
 @pytest.mark.timeout(280)  # 3x average
 def test_request_migration_vllm_graceful_shutdown(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration support.
@@ -207,7 +207,7 @@ def test_request_migration_vllm_graceful_shutdown(
 
 @pytest.mark.timeout(150)  # 3x average
 def test_no_request_migration_vllm_worker_failure(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with migration disabled.
@@ -267,7 +267,7 @@ def test_no_request_migration_vllm_worker_failure(
 
 @pytest.mark.timeout(140)  # 3x average
 def test_no_request_migration_vllm_graceful_shutdown(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration disabled.

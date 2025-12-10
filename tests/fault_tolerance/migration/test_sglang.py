@@ -115,7 +115,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(235)  # 3x average
 def test_request_migration_sglang_worker_failure(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with migration support using SGLang.
@@ -159,7 +159,7 @@ def test_request_migration_sglang_worker_failure(
 
 @pytest.mark.skip(reason="SGLang graceful shutdown not yet implemented")
 def test_request_migration_sglang_graceful_shutdown(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration support using SGLang.
@@ -207,7 +207,7 @@ def test_request_migration_sglang_graceful_shutdown(
 
 @pytest.mark.timeout(135)  # 3x average
 def test_no_request_migration_sglang_worker_failure(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with migration disabled using SGLang.
@@ -267,7 +267,7 @@ def test_no_request_migration_sglang_worker_failure(
 
 @pytest.mark.skip(reason="SGLang graceful shutdown not yet implemented")
 def test_no_request_migration_sglang_graceful_shutdown(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration disabled using SGLang.

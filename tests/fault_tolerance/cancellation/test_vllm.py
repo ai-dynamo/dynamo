@@ -134,9 +134,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.timeout(110)  # 3x average
-def test_request_cancellation_vllm_aggregated(
-    request, runtime_services, predownload_models
-):
+def test_request_cancellation_vllm_aggregated(request, runtime_services):
     """
     End-to-end test for request cancellation functionality in aggregated mode.
 
@@ -209,7 +207,7 @@ def test_request_cancellation_vllm_aggregated(
 
 @pytest.mark.timeout(150)  # 3x average
 def test_request_cancellation_vllm_decode_cancel(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for request cancellation during decode phase.
@@ -279,7 +277,7 @@ def test_request_cancellation_vllm_decode_cancel(
 
 @pytest.mark.timeout(150)  # 3x average
 def test_request_cancellation_vllm_prefill_cancel(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for request cancellation during prefill phase.

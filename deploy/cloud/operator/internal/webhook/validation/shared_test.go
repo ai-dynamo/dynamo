@@ -41,11 +41,6 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			name: "valid spec with all fields",
 			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				Replicas: &validReplicas,
-				Autoscaling: &nvidiacomv1alpha1.Autoscaling{
-					Enabled:     true,
-					MinReplicas: 1,
-					MaxReplicas: 10,
-				},
 				Ingress: &nvidiacomv1alpha1.IngressSpec{
 					Enabled: true,
 					Host:    "example.com",
@@ -76,44 +71,6 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			fieldPath: "spec",
 			wantErr:   true,
 			errMsg:    "spec.replicas must be non-negative",
-		},
-		{
-			name: "autoscaling minReplicas too low",
-			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				Autoscaling: &nvidiacomv1alpha1.Autoscaling{
-					Enabled:     true,
-					MinReplicas: 0,
-					MaxReplicas: 10,
-				},
-			},
-			fieldPath: "spec",
-			wantErr:   true,
-			errMsg:    "spec.autoscaling.minReplicas must be >= 1",
-		},
-		{
-			name: "autoscaling maxReplicas less than minReplicas",
-			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				Autoscaling: &nvidiacomv1alpha1.Autoscaling{
-					Enabled:     true,
-					MinReplicas: 5,
-					MaxReplicas: 3,
-				},
-			},
-			fieldPath: "spec",
-			wantErr:   true,
-			errMsg:    "spec.autoscaling.maxReplicas must be > minReplicas",
-		},
-		{
-			name: "autoscaling disabled - no validation",
-			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				Autoscaling: &nvidiacomv1alpha1.Autoscaling{
-					Enabled:     false,
-					MinReplicas: 0,
-					MaxReplicas: 0,
-				},
-			},
-			fieldPath: "spec",
-			wantErr:   false,
 		},
 		{
 			name: "ingress enabled without host",
@@ -227,7 +184,7 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath)
-			err := validator.Validate()
+			_, err := validator.Validate()
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("SharedSpecValidator.Validate() error = %v, wantErr %v", err, tt.wantErr)
@@ -236,6 +193,56 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 
 			if tt.wantErr && err.Error() != tt.errMsg {
 				t.Errorf("SharedSpecValidator.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
+			}
+		})
+	}
+}
+
+func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
+	validReplicas := int32(3)
+
+	tests := []struct {
+		name         string
+		spec         *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		fieldPath    string
+		wantWarnings int
+	}{
+		{
+			name: "no warnings for spec without autoscaling",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				Replicas: &validReplicas,
+			},
+			fieldPath:    "spec",
+			wantWarnings: 0,
+		},
+		{
+			name: "warning for deprecated autoscaling field enabled",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				Replicas: &validReplicas,
+				//nolint:staticcheck // SA1019: Intentionally testing deprecated field
+				Autoscaling: &nvidiacomv1alpha1.Autoscaling{
+					Enabled:     true,
+					MinReplicas: 1,
+					MaxReplicas: 10,
+				},
+			},
+			fieldPath:    "spec",
+			wantWarnings: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath)
+			warnings, err := validator.Validate()
+
+			if err != nil {
+				t.Errorf("SharedSpecValidator.Validate() unexpected error = %v", err)
+				return
+			}
+
+			if len(warnings) != tt.wantWarnings {
+				t.Errorf("SharedSpecValidator.Validate() warnings count = %d, want %d", len(warnings), tt.wantWarnings)
 			}
 		})
 	}
