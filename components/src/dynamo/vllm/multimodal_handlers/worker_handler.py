@@ -3,7 +3,9 @@
 
 import copy
 import logging
+import os
 
+import safetensors
 import torch
 from vllm.inputs.data import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -20,6 +22,8 @@ from ..multimodal_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 0))
 
 
 class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
@@ -154,22 +158,29 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         ):
             # Process embeddings using the connector
             # Create a descriptor based on the embedding shape.
-            embeddings = torch.empty(
-                request.embeddings_shape,
-                dtype=self.EMBEDDINGS_DTYPE,
-                device=self.EMBEDDINGS_DEVICE,
-            )
-            descriptor = connect.Descriptor(embeddings)
 
-            if descriptor is None:
-                raise RuntimeError(
-                    "Descriptor is None in PD worker - cannot process embeddings"
+            if TRANSFER_LOCAL:
+                logger.info("PD: Loading local safetensors file")
+                embeddings = safetensors.torch.load_file(
+                    "/tmp/encoder_cache.safetensors"
+                )["ec_cache"]
+            else:
+                embeddings = torch.empty(
+                    request.embeddings_shape,
+                    dtype=self.EMBEDDINGS_DTYPE,
+                    device=self.EMBEDDINGS_DEVICE,
                 )
+                descriptor = connect.Descriptor(embeddings)
 
-            read_op = await self._connector.begin_read(
-                request.serialized_request, descriptor
-            )
-            await read_op.wait_for_completion()
+                if descriptor is None:
+                    raise RuntimeError(
+                        "Descriptor is None in PD worker - cannot process embeddings"
+                    )
+
+                read_op = await self._connector.begin_read(
+                    request.serialized_request, descriptor
+                )
+                await read_op.wait_for_completion()
             if "video" in self.config.model.lower():
                 video_numpy = embeddings.numpy()
                 multi_modal_data = construct_mm_data(
