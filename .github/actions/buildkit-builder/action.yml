@@ -62,8 +62,3 @@ runs:
           '--driver-opt="nodeselector=${{ inputs.nodeselector }}"' \
           '--driver-opt="tolerations=${{ inputs.tolerations }}"'
 
-    - name: Bootstrap buildkit builder
-      shell: bash
-      run: |
-        docker buildx inspect --bootstrap
-
