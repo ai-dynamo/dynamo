@@ -358,7 +358,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         cupy-cuda13x
 
 # Copy tests, benchmarks, deploy and components for CI with correct ownership
-COPY --chown=dynamo: pyproject.toml /workspace/
 COPY --chown=dynamo: tests /workspace/tests
 COPY --chown=dynamo: examples /workspace/examples
 COPY --chown=dynamo: deploy /workspace/deploy
@@ -448,7 +447,7 @@ COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
 RUN uv pip install --no-cache maturin[patchelf]
 
 # Editable install of dynamo
-COPY README.md hatch_build.py /workspace/
+COPY pyproject.toml README.md hatch_build.py /workspace/
 RUN uv pip install --no-cache --no-deps -e .
 
 CMD []
