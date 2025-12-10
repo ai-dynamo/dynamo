@@ -2188,7 +2188,7 @@ checksum = "e1d926b4d407d372f141f93bb444696142c29d32962ccbd3531117cf3aa0bfa9"
 
 [[package]]
 name = "dynamo-async-openai"
-version = "0.7.0-post1"
+version = "0.7.1"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -2226,14 +2226,14 @@ dependencies = [
 
 [[package]]
 name = "dynamo-config"
-version = "0.7.0-post1"
+version = "0.7.1"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.7.0-post1"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2251,7 +2251,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.7.0-post1"
+version = "0.7.1"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -2353,7 +2353,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "0.7.0-post1"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "cudarc 0.17.8",
@@ -2370,7 +2370,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "0.7.0-post1"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "dynamo-async-openai",
@@ -2378,6 +2378,7 @@ dependencies = [
  "num-traits",
  "openai-harmony",
  "regex",
+ "rstest 0.25.0",
  "rustpython-parser",
  "serde",
  "serde_json",
@@ -2388,7 +2389,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-run"
-version = "0.7.0-post1"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2416,7 +2417,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.7.0-post1"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2491,7 +2492,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.7.0-post1"
+version = "0.7.1"
 dependencies = [
  "bytemuck",
  "dashmap 6.1.0",
@@ -4569,7 +4570,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-py3"
-version = "0.7.0-post1"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4627,7 +4628,7 @@ checksum = "2874a2af47a2325c2001a6e6fad9b16a53b802102b528163885171cf92b15976"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.7.0-post1"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "async-once-cell",

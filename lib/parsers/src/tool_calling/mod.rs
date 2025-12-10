@@ -10,9 +10,10 @@ pub mod response;
 #[cfg(test)]
 pub mod tests;
 pub mod tools;
+pub mod xml;
 
 // Re-export main types and functions for convenience
-pub use config::{JsonParserConfig, ToolCallConfig, ToolCallParserType};
+pub use config::{JsonParserConfig, ParserConfig, ToolCallConfig, XmlParserConfig};
 pub use harmony::parse_tool_calls_harmony_complete;
 pub use json::try_tool_call_parse_json;
 pub use parsers::{
@@ -22,3 +23,4 @@ pub use parsers::{
 pub use pythonic::try_tool_call_parse_pythonic;
 pub use response::{CalledFunction, ToolCallResponse, ToolCallType};
 pub use tools::{try_tool_call_parse_aggregate, try_tool_call_parse_stream};
+pub use xml::try_tool_call_parse_xml;
