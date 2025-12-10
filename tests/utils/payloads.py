@@ -21,7 +21,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from dynamo import prometheus_names
+from dynamo import prometheus_names  # type: ignore[attr-defined]
 
 logger = logging.getLogger(__name__)
 
