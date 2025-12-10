@@ -162,13 +162,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     else:
         gpus_per_node = config.gpus_per_node
 
-    build_config = BuildConfig(
-        max_batch_size=config.max_batch_size,
-        max_num_tokens=config.max_num_tokens,
-        max_beam_width=config.max_beam_width,
-        max_seq_len=config.max_seq_len,
-    )
-
     kv_cache_config = KvCacheConfig(
         free_gpu_memory_fraction=config.free_gpu_memory_fraction
     )
@@ -190,7 +183,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         "pipeline_parallel_size": config.pipeline_parallel_size,
         "moe_expert_parallel_size": config.expert_parallel_size,
         "backend": Backend.PYTORCH,
-        "build_config": build_config,
         "kv_cache_config": kv_cache_config,
         "gpus_per_node": gpus_per_node,
         "max_num_tokens": config.max_num_tokens,
