@@ -655,7 +655,7 @@ jobs:
 
   fault-tolerance-tests:
     name: ${{ matrix.framework.name }}-amd64-ft
-    needs: [build-amd64, build-arm64]
+    needs: [build-amd64]
     if: always()
     runs-on: cpu-amd-m5-2xlarge
     timeout-minutes: 180
