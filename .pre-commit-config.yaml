@@ -94,3 +94,12 @@ repos:
       additional_dependencies:
         - pytest
         - pytest-benchmark
+        - pydantic
+        - attrs
+        - psutil
+        - aiohttp
+        - httpx
+        - kubernetes
+        - tabulate
+        - transformers
+        - huggingface_hub
