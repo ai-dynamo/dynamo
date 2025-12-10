@@ -21,7 +21,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc", "dep:kvbm_kernels"]
+block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc", "dep:dynamo_kvbm_kernels"]
 
 [dependencies]
 dynamo-llm = { path = "../../llm" }
@@ -31,7 +31,7 @@ dynamo-memory = { path = "../../memory" }
 dynamo-nova = { path = "../../nova" }
 dynamo-nova-backend = { path = "../../nova-backend" }
 dynamo-runtime = { path = "../../runtime" }
-kvbm_kernels = { path = "../../kvbm-kernels", package = "dynamo-kvbm-kernels", optional = true }
+dynamo_kvbm_kernels = { path = "../../kvbm-kernels", package = "dynamo-kvbm-kernels", optional = true }
 
 anyhow = { version = "1" }
 async-stream = { version = "0.3" }

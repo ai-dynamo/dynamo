@@ -9,7 +9,7 @@ use crate::BlockId;
 use crate::v2::physical::transfer::context::TransferCompleteNotification;
 use anyhow::{Result, anyhow};
 use cudarc::driver::result as cuda_result;
-use kvbm_kernels::{OperationalCopyBackend, OperationalCopyDirection, TensorDataType};
+use dynamo_kvbm_kernels::{OperationalCopyBackend, OperationalCopyDirection, TensorDataType};
 use std::ops::Range;
 
 // #[cfg(test)]
@@ -433,7 +433,7 @@ pub(crate) fn try_execute_operational_kernel(
 
     // Launch kernel
     let status = unsafe {
-        kvbm_kernels::operational_copy(
+        dynamo_kvbm_kernels::operational_copy(
             block_ptrs_host.as_ptr() as *const *const std::ffi::c_void,
             block_ptrs_device_raw as usize as *const *const std::ffi::c_void,
             operational_ptrs_host.as_ptr() as *const *mut std::ffi::c_void,

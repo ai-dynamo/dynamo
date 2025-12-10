@@ -35,7 +35,7 @@ This enables us to write performance-critical code in CUDA while making it acces
 │ • Functions: block_to_universal(), universal_to_block()     │
 └──────────────────┬──────────────────────────────────────────┘
                    │ calls (Rust FFI)
-                   │ use kvbm_kernels
+                   │ use dynamo_kvbm_kernels
 ┌──────────────────▼──────────────────────────────────────────┐
 │ Layer 2: Rust FFI (lib/kvbm-kernels/src/tensor_kernels.rs) │
 │ • Wraps CUDA kernels with safe Rust API                     │

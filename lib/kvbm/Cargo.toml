@@ -11,7 +11,8 @@ dynamo-nova = { workspace = true }
 dynamo-tokens = { workspace = true }
 dynamo-config = { workspace = true }
 dynamo-identity = { workspace = true }
-dynamo-kvbm-config = { path = "../kvbm-config", default-features = false }
+dynamo-kvbm-config = { workspace = true }
+dynamo-kvbm-kernels = { workspace = true }
 dynamo-memory = { workspace = true }
 
 anyhow = { workspace = true }

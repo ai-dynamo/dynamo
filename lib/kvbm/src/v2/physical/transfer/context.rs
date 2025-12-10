@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Result;
 use cudarc::driver::{CudaContext, CudaEvent, CudaStream};
 use derive_builder::Builder;
-use kvbm_kernels::OperationalCopyBackend;
+use dynamo_kvbm_kernels::OperationalCopyBackend;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 

@@ -241,7 +241,7 @@ fn build_from_source(target_arch: &str) {
         build.flag(flag);
     }
 
-    build.compile("kvbm_kernels");
+    build.compile("dynamo_kvbm_kernels");
 
     // Generate .fatbin and .md5 for future prebuilt use
     // Only generate .a files for kernels that need static linking, and only on x86_64

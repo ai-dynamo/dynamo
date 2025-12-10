@@ -1884,6 +1884,7 @@ dependencies = [
  "dynamo-config",
  "dynamo-identity",
  "dynamo-kvbm-config",
+ "dynamo-kvbm-kernels",
  "dynamo-memory",
  "dynamo-nova",
  "dynamo-nova-backend",
