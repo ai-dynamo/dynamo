@@ -16,6 +16,7 @@ from sglang.srt.tracing import trace as sglang_trace
 from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Client, Component, Context
+from dynamo.common.utils.input_params import InputParamManager
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
@@ -54,6 +55,12 @@ class BaseWorkerHandler(ABC):
         self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
         self.enable_trace = config.server_args.enable_trace
 
+        self.input_param_manager = InputParamManager(
+            self.engine.tokenizer_manager.tokenizer
+            if not self.skip_tokenizer_init
+            else None
+        )
+
     @abstractmethod
     async def generate(self, request: Dict[str, Any], context: Context):
         """Generate response from request.
@@ -72,23 +79,13 @@ class BaseWorkerHandler(ABC):
         pass
 
     def _get_input_param(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Get the appropriate input parameter for SGLang engine.
+        request_input = self.input_param_manager.get_input_param(
+            request, use_tokenizer=not self.skip_tokenizer_init
+        )
 
-        Args:
-            request: Request dict with token_ids or messages.
-
-        Returns:
-            Dict with either input_ids or prompt for engine.
-        """
-        if self.skip_tokenizer_init:
-            return {"input_ids": request["token_ids"]}
-        else:
-            # use sglang's chat templating itself but leave tokenization to the
-            # interal engine's TokenizerManager
-            prompt = self.engine.tokenizer_manager.tokenizer.apply_chat_template(
-                request["messages"], tokenize=False, add_generation_prompt=True
-            )
-            return {"prompt": prompt}
+        return {
+            "prompt" if isinstance(request_input, str) else "input_ids": request_input
+        }
 
     @staticmethod
     def _generate_bootstrap_room() -> int:
