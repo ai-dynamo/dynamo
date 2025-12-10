@@ -52,10 +52,11 @@ func (d *GroveMultinodeDeployer) GetHostNames(serviceName string, numberOfNodes 
 	return hostnames
 }
 
-// EvaluateAllComponentsReady determines if all Grove components are ready
+// GetComponentReadinessAndServiceReplicaStatuses determines if all Grove components are ready
+// and returns the service replica statuses for each component.
 // - PodCliques: spec.replicas == status.readyReplicas
 // - PodCliqueScalingGroups: spec.replicas == status.availableReplicas
-func EvaluateAllComponentsReady(ctx context.Context, client client.Client, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (bool, string, map[string]v1alpha1.ServiceReplicaStatus) {
+func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client client.Client, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (bool, string, map[string]v1alpha1.ServiceReplicaStatus) {
 	logger := log.FromContext(ctx)
 	var notReadyComponents []string
 

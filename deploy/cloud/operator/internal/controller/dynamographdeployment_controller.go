@@ -334,7 +334,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context
 		syncedGrovePodCliqueSet,
 		func() (bool, string, map[string]v1alpha1.ServiceReplicaStatus) {
 			// Grove readiness: all underlying PodCliques and PodCliqueScalingGroups have replicas == availableReplicas
-			allComponentsReady, reason, serviceStatuses := dynamo.EvaluateAllComponentsReady(ctx, r.Client, dynamoDeployment)
+			allComponentsReady, reason, serviceStatuses := dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
 			if !allComponentsReady {
 				return false, reason, serviceStatuses
 			}
@@ -496,16 +496,17 @@ func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Re
 	serviceStatuses := make(map[string]v1alpha1.ServiceReplicaStatus)
 	for _, resource := range resources {
 		ready, reason := resource.IsReady()
-		if !ready {
-			notReadyResources = append(notReadyResources, resource.GetName())
-			notReadyReasons = append(notReadyReasons, fmt.Sprintf("%s: %s", resource.GetName(), reason))
-			resourceServiceStatuses := resource.GetServiceStatuses()
-			if resourceServiceStatuses == nil {
-				continue
-			}
+
+		resourceServiceStatuses := resource.GetServiceStatuses()
+		if resourceServiceStatuses != nil {
 			for serviceName, serviceStatus := range resourceServiceStatuses {
 				serviceStatuses[serviceName] = serviceStatus
 			}
+		}
+
+		if !ready {
+			notReadyResources = append(notReadyResources, resource.GetName())
+			notReadyReasons = append(notReadyReasons, fmt.Sprintf("%s: %s", resource.GetName(), reason))
 		}
 	}
 

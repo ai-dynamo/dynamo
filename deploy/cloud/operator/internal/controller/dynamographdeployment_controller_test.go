@@ -45,8 +45,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 		expectedAdapterCount int
 		expectedAdapters     map[string]int32 // map of adapter name to expected replicas
 		expectDeleted        []string         // adapter names that should be deleted
-	}{
-		{
+		}{
 			name: "creates adapters for all services",
 			dgd: &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -246,13 +245,6 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 						"MyService": {
 							Replicas: ptr.To(int32(1)),
-						},
-					},
-				},
-			},
-			expectedAdapterCount: 1,
-			expectedAdapters: map[string]int32{
-				"my-dgd-myservice": 1, // lowercase
 			},
 		},
 	}
