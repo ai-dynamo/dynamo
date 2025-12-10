@@ -247,6 +247,19 @@ cargo build --release
 # Commit the updated cuda/prebuilt/tensor_kernels.{fatbin,md5}
 ```
 
+**Important:** If you change `CUDA_ARCHS` or update your nvcc version, you need to
+force regeneration by deleting the checksums:
+
+```bash
+# Force regeneration after changing CUDA_ARCHS or nvcc version
+rm cuda/prebuilt/*.md5
+cargo build --release
+# Commit the updated files
+```
+
+The build system only checks if the `.cu` source has changed, not build configuration.
+This prevents CI from regenerating non-reproducible `.a` files unnecessarily.
+
 ---
 
 ### Python Bindings & Tests

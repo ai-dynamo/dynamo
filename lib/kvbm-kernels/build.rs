@@ -246,6 +246,30 @@ fn generate_prebuilt_artifacts(cu_path: &Path, arch_flags: &[String], out_dir: &
     let lib_path = prebuilt_dir.join(format!("lib{}.a", kernel_name));
     let md5_path = prebuilt_dir.join(format!("{}.md5", kernel_name));
 
+    // Skip regeneration if valid prebuilt artifacts already exist
+    // (avoids modifying source tree with non-reproducible .a files in CI)
+    //
+    // LIMITATION: This only checks if the .cu source has changed, not build configuration
+    // (CUDA_ARCHS, nvcc version, compiler flags). If you change CUDA_ARCHS or update nvcc,
+    // manually delete the .md5 files to force regeneration:
+    //   rm lib/kvbm-kernels/cuda/prebuilt/*.md5
+    if fatbin_path.exists() && lib_path.exists() && md5_path.exists() {
+        // Validate that existing artifacts match current source
+        if let Ok(stored_hashes) = fs::read_to_string(&md5_path) {
+            let hashes: Vec<&str> = stored_hashes.lines().collect();
+            if hashes.len() >= 2 {
+                let current_cu_hash = compute_file_hash(cu_path);
+                if current_cu_hash == hashes[0] {
+                    println!(
+                        "cargo:warning=Skipping regeneration of {} (valid prebuilt artifacts exist)",
+                        kernel_name
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
     // Generate .fatbin using nvcc
     let temp_fatbin = Path::new(out_dir).join(format!("{}.fatbin", kernel_name));
     // Generate .o (object file) for static library
