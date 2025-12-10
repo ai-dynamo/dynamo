@@ -19,7 +19,9 @@ from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload,
     chat_payload_default,
+    chat_payload_with_logprobs,
     completion_payload_default,
+    completion_payload_with_logprobs,
     metric_payload_default,
 )
 from tests.utils.payloads import ToolCallingChatPayload
@@ -57,6 +59,29 @@ vllm_configs = {
             chat_payload_default(),
             completion_payload_default(),
             metric_payload_default(min_num_requests=6, backend="vllm"),
+        ],
+    ),
+    "aggregated_logprobs": VLLMConfig(
+        name="aggregated_logprobs",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_with_logprobs(
+                repeat_count=2,
+                expected_response=["AI", "knock", "joke"],
+                max_tokens=30,
+                temperature=0.0,
+                top_logprobs=3,
+            ),
+            completion_payload_with_logprobs(
+                repeat_count=2,
+                expected_response=["AI", "knock", "joke"],
+                max_tokens=30,
+                temperature=0.0,
+                logprobs=5,
+            ),
         ],
     ),
     "aggregated_lmcache": VLLMConfig(

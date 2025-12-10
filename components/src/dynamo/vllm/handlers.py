@@ -73,7 +73,8 @@ def build_sampling_params(
     Build SamplingParams from a PreprocessedRequest.
 
     Args:
-        request: The PreprocessedRequest dict with 'sampling_options' and 'stop_conditions'
+        request: The PreprocessedRequest dict with 'sampling_options', 'stop_conditions',
+                 and 'output_options'
         default_sampling_params: Default sampling parameters to initialize with
 
     Returns:
@@ -115,6 +116,41 @@ def build_sampling_params(
         ):
             existing = sampling_params.stop_token_ids or []
             sampling_params.stop_token_ids = list(set(existing).union(value))
+
+    # Apply output_options (logprobs, prompt_logprobs, etc.)
+    output_options = request.get("output_options", {})
+    if output_options:
+        # Handle logprobs - vLLM expects this as an integer or None
+        logprobs_value = output_options.get("logprobs")
+        if logprobs_value is not None and logprobs_value != "":
+            try:
+                parsed_logprobs = int(logprobs_value)
+                if parsed_logprobs < 0:
+                    logger.warning(
+                        f"Invalid logprobs value: {logprobs_value} (must be non-negative), ignoring"
+                    )
+                else:
+                    sampling_params.logprobs = parsed_logprobs
+            except (ValueError, TypeError):
+                logger.warning(
+                    f"Invalid logprobs value: {logprobs_value} (must be integer), ignoring"
+                )
+
+        # Handle prompt_logprobs - vLLM expects this as an integer or None
+        prompt_logprobs_value = output_options.get("prompt_logprobs")
+        if prompt_logprobs_value is not None and prompt_logprobs_value != "":
+            try:
+                parsed_prompt_logprobs = int(prompt_logprobs_value)
+                if parsed_prompt_logprobs < 0:
+                    logger.warning(
+                        f"Invalid prompt_logprobs value: {prompt_logprobs_value} (must be non-negative), ignoring"
+                    )
+                else:
+                    sampling_params.prompt_logprobs = parsed_prompt_logprobs
+            except (ValueError, TypeError):
+                logger.warning(
+                    f"Invalid prompt_logprobs value: {prompt_logprobs_value} (must be integer), ignoring"
+                )
 
     # If max_tokens wasn't provided (None or missing), compute a dynamic default
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
@@ -577,6 +613,66 @@ class BaseWorkerHandler(ABC):
             ),
         }
 
+    @staticmethod
+    def _extract_logprobs(
+        output, num_output_tokens_so_far: int
+    ) -> tuple[list[float] | None, list[list[dict]] | None]:
+        """
+        Extract logprobs from vLLM CompletionOutput for new tokens.
+
+        Args:
+            output: vLLM CompletionOutput object
+            num_output_tokens_so_far: Number of tokens already processed
+
+        Returns:
+            Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
+            - log_probs: List of log probabilities for each new token
+            - top_logprobs: List of top logprobs dicts for each new token
+        """
+        if output.logprobs is None:
+            return None, None
+
+        # Get logprobs for new tokens only
+        new_logprobs = output.logprobs[num_output_tokens_so_far:]
+        if not new_logprobs:
+            return None, None
+
+        log_probs = []
+        top_logprobs = []
+
+        for token_idx, token_logprobs_dict in enumerate(new_logprobs):
+            if token_logprobs_dict is None:
+                continue
+
+            # Get the actual token_id that was generated at this position
+            actual_token_id = output.token_ids[num_output_tokens_so_far + token_idx]
+
+            # Extract log probability for the selected token
+            # vLLM guarantees the selected token is always in the logprobs dict
+            selected_logprob = token_logprobs_dict[actual_token_id]
+            log_probs.append(float(selected_logprob.logprob))
+
+            # Build top_logprobs list for this token position
+            token_top_logprobs = []
+            for tok_id, logprob_info in token_logprobs_dict.items():
+                token_top_logprobs.append(
+                    {
+                        "rank": (
+                            logprob_info.rank if hasattr(logprob_info, "rank") else 0
+                        ),
+                        "token_id": tok_id,
+                        "token": (
+                            logprob_info.decoded_token
+                            if hasattr(logprob_info, "decoded_token")
+                            else None
+                        ),
+                        "logprob": float(logprob_info.logprob),
+                    }
+                )
+            top_logprobs.append(token_top_logprobs)
+
+        return log_probs if log_probs else None, top_logprobs if top_logprobs else None
+
     async def generate_tokens(
         self,
         prompt,
@@ -622,6 +718,16 @@ class BaseWorkerHandler(ABC):
                     output = res.outputs[0]
                     next_total_toks = len(output.token_ids)
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+
+                    # Extract logprobs for new tokens if available
+                    log_probs, top_logprobs = self._extract_logprobs(
+                        output, num_output_tokens_so_far
+                    )
+                    if log_probs is not None:
+                        out["log_probs"] = log_probs
+                    if top_logprobs is not None:
+                        out["top_logprobs"] = top_logprobs
+
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
                         out[

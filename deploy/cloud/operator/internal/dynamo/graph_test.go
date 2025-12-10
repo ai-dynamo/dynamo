@@ -1964,6 +1964,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: commonconsts.ComponentTypeWorker,
 													},
 													{
+														Name:  "DYN_HEALTH_CHECK_ENABLED",
+														Value: "true",
+													},
+													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
 														Value: "test-dynamo-graph-deployment",
 													},
@@ -2139,6 +2143,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  commonconsts.DynamoComponentEnvVar,
 														Value: commonconsts.ComponentTypeWorker,
+													},
+													{
+														Name:  "DYN_HEALTH_CHECK_ENABLED",
+														Value: "true",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -2865,6 +2873,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: commonconsts.ComponentTypeWorker,
 													},
 													{
+														Name:  "DYN_HEALTH_CHECK_ENABLED",
+														Value: "true",
+													},
+													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
 														Value: "test-dynamo-graph-deployment",
 													},
@@ -3027,6 +3039,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  commonconsts.DynamoComponentEnvVar,
 														Value: commonconsts.ComponentTypeWorker,
+													},
+													{
+														Name:  "DYN_HEALTH_CHECK_ENABLED",
+														Value: "true",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -4989,6 +5005,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: "ANOTHER_COMPONENTENV", Value: "true"},
 							{Name: "ANOTHER_CONTAINER_ENV", Value: "true"},
 							{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
+							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
 							{Name: commonconsts.DynamoNamespaceEnvVar, Value: ""},
 							{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},

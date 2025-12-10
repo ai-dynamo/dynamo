@@ -69,6 +69,36 @@ impl Default for XmlParserConfig {
     }
 }
 
+/// Configuration for DSML-style tool call parser (DeepSeek V3.2+)
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DsmlParserConfig {
+    /// Start token for function_calls block (e.g., "<｜DSML｜function_calls>")
+    pub function_calls_start: String,
+    /// End token for function_calls block (e.g., "</｜DSML｜function_calls>")
+    pub function_calls_end: String,
+    /// Start prefix for invoke (e.g., "<｜DSML｜invoke name=")
+    pub invoke_start_prefix: String,
+    /// End token for invoke (e.g., "</｜DSML｜invoke>")
+    pub invoke_end: String,
+    /// Start prefix for parameter (e.g., "<｜DSML｜parameter name=")
+    pub parameter_prefix: String,
+    /// End token for parameter (e.g., "</｜DSML｜parameter>")
+    pub parameter_end: String,
+}
+
+impl Default for DsmlParserConfig {
+    fn default() -> Self {
+        Self {
+            function_calls_start: "<｜DSML｜function_calls>".to_string(),
+            function_calls_end: "</｜DSML｜function_calls>".to_string(),
+            invoke_start_prefix: "<｜DSML｜invoke name=".to_string(),
+            invoke_end: "</｜DSML｜invoke>".to_string(),
+            parameter_prefix: "<｜DSML｜parameter name=".to_string(),
+            parameter_end: "</｜DSML｜parameter>".to_string(),
+        }
+    }
+}
+
 /// Parser-specific configuration
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -78,6 +108,7 @@ pub enum ParserConfig {
     Pythonic,
     Harmony(JsonParserConfig),
     Typescript,
+    Dsml(DsmlParserConfig),
 }
 
 impl ParserConfig {
@@ -90,6 +121,7 @@ impl ParserConfig {
             ParserConfig::Xml(config) => vec![config.tool_call_start_token.clone()],
             ParserConfig::Pythonic => vec![],
             ParserConfig::Typescript => vec![],
+            ParserConfig::Dsml(config) => vec![config.function_calls_start.clone()],
         }
     }
 
@@ -102,6 +134,7 @@ impl ParserConfig {
             ParserConfig::Xml(config) => vec![config.tool_call_end_token.clone()],
             ParserConfig::Pythonic => vec![],
             ParserConfig::Typescript => vec![],
+            ParserConfig::Dsml(config) => vec![config.function_calls_end.clone()],
         }
     }
 }
@@ -247,6 +280,18 @@ impl ToolCallConfig {
                 tool_call_end_tokens: vec!["</tool_calls>".to_string()],
                 ..Default::default()
             }),
+        }
+    }
+
+    pub fn deepseek_v3_2() -> Self {
+        // DeepSeek V3.2 format (DSML):
+        // <｜DSML｜function_calls>
+        // <｜DSML｜invoke name="function_name">
+        // <｜DSML｜parameter name="param_name" string="true|false">value</｜DSML｜parameter>
+        // </｜DSML｜invoke>
+        // </｜DSML｜function_calls>
+        Self {
+            parser_config: ParserConfig::Dsml(DsmlParserConfig::default()),
         }
     }
 }
