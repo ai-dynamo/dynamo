@@ -33,7 +33,9 @@ from pathlib import Path
 
 # Suppress urllib3 deprecation warnings that break kubernetes client error handling
 # This is a known issue with kubernetes python client and urllib3 v2.x
-warnings.filterwarnings("ignore", message=".*HTTPResponse.getheaders.*", category=DeprecationWarning)
+warnings.filterwarnings(
+    "ignore", message=".*HTTPResponse.getheaders.*", category=DeprecationWarning
+)
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="urllib3")
 
 from kubernetes import client, config
@@ -43,7 +45,7 @@ from kubernetes.client.rest import ApiException
 @contextmanager
 def suppress_deprecation_warnings():
     """Context manager to suppress deprecation warnings during kubernetes API calls.
-    
+
     The kubernetes client's exception handling calls deprecated urllib3 methods,
     which can cause issues in certain Python/urllib3 version combinations.
     """
@@ -118,7 +120,9 @@ def create_cuda_fault_configmap(namespace, lib_path=None):
         # Delete existing if present
         with suppress_deprecation_warnings():
             try:
-                core_api.delete_namespaced_config_map("cuda-fault-injection-lib", namespace)
+                core_api.delete_namespaced_config_map(
+                    "cuda-fault-injection-lib", namespace
+                )
                 print("    → Deleted existing ConfigMap")
                 time.sleep(2)
             except ApiException as e:
@@ -181,13 +185,14 @@ def _patch_service_for_injection(
         service["extraPodSpec"] = {}
     if "mainContainer" not in service["extraPodSpec"]:
         service["extraPodSpec"]["mainContainer"] = {}
-    if "env" not in service["extraPodSpec"]["mainContainer"]:
-        service["extraPodSpec"]["mainContainer"]["env"] = []
+    # DGD uses 'envs' at service level (NOT extraPodSpec.mainContainer.env)
+    if "envs" not in service:
+        service["envs"] = []
 
     # Remove existing LD_PRELOAD, CUDA_FAULT_INJECTION_ENABLED, and CUDA_XID_TYPE if present
-    service["extraPodSpec"]["mainContainer"]["env"] = [
+    service["envs"] = [
         env
-        for env in service["extraPodSpec"]["mainContainer"]["env"]
+        for env in service["envs"]
         if env.get("name")
         not in [
             "LD_PRELOAD",
@@ -198,7 +203,8 @@ def _patch_service_for_injection(
 
     # Add new environment variables if enabling
     if enable:
-        service["extraPodSpec"]["mainContainer"]["env"].extend(new_envs)
+        service["envs"].extend(new_envs)
+        print(f"      ✓ Added LD_PRELOAD and CUDA fault env vars")
 
     # Handle ConfigMap volume mount
     if use_configmap and enable:
@@ -249,18 +255,24 @@ def _patch_service_for_injection(
             if ic.get("name") not in ["decode-cuda-fault-lib", "compile-cuda-fault-lib"]
         ]
 
-        # Add init container to compile the library
+        # Add init container to compile the library and setup fault toggle
         service["extraPodSpec"]["initContainers"].append(
             {
                 "name": "compile-cuda-fault-lib",
                 "image": "gcc:latest",
                 "command": ["sh", "-c"],
                 "args": [
+                    # Compile the CUDA intercept library
                     "gcc -shared -fPIC -Wall -Wextra /source/cuda_intercept.c -o /dest/cuda_intercept.so -ldl && "
                     "chmod 755 /dest/cuda_intercept.so && "
                     "echo 'Compiled CUDA fault library for Linux' && "
                     "ls -lh /dest/cuda_intercept.so && "
-                    "file /dest/cuda_intercept.so"
+                    "file /dest/cuda_intercept.so && "
+                    # Initialize the toggle file with faults DISABLED (0)
+                    # The file is world-writable so main container can toggle it
+                    "echo '0' > /host-fault/cuda_fault_enabled && "
+                    "chmod 666 /host-fault/cuda_fault_enabled && "
+                    "echo 'Initialized fault toggle file (disabled)'"
                 ],
                 "volumeMounts": [
                     {
@@ -269,6 +281,7 @@ def _patch_service_for_injection(
                         "readOnly": True,
                     },
                     {"name": "cuda-fault-lib", "mountPath": "/dest"},
+                    {"name": "node-fault-marker", "mountPath": "/host-fault"},
                 ],
             }
         )
@@ -448,8 +461,19 @@ def patch_deployment_env(
                     {"name": "CUDA_XID_TYPE", "value": str(xid_type)},
                 ]
 
-            # Patch worker services (VllmDecodeWorker and VllmPrefillWorker)
-            services_to_patch = ["VllmDecodeWorker", "VllmPrefillWorker"]
+            # Patch worker services (supports vLLM, SGLang, and TensorRT-LLM naming)
+            # vLLM: VllmDecodeWorker, VllmPrefillWorker
+            # SGLang: decode, prefill
+            # TensorRT-LLM: TRTLLMDecodeWorker, TRTLLMPrefillWorker, TRTLLMWorker (agg)
+            services_to_patch = [
+                "VllmDecodeWorker",
+                "VllmPrefillWorker",  # vLLM
+                "decode",
+                "prefill",  # SGLang
+                "TRTLLMDecodeWorker",
+                "TRTLLMPrefillWorker",
+                "TRTLLMWorker",  # TensorRT-LLM
+            ]
             patched_services = []
 
             spec = dgd.get("spec", {})
@@ -790,7 +814,11 @@ def inject_via_deployment_patch(
         copy_library_to_pod(pod.metadata.name, namespace, lib_path)
 
     # Step 3: Patch deployment
-    mode_str = "passthrough (toggle-controlled)" if passthrough_mode else "active (immediate crash)"
+    mode_str = (
+        "passthrough (toggle-controlled)"
+        if passthrough_mode
+        else "active (immediate crash)"
+    )
     print(f"\n[3/4] Patching deployment to enable CUDA fault injection ({mode_str})...")
     if not patch_deployment_env(
         deployment_name,
@@ -822,8 +850,12 @@ def inject_via_deployment_patch(
                 print(f"\n[✓] All {len(new_pods)} pods restarted successfully")
                 if passthrough_mode:
                     print("[✓] CUDA fault injection is in PASSTHROUGH mode")
-                    print("\n   Pods are running normally. Use toggle to activate faults:")
-                    print("   curl -X POST 'http://localhost:8080/api/v1/faults/gpu/toggle-cuda?namespace=<ns>&enable=true'")
+                    print(
+                        "\n   Pods are running normally. Use toggle to activate faults:"
+                    )
+                    print(
+                        "   curl -X POST 'http://localhost:8080/api/v1/faults/gpu/toggle-cuda?namespace=<ns>&enable=true'"
+                    )
                 else:
                     print("[✓] CUDA fault injection is now ACTIVE")
                     print("\n⚠ Pods will crash with 'No CUDA-capable device' error")
@@ -1005,7 +1037,7 @@ Examples:
         "--passthrough",
         action="store_true",
         help="Load library in passthrough mode (CUDA_FAULT_INJECTION_ENABLED=0). "
-             "Use toggle file or API to enable faults later.",
+        "Use toggle file or API to enable faults later.",
     )
 
     args = parser.parse_args()

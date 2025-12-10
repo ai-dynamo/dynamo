@@ -27,6 +27,13 @@
 #include <string.h>
 
 typedef int cudaError_t;
+typedef void* cudaStream_t;
+
+// dim3 structure for kernel launch dimensions
+typedef struct {
+  unsigned int x, y, z;
+} dim3;
+
 typedef struct cudaDeviceProp_st {
   char name[256];
   size_t totalGlobalMem;
@@ -64,12 +71,13 @@ static void
 get_fault_config(int* inject, int* xid_type, cudaError_t* error_code)
 {
   static int initialized = 0;
-  static int env_inject = 0;   // From environment variable
-  static int cached_xid = 79;  // Default to XID 79
+  static int env_inject = 0;       // From environment variable (initial state)
+  static int cached_xid = 79;      // Default to XID 79
   static cudaError_t cached_error = cudaErrorNoDevice;
 
   if (!initialized) {
-    // Check if injection is enabled via environment
+    // Check if injection is enabled via environment (sets initial state)
+    // Toggle file can override this at runtime!
     char* env = getenv("CUDA_FAULT_INJECTION_ENABLED");
     if (env) {
       env_inject = (strcmp(env, "1") == 0 || strcmp(env, "true") == 0);
@@ -105,7 +113,11 @@ get_fault_config(int* inject, int* xid_type, cudaError_t* error_code)
   // Runtime toggle: Check node-persistent fault marker on EVERY call
   // Use hostPath (/host-fault) so fault persists across pod restarts on same node
   // Pod reschedules to different node → no file there → automatic recovery!
-  int runtime_inject = env_inject;  // Default to env var
+  //
+  // NOTE: Toggle file ALWAYS overrides env var! This allows:
+  //   - Passthrough mode: env=0, then toggle file enables faults
+  //   - Active mode: env=1, then toggle file can disable faults
+  int runtime_inject = env_inject;  // Default to env var (can be 0 for passthrough)
 
   // Check hostPath first (persistent across restarts on same node)
   FILE* toggle_file = fopen("/host-fault/cuda_fault_enabled", "r");
@@ -307,6 +319,65 @@ cudaGetDeviceProperties(cudaDeviceProp* prop, int device)
   real_func_t real_func = (real_func_t)dlsym(RTLD_NEXT, "cudaGetDeviceProperties");
   if (real_func) {
     return real_func(prop, device);
+  }
+  return cudaErrorNoDevice;
+}
+
+// =============================================================================
+// CRITICAL: Kernel launch interception - needed for inference fault injection
+// =============================================================================
+
+// Intercept: Kernel launch (CRITICAL for inference)
+cudaError_t
+cudaLaunchKernel(const void* func, dim3 gridDim, dim3 blockDim,
+                 void** args, size_t sharedMem, cudaStream_t stream)
+{
+  if (should_inject_fault()) {
+    cudaError_t error = get_error_code();
+    log_intercept("cudaLaunchKernel", error);
+    return error;
+  }
+
+  typedef cudaError_t (*real_func_t)(const void*, dim3, dim3, void**, size_t, cudaStream_t);
+  real_func_t real_func = (real_func_t)dlsym(RTLD_NEXT, "cudaLaunchKernel");
+  if (real_func) {
+    return real_func(func, gridDim, blockDim, args, sharedMem, stream);
+  }
+  return cudaErrorNoDevice;
+}
+
+// Intercept: Async memcpy (commonly used in inference)
+cudaError_t
+cudaMemcpyAsync(void* dst, const void* src, size_t count, int kind, cudaStream_t stream)
+{
+  if (should_inject_fault()) {
+    cudaError_t error = get_error_code();
+    log_intercept("cudaMemcpyAsync", error);
+    return error;
+  }
+
+  typedef cudaError_t (*real_func_t)(void*, const void*, size_t, int, cudaStream_t);
+  real_func_t real_func = (real_func_t)dlsym(RTLD_NEXT, "cudaMemcpyAsync");
+  if (real_func) {
+    return real_func(dst, src, count, kind, stream);
+  }
+  return cudaErrorNoDevice;
+}
+
+// Intercept: Stream synchronize (wait for GPU work)
+cudaError_t
+cudaStreamSynchronize(cudaStream_t stream)
+{
+  if (should_inject_fault()) {
+    cudaError_t error = get_error_code();
+    log_intercept("cudaStreamSynchronize", error);
+    return error;
+  }
+
+  typedef cudaError_t (*real_func_t)(cudaStream_t);
+  real_func_t real_func = (real_func_t)dlsym(RTLD_NEXT, "cudaStreamSynchronize");
+  if (real_func) {
+    return real_func(stream);
   }
   return cudaErrorNoDevice;
 }
