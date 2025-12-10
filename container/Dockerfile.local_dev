@@ -39,7 +39,9 @@ RUN apt-get update && apt-get install -y \
     # File utilities
     tree fd-find ripgrep \
     # Shell utilities
-    zsh fish bash-completion
+    zsh fish bash-completion \
+    # User management
+    sudo gnupg2 gnupg1
 
 # Install awk separately with fault tolerance
 # awk is a virtual package with multiple implementations (gawk, mawk, original-awk).
@@ -67,8 +69,7 @@ RUN wget -qO - https://developer.download.nvidia.com/devtools/repos/ubuntu2404/$
 
 # https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
 # Configure user with sudo access for Dev Container workflows
-RUN apt-get install -y sudo gnupg2 gnupg1 \
-    && echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
+RUN echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME \
     && mkdir -p /home/$USERNAME \
     # Handle GID conflicts: if target GID exists and it's not our group, remove it
@@ -76,7 +77,7 @@ RUN apt-get install -y sudo gnupg2 gnupg1 \
     # Create group if it doesn't exist, otherwise modify existing group
     && (getent group $USERNAME > /dev/null 2>&1 && groupmod -g $USER_GID $USERNAME || groupadd -g $USER_GID $USERNAME) \
     && usermod -u $USER_UID -g $USER_GID -G 0 $USERNAME \
-    && chown -R $USERNAME:$USERNAME /home/$USERNAME \
+    && chown $USERNAME:$USER_GID /home/$USERNAME \
     && chsh -s /bin/bash $USERNAME
 
 
