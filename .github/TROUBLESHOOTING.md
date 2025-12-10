@@ -111,7 +111,7 @@ On GitHub, signed commits show a "Verified" badge.
 
 **Symptom**: You opened a PR from a fork, CI checks show "Waiting for status", and you see a comment about external contributions.
 
-**Cause**: For security reasons, PRs from forks cannot automatically access CI secrets. A maintainer must approve the CI run.
+**Cause**: A maintainer must approve the CI run.
 
 **How It Works**:
 
@@ -120,11 +120,10 @@ flowchart TD
     A[External PR Opened] --> B[copy-pr-bot detects fork PR]
     B --> C[Bot comments on PR]
     C --> D{NVIDIA Maintainer Review}
-    D -->|Approve| E[Maintainer comments trigger phrase]
-    E --> F[copy-pr-bot creates internal PR]
-    F --> G[CI runs with full access]
-    G --> H[Results reported back]
-    D -->|Request Changes| I[Contributor updates PR]
+    D --> E[Maintainer comments trigger phrase]
+    E --> G[CI runs with full access]
+    G -->|Request Changes| I[Contributor updates PR]
+    G -->|Approved| J[Maintainer merges PR]
     I --> D
 ```
 
