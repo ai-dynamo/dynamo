@@ -56,6 +56,13 @@ def pytest_addoption(parser):
         default=None,
         help="Target node for hardware fault injection (auto-detect if not specified)",
     )
+    parser.addoption(
+        "--hw-fault-backend",
+        type=str,
+        default="vllm",
+        choices=["vllm", "sglang", "trtllm"],
+        help="Backend runtime for HW fault tests (default: vllm)",
+    )
 
 
 def pytest_generate_tests(metafunc):
@@ -147,4 +154,11 @@ def hw_fault_config(request):
         "enabled": True,
         "xid_type": request.config.getoption("--hw-fault-xid"),
         "target_node": request.config.getoption("--hw-fault-target-node"),
+        "backend": request.config.getoption("--hw-fault-backend"),
     }
+
+
+@pytest.fixture
+def hw_fault_backend(request):
+    """Get the backend runtime for HW fault tests."""
+    return request.config.getoption("--hw-fault-backend")
