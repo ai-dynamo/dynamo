@@ -165,7 +165,7 @@ pub struct Metrics {
     request_duration: HistogramVec,
     input_sequence_length: HistogramVec,
     output_sequence_length: HistogramVec,
-    cached_sequence_length: HistogramVec,
+    cached_tokens: HistogramVec,
     output_tokens_counter: IntCounterVec,
     time_to_first_token: HistogramVec,
     inter_token_latency: HistogramVec,
@@ -439,9 +439,9 @@ impl Metrics {
         )
         .unwrap();
 
-        let cached_sequence_length = HistogramVec::new(
+        let cached_tokens = HistogramVec::new(
             HistogramOpts::new(
-                frontend_metric_name(frontend_service::CACHED_SEQUENCE_LENGTH),
+                frontend_metric_name(frontend_service::CACHED_TOKENS),
                 "Number of cached tokens (prefix cache hits) per request",
             )
             .buckets(input_sequence_buckets.clone()),
@@ -515,7 +515,7 @@ impl Metrics {
             request_duration,
             input_sequence_length,
             output_sequence_length,
-            cached_sequence_length,
+            cached_tokens,
             output_tokens_counter,
             time_to_first_token,
             inter_token_latency,
@@ -611,7 +611,7 @@ impl Metrics {
         registry.register(Box::new(self.request_duration.clone()))?;
         registry.register(Box::new(self.input_sequence_length.clone()))?;
         registry.register(Box::new(self.output_sequence_length.clone()))?;
-        registry.register(Box::new(self.cached_sequence_length.clone()))?;
+        registry.register(Box::new(self.cached_tokens.clone()))?;
         registry.register(Box::new(self.output_tokens_counter.clone()))?;
         registry.register(Box::new(self.time_to_first_token.clone()))?;
         registry.register(Box::new(self.inter_token_latency.clone()))?;
@@ -866,7 +866,7 @@ impl ResponseMetricCollector {
         {
             self.cached_tokens_observed = true;
             self.metrics
-                .cached_sequence_length
+                .cached_tokens
                 .with_label_values(&[&self.model])
                 .observe(tokens as f64);
         }
@@ -1402,11 +1402,11 @@ mod tests {
         metrics.register(&registry).unwrap();
 
         let model = "test-model";
-        let expected_metric_name = "dynamo_frontend_cached_sequence_length";
+        let expected_metric_name = "dynamo_frontend_cached_tokens";
         let mut collector = metrics.clone().create_response_collector(model);
 
         // Create histogram handle first
-        let _histogram = metrics.cached_sequence_length.with_label_values(&[model]);
+        let _histogram = metrics.cached_tokens.with_label_values(&[model]);
 
         // First call should observe and record 1 sample
         collector.observe_cached_tokens(Some(100));
@@ -1461,7 +1461,7 @@ mod tests {
         metrics.register(&registry).unwrap();
 
         let model = "test-model";
-        let expected_metric_name = "dynamo_frontend_cached_sequence_length";
+        let expected_metric_name = "dynamo_frontend_cached_tokens";
         let mut collector = metrics.clone().create_response_collector(model);
 
         // Create a metrics annotation event (event without SSE data payload)

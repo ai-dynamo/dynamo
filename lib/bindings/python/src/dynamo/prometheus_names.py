@@ -56,7 +56,7 @@ class frontend_service:
     # Output sequence length in tokens
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
     # Number of cached tokens (prefix cache hits) per request
-    CACHED_SEQUENCE_LENGTH = "cached_sequence_length"
+    CACHED_TOKENS = "cached_tokens"
     # Total number of output tokens generated (counter that updates in real-time)
     OUTPUT_TOKENS_TOTAL = "output_tokens_total"
     # Time to first token in seconds
