@@ -9,13 +9,6 @@ on:
       - main
       - "pull-request/[0-9]+"
       - release/*.*.*
-  workflow_dispatch:
-    inputs:
-      run_deploy_operator:
-        description: 'Run deploy operator and deployment tests'
-        required: false
-        type: boolean
-        default: false
 
 concurrency:
     # The group name is a ternary operation. If the ref_name is 'main',
@@ -28,7 +21,6 @@ concurrency:
 jobs:
   changed-files:
     runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
       has_code_changes: ${{ steps.filter.outputs.has_code_changes }}
     steps:
@@ -500,9 +492,7 @@ jobs:
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-operator job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -578,9 +568,7 @@ jobs:
 
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-test-vllm job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
@@ -764,9 +752,7 @@ jobs:
 
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-test-sglang job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, sglang]
     permissions:
       contents: read
@@ -787,9 +773,7 @@ jobs:
 
   deploy-test-trtllm:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-test-trtllm job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, trtllm]
     permissions:
       contents: read
@@ -812,9 +796,7 @@ jobs:
 
   cleanup:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment the below if statement when we have a way to test the cleanup job in CI.
-    # if: always()
-    if: github.event.inputs.run_deploy_operator
+    if: always()
     needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
     steps:
     - name: Output Node Name
