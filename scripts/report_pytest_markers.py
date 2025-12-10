@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """
 Pytest Marker Report (Production Grade)
@@ -60,7 +62,7 @@ REQUIRED_CATEGORIES: Dict[str, Set[str]] = {
     "Hardware": {"gpu_0", "gpu_1", "gpu_2", "gpu_4", "gpu_8", "h100", "k8s"},
 }
 
-DEFAULT_MOCK_TARGETS = [
+STUB_MODULES = [
     "pytest_httpserver",
     "pytest_httpserver.HTTPServer",
     "pytest_benchmark",
@@ -124,29 +126,39 @@ def missing_categories(markers: Set[str]) -> List[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Dependency Mocking
+# Dependency Stubbing
 # --------------------------------------------------------------------------- #
 
 
-class ModuleMocker:
-    """Mock modules safely to allow test collection without real dependencies."""
+class DependencyStubber:
+    """Stub unavailable modules to allow test collection without real dependencies."""
 
     def __init__(self):
-        self.mocked: Set[str] = set()
+        self.stubbed: Set[str] = set()
 
-    def ensure_mock(self, mod: str) -> ModuleType:
-        if mod in sys.modules:
-            return sys.modules[mod]
+    def _create_module_stub(self, name: str) -> MagicMock:
+        """Create a stub module with proper Python module attributes."""
+        stub = MagicMock()
+        stub.__path__ = []
+        stub.__name__ = name
+        stub.__loader__ = None
+        stub.__spec__ = None
+        stub.__package__ = name.rsplit(".", 1)[0] if "." in name else name
+        return stub
 
-        # Check if any parent is already mocked - skip real import attempt
-        parts = mod.split(".")
-        parent_mocked = any(
-            ".".join(parts[:i]) in self.mocked for i in range(1, len(parts))
+    def ensure_available(self, module_name: str) -> ModuleType:
+        """Ensure a module is available, stubbing it if not installed."""
+        if module_name in sys.modules:
+            return sys.modules[module_name]
+
+        parts = module_name.split(".")
+        parent_stubbed = any(
+            ".".join(parts[:i]) in self.stubbed for i in range(1, len(parts))
         )
 
-        if not parent_mocked:
+        if not parent_stubbed:
             try:
-                return importlib.import_module(mod)
+                return importlib.import_module(module_name)
             except (ImportError, AttributeError):
                 pass
 
@@ -157,14 +169,13 @@ class ModuleMocker:
                 pkg = ModuleType(sub)
                 pkg.__path__ = []
                 sys.modules[sub] = pkg
-                self.mocked.add(sub)
+                self.stubbed.add(sub)
 
-        # Mock leaf module
-        leaf = MagicMock()
-        leaf.__path__ = []
-        sys.modules[mod] = leaf
-        self.mocked.add(mod)
-        return leaf
+        # Create stub module with proper attributes
+        stub = self._create_module_stub(module_name)
+        sys.modules[module_name] = stub
+        self.stubbed.add(module_name)
+        return stub
 
 
 # --------------------------------------------------------------------------- #
@@ -316,7 +327,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="pytest marker validator")
     parser.add_argument("--json", help="Write JSON report to file")
     parser.add_argument(
-        "--no-mock", action="store_true", help="Disable dependency mocking"
+        "--no-stub", action="store_true", help="Disable dependency stubbing"
     )
     parser.add_argument(
         "--strict",
@@ -329,12 +340,12 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_collection(test_path: str, use_mocking: bool) -> tuple[int, Report]:
+def run_collection(test_path: str, use_stubbing: bool) -> tuple[int, Report]:
     """Run pytest collection and return exit code and report."""
-    if use_mocking:
-        mocker = ModuleMocker()
-        for mod in DEFAULT_MOCK_TARGETS:
-            mocker.ensure_mock(mod)
+    if use_stubbing:
+        stubber = DependencyStubber()
+        for module in STUB_MODULES:
+            stubber.ensure_available(module)
 
         # Special case: pytest-benchmark needs a real Warning subclass
         try:
@@ -344,7 +355,7 @@ def run_collection(test_path: str, use_mocking: bool) -> tuple[int, Report]:
         except (KeyError, AttributeError):
             pass
 
-        LOG.info("Mocked %d modules", len(mocker.mocked))
+        LOG.info("Stubbed %d modules", len(stubber.stubbed))
 
     plugin = MarkerReportPlugin()
     exitcode = pytest.main(
@@ -388,7 +399,7 @@ def print_human_report(report: Report) -> None:
 def main() -> int:
     """Main entry point."""
     args = parse_args()
-    exitcode, report = run_collection(args.tests, not args.no_mock)
+    exitcode, report = run_collection(args.tests, not args.no_stub)
 
     # Load and validate marker definitions
     declared = load_declared_markers(Path("."))
