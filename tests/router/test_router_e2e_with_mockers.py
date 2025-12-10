@@ -11,7 +11,7 @@ from tests.router.common import (  # utilities
     _test_python_router_bindings,
     _test_router_basic,
     _test_router_decisions,
-    _test_router_disagg_decisions,
+    _test_router_decisions_disagg,
     _test_router_indexers_sync,
     _test_router_overload_503,
     _test_router_query_instance_id,
@@ -66,7 +66,7 @@ def get_unique_ports(
         "test_mocker_two_kv_router": 100,
         "test_mocker_kv_router_overload_503": 200,
         "test_query_instance_id_returns_worker_and_tokens": 300,
-        "test_router_disagg_decisions": 400,
+        "test_router_decisions_disagg": 400,
         "test_busy_threshold_endpoint": 500,
     }
 
@@ -583,7 +583,7 @@ def test_router_decisions(request, runtime_services_session, predownload_tokeniz
 
 
 @pytest.mark.parallel
-def test_router_disagg_decisions(
+def test_router_decisions_disagg(
     request, runtime_services_session, predownload_tokenizers
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup.
@@ -632,7 +632,7 @@ def test_router_disagg_decisions(
         frontend_port = get_unique_ports(request, num_ports=1)[0]
 
         # Run disagg routing test
-        _test_router_disagg_decisions(
+        _test_router_decisions_disagg(
             prefill_workers=prefill_workers,
             decode_workers=decode_workers,
             block_size=BLOCK_SIZE,
