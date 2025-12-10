@@ -90,10 +90,7 @@ fn convert_media_url_to_placeholder(
     content_array
         .iter()
         .map(|part| {
-            let part_type = part
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
+            let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
             if let Some((_, target_type)) = conversions.iter().find(|(src, _)| *src == part_type) {
                 serde_json::json!({"type": target_type})
@@ -131,8 +128,10 @@ fn may_be_fix_msg_content(messages: serde_json::Value, preserve_arrays: bool) ->
                 // Case 2: Array processing
                 Some(serde_json::Value::Array(content_array)) => {
                     // First, convert any media URL parts to placeholders (e.g., image_url → image)
-                    let content_array =
-                        convert_media_url_to_placeholder(content_array, DEFAULT_MEDIA_TYPE_CONVERSIONS);
+                    let content_array = convert_media_url_to_placeholder(
+                        content_array,
+                        DEFAULT_MEDIA_TYPE_CONVERSIONS,
+                    );
 
                     // Check if it's text-only (after media URL conversion)
                     let is_text_only_array = !content_array.is_empty()
@@ -509,7 +508,8 @@ mod tests {
         ];
 
         // Use the actual DEFAULT_MEDIA_TYPE_CONVERSIONS
-        let result = convert_media_url_to_placeholder(&content_array, DEFAULT_MEDIA_TYPE_CONVERSIONS);
+        let result =
+            convert_media_url_to_placeholder(&content_array, DEFAULT_MEDIA_TYPE_CONVERSIONS);
 
         assert_eq!(result.len(), 4);
 
