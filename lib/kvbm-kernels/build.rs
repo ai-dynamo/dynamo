@@ -245,7 +245,27 @@ fn build_from_source(target_arch: &str) {
 
     // Generate .fatbin and .md5 for future prebuilt use
     // Only generate .a files for kernels that need static linking, and only on x86_64
+    // Skip prebuilt artifact generation on non-x86_64 to avoid modifying the source tree
+    let is_x86_64 = target_arch == "x86_64";
+    println!(
+        "cargo:warning=Generating prebuilt artifacts for target architecture: {}",
+        target_arch
+    );
+
     for file in &cu_files {
+        let kernel_name = file.file_stem().unwrap().to_str().unwrap();
+
+        // Skip generating prebuilt artifacts for kernels that need static libs on non-x86_64
+        // This prevents modifying libtensor_kernels.a on ARM, which would dirty the git tree
+        if kernel_needs_static_lib(kernel_name) && !is_x86_64 {
+            println!(
+                "cargo:warning=Skipping prebuilt artifact generation for {} on {} \
+                 (static library is x86_64-only)",
+                kernel_name, target_arch
+            );
+            continue;
+        }
+
         generate_prebuilt_artifacts(file, &arch_flags, &out_dir, target_arch);
     }
 }
