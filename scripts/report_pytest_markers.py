@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#!/usr/bin/env python3
 """
 Pytest Marker Report (Production Grade)
 
@@ -39,10 +38,8 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 LOG = logging.getLogger("pytest-marker-report")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+# Disable all logging except CRITICAL to suppress noise from test code collection
+logging.disable(logging.WARNING)
 
 # --------------------------------------------------------------------------- #
 # Configuration
@@ -386,10 +383,18 @@ def print_human_report(report: Report) -> None:
 
     for rec in report.tests:
         print(f"{rec.nodeid:<60} | {', '.join(rec.markers)}")
-        if rec.missing:
-            print(f"  -> Missing: {', '.join(rec.missing)}")
 
-    print("=" * 80)
+    # Print tests with missing markers before summary
+    missing_tests = [rec for rec in report.tests if rec.missing]
+    if missing_tests:
+        print("\n" + "=" * 80)
+        print("TESTS MISSING REQUIRED MARKERS")
+        print("=" * 80)
+        for rec in missing_tests:
+            print(f"{rec.nodeid}")
+            print(f"  Missing: {', '.join(rec.missing)}")
+
+    print("\n" + "=" * 80)
     print("SUMMARY")
     print("=" * 80)
     print(f"  Tests checked: {report.total_checked}")
@@ -429,4 +434,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
