@@ -903,7 +903,7 @@ func GenerateBasePodSpec(
 
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
-	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
+	podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(podSpec.ImagePullSecrets, imagePullSecrets)
 
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName)
 	return &podSpec, nil
