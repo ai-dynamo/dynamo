@@ -7,9 +7,7 @@ import os
 os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
 import asyncio
-import json
 import logging
-import threading
 import time
 from typing import AsyncGenerator, Optional
 
@@ -22,13 +20,17 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
-# Debug file path
+# Debug flag: set DYNAMO_DEBUG=1 to enable debug file dumps
+DEBUG_ENABLED = os.environ.get("DYNAMO_DEBUG", "0") == "1"
 DEBUG_WORKER_KV_FILE = "/tmp/debug_worker_kv.txt"
 
 
 def dump_worker_kv_event(worker_id: int, event: dict, token_ids: list[int]):
     """Dump worker-side KV event with token_ids to file for debugging."""
+    if not DEBUG_ENABLED:
+        return
     import datetime
+
     with open(DEBUG_WORKER_KV_FILE, "a") as f:
         f.write(f"\n{'='*60}\n")
         f.write(f"Timestamp: {datetime.datetime.now()}\n")
@@ -305,14 +307,12 @@ class TrtllmWorker:
         try:
             # Use longer timeout or None for infinite wait
             events = self.llm.get_kv_cache_events_async(timeout=None)
-            logger.info(f"Worker {self.worker_id}: events: {events}")
-            logger.info(f"Worker {self.worker_id}: KV events iterator obtained (infinite timeout)")
+            logger.info(f"Worker {self.worker_id}: KV events iterator obtained")
 
             event_count = 0
             async for event in events:
                 event_count += 1
-                # Print full event for debugging
-                logger.info(f"[+++++]Worker {self.worker_id}: KV event #{event_count}: {event}")
+                logger.debug(f"Worker {self.worker_id}: KV event #{event_count}: {event}")
                 
                 try:
                     # Validate event structure
@@ -341,7 +341,6 @@ class TrtllmWorker:
                     # Process different event types
                     if event_type == "stored":
                         num_blocks = len(data.get('blocks', []))
-                        num_blocks = len(data.get('blocks', []))
                         logger.debug(f"Worker {self.worker_id}: STORED event with {num_blocks} blocks")
                         self.processing_initial_created_events = False
                         parent_hash = _to_signed_i64(data.get("parent_hash"))
@@ -353,10 +352,6 @@ class TrtllmWorker:
 
                             if token_num_in_block == self.block_size:
                                 token_ids = [int(token["token_id"]) for token in block["tokens"]]
-                                logger.info(
-                                    f"Worker {self.worker_id}: Block token_ids (first 10): {token_ids}, "
-                                    f"block_hash={block_hash}"
-                                )
                                 blocks.append({
                                     "block_hash": block_hash,
                                     "token_ids": token_ids,
@@ -402,8 +397,8 @@ class TrtllmWorker:
                                                         "offsets": [[image_start, image_end]]
                                                     }]
                                                 }
-                                                logger.info(
-                                                    f"Worker {self.worker_id}: Extracted mm_hash={mm_hash} from TRTLLM, "
+                                                logger.debug(
+                                                    f"Worker {self.worker_id}: mm_hash={mm_hash}, "
                                                     f"offsets=[{image_start}, {image_end}]"
                                                 )
                                             break
@@ -470,11 +465,9 @@ class TrtllmWorker:
             else:
                 logger.error(f"Worker {self.worker_id} KV events loop error: {e}")
         except Exception as e:
-            import traceback
             logger.error(f"Worker {self.worker_id} KV events loop error: {e}")
-            logger.error(traceback.format_exc())
-        
-        logger.warning(f"Worker {self.worker_id}: KV events loop EXITED! This should not happen.")
+
+        logger.warning(f"Worker {self.worker_id}: KV events loop exited unexpectedly")
 
     async def generate(
         self,
@@ -504,11 +497,11 @@ class TrtllmWorker:
             top_k=top_k,
         )
 
-        # Log input type for debugging
+        # Log input type
         if isinstance(prompt_input, dict):
-            logger.info(f"Worker {self.worker_id}: Processing MM request with keys: {prompt_input.keys()}")
+            logger.debug(f"Worker {self.worker_id}: MM request with keys: {prompt_input.keys()}")
         else:
-            logger.info(f"Worker {self.worker_id}: Processing text request with {len(prompt_input)} tokens")
+            logger.debug(f"Worker {self.worker_id}: Text request with {len(prompt_input)} tokens")
 
         # Pass prompt_input directly to generate_async
         # TRTLLM accepts both token list and dict (from default_multimodal_input_loader)

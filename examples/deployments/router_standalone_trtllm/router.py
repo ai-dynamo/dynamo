@@ -1,22 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import argparse
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import List
 
@@ -30,13 +19,17 @@ from dynamo._core import RadixTree, ZmqKvEventListener
 
 logger = logging.getLogger(__name__)
 
-# Debug file path
+# Debug flag: set DYNAMO_DEBUG=1 to enable debug file dumps
+DEBUG_ENABLED = os.environ.get("DYNAMO_DEBUG", "0") == "1"
 DEBUG_KV_EVENT_FILE = "/tmp/debug_kv_events.txt"
 
 
 def dump_kv_event(worker_id: int, event: dict):
     """Dump KV event to file for debugging."""
+    if not DEBUG_ENABLED:
+        return
     import datetime
+
     with open(DEBUG_KV_EVENT_FILE, "a") as f:
         f.write(f"\n{'='*60}\n")
         f.write(f"Timestamp: {datetime.datetime.now()}\n")
@@ -52,6 +45,8 @@ class RouterRequest(BaseModel):
 
 class RouterResponse(BaseModel):
     worker_id: int
+    overlap: float = 0.0  # Overlap ratio for the selected worker
+    matched_blocks: int = 0  # Number of matched blocks
 
 
 class InjectEventRequest(BaseModel):
@@ -173,7 +168,15 @@ class KvRouter:
         for worker_id in range(self.num_workers):
             asyncio.create_task(update_tree(worker_id))
 
-    async def get_best_worker(self, local_hashes: list[int], num_tokens: int) -> int:
+    async def get_best_worker(
+        self, local_hashes: list[int], num_tokens: int
+    ) -> tuple[int, float, int]:
+        """
+        Find best worker for request.
+
+        Returns:
+            tuple of (worker_id, overlap_ratio, matched_blocks)
+        """
         try:
             if num_tokens <= 0:
                 raise ValueError("num_tokens must be positive")
@@ -186,8 +189,12 @@ class KvRouter:
 
             # raw_scores is keyed by (worker_id, dp_rank) tuples, not just worker_id
             # For now, assume dp_rank=0 for all workers
+            matched_blocks_per_worker = {
+                worker_id: raw_scores.get((worker_id, 0), 0)
+                for worker_id in range(self.num_workers)
+            }
             overlap_scores = {
-                worker_id: raw_scores.get((worker_id, 0), 0) * self.block_size / num_tokens
+                worker_id: matched_blocks_per_worker[worker_id] * self.block_size / num_tokens
                 for worker_id in range(self.num_workers)
             }
 
@@ -222,7 +229,9 @@ class KvRouter:
             # no need for async lock here, as the state is intended to be continuously overwritten
             self.waitings[best_worker_id] += 1
 
-            return best_worker_id
+            best_overlap = overlap_scores[best_worker_id]
+            best_matched = matched_blocks_per_worker[best_worker_id]
+            return best_worker_id, best_overlap, best_matched
 
         except Exception as e:
             logger.error(f"Error in get_best_worker: {e}")
@@ -301,10 +310,14 @@ class RouterAPI:
                 raise HTTPException(status_code=503, detail="Router not initialized")
 
             try:
-                worker_id = await self.router.get_best_worker(
+                worker_id, overlap, matched_blocks = await self.router.get_best_worker(
                     request.local_hashes, request.num_tokens
                 )
-                return RouterResponse(worker_id=worker_id)
+                return RouterResponse(
+                    worker_id=worker_id,
+                    overlap=overlap,
+                    matched_blocks=matched_blocks,
+                )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             except Exception as e:

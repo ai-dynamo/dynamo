@@ -19,9 +19,9 @@ import httpx
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
+from PIL import Image
 from pydantic import BaseModel
 from router import RouterAPI, RouterRequest, RouterResponse
-from PIL import Image
 from tensorrt_llm.inputs.multimodal import apply_mm_hashes
 from tensorrt_llm.inputs.utils import default_multimodal_input_loader, load_image
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
@@ -32,9 +32,9 @@ from dynamo._core import compute_block_hash_for_seq_py
 
 logger = logging.getLogger(__name__)
 
-# Debug file paths
+# Debug flag: set DYNAMO_DEBUG=1 to enable debug file dumps
+DEBUG_ENABLED = os.environ.get("DYNAMO_DEBUG", "0") == "1"
 DEBUG_API_FILE = "/tmp/debug_api_hashes.txt"
-DEBUG_KV_EVENT_FILE = "/tmp/debug_kv_events.txt"
 
 
 def dump_api_debug(
@@ -46,7 +46,10 @@ def dump_api_debug(
     image_urls: list[str] | None,
 ):
     """Dump API-side hash computation to file for debugging."""
+    if not DEBUG_ENABLED:
+        return
     import datetime
+
     with open(DEBUG_API_FILE, "a") as f:
         f.write(f"\n{'='*60}\n")
         f.write(f"Timestamp: {datetime.datetime.now()}\n")
@@ -257,8 +260,6 @@ class ServiceAPI:
 
                     except Exception as e:
                         logger.warning(f"Failed to process MM input: {e}, falling back to text-only")
-                        import traceback
-                        traceback.print_exc()
                         tokens = self.tokenizer.encode(prompt)
                         mm_input = None
                 else:
@@ -275,11 +276,6 @@ class ServiceAPI:
                             "code": 400,
                         }
                     )
-
-                # logger.info(
-                #     f"API: Tokenized {num_tokens} tokens, first 10: {tokens[:10]}, "
-                #     f"block_size={self.init_params.block_size}"
-                # )
 
                 # Build block_mm_infos if we have mm_hash
                 # Use actual image token positions (image_offsets) not [0, num_tokens]

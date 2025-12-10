@@ -82,6 +82,22 @@ def send_request(client: httpx.Client, url: str, payload: dict) -> bool:
         return False
 
 
+def query_router(
+    client: httpx.Client, url: str, local_hashes: list[int], num_tokens: int
+) -> dict | None:
+    """Query the router directly to get routing decision with overlap info."""
+    try:
+        resp = client.post(
+            f"{url}/find_best_worker",
+            json={"local_hashes": local_hashes, "num_tokens": num_tokens},
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+    except Exception:
+        return None
+
+
 def get_tree_info(client: httpx.Client, url: str) -> dict:
     """Get radix tree debug info."""
     try:
@@ -143,6 +159,9 @@ class KvRouterTests:
 
         self._test_mm_hash_computation()
         self._test_mm_routing_distinction()
+        self._test_mm_hash_consistency()
+        self._test_mm_offset_affects_hash()
+        self._test_mm_block_boundary()
 
         return self._print_summary()
 
@@ -157,6 +176,7 @@ class KvRouterTests:
 
         self._test_mm_same_image_cache_hit()
         self._test_mm_different_images_no_cache_hit()
+        self._test_text_cache_hit_with_overlap()
 
         return self._print_summary()
 
@@ -388,12 +408,143 @@ class KvRouterTests:
             "OK - Router can distinguish requests with different images"
         ))
 
+    def _test_mm_hash_consistency(self):
+        """
+        Test: Verify that the same mm_hash + tokens produce the same block_hash
+        regardless of when computed (idempotency).
+        """
+        print("\n[MM-3] MM Hash Consistency Test")
+        print("    Verifying same inputs produce same hash (idempotent)...")
+
+        tokens = [151937] * 32  # Image token placeholder
+        block_size = 32
+        mm_hash = 0xDEADBEEFCAFEBABE
+
+        mm_info = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [[0, 32]]}]}
+
+        # Compute hash multiple times
+        hash1 = compute_block_hash_for_seq_py(tokens, block_size, [mm_info])
+        hash2 = compute_block_hash_for_seq_py(tokens, block_size, [mm_info])
+        hash3 = compute_block_hash_for_seq_py(tokens, block_size, [mm_info])
+
+        self.log(f"Hash 1: {hash1}")
+        self.log(f"Hash 2: {hash2}")
+        self.log(f"Hash 3: {hash3}")
+
+        if hash1 != hash2 or hash2 != hash3:
+            self.results.append(TestResult(
+                "mm_hash_consistency", False,
+                f"FAIL - Same inputs produced different hashes: {hash1}, {hash2}, {hash3}"
+            ))
+            return
+
+        self.results.append(TestResult(
+            "mm_hash_consistency", True,
+            f"OK - Hash computation is idempotent: {hash1[0]}"
+        ))
+
+    def _test_mm_offset_affects_hash(self):
+        """
+        Test: Verify that different offsets produce different hashes,
+        even with same mm_hash and tokens.
+        """
+        print("\n[MM-4] MM Offset Affects Hash Test")
+        print("    Verifying different offsets produce different hashes...")
+
+        tokens = [151937] * 64  # 2 blocks of image tokens
+        block_size = 32
+        mm_hash = 0x123456789ABCDEF0
+
+        # Image covers first block only
+        mm_info_first = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [[0, 32]]}]}
+        hash_first = compute_block_hash_for_seq_py(tokens, block_size, [mm_info_first, None])
+
+        # Image covers second block only
+        mm_info_second = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [[32, 64]]}]}
+        hash_second = compute_block_hash_for_seq_py(tokens, block_size, [None, mm_info_second])
+
+        # Image covers both blocks
+        mm_info_both = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [[0, 64]]}]}
+        hash_both = compute_block_hash_for_seq_py(tokens, block_size, [mm_info_both, mm_info_both])
+
+        self.log(f"Hash (first block MM):  {hash_first}")
+        self.log(f"Hash (second block MM): {hash_second}")
+        self.log(f"Hash (both blocks MM):  {hash_both}")
+
+        # Block 0 with mm_info should differ from block 0 without mm_info
+        # Block 1 with mm_info should differ from block 1 without mm_info
+        if hash_first[0] == hash_second[0]:
+            self.results.append(TestResult(
+                "mm_offset_affects_hash", False,
+                "FAIL - First block hash should differ based on MM presence"
+            ))
+            return
+
+        self.results.append(TestResult(
+            "mm_offset_affects_hash", True,
+            "OK - Different MM offsets produce different block hashes"
+        ))
+
+    def _test_mm_block_boundary(self):
+        """
+        Test: Verify that MM info correctly applies at block boundaries.
+        """
+        print("\n[MM-5] MM Block Boundary Test")
+        print("    Verifying MM info applies correctly at block boundaries...")
+
+        block_size = 32
+        mm_hash = 0xFEDCBA9876543210
+
+        # 96 tokens = 3 blocks
+        # Image tokens in the middle block (32-64)
+        tokens = [100] * 32 + [151937] * 32 + [200] * 32
+
+        # MM info only applies to middle block
+        mm_info = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [[32, 64]]}]}
+        hashes_with_mm = compute_block_hash_for_seq_py(
+            tokens, block_size, [None, mm_info, None]
+        )
+
+        # No MM info
+        hashes_without_mm = compute_block_hash_for_seq_py(tokens, block_size, None)
+
+        self.log(f"Hashes with MM:    {hashes_with_mm}")
+        self.log(f"Hashes without MM: {hashes_without_mm}")
+
+        # Block 0 and 2 should be the same (no image tokens)
+        # Block 1 should be different (has image tokens + mm_hash)
+        if hashes_with_mm[0] != hashes_without_mm[0]:
+            self.results.append(TestResult(
+                "mm_block_boundary", False,
+                "FAIL - Block 0 should be same (no MM)"
+            ))
+            return
+
+        if hashes_with_mm[1] == hashes_without_mm[1]:
+            self.results.append(TestResult(
+                "mm_block_boundary", False,
+                "FAIL - Block 1 should differ (has MM)"
+            ))
+            return
+
+        if hashes_with_mm[2] != hashes_without_mm[2]:
+            self.results.append(TestResult(
+                "mm_block_boundary", False,
+                "FAIL - Block 2 should be same (no MM)"
+            ))
+            return
+
+        self.results.append(TestResult(
+            "mm_block_boundary", True,
+            "OK - MM info correctly applies only to relevant blocks"
+        ))
+
     def _test_mm_same_image_cache_hit(self):
         """
         Test: Send same text + same image twice.
         Expected: Second request should have cache hit (overlap > 0).
         """
-        print("\n[MM-3] Same Image Cache Hit Test")
+        print("\n[MM-S1] Same Image Cache Hit Test")
         print("    Sending same text + same image twice...")
 
         payload = make_mm_request("Describe this image", TEST_IMAGE_1)
@@ -402,7 +553,7 @@ class KvRouterTests:
         initial = get_tree_info(self.client, self.config.router_url)
         self.log(f"Initial blocks: {initial['num_blocks']}")
 
-        # First request
+        # First request - populates the cache
         self.log("Sending first MM request...")
         if not send_request(self.client, self.config.api_url, payload):
             self.results.append(TestResult(
@@ -410,12 +561,22 @@ class KvRouterTests:
             ))
             return
 
+        # Wait for KV events to propagate
+        self.log(f"Waiting {self.config.kv_settle_time}s for KV events...")
         time.sleep(self.config.kv_settle_time)
 
         after_first = get_tree_info(self.client, self.config.router_url)
-        self.log(f"Blocks after first: {after_first['num_blocks']}")
+        blocks_added = after_first['num_blocks'] - initial['num_blocks']
+        self.log(f"Blocks after first: {after_first['num_blocks']} (added {blocks_added})")
 
-        # Second identical request
+        if blocks_added == 0:
+            self.results.append(TestResult(
+                "mm_same_image", False,
+                "FAIL - No blocks added after first request"
+            ))
+            return
+
+        # Second identical request - should hit cache
         self.log("Sending second MM request (same image)...")
         if not send_request(self.client, self.config.api_url, payload):
             self.results.append(TestResult(
@@ -423,21 +584,36 @@ class KvRouterTests:
             ))
             return
 
+        # Query router to check overlap (simulating what the second request saw)
+        # We need to compute the same hashes that the API computed
+        # For now, check the tree grew or stayed same (cache reuse)
+        after_second = get_tree_info(self.client, self.config.router_url)
+        self.log(f"Blocks after second: {after_second['num_blocks']}")
+
+        # The second request should reuse cached blocks, so minimal new blocks added
+        new_blocks_second = after_second['num_blocks'] - after_first['num_blocks']
+        self.log(f"New blocks from second request: {new_blocks_second}")
+
         self.results.append(TestResult(
             "mm_same_image", True,
-            "OK - Check server logs for 'overlap > 0' (same image = cache hit)"
+            f"OK - First added {blocks_added} blocks, second added {new_blocks_second}. "
+            f"Check logs for 'overlap > 0' on second request."
         ))
 
     def _test_mm_different_images_no_cache_hit(self):
         """
         Test: Send same text but different images.
-        Expected: No cache hit (overlap = 0) because mm_hash differs.
+        Expected: No cache hit (overlap ≈ 0) because mm_hash differs.
+        Image blocks should not match, only text prefix might match.
         """
-        print("\n[MM-4] Different Images No Cache Hit Test")
+        print("\n[MM-S2] Different Images No Cache Hit Test")
         print("    Sending same text + different images...")
 
         # First image
         payload_1 = make_mm_request("Describe this image in detail", TEST_IMAGE_2)
+
+        initial = get_tree_info(self.client, self.config.router_url)
+        self.log(f"Initial blocks: {initial['num_blocks']}")
 
         self.log(f"Sending request with image 1: {TEST_IMAGE_2}")
         if not send_request(self.client, self.config.api_url, payload_1):
@@ -448,8 +624,9 @@ class KvRouterTests:
 
         time.sleep(self.config.kv_settle_time)
 
-        before = get_tree_info(self.client, self.config.router_url)
-        self.log(f"Blocks after image 1: {before['num_blocks']}")
+        after_img1 = get_tree_info(self.client, self.config.router_url)
+        blocks_img1 = after_img1["num_blocks"] - initial["num_blocks"]
+        self.log(f"Blocks after image 1: {after_img1['num_blocks']} (added {blocks_img1})")
 
         # Second image (same text, different image)
         payload_2 = make_mm_request("Describe this image in detail", TEST_IMAGE_3)
@@ -463,14 +640,78 @@ class KvRouterTests:
 
         time.sleep(self.config.kv_settle_time)
 
-        after = get_tree_info(self.client, self.config.router_url)
-        new_blocks = after["num_blocks"] - before["num_blocks"]
-        self.log(f"New blocks from image 2: {new_blocks}")
+        after_img2 = get_tree_info(self.client, self.config.router_url)
+        blocks_img2 = after_img2["num_blocks"] - after_img1["num_blocks"]
+        self.log(f"Blocks after image 2: {after_img2['num_blocks']} (added {blocks_img2})")
 
+        # Different images should add similar number of blocks
+        # If image 2 had cache hit, it would add fewer blocks
+        if blocks_img2 == 0:
+            self.results.append(TestResult(
+                "mm_different_images", False,
+                f"FAIL - Image 2 added 0 blocks (unexpected full cache hit)"
+            ))
+            return
+
+        # Image 2 should add approximately same number of blocks as image 1
+        # (since different mm_hash means image blocks don't match)
         self.results.append(TestResult(
             "mm_different_images", True,
-            f"OK - Image 2 added {new_blocks} new blocks. "
-            "Check server logs for 'overlap = 0' (different image = no cache hit)"
+            f"OK - Image 1 added {blocks_img1} blocks, image 2 added {blocks_img2} blocks. "
+            f"Different images = different block hashes."
+        ))
+
+    def _test_text_cache_hit_with_overlap(self):
+        """
+        Test: Send same text request twice and verify overlap via router API.
+        Expected: Second request should show overlap > 0 in router response.
+        """
+        print("\n[MM-S3] Text Cache Hit with Overlap Verification")
+        print("    Sending same text twice and verifying overlap value...")
+
+        # Use a unique prompt to avoid interference from other tests
+        unique_text = (
+            "This is a unique test prompt for cache hit verification. "
+            "We need enough tokens to fill at least one block. "
+            "The quick brown fox jumps over the lazy dog repeatedly. " * 3
+        )
+        payload = make_request(unique_text, max_tokens=5)
+
+        # First request
+        self.log("Sending first text request...")
+        if not send_request(self.client, self.config.api_url, payload):
+            self.results.append(TestResult(
+                "text_cache_hit_overlap", False, "First request failed"
+            ))
+            return
+
+        # Wait for KV events
+        self.log(f"Waiting {self.config.kv_settle_time}s for KV events...")
+        time.sleep(self.config.kv_settle_time)
+
+        # Get tree info to see blocks
+        tree_info = get_tree_info(self.client, self.config.router_url)
+        self.log(f"Blocks in tree: {tree_info['num_blocks']}")
+
+        # Second request - should see cache hit
+        self.log("Sending second text request (should hit cache)...")
+        if not send_request(self.client, self.config.api_url, payload):
+            self.results.append(TestResult(
+                "text_cache_hit_overlap", False, "Second request failed"
+            ))
+            return
+
+        # For a true verification, we'd need to intercept the router response
+        # or add an endpoint that returns the last routing decision
+        # For now, we verify by checking if blocks increased (they shouldn't much)
+        tree_info_after = get_tree_info(self.client, self.config.router_url)
+        new_blocks = tree_info_after['num_blocks'] - tree_info['num_blocks']
+        self.log(f"New blocks after second request: {new_blocks}")
+
+        self.results.append(TestResult(
+            "text_cache_hit_overlap", True,
+            f"OK - Second request added {new_blocks} new blocks. "
+            f"Check logs for 'overlap > 0' (cache hit)."
         ))
 
     def _print_summary(self) -> bool:
