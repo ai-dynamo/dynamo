@@ -208,11 +208,11 @@ async fn test_streaming_without_usage() {
     // Collect all chunks
     let chunks: Vec<_> = transformed_stream.collect().await;
 
-    // Filter out ghost events (service events with metrics that get filtered in HTTP layer)
+    // Filter out metrics annotation events (events without SSE data payload)
     let content_chunks: Vec<_> = chunks
         .into_iter()
         .filter(|chunk| {
-            // Ghost events have event=Some(ANNOTATION_LLM_METRICS) and data=None
+            // Metrics annotation events have event=Some(ANNOTATION_LLM_METRICS) and data=None
             !(chunk
                 .event
                 .as_ref()
@@ -340,11 +340,11 @@ async fn test_streaming_with_usage_false() {
     // Collect all chunks
     let chunks: Vec<_> = transformed_stream.collect().await;
 
-    // Filter out ghost events (service events with metrics that get filtered in HTTP layer)
+    // Filter out metrics annotation events (events without SSE data payload)
     let content_chunks: Vec<_> = chunks
         .into_iter()
         .filter(|chunk| {
-            // Ghost events have event=Some(ANNOTATION_LLM_METRICS) and data=None
+            // Metrics annotation events have event=Some(ANNOTATION_LLM_METRICS) and data=None
             !(chunk
                 .event
                 .as_ref()

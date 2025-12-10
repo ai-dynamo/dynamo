@@ -1452,7 +1452,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ghost_event_handling() {
+    fn test_metrics_annotation_event_handling() {
         use crate::preprocessor::LLMMetricAnnotation;
         use crate::types::Annotated;
 
@@ -1464,7 +1464,7 @@ mod tests {
         let expected_metric_name = "dynamo_frontend_cached_sequence_length";
         let mut collector = metrics.clone().create_response_collector(model);
 
-        // Create a service event (ghost event) with metrics annotation but no data/event
+        // Create a metrics annotation event (event without SSE data payload)
         let mut annotated = Annotated::<
             crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
         > {
@@ -1497,7 +1497,7 @@ mod tests {
         // Should return Ok(None) for metrics annotation events
         assert!(matches!(result, Ok(None)));
 
-        // Should have observed the cached tokens from the ghost event
+        // Should have observed the cached tokens from the metrics annotation event
         let metric_families = registry.gather();
         let histogram_family = metric_families
             .iter()
