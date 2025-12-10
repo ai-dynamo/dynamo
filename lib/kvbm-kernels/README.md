@@ -159,7 +159,7 @@ with 128 blocks, that's the difference between 50μs and 5s of added latency per
 ├── build.rs                # NVCC build script (sm80+sm90 by default)
 ├── cuda/
 │   ├── tensor_kernels.cu   # Batched CUDA kernels + memcpy fallback
-│   └── prebuilt/           # Prebuilt .fatbin files with MD5 checksums
+│   └── prebuilt/           # Prebuilt .fatbin, .a (static libs), and .md5 checksums
 ├── src/
 │   ├── lib.rs              # Rust facade for the kernels
 │   └── tensor_kernels.rs   # FFI wrappers + integration tests
@@ -230,13 +230,14 @@ path (block ⇄ universal ⇄ operational), and asserts lossless round-trips.
 
 #### Prebuilt Kernels
 
-By default, the build system uses prebuilt `.fatbin` files from `cuda/prebuilt/`
-if `nvcc` is not available. To force building from source:
+By default, the build system automatically:
+- **Uses prebuilt** `.fatbin` and `.a` files from `cuda/prebuilt/` if `nvcc` is **not available**
+- **Builds from source** if `nvcc` is **available**
+
+To force using prebuilt kernels even when nvcc is available:
 
 ```bash
-# Disable prebuilt kernels
-export DYNAMO_USE_PREBUILT_KERNELS=false
-cargo build
+cargo build --features prebuilt-kernels
 ```
 
 After modifying CUDA source, regenerate prebuilt kernels and update checksums:
@@ -244,7 +245,7 @@ After modifying CUDA source, regenerate prebuilt kernels and update checksums:
 ```bash
 # This rebuilds tensor_kernels.cu and updates MD5 hashes
 cargo build --release
-# Commit the updated cuda/prebuilt/tensor_kernels.{fatbin,md5}
+# Commit the updated cuda/prebuilt/tensor_kernels.{fatbin,a,md5}
 ```
 
 **Important:** If you change `CUDA_ARCHS` or update your nvcc version, you need to
@@ -259,6 +260,30 @@ cargo build --release
 
 The build system only checks if the `.cu` source has changed, not build configuration.
 This prevents CI from regenerating non-reproducible `.a` files unnecessarily.
+
+##### Architecture Limitations
+
+**Prebuilt mode currently only supports x86_64 architecture.**
+
+Static libraries (`.a` files) contain compiled host-side C++ code and are CPU architecture-specific.
+The prebuilt `libtensor_kernels.a` is built for x86_64. On ARM (aarch64) or other architectures,
+you must install `nvcc` and build `tensor_kernels` from source.
+
+The build will fail with a clear error message if you attempt prebuilt mode on ARM:
+
+```
+╔════════════════════════════════════════════════════════════════════════╗
+║  Prebuilt mode is not supported on aarch64 architecture               ║
+║                                                                        ║
+║  Static libraries (.a files) are CPU architecture-specific.           ║
+║  Prebuilt libtensor_kernels.a is only available for x86_64.           ║
+║                                                                        ║
+║  Please install nvcc to build from source, or use an x86_64 system.   ║
+╚════════════════════════════════════════════════════════════════════════╝
+```
+
+**Note:** Only `tensor_kernels.cu` requires a static library (`.a`) for FFI linking. The
+`vectorized_copy.cu` kernel loads at runtime via `.fatbin` and works on all architectures.
 
 ---
 
