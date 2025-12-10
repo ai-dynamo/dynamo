@@ -287,8 +287,13 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
 
-# Copy benchmarks, examples, and tests for CI with correct ownership
-COPY --chown=dynamo: . /workspace/
+# Copy tests, benchmarks, deploy and components for CI
+COPY --chown=dynamo: tests /workspace/tests
+COPY --chown=dynamo: examples /workspace/examples
+COPY --chown=dynamo: deploy /workspace/deploy
+COPY --chown=dynamo: recipes/ /workspace/recipes/
+COPY --chown=dynamo: components/ /workspace/components/
+COPY --chown=dynamo: lib/ /workspace/lib/
 
 # Copy attribution files
 COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
