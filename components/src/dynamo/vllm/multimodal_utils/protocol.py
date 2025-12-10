@@ -147,7 +147,7 @@ class vLLMMultimodalRequest(vLLMGenerateRequest):
     embeddings_shape: Optional[
         Union[Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
-    serialized_request: Optional[connect.RdmaMetadata] = None
+    serialized_request: Optional[connect.RdmaMetadata | str] = None
 
 
 class MyRequestOutput(BaseModel):
