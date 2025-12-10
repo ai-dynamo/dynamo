@@ -6,6 +6,14 @@ name: Nightly CI pipeline
 on:
   schedule:
     - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
+  # TEMPORARY: Enable PR and manual triggers for debugging exit codes 127/139
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/nightly-ci.yml'
+      - '.github/actions/pytest/**'
+  workflow_dispatch:  # Allow manual triggering from GitHub UI
 
 permissions:
   contents: read
