@@ -443,7 +443,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
-    /tmp/use-sccache.sh show-stats && \
+    /tmp/use-sccache.sh show-stats "DEBUG" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
         export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
