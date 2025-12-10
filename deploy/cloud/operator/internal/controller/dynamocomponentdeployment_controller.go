@@ -280,7 +280,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	logs.Info("Finished reconciling.")
 	r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeNormal, "Update", "All resources updated!")
 
-	err = r.setStatusConditionAndServiceReplicaStatus(ctx, req, dynamoComponentDeployment, componentReconcileResult)
+	err = r.setStatusConditionAndServiceReplicaStatus(ctx, dynamoComponentDeployment, componentReconcileResult)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to set status condition and service replica status: %w", err)
 	}
@@ -446,20 +446,20 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 
 }
 
-func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, req ctrl.Request, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
+func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
 	condition := metav1.Condition{
 		Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
 		Status:  componentReconcileResult.status,
 		Reason:  componentReconcileResult.reason,
 		Message: componentReconcileResult.message,
 	}
-	dynamoComponentDeployment, err := r.setStatusConditions(ctx, req, condition)
+
+	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, condition)
+	dynamoComponentDeployment.Status.Service = componentReconcileResult.serviceReplicaStatus
+
+	err := r.Status().Update(ctx, dynamoComponentDeployment)
 	if err != nil {
-		return fmt.Errorf("failed to set status condition: %w", err)
-	}
-	err = r.setServiceReplicaStatus(ctx, dynamoComponentDeployment, componentReconcileResult.serviceReplicaStatus)
-	if err != nil {
-		return fmt.Errorf("failed to set service replica status: %w", err)
+		return fmt.Errorf("failed to update DynamoComponentDeployment status: %w", err)
 	}
 	return nil
 }
@@ -807,15 +807,6 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditions(ctx context.Co
 		return
 	}
 	return
-}
-
-func (r *DynamoComponentDeploymentReconciler) setServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, serviceReplicaStatus v1alpha1.ServiceReplicaStatus) error {
-	dynamoComponentDeployment.Status.Service = serviceReplicaStatus
-	err := r.Status().Update(ctx, dynamoComponentDeployment)
-	if err != nil {
-		return fmt.Errorf("failed to update DynamoComponentDeployment status: %w", err)
-	}
-	return nil
 }
 
 //nolint:nakedret
