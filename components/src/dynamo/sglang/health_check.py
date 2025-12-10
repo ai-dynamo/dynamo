@@ -113,8 +113,8 @@ class SglangPrefillHealthCheckPayload(HealthCheckPayload):
         }
 
         if use_text_input:
-            self.default_payload["request"]["prompt"] = "Test"
+            self.default_payload["request"]["prompt"] = "Test"  # type: ignore
         else:
-            self.default_payload["request"]["token_ids"] = [bos_token_id]
+            self.default_payload["request"]["token_ids"] = [bos_token_id]  # type: ignore
 
         super().__init__()
