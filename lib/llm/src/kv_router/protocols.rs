@@ -143,6 +143,21 @@ pub struct SpecDecodeStats {
     pub num_accepted_tokens_per_pos: Option<Vec<u32>>,
 }
 
+/// Active load metrics for a worker, used for busy detection.
+///
+/// Published by workers (with only `kv_active_blocks`) and by the scheduler
+/// (with both `kv_active_blocks` and `active_prefill_tokens`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ActiveLoad {
+    pub worker_id: WorkerId,
+    #[serde(default)]
+    pub dp_rank: DpRank,
+    /// Number of active KV cache blocks on the worker.
+    pub kv_active_blocks: Option<u64>,
+    /// Number of active prefill tokens (from scheduler's view).
+    pub active_prefill_tokens: Option<u64>,
+}
+
 /// A [`LocalBlockHash`] is a hash computed from the tokens_ids, extra_token_ids and the optional
 /// lora_id of a block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]

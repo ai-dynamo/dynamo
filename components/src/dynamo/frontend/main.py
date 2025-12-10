@@ -190,10 +190,16 @@ def parse_args():
         help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
     )
     parser.add_argument(
-        "--busy-threshold",
+        "--active-decode-blocks-threshold",
         type=float,
         default=None,
-        help="Threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache usage. If not set, busy detection is disabled.",
+        help="Threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache block utilization. If not set, blocks-based busy detection is disabled.",
+    )
+    parser.add_argument(
+        "--active-prefill-tokens-threshold",
+        type=float,
+        default=None,
+        help="Threshold for determining when a worker is considered busy based on prefill token utilization. Can exceed 1.0 since active prefill tokens include queued tokens. If not set, tokens-based busy detection is disabled.",
     )
     parser.add_argument(
         "--model-name",
@@ -316,7 +322,11 @@ async def async_main():
         "http_port": flags.http_port,
         "kv_cache_block_size": flags.kv_cache_block_size,
         "router_config": RouterConfig(
-            router_mode, kv_router_config, flags.busy_threshold, flags.enforce_disagg
+            router_mode,
+            kv_router_config,
+            flags.active_decode_blocks_threshold,
+            flags.active_prefill_tokens_threshold,
+            flags.enforce_disagg,
         ),
     }
 

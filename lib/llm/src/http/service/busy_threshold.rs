@@ -1,34 +1,35 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! HTTP endpoint for dynamically getting/setting the busy threshold per model.
+//! HTTP endpoint for dynamically getting/setting the busy thresholds per model.
 //!
-//! The busy threshold controls when workers are marked as "busy" based on their
-//! KV cache utilization. When all workers for a model exceed their threshold,
-//! new requests are rejected with a 503 Service Unavailable response.
+//! The busy thresholds control when workers are marked as "busy" based on their
+//! KV cache block utilization and prefill token utilization. When all workers
+//! for a model exceed their thresholds, new requests are rejected with a 503
+//! Service Unavailable response.
 //!
 //! ## Endpoints
 //!
 //! ### POST /busy_threshold
 //!
-//! Get or set a model's busy threshold.
+//! Get or set a model's busy thresholds.
 //!
-//! **Set threshold:**
+//! **Set thresholds:**
 //! ```json
 //! // Request
-//! {"model": "llama-3-70b", "threshold": 0.85}
+//! {"model": "llama-3-70b", "blocks_threshold": 0.85, "tokens_threshold": 1.5}
 //! // Response
-//! {"model": "llama-3-70b", "threshold": 0.85}
+//! {"model": "llama-3-70b", "blocks_threshold": 0.85, "tokens_threshold": 1.5}
 //! ```
 //!
-//! **Get threshold (omit or null threshold):**
+//! **Get thresholds (omit thresholds):**
 //! ```json
 //! // Request
 //! {"model": "llama-3-70b"}
 //! // Response (if configured)
-//! {"model": "llama-3-70b", "threshold": 0.85}
+//! {"model": "llama-3-70b", "blocks_threshold": 0.85, "tokens_threshold": 1.5}
 //! // Response (if not configured)
-//! {"model": "llama-3-70b", "threshold": null}
+//! {"model": "llama-3-70b", "blocks_threshold": null, "tokens_threshold": null}
 //! ```
 //!
 //! ### GET /busy_threshold
@@ -37,7 +38,7 @@
 //!
 //! ```json
 //! // Response
-//! {"thresholds": [{"model": "llama-3-70b", "threshold": 0.85}]}
+//! {"thresholds": [{"model": "llama-3-70b", "blocks_threshold": 0.85, "tokens_threshold": 1.5}]}
 //! ```
 
 use super::{RouteDoc, service_v2};
@@ -50,16 +51,18 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Request body for getting or setting a busy threshold.
+/// Request body for getting or setting busy thresholds.
 ///
-/// - If `threshold` is provided: sets/creates the threshold and returns the new value
-/// - If `threshold` is null/omitted: returns the existing threshold if any
+/// - If thresholds are provided: sets/creates the thresholds and returns the new values
+/// - If thresholds are null/omitted: returns the existing thresholds if any
 #[derive(Debug, Deserialize)]
 pub struct BusyThresholdRequest {
     /// The model name
     pub model: String,
-    /// The threshold value (0.0 to 1.0), or null to just get the current value
-    pub threshold: Option<f64>,
+    /// The blocks threshold value (0.0 to 1.0), or null to just get the current value
+    pub blocks_threshold: Option<f64>,
+    /// The tokens threshold value (can exceed 1.0), or null to just get the current value
+    pub tokens_threshold: Option<f64>,
 }
 
 /// Response for a threshold operation
@@ -67,8 +70,10 @@ pub struct BusyThresholdRequest {
 pub struct BusyThresholdResponse {
     /// The model name
     pub model: String,
-    /// The threshold value (null if no threshold is configured)
-    pub threshold: Option<f64>,
+    /// The blocks threshold value (null if no threshold is configured)
+    pub blocks_threshold: Option<f64>,
+    /// The tokens threshold value (null if no threshold is configured)
+    pub tokens_threshold: Option<f64>,
 }
 
 /// Response for listing all thresholds
@@ -107,25 +112,42 @@ async fn busy_threshold_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
     Json(request): Json<BusyThresholdRequest>,
 ) -> impl IntoResponse {
-    // Validate threshold range if provided
-    if let Some(threshold) = request.threshold
+    // Validate blocks threshold range if provided (must be 0.0-1.0)
+    if let Some(threshold) = request.blocks_threshold
         && !(0.0..=1.0).contains(&threshold)
     {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!(ErrorResponse {
-                error: format!("Threshold must be between 0.0 and 1.0, got {}", threshold),
+                error: format!(
+                    "blocks_threshold must be between 0.0 and 1.0, got {}",
+                    threshold
+                ),
+            })),
+        );
+    }
+
+    // tokens_threshold can exceed 1.0 (no upper bound validation)
+    if let Some(threshold) = request.tokens_threshold
+        && threshold < 0.0
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!(ErrorResponse {
+                error: format!("tokens_threshold must be >= 0.0, got {}", threshold),
             })),
         );
     }
 
     let manager = state.manager();
 
-    // Get or set the threshold via the model's worker monitor
-    let threshold = manager.busy_threshold(&request.model, request.threshold);
+    // Get or set the thresholds via the model's worker monitor
+    let blocks_threshold = manager.blocks_threshold(&request.model, request.blocks_threshold);
+    let tokens_threshold = manager.tokens_threshold(&request.model, request.tokens_threshold);
 
     // If trying to SET but model has no monitor, return 404
-    if request.threshold.is_some() && threshold.is_none() {
+    let is_setting = request.blocks_threshold.is_some() || request.tokens_threshold.is_some();
+    if is_setting && blocks_threshold.is_none() && tokens_threshold.is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!(ErrorResponse {
@@ -137,11 +159,12 @@ async fn busy_threshold_handler(
         );
     }
 
-    if request.threshold.is_some() {
+    if is_setting {
         tracing::info!(
             model = %request.model,
-            threshold = ?threshold,
-            "Updated busy threshold"
+            blocks_threshold = ?blocks_threshold,
+            tokens_threshold = ?tokens_threshold,
+            "Updated busy thresholds"
         );
     }
 
@@ -149,7 +172,8 @@ async fn busy_threshold_handler(
         StatusCode::OK,
         Json(serde_json::json!(BusyThresholdResponse {
             model: request.model,
-            threshold,
+            blocks_threshold,
+            tokens_threshold,
         })),
     )
 }
@@ -163,10 +187,13 @@ async fn list_busy_thresholds_handler(
     let response = ListBusyThresholdsResponse {
         thresholds: thresholds
             .into_iter()
-            .map(|(model, threshold)| BusyThresholdResponse {
-                model,
-                threshold: Some(threshold),
-            })
+            .map(
+                |(model, blocks_threshold, tokens_threshold)| BusyThresholdResponse {
+                    model,
+                    blocks_threshold: Some(blocks_threshold),
+                    tokens_threshold: Some(tokens_threshold),
+                },
+            )
             .collect(),
     };
 

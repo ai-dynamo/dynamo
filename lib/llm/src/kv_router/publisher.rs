@@ -26,7 +26,6 @@ use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT,
     indexer::{RouterEvent, compute_block_hash_for_seq},
     protocols::*,
-    scoring::LoadEvent,
 };
 use dynamo_runtime::config::environment_names::nats as env_nats;
 
@@ -867,14 +866,16 @@ impl WorkerMetricsPublisher {
                     // Timer expired - publish if we have pending metrics
                     _ = &mut publish_timer => {
                         if let Some(metrics) = pending_publish.take() {
-                            // Create LoadEvent wrapping the metrics
-                            let load_event = LoadEvent {
+                            // Create ActiveLoad with only kv_active_blocks (worker doesn't know prefill tokens)
+                            let active_load = ActiveLoad {
                                 worker_id,
-                                data: (*metrics).clone(),
+                                dp_rank: metrics.worker_stats.data_parallel_rank.unwrap_or(0),
+                                kv_active_blocks: Some(metrics.kv_stats.kv_active_blocks),
+                                active_prefill_tokens: None,
                             };
 
                             if let Err(e) =
-                                namespace.publish(KV_METRICS_SUBJECT, &load_event).await
+                                namespace.publish(KV_METRICS_SUBJECT, &active_load).await
                             {
                                 tracing::warn!("Failed to publish metrics over NATS: {}", e);
                             }
@@ -1239,7 +1240,7 @@ mod test_exponential_backoff {
 #[cfg(all(test, feature = "integration"))]
 mod test_integration_publisher {
     use super::*;
-    use crate::kv_router::protocols::{ForwardPassMetrics, KvStats, WorkerStats};
+    use crate::kv_router::protocols::{ActiveLoad, ForwardPassMetrics, KvStats, WorkerStats};
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
     use dynamo_runtime::traits::events::EventSubscriber;
     use futures::StreamExt;
@@ -1253,7 +1254,7 @@ mod test_integration_publisher {
 
         // Create a subscriber for the metrics events using subscribe_with_type
         let mut subscriber = namespace
-            .subscribe_with_type::<LoadEvent>(KV_METRICS_SUBJECT)
+            .subscribe_with_type::<ActiveLoad>(KV_METRICS_SUBJECT)
             .await
             .unwrap();
 
@@ -1301,8 +1302,8 @@ mod test_integration_publisher {
 
         let event = result.unwrap().unwrap(); // Unwrap the Option and the Result
         assert_eq!(event.worker_id, worker_id);
-        assert_eq!(event.data.kv_stats.kv_active_blocks, 900); // Last value: 9 * 100
-        assert_eq!(event.data.worker_stats.num_requests_waiting, 90); // Last value: 9 * 10
+        assert_eq!(event.kv_active_blocks, Some(900)); // Last value: 9 * 100
+        assert_eq!(event.active_prefill_tokens, None); // Worker doesn't publish prefill tokens
 
         // Ensure no more events are waiting
         let no_msg =

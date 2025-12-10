@@ -3,15 +3,9 @@
 
 //! Scoring functions for the KV router.
 
-use super::protocols::{ForwardPassMetrics, LoadMetrics};
+use super::protocols::LoadMetrics;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LoadEvent {
-    pub worker_id: u64,
-    pub data: ForwardPassMetrics,
-}
 
 /// [gluo FIXME] exactly the same as EndpointInfo except that 'data'
 /// is cleaned (not optional)

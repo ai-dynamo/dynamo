@@ -14,11 +14,12 @@ use std::time::Duration;
 use tokio::sync::{RwLock, watch};
 
 use super::KV_HIT_RATE_SUBJECT;
+use super::KV_METRICS_SUBJECT;
 use super::KvRouterConfig;
 use super::RouterConfigOverride;
 use super::WorkerSelector;
 use super::indexer::OverlapScores;
-use super::protocols::{DpRank, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+use super::protocols::{ActiveLoad, DpRank, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use super::sequence::{ActiveSequencesMultiWorker, SequenceError};
 
 use crate::tokens::SequenceHash;
@@ -133,7 +134,7 @@ impl KvScheduler {
         let slots_monitor = slots.clone();
         let mut instance_ids_monitor_rx = instance_ids_rx.clone();
         let mut configs_monitor_rx = runtime_configs_rx.clone();
-        let monitor_cancel_token = component.drt().primary_token();
+        let monitor_cancel_token = component.drt().child_token();
         tokio::spawn(async move {
             tracing::trace!("workers monitoring task started");
             loop {
@@ -285,6 +286,45 @@ impl KvScheduler {
             }
 
             tracing::trace!("background endpoint subscriber shutting down");
+        });
+
+        // Background task to publish active load metrics every 5 seconds
+        let slots_metrics = slots.clone();
+        let ns_metrics = component.namespace().clone();
+        let metrics_cancel_token = component.drt().child_token();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            tracing::trace!("active load metrics publishing task started");
+
+            loop {
+                tokio::select! {
+                    _ = metrics_cancel_token.cancelled() => {
+                        tracing::trace!("active load metrics publishing task shutting down");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        // Query active blocks and tokens from all workers
+                        let active_blocks = slots_metrics.active_blocks().await;
+                        let active_tokens = slots_metrics.active_tokens().await;
+
+                        // Publish ActiveLoad for each worker/dp_rank
+                        for (worker, blocks) in active_blocks.iter() {
+                            let tokens = active_tokens.get(worker).copied();
+                            let active_load = ActiveLoad {
+                                worker_id: worker.worker_id,
+                                dp_rank: worker.dp_rank,
+                                kv_active_blocks: Some(*blocks as u64),
+                                active_prefill_tokens: tokens.map(|t| t as u64),
+                            };
+
+                            if let Err(e) = ns_metrics.publish(KV_METRICS_SUBJECT, &active_load).await {
+                                tracing::warn!("Failed to publish active load metrics: {:?}", e);
+                            }
+                        }
+                    }
+                }
+            }
+            tracing::trace!("active load metrics publishing task exiting");
         });
 
         Ok(KvScheduler { request_tx, slots })

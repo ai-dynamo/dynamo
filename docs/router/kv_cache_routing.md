@@ -31,7 +31,9 @@ The main KV-aware routing arguments:
 
 - `--no-track-active-blocks`: Disables tracking of active blocks (blocks being used for ongoing generation/decode phases). By default, the router tracks active blocks for load balancing. Disable this when routing to workers that only perform prefill (no decode phase), as tracking decode load is not relevant. This reduces router overhead and simplifies state management.
 
-- `--busy-threshold`: Initial threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache usage. When a worker's KV cache active blocks exceed this percentage of total blocks, it will be marked as busy and excluded from routing. If not set, busy detection is disabled. This feature works with all routing modes (`--router-mode kv|round-robin|random`) as long as backend engines emit `ForwardPassMetrics`. The threshold can be dynamically updated at runtime via the `/busy_threshold` HTTP endpoint (see [Dynamic Threshold Configuration](#dynamic-threshold-configuration)).
+- `--active-decode-blocks-threshold`: Initial threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache block utilization. When a worker's KV cache active blocks exceed this percentage of total blocks, it will be marked as busy and excluded from routing. If not set, blocks-based busy detection is disabled. This feature works with all routing modes (`--router-mode kv|round-robin|random`) as long as backend engines emit `ForwardPassMetrics`. The threshold can be dynamically updated at runtime via the `/busy_threshold` HTTP endpoint (see [Dynamic Threshold Configuration](#dynamic-threshold-configuration)).
+
+- `--active-prefill-tokens-threshold`: Threshold for determining when a worker is considered busy based on prefill token utilization. Can exceed 1.0 since active prefill tokens include queued tokens (pending prefill work). If not set, tokens-based busy detection is disabled. When set, the router checks if active prefill tokens exceed `threshold * max_num_batch_tokens`. Generally, set this higher than 1.0 to account for queued requests.
 
 - `--router-ttl`: Time-to-live in seconds for blocks in the router's local cache predictions. Blocks older than this duration will be automatically expired and removed from the router's radix tree. Defaults to 120.0 seconds when `--no-kv-events` is used. This helps manage memory usage by removing stale cache predictions that are unlikely to be accurate.
 
@@ -585,28 +587,32 @@ See [KV Router Architecture](../router/README.md) for performance tuning details
 
 ## Dynamic Threshold Configuration
 
-The busy threshold can be updated at runtime without restarting the frontend. The frontend exposes HTTP endpoints at `/busy_threshold`:
+The busy thresholds can be updated at runtime without restarting the frontend. The frontend exposes HTTP endpoints at `/busy_threshold`:
 
-**Get or set a model's threshold (POST):**
+**Get or set a model's thresholds (POST):**
 ```bash
-# Set threshold for a model
+# Set both thresholds for a model
 curl -X POST http://localhost:8000/busy_threshold \
   -H "Content-Type: application/json" \
-  -d '{"model": "meta-llama/Llama-2-7b-hf", "threshold": 0.85}'
-# Response: {"model": "meta-llama/Llama-2-7b-hf", "threshold": 0.85}
+  -d '{"model": "meta-llama/Llama-2-7b-hf", "blocks_threshold": 0.85, "tokens_threshold": 1.5}'
+# Response: {"model": "meta-llama/Llama-2-7b-hf", "blocks_threshold": 0.85, "tokens_threshold": 1.5}
 
-# Get current threshold (omit threshold field)
+# Set only blocks threshold
+curl -X POST http://localhost:8000/busy_threshold \
+  -H "Content-Type: application/json" \
+  -d '{"model": "meta-llama/Llama-2-7b-hf", "blocks_threshold": 0.85}'
+# Response: {"model": "meta-llama/Llama-2-7b-hf", "blocks_threshold": 0.85, "tokens_threshold": <current_value>}
+
+# Get current thresholds (omit threshold fields)
 curl -X POST http://localhost:8000/busy_threshold \
   -H "Content-Type: application/json" \
   -d '{"model": "meta-llama/Llama-2-7b-hf"}'
-# Response: {"model": "meta-llama/Llama-2-7b-hf", "threshold": 0.85}
-# Or if not configured: {"model": "...", "threshold": null}
+# Response: {"model": "meta-llama/Llama-2-7b-hf", "blocks_threshold": 0.85, "tokens_threshold": 1.5}
+# Or if not configured: {"model": "...", "blocks_threshold": null, "tokens_threshold": null}
 ```
 
 **List all configured thresholds (GET):**
 ```bash
 curl http://localhost:8000/busy_threshold
-# Response: {"thresholds": [{"model": "meta-llama/Llama-2-7b-hf", "threshold": 0.85}]}
+# Response: {"thresholds": [{"model": "meta-llama/Llama-2-7b-hf", "blocks_threshold": 0.85, "tokens_threshold": 1.5}]}
 ```
-
-This allows you to tune the busy threshold based on observed system behavior without service interruption.

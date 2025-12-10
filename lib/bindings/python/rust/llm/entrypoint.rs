@@ -77,24 +77,29 @@ impl KvRouterConfig {
 pub struct RouterConfig {
     router_mode: RouterMode,
     kv_router_config: KvRouterConfig,
-    busy_threshold: Option<f64>,
+    /// Threshold for KV cache block utilization (0.0-1.0)
+    blocks_threshold: Option<f64>,
+    /// Threshold for prefill token utilization (can exceed 1.0)
+    tokens_threshold: Option<f64>,
     enforce_disagg: bool,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, busy_threshold=None, enforce_disagg=false))]
+    #[pyo3(signature = (mode, config=None, blocks_threshold=None, tokens_threshold=None, enforce_disagg=false))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
-        busy_threshold: Option<f64>,
+        blocks_threshold: Option<f64>,
+        tokens_threshold: Option<f64>,
         enforce_disagg: bool,
     ) -> Self {
         Self {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
-            busy_threshold,
+            blocks_threshold,
+            tokens_threshold,
             enforce_disagg,
         }
     }
@@ -105,7 +110,8 @@ impl From<RouterConfig> for RsRouterConfig {
         RsRouterConfig {
             router_mode: rc.router_mode.into(),
             kv_router_config: rc.kv_router_config.inner,
-            busy_threshold: rc.busy_threshold,
+            blocks_threshold: rc.blocks_threshold,
+            tokens_threshold: rc.tokens_threshold,
             enforce_disagg: rc.enforce_disagg,
         }
     }
