@@ -25,6 +25,7 @@ import (
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
+	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
 
@@ -244,7 +245,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	err = r.reconcileScalingAdapters(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile scaling adapters")
-		return "", "", "", fmt.Errorf("failed to reconcile scaling adapters: %w", err)
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 	}
 
 	// Reconcile the SA, Role and RoleBinding if k8s discovery is enabled

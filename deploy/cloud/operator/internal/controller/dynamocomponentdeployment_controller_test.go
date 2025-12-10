@@ -1896,7 +1896,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				},
 			}
 
-			err = reconciler.setStatusConditionAndServiceReplicaStatus(ctx, req, dcd, tt.componentReconcileResult)
+			err = reconciler.setStatusConditionAndServiceReplicaStatus(ctx, dcd, tt.componentReconcileResult)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// Fetch the updated DCD to verify status was set

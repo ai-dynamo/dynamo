@@ -1,0 +1,95 @@
+{{- if .Values.config.authorizer.enabled }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: authorizer-webhook
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{- include "operator.authorizer.webhook.labels" . | nindent 4 }}
+webhooks:
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ required ".Values.service.name is required" .Values.service.name }}
+        namespace: {{ .Release.Namespace }}
+        path: /webhooks/authorizer-webhook
+        port: {{ required ".Values.config.server.webhooks.port" .Values.config.server.webhooks.port }}
+    failurePolicy: Fail
+    matchPolicy: Exact
+    name: authorizer.webhooks.grove.io
+    namespaceSelector: { }
+    sideEffects: None
+    objectSelector:
+      matchLabels:
+        app.kubernetes.io/managed-by: grove-operator
+    rules:
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - UPDATE
+          - DELETE
+        resources:
+          - secrets
+          - serviceaccounts
+          - services
+        scope: '*'
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - UPDATE
+        resources:
+          - pods
+        scope: '*'
+      - apiGroups:
+          - "rbac.authorization.k8s.io"
+        apiVersions:
+          - v1
+        operations:
+          - UPDATE
+          - DELETE
+        resources:
+          - roles
+          - rolebindings
+        scope: '*'
+      - apiGroups:
+          - "autoscaling"
+        apiVersions:
+          - v1
+          - v2
+        operations:
+          - UPDATE
+          - DELETE
+        resources:
+          - horizontalpodautoscalers
+        scope: '*'
+      - apiGroups:
+          - "grove.io"
+        apiVersions:
+          - "v1alpha1"
+        operations:
+          - CREATE
+          - UPDATE
+          - DELETE
+        resources:
+          - podcliques
+          - podcliquescalinggroups
+        scope: '*'
+      - apiGroups:
+          - "scheduler.grove.io"
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+          - DELETE
+        resources:
+          - podgangs
+        scope: '*'
+    timeoutSeconds: 10
+{{- end }}

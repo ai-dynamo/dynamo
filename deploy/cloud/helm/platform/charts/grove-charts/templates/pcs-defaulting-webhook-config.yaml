@@ -1,0 +1,34 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: podcliqueset-defaulting-webhook
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{- include "operator.pcs.defaulting.webhook.labels" . | nindent 4 }}
+webhooks:
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ required ".Values.service.name is required" .Values.service.name }}
+        namespace: {{ .Release.Namespace }}
+        path: /webhooks/default-podcliqueset
+        port: {{ required ".Values.config.server.webhooks.port" .Values.config.server.webhooks.port }}
+    failurePolicy: Fail
+    matchPolicy: Exact
+    name: pcs.defaulting.webhooks.grove.io
+    namespaceSelector: { }
+    rules:
+      - apiGroups:
+          - "grove.io"
+        apiVersions:
+          - "v1alpha1"
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - podcliquesets
+        scope: '*'
+    sideEffects: None
+    timeoutSeconds: 10

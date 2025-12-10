@@ -1,0 +1,14 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ required ".Values.clusterRoleBinding.name is required" .Values.clusterRoleBinding.name }}
+  labels:
+{{- include "operator.clusterrolebinding.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ required ".Values.clusterRole.name is required" .Values.clusterRole.name }}
+subjects:
+- kind: ServiceAccount
+  name: {{ required ".Values.serviceAccount.name is required" .Values.serviceAccount.name }}
+  namespace: {{ .Release.Namespace }}

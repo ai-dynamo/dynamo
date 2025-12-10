@@ -1,0 +1,9 @@
+{{- if .Values.priorityClass.enabled }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ required ".Values.priorityClass.name is required" .Values.priorityClass.name }}
+value: {{ .Values.priorityClass.value }}
+globalDefault: false
+description: "This class is used to ensure that the grove-operator has a high priority and is not preempted in favor of other pods."
+{{- end }}

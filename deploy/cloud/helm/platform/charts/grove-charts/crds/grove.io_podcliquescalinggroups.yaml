@@ -1,0 +1,271 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.3
+  name: podcliquescalinggroups.grove.io
+spec:
+  group: grove.io
+  names:
+    kind: PodCliqueScalingGroup
+    listKind: PodCliqueScalingGroupList
+    plural: podcliquescalinggroups
+    shortNames:
+    - pcsg
+    singular: podcliquescalinggroup
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          PodCliqueScalingGroup is the schema to define scaling groups that is used to scale a group of PodClique's.
+          An instance of this custom resource will be created for every pod clique scaling group defined as part of PodCliqueSet.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: Spec is the specification of the PodCliqueScalingGroup.
+            properties:
+              cliqueNames:
+                description: |-
+                  CliqueNames is the list of PodClique names that are configured in the
+                  matching PodCliqueScalingGroup in PodCliqueSet.Spec.Template.PodCliqueScalingGroupConfigs.
+                items:
+                  type: string
+                type: array
+              minAvailable:
+                default: 1
+                description: |-
+                  MinAvailable specifies the minimum number of ready replicas required for a PodCliqueScalingGroup to be considered operational.
+                  A PodCliqueScalingGroup replica is considered "ready" when its associated PodCliques have sufficient ready or starting pods.
+                  If MinAvailable is breached, it will be used to signal that the PodCliqueScalingGroup is no longer operating with the desired availability.
+                  MinAvailable cannot be greater than Replicas. If ScaleConfig is defined then its MinAvailable should not be less than ScaleConfig.MinReplicas.
+
+                  It serves two main purposes:
+                  1. Gang Scheduling: MinAvailable defines the minimum number of replicas that are guaranteed to be gang scheduled.
+                  2. Gang Termination: MinAvailable is used as a lower bound below which a PodGang becomes a candidate for Gang termination.
+                  If not specified, it defaults to 1.
+                format: int32
+                type: integer
+              replicas:
+                default: 1
+                description: |-
+                  Replicas is the desired number of replicas for the PodCliqueScalingGroup.
+                  If not specified, it defaults to 1.
+                format: int32
+                type: integer
+            required:
+            - cliqueNames
+            - replicas
+            type: object
+          status:
+            description: Status is the status of the PodCliqueScalingGroup.
+            properties:
+              availableReplicas:
+                default: 0
+                description: |-
+                  AvailableReplicas is the number of PodCliqueScalingGroup replicas that are available.
+                  A PodCliqueScalingGroup replica is considered available when all constituent PodClique's have
+                  PodClique.Status.ReadyReplicas greater than or equal to PodClique.Spec.MinAvailable
+                format: int32
+                type: integer
+              conditions:
+                description: Conditions represents the latest available observations
+                  of the PodCliqueScalingGroup by its controller.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              currentPodCliqueSetGenerationHash:
+                description: |-
+                  CurrentPodCliqueSetGenerationHash establishes a correlation to PodCliqueSet generation hash indicating
+                  that the spec of the PodCliqueSet at this generation is fully realized in the PodCliqueScalingGroup.
+                type: string
+              lastErrors:
+                description: LastErrors captures the last errors observed by the controller
+                  when reconciling the PodClique.
+                items:
+                  description: LastError captures the last error observed by the controller
+                    when reconciling an object.
+                  properties:
+                    code:
+                      description: Code is the error code that uniquely identifies
+                        the error.
+                      type: string
+                    description:
+                      description: Description is a human-readable description of
+                        the error.
+                      type: string
+                    observedAt:
+                      description: ObservedAt is the time at which the error was observed.
+                      format: date-time
+                      type: string
+                  required:
+                  - code
+                  - description
+                  - observedAt
+                  type: object
+                type: array
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  by the controller.
+                format: int64
+                type: integer
+              replicas:
+                description: Replicas is the observed number of replicas for the PodCliqueScalingGroup.
+                format: int32
+                type: integer
+              rollingUpdateProgress:
+                description: RollingUpdateProgress provides details about the ongoing
+                  rolling update of the PodCliqueScalingGroup.
+                properties:
+                  podCliqueSetGenerationHash:
+                    description: |-
+                      PodCliqueSetGenerationHash is the PodCliqueSet generation hash corresponding to the PodCliqueSet spec that is being rolled out.
+                      While the update is in progress PodCliqueScalingGroupStatus.CurrentPodCliqueSetGenerationHash will not match this hash. Once the update is complete the
+                      value of this field will be copied to PodCliqueScalingGroupStatus.CurrentPodCliqueSetGenerationHash.
+                    type: string
+                  readyReplicaIndicesSelectedToUpdate:
+                    description: |-
+                      ReadyReplicaIndicesSelectedToUpdate provides the rolling update progress of ready replicas of PodCliqueScalingGroup that have been selected for update.
+                      PodCliqueScalingGroup replicas that are either pending or unhealthy will be force updated and the update will not wait for these replicas to become ready.
+                      For all ready replicas, one replica is chosen at a time to update, once it is updated and becomes ready, the next ready replica is chosen for update.
+                    properties:
+                      completed:
+                        description: Completed is the list of indices of PodCliqueScalingGroup
+                          replicas that have been updated to the latest PodCliqueSet
+                          spec.
+                        items:
+                          format: int32
+                          type: integer
+                        type: array
+                      current:
+                        description: Current is the index of the PodCliqueScalingGroup
+                          replica that is currently being updated.
+                        format: int32
+                        type: integer
+                    required:
+                    - current
+                    type: object
+                  updateEndedAt:
+                    description: UpdateEndedAt is the time at which the rolling update
+                      ended.
+                    format: date-time
+                    type: string
+                  updateStartedAt:
+                    description: UpdateStartedAt is the time at which the rolling
+                      update started.
+                    format: date-time
+                    type: string
+                  updatedPodCliques:
+                    description: UpdatedPodCliques is the list of PodClique names
+                      that have been updated to the latest PodCliqueSet spec.
+                    items:
+                      type: string
+                    type: array
+                required:
+                - podCliqueSetGenerationHash
+                - updateStartedAt
+                type: object
+              scheduledReplicas:
+                default: 0
+                description: |-
+                  ScheduledReplicas is the number of replicas that are scheduled for the PodCliqueScalingGroup.
+                  A replica of PodCliqueScalingGroup is considered "scheduled" when at least MinAvailable number
+                  of pods in each constituent PodClique has been scheduled.
+                format: int32
+                type: integer
+              selector:
+                description: Selector is the selector used to identify the pods that
+                  belong to this scaling group.
+                type: string
+              updatedReplicas:
+                default: 0
+                description: UpdatedReplicas is the number of PodCliqueScalingGroup
+                  replicas that correspond with the latest PodCliqueSetGenerationHash.
+                format: int32
+                type: integer
+            required:
+            - availableReplicas
+            - scheduledReplicas
+            - updatedReplicas
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      scale:
+        labelSelectorPath: .status.selector
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+      status: {}
