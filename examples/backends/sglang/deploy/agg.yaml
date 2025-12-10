@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.7.0.post1
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.7.1
     decode:
       envFromSecret: hf-token-secret
       dynamoNamespace: sglang-agg
@@ -24,7 +24,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.7.0.post1
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.7.1
           workingDir: /workspace/examples/backends/sglang
           command:
           - python3

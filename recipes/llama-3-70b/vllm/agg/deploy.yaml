@@ -18,7 +18,7 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.1
           workingDir: /workspace/examples/backends/vllm
       envs:
         - name: HF_HOME
@@ -47,7 +47,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.1
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:

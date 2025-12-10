@@ -19,7 +19,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.7.0.post1
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.7.1
     decode:
       dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
@@ -34,7 +34,7 @@ spec:
         size: 80Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.7.0.post1
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.7.1
           workingDir: /workspace
           command:
             - python3
@@ -74,7 +74,7 @@ spec:
         size: 80Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.7.0.post1
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.7.1
           workingDir: /workspace
           command:
             - python3

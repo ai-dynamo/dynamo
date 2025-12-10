@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0.post1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.1
     TRTLLMWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: trtllm-agg
@@ -24,7 +24,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0.post1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.1
           workingDir: /workspace/
           command:
           - python3
