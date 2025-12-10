@@ -90,8 +90,12 @@ kubectl get storageclass
 **Step 1: Download Model**
 
 ```bash
+cd recipes
 # Update storageClassName in model-cache.yaml first!
 kubectl apply -f <model>/model-cache/ -n ${NAMESPACE}
+
+# Create model cache PVC
+kubectl apply -f <model>/model-cache/model-download.yaml -n ${NAMESPACE}
 
 # Wait for download to complete (may take 10-60 minutes depending on model size)
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=6000s
@@ -101,6 +105,8 @@ kubectl logs -f job/model-download -n ${NAMESPACE}
 ```
 
 **Step 2: Deploy Service**
+
+Update the image in `<model>/<framework>/<mode>/deploy.yaml`.
 
 ```bash
 kubectl apply -f <model>/<framework>/<mode>/deploy.yaml -n ${NAMESPACE}
@@ -147,16 +153,6 @@ kubectl logs -f job/<benchmark-job-name> -n ${NAMESPACE}
 kubectl logs job/<benchmark-job-name> -n ${NAMESPACE} | tail -50
 ```
 
-** Inference Gateway (GAIE) Integration (Optional)**
-
-For Llama-3-70B with vLLM (Aggregated), an example of integration with the Inference Gateway is provided.
-
-Follow to Follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE. Then apply manifests.
-
-```bash
-export DEPLOY_PATH=llama-3-70b/vllm/agg/
-#DEPLOY_PATH=<model>/<framework>/<mode>/
-kubectl apply -R -f "$DEPLOY_PATH/gaie/k8s-manifests" -n "$NAMESPACE"
 
 ## Example Deployments
 
@@ -172,12 +168,30 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 
 # Deploy
+cd recipes
 kubectl apply -f llama-3-70b/model-cache/ -n ${NAMESPACE}
+kubectl apply -f llama-3-70b/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=6000s
 kubectl apply -f llama-3-70b/vllm/agg/deploy.yaml -n ${NAMESPACE}
 
 # Test
 kubectl port-forward svc/llama3-70b-agg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+### Inference Gateway (GAIE) Integration (Optional)**
+
+For Llama-3-70B with vLLM (Aggregated), an example of integration with the Inference Gateway is provided.
+
+First, deploy the Dynamo Graph per instructions above.
+
+Then follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE.
+
+Update the containers.epp.image in the deployment file, i.e. llama-3-70b/vllm/agg/gaie/k8s-manifests/epp/deployment.yaml. It should match the release tag and be in the format `nvcr.io/nvidia/ai-dynamo/frontend:<my-tag>` i.e. `nvcr.io/nvstaging/ai-dynamo/dynamo-frontend:0.7.0rc2-amd64`
+
+```bash
+export DEPLOY_PATH=llama-3-70b/vllm/agg/
+# DEPLOY_PATH=<model>/<framework>/<mode>/
+kubectl apply -R -f "$DEPLOY_PATH/gaie/k8s-manifests" -n "$NAMESPACE"
 ```
 
 ### DeepSeek-R1 on GB200 (Multi-node)

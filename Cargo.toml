@@ -20,8 +20,8 @@ members = [
     "lib/nova-backend",
     "lib/nova-discovery",
     "lib/kvbm",
-    "lib/kvbm-kernels",
     "lib/kvbm-config",
+    "lib/discovery",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
@@ -60,7 +60,6 @@ dynamo-nova = { path = "lib/nova", version = "0.7.0" }
 dynamo-nova-backend = { path = "lib/nova-backend", version = "0.7.0" }
 dynamo-nova-discovery = { path = "lib/nova-discovery", version = "0.7.0" }
 dynamo-kvbm = { path = "lib/kvbm", version = "0.7.0" }
-dynamo-kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.7.0" }
 dynamo-memory = { path = "lib/memory", version = "0.7.0" }
 dynamo-runtime = { path = "lib/runtime", version = "0.7.0" }
 dynamo-llm = { path = "lib/llm", version = "0.7.0" }

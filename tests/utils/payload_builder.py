@@ -6,7 +6,9 @@ from typing import Any, Dict, List, Optional, Union
 from tests.utils.client import send_request
 from tests.utils.payloads import (
     ChatPayload,
+    ChatPayloadWithLogprobs,
     CompletionPayload,
+    CompletionPayloadWithLogprobs,
     EmbeddingPayload,
     MetricsPayload,
 )
@@ -66,6 +68,48 @@ def completion_payload_default(
     )
 
 
+def multimodal_payload_default(
+    image_url: str = "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png",
+    text: str = "Describe the image",
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    max_tokens: int = 160,
+    temperature: Optional[float] = None,
+    stream: bool = False,
+) -> ChatPayload:
+    """Create a multimodal chat payload with image and text content.
+
+    Args:
+        image_url: URL of the image to include in the request
+        text: Text prompt to accompany the image
+        repeat_count: Number of times to repeat the request
+        expected_response: List of strings expected in the response
+        expected_log: List of regex patterns expected in logs
+        max_tokens: Maximum tokens to generate
+        temperature: Sampling temperature (optional)
+        stream: Whether to stream the response
+
+    Returns:
+        ChatPayload configured for multimodal requests
+    """
+    return chat_payload(
+        content=[
+            {"type": "text", "text": text},
+            {
+                "type": "image_url",
+                "image_url": {"url": image_url},
+            },
+        ],
+        repeat_count=repeat_count,
+        expected_response=expected_response or ["image"],
+        expected_log=expected_log or [],
+        max_tokens=max_tokens,
+        temperature=temperature,
+        stream=stream,
+    )
+
+
 def metric_payload_default(
     min_num_requests: int,
     repeat_count: int = 1,
@@ -92,6 +136,9 @@ def chat_payload(
     max_tokens: int = 300,
     temperature: Optional[float] = None,
     stream: bool = False,
+    logprobs: bool = False,
+    top_logprobs: Optional[int] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> ChatPayload:
     body: Dict[str, Any] = {
         "messages": [
@@ -102,16 +149,35 @@ def chat_payload(
         ],
         "max_tokens": max_tokens,
         "stream": stream,
+        "logprobs": logprobs,
     }
     if temperature is not None:
         body["temperature"] = temperature
+    if logprobs is not None:
+        body["logprobs"] = logprobs
+    if top_logprobs is not None:
+        body["top_logprobs"] = top_logprobs
 
-    return ChatPayload(
-        body=body,
-        repeat_count=repeat_count,
-        expected_log=expected_log or [],
-        expected_response=expected_response or [],
-    )
+    if top_logprobs is not None:
+        body["top_logprobs"] = top_logprobs
+
+    if extra_body:
+        body.update(extra_body)
+
+    if logprobs:
+        return ChatPayloadWithLogprobs(
+            body=body,
+            repeat_count=repeat_count,
+            expected_log=expected_log or [],
+            expected_response=expected_response or [],
+        )
+    else:
+        return ChatPayload(
+            body=body,
+            repeat_count=repeat_count,
+            expected_log=expected_log or [],
+            expected_response=expected_response or [],
+        )
 
 
 def completion_payload(
@@ -122,18 +188,29 @@ def completion_payload(
     max_tokens: int = 150,
     temperature: float = 0.1,
     stream: bool = False,
+    logprobs: Optional[int] = None,
 ) -> CompletionPayload:
-    return CompletionPayload(
-        body={
-            "prompt": prompt,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": stream,
-        },
-        repeat_count=repeat_count,
-        expected_log=expected_log or [],
-        expected_response=expected_response or [],
-    )
+    body: Dict[str, Any] = {
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": stream,
+    }
+    if logprobs is not None:
+        body["logprobs"] = logprobs
+        return CompletionPayloadWithLogprobs(
+            body=body,
+            repeat_count=repeat_count,
+            expected_log=expected_log or [],
+            expected_response=expected_response or [],
+        )
+    else:
+        return CompletionPayload(
+            body=body,
+            repeat_count=repeat_count,
+            expected_log=expected_log or [],
+            expected_response=expected_response or [],
+        )
 
 
 def embedding_payload_default(
@@ -234,3 +311,83 @@ def make_completions_health_check(port: int, model: str):
             return False
 
     return _check_completions_endpoint
+
+
+def chat_payload_with_logprobs(
+    content: Union[str, List[Dict[str, Any]]] = TEXT_PROMPT,
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    max_tokens: int = 50,
+    temperature: float = 0.0,
+    top_logprobs: int = 3,
+) -> ChatPayloadWithLogprobs:
+    """
+    Create a chat payload that requests and validates logprobs in the response.
+
+    Args:
+        content: Message content (text or structured content list)
+        repeat_count: Number of times to repeat the request
+        expected_response: List of strings expected in the response text
+        max_tokens: Maximum tokens to generate
+        temperature: Sampling temperature
+        top_logprobs: Number of top logprobs to return per token
+
+    Returns:
+        ChatPayloadWithLogprobs that validates logprobs in response
+    """
+    body: Dict[str, Any] = {
+        "messages": [
+            {
+                "role": "user",
+                "content": content,
+            }
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "logprobs": True,
+        "top_logprobs": top_logprobs,
+    }
+
+    return ChatPayloadWithLogprobs(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=[],
+        expected_response=expected_response or ["AI", "knock", "joke"],
+    )
+
+
+def completion_payload_with_logprobs(
+    prompt: str = TEXT_PROMPT,
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    max_tokens: int = 50,
+    temperature: float = 0.0,
+    logprobs: int = 5,
+) -> CompletionPayloadWithLogprobs:
+    """
+    Create a completion payload that requests and validates logprobs in the response.
+
+    Args:
+        prompt: Text prompt
+        repeat_count: Number of times to repeat the request
+        expected_response: List of strings expected in the response text
+        max_tokens: Maximum tokens to generate
+        temperature: Sampling temperature
+        logprobs: Number of logprobs to return per token
+
+    Returns:
+        CompletionPayloadWithLogprobs that validates logprobs in response
+    """
+    body: Dict[str, Any] = {
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "logprobs": logprobs,
+    }
+
+    return CompletionPayloadWithLogprobs(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=[],
+        expected_response=expected_response or ["AI", "knock", "joke"],
+    )

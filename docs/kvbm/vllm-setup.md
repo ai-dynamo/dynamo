@@ -134,6 +134,8 @@ KVBM currently provides following types of metrics out of the box:
 - `kvbm_offload_blocks_d2d`: The number of offload blocks from device to disk (bypassing host memory)
 - `kvbm_onboard_blocks_d2d`: The number of onboard blocks from disk to device
 - `kvbm_onboard_blocks_h2d`: The number of onboard blocks from host to device
+- `kvbm_host_cache_hit_rate`: Host cache hit rate (0.0-1.0) from sliding window
+- `kvbm_disk_cache_hit_rate`: Disk cache hit rate (0.0-1.0) from sliding window
 
 ## Troubleshooting
 
@@ -180,3 +182,13 @@ More details about how to use LMBenchmark could be found [here](https://github.c
 `NOTE`: if metrics are enabled as mentioned in the above section, you can observe KV offloading, and KV onboarding in the grafana dashboard.
 
 To compare, you can run `vllm serve Qwen/Qwen3-0.6B` to turn KVBM off as the baseline.
+
+## Developing Locally
+
+Inside the Dynamo container, after changing KVBM related code (Rust and/or Python), to test or use it:
+```bash
+cd /workspace/lib/bindings/kvbm
+uv pip install maturin[patchelf]
+maturin build --release --out /workspace/dist
+uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/kvbm*.whl
+```

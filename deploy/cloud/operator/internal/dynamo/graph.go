@@ -34,7 +34,6 @@ import (
 	"k8s.io/utils/ptr"
 
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -63,15 +62,15 @@ type Autoscaling struct {
 }
 
 type Config struct {
-	Dynamo       *DynamoConfig        `yaml:"dynamo,omitempty"`
-	Resources    *Resources           `yaml:"resources,omitempty"`
-	Traffic      *Traffic             `yaml:"traffic,omitempty"`
-	Autoscaling  *Autoscaling         `yaml:"autoscaling,omitempty"`
-	HttpExposed  bool                 `yaml:"http_exposed,omitempty"`
-	ApiEndpoints []string             `yaml:"api_endpoints,omitempty"`
-	Workers      *int32               `yaml:"workers,omitempty"`
-	TotalGpus    *int32               `yaml:"total_gpus,omitempty"`
-	ExtraPodSpec *common.ExtraPodSpec `yaml:"extraPodSpec,omitempty"`
+	Dynamo       *DynamoConfig          `yaml:"dynamo,omitempty"`
+	Resources    *Resources             `yaml:"resources,omitempty"`
+	Traffic      *Traffic               `yaml:"traffic,omitempty"`
+	Autoscaling  *Autoscaling           `yaml:"autoscaling,omitempty"`
+	HttpExposed  bool                   `yaml:"http_exposed,omitempty"`
+	ApiEndpoints []string               `yaml:"api_endpoints,omitempty"`
+	Workers      *int32                 `yaml:"workers,omitempty"`
+	TotalGpus    *int32                 `yaml:"total_gpus,omitempty"`
+	ExtraPodSpec *v1alpha1.ExtraPodSpec `yaml:"extraPodSpec,omitempty"`
 }
 
 type ServiceConfig struct {
@@ -150,7 +149,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		if component.ComponentType == commonconsts.ComponentTypePlanner {
 			// ensure that the extraPodSpec is not nil
 			if deployment.Spec.ExtraPodSpec == nil {
-				deployment.Spec.ExtraPodSpec = &common.ExtraPodSpec{}
+				deployment.Spec.ExtraPodSpec = &v1alpha1.ExtraPodSpec{}
 			}
 			// ensure that the embedded PodSpec struct is not nil
 			if deployment.Spec.ExtraPodSpec.PodSpec == nil {
@@ -231,10 +230,10 @@ func overrideWithDynDeploymentConfig(ctx context.Context, dynamoDeploymentCompon
 			dynamoDeploymentComponent.Spec.Replicas = componentDynConfig.ServiceArgs.Workers
 		}
 		if componentDynConfig.ServiceArgs != nil && componentDynConfig.ServiceArgs.Resources != nil {
-			requests := &common.ResourceItem{}
-			limits := &common.ResourceItem{}
+			requests := &v1alpha1.ResourceItem{}
+			limits := &v1alpha1.ResourceItem{}
 			if dynamoDeploymentComponent.Spec.Resources == nil {
-				dynamoDeploymentComponent.Spec.Resources = &common.Resources{
+				dynamoDeploymentComponent.Spec.Resources = &v1alpha1.Resources{
 					Requests: requests,
 					Limits:   limits,
 				}
@@ -626,6 +625,7 @@ type MultinodeDeployer interface {
 	GetLeaderHostname(serviceName string) string
 	GetHostNames(serviceName string, numberOfNodes int32) []string
 	GetNodeRank() (string, bool) // returns (rank, needsShellInterpretation)
+	NeedsDNSWait() bool          // returns true if DNS wait is needed to launch multinode components
 }
 
 // BackendFactory creates backend instances based on the framework type
@@ -896,7 +896,9 @@ func GenerateBasePodSpec(
 	}
 
 	if controllerConfig.IsK8sDiscoveryEnabled(component.Annotations) {
-		podSpec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(parentGraphDeploymentName)
+		if podSpec.ServiceAccountName == "" {
+			podSpec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(parentGraphDeploymentName)
+		}
 	}
 
 	podSpec.Containers = append(podSpec.Containers, container)
@@ -1032,7 +1034,7 @@ func GenerateGrovePodCliqueSet(
 					PodSpec:      *podSpec,
 				},
 			}
-			labels, err := generateLabels(component, dynamoDeployment, r.Name)
+			labels, err := generateLabels(component, dynamoDeployment, serviceName)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
 			}
@@ -1073,6 +1075,7 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dyn
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDynamoComponentName(dynamoDeployment, componentName)
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+	labels[commonconsts.KubeLabelDynamoComponent] = componentName
 	if component.DynamoNamespace != nil {
 		labels[commonconsts.KubeLabelDynamoNamespace] = *component.DynamoNamespace
 	}

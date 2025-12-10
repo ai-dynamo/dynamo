@@ -10,10 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{self as rs, RuntimeConfig, logging};
 
-#[cfg(feature = "block-manager")]
 mod block_manager;
-#[cfg(feature = "block-manager")]
-mod kernels;
 
 mod v2;
 
@@ -42,13 +39,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     #[cfg(feature = "block-manager")]
     block_manager::add_to_module(m)?;
-
-    #[cfg(feature = "block-manager")]
-    {
-        let kernels = PyModule::new(m.py(), "kernels")?;
-        kernels::add_to_module(&kernels)?;
-        m.add_submodule(&kernels)?;
-    }
 
     let v2 = PyModule::new(m.py(), "v2")?;
     v2::add_to_module(&v2)?;

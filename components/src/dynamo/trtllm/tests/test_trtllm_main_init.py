@@ -10,7 +10,12 @@ from unittest.mock import Mock
 import pytest
 
 # Mark all tests in this module to run only in TensorRT-LLM container
-pytestmark = pytest.mark.trtllm
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.trtllm,
+    pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
+]
 
 
 def test_tensorrt_llm_metrics_collector_import():

@@ -8,7 +8,6 @@ On the server side, run one of the following commands:
     vLLM OpenAI API server
     vllm serve <your_model> \
         --swap-space 16 \
-        --disable-log-requests
 
     (TGI backend)
     ./launch_tgi_server.sh <your_model> <max_batch_total_tokens>

@@ -21,6 +21,13 @@ from tests.utils.payloads import check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
 
+pytestmark = [
+    pytest.mark.sglang,
+    pytest.mark.e2e,
+    pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
+    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
+]
+
 
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with SGLang backend"""
@@ -85,6 +92,11 @@ class DynamoWorkerProcess(ManagedProcess):
         # Set debug logging environment
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
+        # Disable canary health check - these tests expect full control over requests
+        # sent to the workers where canary health check intermittently sends dummy
+        # requests to workers interfering with the test process which may cause
+        # intermittent failures
+        env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
 
@@ -146,14 +158,10 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.e2e
-@pytest.mark.sglang
+@pytest.mark.timeout(160)  # 3x average
 @pytest.mark.gpu_1
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.xfail(strict=False)
-def test_request_cancellation_sglang_aggregated(
-    request, runtime_services, predownload_models
-):
+def test_request_cancellation_sglang_aggregated(request, runtime_services):
     """
     End-to-end test for request cancellation functionality in aggregated mode.
 
@@ -235,17 +243,13 @@ def test_request_cancellation_sglang_aggregated(
                 logger.info(f"{description} detected successfully")
 
 
-@pytest.mark.e2e
-@pytest.mark.sglang
+@pytest.mark.timeout(185)  # 3x average
 @pytest.mark.gpu_2
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_request_cancellation_sglang_decode_cancel(
-    request, runtime_services, predownload_models
-):
+def test_request_cancellation_sglang_decode_cancel(request, runtime_services):
     """
-    End-to-end test for request cancellation during remote decode phase.
+    End-to-end test for request cancellation during decode phase.
 
-    This test verifies that when a request is cancelled by the client during the remote decode phase,
+    This test verifies that when a request is cancelled by the client during the decode phase,
     the system properly handles the cancellation and cleans up resources
     on both the prefill and decode workers in a disaggregated setup.
 
@@ -267,9 +271,9 @@ def test_request_cancellation_sglang_decode_cancel(
                 # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
                 time.sleep(2)
 
-                # Step 4: Test request cancellation during remote decode phase
+                # Step 4: Test request cancellation during decode phase
                 logger.info(
-                    "Testing chat completion stream request cancellation during remote decode phase..."
+                    "Testing chat completion stream request cancellation during decode phase..."
                 )
 
                 # Send streaming request (non-blocking)

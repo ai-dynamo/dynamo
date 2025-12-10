@@ -87,7 +87,7 @@ pub async fn run(
             .await?;
             http_service
         }
-        EngineConfig::StaticFull { engine, model, .. } => {
+        EngineConfig::InProcessText { engine, model, .. } => {
             let http_service = http_service_builder.build()?;
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = http_service.model_manager();
@@ -101,7 +101,7 @@ pub async fn run(
             }
             http_service
         }
-        EngineConfig::StaticCore {
+        EngineConfig::InProcessTokens {
             engine: inner_engine,
             model,
             ..

@@ -19,7 +19,7 @@ limitations under the License.
 
 A Helm chart for NVIDIA Dynamo Platform.
 
-![Version: 0.5.0](https://img.shields.io/badge/Version-0.5.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
+![Version: 0.7.0](https://img.shields.io/badge/Version-0.7.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 
 ## 🚀 Overview
 
@@ -86,10 +86,10 @@ The chart includes built-in validation to prevent all operator conflicts:
 
 | Repository | Name | Version |
 |------------|------|---------|
-| file://components/operator | dynamo-operator | 0.5.0 |
+| file://components/operator | dynamo-operator | 0.6.1 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/nvidia/grove | grove(grove-charts) | v0.1.0-alpha.2 |
+| oci://ghcr.io/nvidia/grove | grove(grove-charts) | v0.1.0-alpha.3 |
 | oci://ghcr.io/nvidia/kai-scheduler | kai-scheduler | v0.9.4 |
 
 ## Values
@@ -100,7 +100,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port" |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for operator state storage (leave empty to use the bundled etcd chart). Format: "http://hostname:port" or "https://hostname:port" |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
-| dynamo-operator.namespaceRestriction | object | `{"enabled":false,"targetNamespace":null}` | Namespace access controls for the operator |
+| dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | Namespace access controls for the operator |
 | dynamo-operator.namespaceRestriction.enabled | bool | `false` | Whether to restrict operator to specific namespaces. By default, the operator will run with cluster-wide permissions. Only 1 instance of the operator should be deployed in the cluster. If you want to deploy multiple operator instances, you can set this to true and specify the target namespace (by default, the target namespace is the helm release namespace). |
 | dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | Target namespace for operator deployment (leave empty for current namespace) |
 | dynamo-operator.controllerManager.tolerations | list | `[]` | Node tolerations for controller manager pods |
@@ -132,7 +132,22 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.dynamo.metrics.prometheusEndpoint | string | `""` | Endpoint that services can use to retrieve metrics. If set, dynamo operator will automatically inject the PROMETHEUS_ENDPOINT environment variable into services it manages. Users can override the value of the PROMETHEUS_ENDPOINT environment variable by modifying the corresponding deployment's environment variables |
 | dynamo-operator.dynamo.mpiRun.secretName | string | `"mpi-run-ssh-secret"` | Name of the secret containing the SSH key for MPI Run |
 | dynamo-operator.dynamo.mpiRun.sshKeygen.enabled | bool | `true` | Whether to enable SSH key generation for MPI Run |
-| dynamo-operator.dynamo.dgdr.profilerImage | string | `""` | Container image to use for profiling jobs (both online and offline/AIC) |
+| dynamo-operator.webhook.enabled | bool | `true` | Whether to enable admission webhooks for resource validation. When enabled, the operator will validate DynamoComponentDeployment and DynamoGraphDeployment resources before they are created or updated in the cluster. Enabled by default for production-ready validation and better error reporting. |
+| dynamo-operator.webhook.certificateSecret.name | string | `"webhook-server-cert"` | Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate). |
+| dynamo-operator.webhook.certificateSecret.external | bool | `false` | Whether to manage the certificate secret externally. When false (default), certificates are automatically generated via Helm hooks during installation. When true, you must create the secret manually before installing the chart. |
+| dynamo-operator.webhook.certificateValidity | int | `365` | Certificate validity duration in days for auto-generated certificates. Only used when certManager.enabled=false and certificateSecret.external=false. After this duration, certificates will expire and need to be regenerated. |
+| dynamo-operator.webhook.certGenerator.image.repository | string | `"bitnami/kubectl"` | Container image repository for certificate generation jobs. This image must contain both openssl and kubectl commands. |
+| dynamo-operator.webhook.certGenerator.image.tag | string | `"latest"` | Container image tag for certificate generation jobs |
+| dynamo-operator.webhook.certGenerator.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for certificate generation jobs |
+| dynamo-operator.webhook.caBundle | string | `""` | CA bundle (base64 encoded) for webhook validation. Only used when certificateSecret.external=true. For automatic certificate generation or cert-manager integration, leave this empty as it will be injected automatically. |
+| dynamo-operator.webhook.failurePolicy | string | `"Fail"` | Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. 'Fail' (recommended for production) rejects requests if the webhook cannot be reached, ensuring strict validation. 'Ignore' allows requests through if the webhook is unavailable, providing availability over validation guarantees. |
+| dynamo-operator.webhook.timeoutSeconds | int | `10` | Timeout in seconds for webhook validation calls. If the webhook doesn't respond within this time, the request will be handled according to the failurePolicy. |
+| dynamo-operator.webhook.namespaceSelector | object | `{}` | Custom namespace selector for webhook validation. Use this to include or exclude specific namespaces from webhook validation. For CLUSTER-WIDE operators, you can exclude namespaces managed by namespace-restricted operators by using: matchExpressions: [{ key: "dynamo-operator", operator: "NotIn", values: ["namespace-restricted"] }]. For NAMESPACE-RESTRICTED operators, leave empty as it will be auto-configured to match only the operator's namespace. |
+| dynamo-operator.webhook.certManager.enabled | bool | `false` | Whether to use cert-manager for automatic certificate management. Requires cert-manager to be installed in the cluster. When enabled, cert-manager will automatically generate, renew, and rotate certificates, and the automatic certificate generation via Helm hooks will be disabled. |
+| dynamo-operator.webhook.certManager.certificate.duration | string | `"8760h"` | Certificate duration for webhook certificates managed by cert-manager (e.g., "8760h" for 1 year). cert-manager will automatically renew the certificate before it expires. |
+| dynamo-operator.webhook.certManager.certificate.renewBefore | string | `"360h"` | Time before certificate expiration to trigger renewal (e.g., "360h" for 15 days). cert-manager will attempt to renew the certificate when this threshold is reached. |
+| dynamo-operator.webhook.certManager.certificate.rootCA.duration | string | `"87600h"` | Duration for the root CA certificate (e.g., "87600h" for 10 years). The root CA typically has a much longer lifetime than the leaf certificates it signs. |
+| dynamo-operator.webhook.certManager.certificate.rootCA.renewBefore | string | `"720h"` | Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued. |
 | grove.enabled | bool | `false` | Whether to enable Grove for multi-node inference coordination, if enabled, the Grove operator will be deployed cluster-wide |
 | kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler for intelligent resource allocation, if enabled, the Kai Scheduler operator will be deployed cluster-wide |
 | etcd.enabled | bool | `true` | Whether to enable etcd deployment, disable if you want to use an external etcd instance. For complete configuration options, see: https://github.com/bitnami/charts/tree/main/bitnami/etcd , all etcd settings should be prefixed with "etcd." |

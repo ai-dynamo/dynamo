@@ -137,7 +137,7 @@ impl NetworkManager {
         nats_client: Option<async_nats::Client>,
         component_registry: crate::component::Registry,
         mode: RequestPlaneMode,
-    ) -> Arc<Self> {
+    ) -> Self {
         let config = NetworkConfig::from_env(nats_client);
 
         tracing::info!(
@@ -147,13 +147,13 @@ impl NetworkManager {
             "Initializing NetworkManager"
         );
 
-        Arc::new(Self {
+        Self {
             mode,
             config,
             server: Arc::new(OnceCell::new()),
             cancellation_token,
             component_registry,
-        })
+        }
     }
 
     /// Get or create the request plane server

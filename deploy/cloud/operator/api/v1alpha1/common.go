@@ -53,15 +53,85 @@ type VolumeMount struct {
 	UseAsCompilationCache bool `json:"useAsCompilationCache,omitempty"`
 }
 
+// Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
+// with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+// for migration guidance. This field will be removed in a future API version.
 type Autoscaling struct {
-	Enabled     bool                                           `json:"enabled,omitempty"`
-	MinReplicas int                                            `json:"minReplicas,omitempty"`
-	MaxReplicas int                                            `json:"maxReplicas,omitempty"`
-	Behavior    *autoscalingv2.HorizontalPodAutoscalerBehavior `json:"behavior,omitempty"`
-	Metrics     []autoscalingv2.MetricSpec                     `json:"metrics,omitempty"`
+	// Deprecated: This field is ignored.
+	Enabled bool `json:"enabled,omitempty"`
+	// Deprecated: This field is ignored.
+	MinReplicas int `json:"minReplicas,omitempty"`
+	// Deprecated: This field is ignored.
+	MaxReplicas int `json:"maxReplicas,omitempty"`
+	// Deprecated: This field is ignored.
+	Behavior *autoscalingv2.HorizontalPodAutoscalerBehavior `json:"behavior,omitempty"`
+	// Deprecated: This field is ignored.
+	Metrics []autoscalingv2.MetricSpec `json:"metrics,omitempty"`
 }
 
 type SharedMemorySpec struct {
 	Disabled bool              `json:"disabled,omitempty"`
 	Size     resource.Quantity `json:"size,omitempty"`
+}
+
+type ResourceItem struct {
+	// CPU specifies the CPU resource request/limit (e.g., "1000m", "2")
+	CPU string `json:"cpu,omitempty"`
+	// Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi")
+	Memory string `json:"memory,omitempty"`
+	// GPU indicates the number of GPUs to request.
+	// Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+	GPU string `json:"gpu,omitempty"`
+	// GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe"
+	// By default if not specified, the GPU type is "nvidia.com/gpu"
+	GPUType string `json:"gpuType,omitempty"`
+	// Custom specifies additional custom resource requests/limits
+	Custom map[string]string `json:"custom,omitempty"`
+}
+
+// Resources defines requested and limits for a component, including CPU, memory,
+// GPUs/devices, and any runtime-specific resources.
+type Resources struct {
+	// Requests specifies the minimum resources required by the component
+	Requests *ResourceItem `json:"requests,omitempty"`
+	// Limits specifies the maximum resources allowed for the component
+	Limits *ResourceItem `json:"limits,omitempty"`
+	// Claims specifies resource claims for dynamic resource allocation
+	Claims []corev1.ResourceClaim `json:"claims,omitempty"`
+}
+
+type DeploymentTargetHPAConf struct {
+	CPU         *int32  `json:"cpu,omitempty"`
+	GPU         *int32  `json:"gpu,omitempty"`
+	Memory      *string `json:"memory,omitempty"`
+	QPS         *int64  `json:"qps,omitempty"`
+	MinReplicas *int32  `json:"min_replicas,omitempty"`
+	MaxReplicas *int32  `json:"max_replicas,omitempty"`
+}
+
+type LabelItemSchema struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+type ExtraPodMetadata struct {
+	Annotations map[string]string `json:"annotations,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+}
+
+type ExtraPodSpec struct {
+	*corev1.PodSpec `json:",inline"`
+	MainContainer   *corev1.Container `json:"mainContainer,omitempty"`
+}
+
+// ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
+// for replica management. When enabled (default), the DGDSA owns the replicas field and
+// external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
+type ScalingAdapter struct {
+	// Disable indicates whether the ScalingAdapter should be disabled for this service.
+	// When false (default), a DGDSA is created and owns the replicas field.
+	// When true, no DGDSA is created and replicas can be modified directly in the DGD.
+	// +optional
+	// +kubebuilder:default=false
+	Disable bool `json:"disable,omitempty"`
 }

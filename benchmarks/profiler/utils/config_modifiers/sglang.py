@@ -205,6 +205,18 @@ class SGLangConfigModifier:
 
         # Set --tp argument
         args = set_argument_value(args, "--tp", str(tp_size))
+        args = remove_valued_arguments(args, "--tp-size")
+        args = remove_valued_arguments(args, "--tensor-parallel-size")
+
+        # Remove --ep if present
+        args = remove_valued_arguments(args, "--ep")
+        args = remove_valued_arguments(args, "--ep-size")
+        args = remove_valued_arguments(args, "--expert-parallel-size")
+
+        # remove --dp if present
+        args = remove_valued_arguments(args, "--dp")
+        args = remove_valued_arguments(args, "--dp-size")
+        args = remove_valued_arguments(args, "--data-parallel-size")
 
         worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()
@@ -230,12 +242,18 @@ class SGLangConfigModifier:
 
         # 1. Set --tp=tep_size, if not present add it
         args = set_argument_value(args, "--tp", str(tep_size))
+        args = remove_valued_arguments(args, "--tp-size")
+        args = remove_valued_arguments(args, "--tensor-parallel-size")
 
-        # 2. Set --ep-size=tep_size, if not present add it
-        args = set_argument_value(args, "--ep-size", str(tep_size))
+        # 2. Set --ep=tep_size, if not present add it
+        args = set_argument_value(args, "--ep", str(tep_size))
+        args = remove_valued_arguments(args, "--ep-size")
+        args = remove_valued_arguments(args, "--expert-parallel-size")
 
         # 3. Remove --dp if present
         args = remove_valued_arguments(args, "--dp")
+        args = remove_valued_arguments(args, "--dp-size")
+        args = remove_valued_arguments(args, "--data-parallel-size")
 
         # 4. Remove --enable-dp-attention if present
         if "--enable-dp-attention" in args:
@@ -265,16 +283,21 @@ class SGLangConfigModifier:
 
         # 1. Set --tp=dep_size
         args = set_argument_value(args, "--tp", str(dep_size))
+        args = remove_valued_arguments(args, "--tp-size")
+        args = remove_valued_arguments(args, "--tensor-parallel-size")
 
         # 2. Set --dp=dep_size (data parallelism across experts)
         args = set_argument_value(args, "--dp", str(dep_size))
+        args = remove_valued_arguments(args, "--dp-size")
+        args = remove_valued_arguments(args, "--data-parallel-size")
 
         # 3. Enable --enable-dp-attention
-        if "--enable-dp-attention" not in args:
-            args = append_argument(args, "--enable-dp-attention")
+        args = append_argument(args, "--enable-dp-attention")
 
-        # 4. Set --ep-size=dep_size (expert parallelism size)
-        args = set_argument_value(args, "--ep-size", str(dep_size))
+        # 4. Set --ep=dep_size (expert parallelism size)
+        args = set_argument_value(args, "--ep", str(dep_size))
+        args = remove_valued_arguments(args, "--ep-size")
+        args = remove_valued_arguments(args, "--expert-parallel-size")
 
         worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()
