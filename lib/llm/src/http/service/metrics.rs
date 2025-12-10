@@ -973,7 +973,7 @@ impl<T> From<crate::types::Annotated<T>> for EventConverter<T> {
 /// This function handles metrics collection, http_queue_guard management, and converts
 /// annotated responses to SSE events for streaming responses.
 ///
-/// Returns None for service events (events with no data and no event type) to filter them out.
+/// Returns None for metrics annotation events (events without SSE data payload).
 pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     annotated: EventConverter<T>,
     response_collector: &mut ResponseMetricCollector,
@@ -1028,7 +1028,7 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
         }
     }
 
-    // Filter out service events (events with no data and no event type)
+    // Filter out metrics annotation events (events without SSE data payload)
     if annotated.data.is_none() && annotated.event.is_none() {
         Ok(None)
     } else {
@@ -1396,53 +1396,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cached_tokens_counter_increments() {
-        let metrics = Arc::new(Metrics::new());
-        let registry = prometheus::Registry::new();
-        metrics.register(&registry).unwrap();
-
-        let model = "test-model";
-        let expected_metric_name = "dynamo_frontend_cached_sequence_length";
-        let mut collector = metrics.clone().create_response_collector(model);
-
-        // Create histogram handle first (this registers it with the registry)
-        let _histogram = metrics.cached_sequence_length.with_label_values(&[model]);
-
-        // Observe cached tokens
-        collector.observe_cached_tokens(Some(100));
-
-        // Verify histogram recorded the observation
-        let metric_families = registry.gather();
-        let histogram_family = metric_families
-            .iter()
-            .find(|mf| mf.name() == expected_metric_name)
-            .expect("histogram should be registered");
-        assert_eq!(histogram_family.get_metric().len(), 1);
-        assert_eq!(
-            histogram_family.get_metric()[0]
-                .get_histogram()
-                .get_sample_count(),
-            1
-        );
-
-        // Observe more cached tokens with the same collector (should be idempotent)
-        collector.observe_cached_tokens(Some(50));
-
-        // Sample count should remain 1 (idempotent)
-        let metric_families = registry.gather();
-        let histogram_family = metric_families
-            .iter()
-            .find(|mf| mf.name() == expected_metric_name)
-            .expect("histogram should be registered");
-        assert_eq!(
-            histogram_family.get_metric()[0]
-                .get_histogram()
-                .get_sample_count(),
-            1
-        );
-    }
-
-    #[test]
     fn test_cached_tokens_once_per_request() {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
@@ -1541,7 +1494,7 @@ mod tests {
             &mut http_queue_guard,
         );
 
-        // Should return Ok(None) for service events
+        // Should return Ok(None) for metrics annotation events
         assert!(matches!(result, Ok(None)));
 
         // Should have observed the cached tokens from the ghost event

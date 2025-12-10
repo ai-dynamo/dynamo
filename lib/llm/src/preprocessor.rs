@@ -693,8 +693,10 @@ impl OpenAIPreprocessor {
                         // Create annotation string
                         let annotation = llm_metrics
                             .to_annotation::<()>()
-                            .map_err(|e| format!("Failed to serialize metrics: {}", e))
-                            .unwrap_or_else(|_| Annotated::<()>::from_data(()));
+                            .unwrap_or_else(|e| {
+                                tracing::warn!("Failed to serialize metrics: {}", e);
+                                Annotated::<()>::from_data(())
+                            });
 
                         // Send the usage chunk if needed
                         let data = if inner.response_generator.is_usage_enabled() {
