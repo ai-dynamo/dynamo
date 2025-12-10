@@ -303,17 +303,16 @@ class TrtllmWorker:
         await asyncio.sleep(2)
         
         try:
-            events = self.llm.get_kv_cache_events_async(timeout=5)
+            # Use longer timeout or None for infinite wait
+            events = self.llm.get_kv_cache_events_async(timeout=None)
             logger.info(f"Worker {self.worker_id}: events: {events}")
-            logger.info(f"Worker {self.worker_id}: KV events iterator obtained")
+            logger.info(f"Worker {self.worker_id}: KV events iterator obtained (infinite timeout)")
 
-
-            
             event_count = 0
             async for event in events:
                 event_count += 1
                 # Print full event for debugging
-                logger.info(f"Worker {self.worker_id}: KV event #{event_count}: {event}")
+                logger.info(f"[+++++]Worker {self.worker_id}: KV event #{event_count}: {event}")
                 
                 try:
                     # Validate event structure
@@ -376,32 +375,39 @@ class TrtllmWorker:
                             for b in blocks:
                                 all_token_ids.extend(b["token_ids"])
 
-                            # Check if there are image tokens (151937 for Qwen2-VL)
-                            # and inject mm_extra_info with fixed mm_hash for testing
-                            IMAGE_TOKEN_ID = 151937
-                            MM_HASH_TEST = 146425076850666018
+                            # Extract mm_extra_info from TRTLLM's mm_keys in blocks
+                            # TRTLLM format: 'mm_keys': [{'type': 'mm_key', 'hash': 'hex_string', 'start_offset': 0}]
                             mm_extra_info = None
-
-                            # Find image token positions in all_token_ids
-                            image_start = None
-                            image_end = None
-                            for i, tid in enumerate(all_token_ids):
-                                if tid == IMAGE_TOKEN_ID:
-                                    if image_start is None:
-                                        image_start = i
-                                    image_end = i + 1
-
-                            if image_start is not None:
-                                mm_extra_info = {
-                                    "mm_objects": [{
-                                        "mm_hash": MM_HASH_TEST,
-                                        "offsets": [[image_start, image_end]]
-                                    }]
-                                }
-                                logger.info(
-                                    f"Worker {self.worker_id}: Injecting mm_extra_info with "
-                                    f"mm_hash={MM_HASH_TEST}, offsets=[{image_start}, {image_end}]"
-                                )
+                            for block in data["blocks"]:
+                                mm_keys = block.get("mm_keys")
+                                if mm_keys:
+                                    for mm_key in mm_keys:
+                                        if mm_key.get("type") == "mm_key":
+                                            hash_hex = mm_key.get("hash", "")
+                                            # Convert hex hash to int (take first 16 chars)
+                                            mm_hash = int(hash_hex[:16], 16) if hash_hex else 0
+                                            # Find image token range for offsets
+                                            IMAGE_TOKEN_ID = 151937
+                                            image_start = None
+                                            image_end = None
+                                            for i, tid in enumerate(all_token_ids):
+                                                if tid == IMAGE_TOKEN_ID:
+                                                    if image_start is None:
+                                                        image_start = i
+                                                    image_end = i + 1
+                                            if image_start is not None:
+                                                mm_extra_info = {
+                                                    "mm_objects": [{
+                                                        "mm_hash": mm_hash,
+                                                        "offsets": [[image_start, image_end]]
+                                                    }]
+                                                }
+                                                logger.info(
+                                                    f"Worker {self.worker_id}: Extracted mm_hash={mm_hash} from TRTLLM, "
+                                                    f"offsets=[{image_start}, {image_end}]"
+                                                )
+                                            break
+                                    break  # Only need first mm_key
 
                             kv_event = {
                                 "event_id": event_id,
@@ -464,7 +470,11 @@ class TrtllmWorker:
             else:
                 logger.error(f"Worker {self.worker_id} KV events loop error: {e}")
         except Exception as e:
+            import traceback
             logger.error(f"Worker {self.worker_id} KV events loop error: {e}")
+            logger.error(traceback.format_exc())
+        
+        logger.warning(f"Worker {self.worker_id}: KV events loop EXITED! This should not happen.")
 
     async def generate(
         self,

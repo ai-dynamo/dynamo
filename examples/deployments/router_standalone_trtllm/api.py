@@ -35,34 +35,6 @@ logger = logging.getLogger(__name__)
 # Debug file paths
 DEBUG_API_FILE = "/tmp/debug_api_hashes.txt"
 DEBUG_KV_EVENT_FILE = "/tmp/debug_kv_events.txt"
-DEBUG_PROMPT_FILE = "/tmp/debug_prompts.txt"
-
-
-def dump_prompt_debug(
-    messages_dict: list[dict],
-    prompt_after_chat_template: str,
-    prompt_after_mm_loader: str | None,
-    image_urls: list[str] | None,
-    processor_tokens: list[int] | None = None,
-):
-    """Dump prompt transformations to file for debugging."""
-    import datetime
-    with open(DEBUG_PROMPT_FILE, "a") as f:
-        f.write(f"\n{'='*80}\n")
-        f.write(f"Timestamp: {datetime.datetime.now()}\n")
-        f.write(f"\n--- Raw messages_dict ---\n")
-        f.write(f"{messages_dict}\n")
-        f.write(f"\n--- Image URLs ---\n")
-        f.write(f"{image_urls}\n")
-        f.write(f"\n--- After tokenizer.apply_chat_template ---\n")
-        f.write(f"{prompt_after_chat_template}\n")
-        if prompt_after_mm_loader:
-            f.write(f"\n--- After default_multimodal_input_loader (processed_prompt) ---\n")
-            f.write(f"{prompt_after_mm_loader}\n")
-        if processor_tokens:
-            f.write(f"\n--- Processor tokens (len={len(processor_tokens)}) ---\n")
-            f.write(f"{processor_tokens}\n")
-        f.write(f"{'='*80}\n")
 
 
 def dump_api_debug(
@@ -202,12 +174,6 @@ class ServiceAPI:
                     )
                     prompt = self._format_messages_simple(messages_dict)
 
-                # Log raw messages and chat template result
-                logger.info(f"API: Raw messages_dict: {messages_dict}")
-                logger.info(f"API: After tokenizer.apply_chat_template: {repr(prompt[:500])}...")
-                if image_urls:
-                    logger.info(f"API: Image URLs: {image_urls}")
-
                 # Process multimodal or text-only
                 block_mm_infos = None
                 mm_hash = None
@@ -233,7 +199,6 @@ class ServiceAPI:
                         multi_modal_data = mm_input.get("multi_modal_data")
 
                         logger.info(f"API: Processed MM input for TRTLLM, prompt length: {len(processed_prompt)}")
-                        logger.info(f"API: After default_multimodal_input_loader processed_prompt: {repr(processed_prompt[:500])}...")
 
                         # 2. Use HF processor to get expanded tokens for routing hash
                         if self.processor is not None:
@@ -286,7 +251,6 @@ class ServiceAPI:
                         if multi_modal_data:
                             mm_hashes_dict = apply_mm_hashes(multi_modal_data)
                             if "image" in mm_hashes_dict and mm_hashes_dict["image"]:
-                                logger.info(mm_hashes_dict["image"][0])
                                 first_hex = mm_hashes_dict["image"][0][:16]
                                 mm_hash = int(first_hex, 16)
                                 logger.info(f"API: Computed mm_hash={mm_hash}")
@@ -297,20 +261,9 @@ class ServiceAPI:
                         traceback.print_exc()
                         tokens = self.tokenizer.encode(prompt)
                         mm_input = None
-                        processed_prompt = None
                 else:
                     # Text-only request
                     tokens = self.tokenizer.encode(prompt)
-                    processed_prompt = None
-
-                # Dump prompt debug info
-                dump_prompt_debug(
-                    messages_dict=messages_dict,
-                    prompt_after_chat_template=prompt,
-                    prompt_after_mm_loader=processed_prompt if image_urls else None,
-                    image_urls=image_urls if image_urls else None,
-                    processor_tokens=tokens if image_urls else None,
-                )
 
                 num_tokens = len(tokens)
 
