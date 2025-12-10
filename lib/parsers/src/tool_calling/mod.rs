@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod config;
+pub mod dsml;
 pub mod harmony;
 pub mod json;
 pub mod parsers;
@@ -14,6 +15,7 @@ pub mod xml;
 
 // Re-export main types and functions for convenience
 pub use config::{JsonParserConfig, ParserConfig, ToolCallConfig, XmlParserConfig};
+pub use dsml::try_tool_call_parse_dsml;
 pub use harmony::parse_tool_calls_harmony_complete;
 pub use json::try_tool_call_parse_json;
 pub use parsers::{

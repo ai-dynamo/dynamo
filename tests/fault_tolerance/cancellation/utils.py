@@ -29,6 +29,11 @@ class DynamoFrontendProcess(ManagedProcess):
         # Set debug logging environment
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
+        # Disable canary health check - these tests expect full control over requests
+        # sent to the workers where canary health check intermittently sends dummy
+        # requests to workers interfering with the test process which may cause
+        # intermittent failures
+        env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
         env.pop("DYN_SYSTEM_PORT", None)
 

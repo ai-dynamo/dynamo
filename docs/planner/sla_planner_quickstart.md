@@ -179,6 +179,25 @@ kubectl port-forward svc/trtllm-disagg-frontend 8000:8000 -n $NAMESPACE
 curl http://localhost:8000/v1/models
 ```
 
+### Step 5 (Optional): Access the Planner Grafana Dashboard
+
+If you want to monitor the SLA Planner's decision-making in real-time, you can deploy the Planner Grafana dashboard.
+
+```bash
+kubectl apply -n monitoring -f deploy/observability/k8s/grafana-planner-dashboard-configmap.yaml
+```
+
+Follow the instructions in [Dynamo Metrics Collection on Kubernetes](../kubernetes/observability/metrics.md) to access the Grafana UI and select the **Dynamo Planner Dashboard**.
+
+The dashboard displays:
+- **Worker Counts & GPU Usage**: Current prefill/decode worker counts and cumulative GPU hours
+- **Observed Metrics**: Real-time TTFT, ITL, request rate, and sequence lengths from Prometheus
+- **Predicted Metrics**: Planner's load predictions and recommended replica counts
+- **Correction Factors**: How the planner adjusts predictions based on observed vs expected performance
+
+> [!TIP]
+> Use the **Namespace** dropdown at the top of the dashboard to filter metrics for your specific deployment namespace.
+
 ## DGDR Configuration Details
 
 ### Required Fields
