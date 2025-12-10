@@ -59,7 +59,6 @@ class Config:
         self.dump_config_to: Optional[str] = None
         self.custom_jinja_template: Optional[str] = None
         self.dyn_endpoint_types: str = "chat,completions"
-        self.use_trtllm_tokenizer: bool = False
         self.store_kv: str = ""
         self.request_plane: str = ""
 
@@ -93,7 +92,6 @@ class Config:
             f"tool_call_parser={self.tool_call_parser}, "
             f"dump_config_to={self.dump_config_to}, "
             f"custom_jinja_template={self.custom_jinja_template}, "
-            f"use_trtllm_tokenizer={self.use_trtllm_tokenizer}, "
             f"store_kv={self.store_kv}, "
             f"request_plane={self.request_plane}"
         )
@@ -292,12 +290,6 @@ def cmd_line_args():
         help="Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Default: 'chat,completions'. Use 'completions' for models without chat templates.",
     )
     parser.add_argument(
-        "--use-trtllm-tokenizer",
-        action="store_true",
-        default=False,
-        help="Use TensorRT-LLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
-    )
-    parser.add_argument(
         "--store-kv",
         type=str,
         choices=["etcd", "file", "mem"],
@@ -387,8 +379,6 @@ def cmd_line_args():
         config.custom_jinja_template = expanded_template_path
     else:
         config.custom_jinja_template = None
-
-    config.use_trtllm_tokenizer = args.use_trtllm_tokenizer
 
     return config
 

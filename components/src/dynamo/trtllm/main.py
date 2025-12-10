@@ -183,7 +183,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         dynamic_batch_config=dynamic_batch_config,
     )
     modality = getattr(config, "modality", None) or "text"
-
     arg_map = {
         "model": model_path,
         "scheduler_config": scheduler_config,
@@ -287,8 +286,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     if hasattr(default_sampling_params, "return_perf_metrics"):
         default_sampling_params.return_perf_metrics = True
     model_input = ModelInput.Tokens
-    if config.use_trtllm_tokenizer:
-        model_input = ModelInput.Text
 
     # Set model type based on disaggregation mode for unified frontend support
     if config.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -329,11 +326,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
     else:
-        if config.use_trtllm_tokenizer:
-            default_sampling_params.detokenize = True
-        else:
-            # We already detokenize inside HandlerBase. No need to also do it in TRTLLM.
-            default_sampling_params.detokenize = False
+        # We already detokenize inside HandlerBase. No need to also do it in TRTLLM.
+        default_sampling_params.detokenize = False
 
     connector = None
     logging.info("Initializing NIXL Connect.")
@@ -435,9 +429,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             )
 
         # Get health check payload (checks env var and falls back to TensorRT-LLM default)
-        health_check_payload = TrtllmHealthCheckPayload(
-            tokenizer=tokenizer, use_text_input=config.use_trtllm_tokenizer
-        ).to_dict()
+        health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
 
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
