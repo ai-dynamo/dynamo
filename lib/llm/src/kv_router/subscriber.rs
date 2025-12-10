@@ -187,24 +187,29 @@ impl SnapshotResources {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to receive dump response: {e:?}"))?;
 
-        // Upload the snapshot to NATS object store
-        let url = url::Url::parse(&format!(
-            "nats://{}/{}/{RADIX_STATE_FILE}",
-            self.nats_client.addr(),
-            self.bucket_name
-        ))?;
+        // Upload the snapshot to NATS object store in background (non-blocking)
+        let nats_client = self.nats_client.clone();
+        let bucket_name = self.bucket_name.clone();
+        let event_count = events.len();
+        tokio::spawn(async move {
+            let Ok(url) = url::Url::parse(&format!(
+                "nats://{}/{bucket_name}/{RADIX_STATE_FILE}",
+                nats_client.addr(),
+            )) else {
+                tracing::warn!("Failed to parse snapshot URL");
+                return;
+            };
 
-        self.nats_client
-            .object_store_upload_data(&events, &url)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to upload snapshot: {e:?}"))?;
+            if let Err(e) = nats_client.object_store_upload_data(&events, &url).await {
+                tracing::warn!("Failed to upload snapshot: {e:?}");
+                return;
+            }
 
-        tracing::info!(
-            "Successfully performed snapshot of radix tree with {} events to bucket {} in {}ms",
-            events.len(),
-            self.bucket_name,
-            start_time.elapsed().as_millis()
-        );
+            tracing::info!(
+                "Successfully uploaded snapshot with {event_count} events to bucket {bucket_name} in {}ms",
+                start_time.elapsed().as_millis()
+            );
+        });
 
         Ok(())
     }

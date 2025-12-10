@@ -77,23 +77,31 @@ runs:
           fi
         fi
 
-        # Run without --rm so we can copy results even if container crashes (example SIGSEGV exit 139)
-        docker run ${GPU_FLAGS} -w /workspace \
+        # Get absolute path for test-results directory and ensure it has proper permissions
+        TEST_RESULTS_DIR="$(pwd)/test-results"
+        chmod 777 "${TEST_RESULTS_DIR}"
+        echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
+
+        docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \
+          -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
-          bash -c "mkdir -p /workspace/test-results && ${PYTEST_CMD}"
+          bash -c "${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
-        # Copy test results from container to host
-        docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/test-results . || echo "Failed to copy test results"
-
-        # Clean up container
-        docker rm -f ${{ env.CONTAINER_ID }}_pytest || echo "Failed to clean up container"
+        # Verify test results were written (only in normal mode)
+        if [[ "${{ inputs.dry_run }}" != "true" ]]; then
+          if [[ -f "${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}" ]]; then
+            echo "✅ Test results file found: ${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}"
+          else
+            echo "⚠️  Test results file not found: ${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}"
+          fi
+        fi
 
         # Always continue to results processing
         exit 0
@@ -107,13 +115,6 @@ runs:
         STR_TEST_TYPE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
         echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
 
-        # Skip XML processing if in dry-run mode
-        if [[ "${{ inputs.dry_run }}" == "true" ]]; then
-          echo "✅ Dry-run mode: Test collection completed"
-          echo "⏭️  No JUnit XML generated (dry-run mode)"
-          exit 0
-        fi
-
         # Check for JUnit XML file and determine test status
         JUNIT_FILE="test-results/pytest_test_report.xml"
 
@@ -125,23 +126,9 @@ runs:
           ERROR_TESTS=$(grep -o 'errors="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
           echo "📊 ${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
 
-          # Create uniquely named metadata file with step context information
-          # Use framework-testtype-arch to make it unique per test run
-          METADATA_FILE="test-results/test_metadata_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}.json"
-          JUNIT_NAME="pytest_test_report_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}.xml"
-
           # Rename XML file to unique name
+          JUNIT_NAME="pytest_test_report_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
           mv "$JUNIT_FILE" "test-results/$JUNIT_NAME"
-
-          echo '{' > "$METADATA_FILE"
-          echo '  "job_name": "${{ github.job }}",' >> "$METADATA_FILE"
-          echo '  "framework": "${{ inputs.framework }}",' >> "$METADATA_FILE"
-          echo '  "test_type": "${{ inputs.test_type }}",' >> "$METADATA_FILE"
-          echo '  "platform_arch": "${{ inputs.platform_arch }}",' >> "$METADATA_FILE"
-          echo '  "junit_xml_file": "'"$JUNIT_NAME"'",' >> "$METADATA_FILE"
-          echo '  "step_name": "Run ${{ inputs.test_type }} tests"' >> "$METADATA_FILE"
-          echo '}' >> "$METADATA_FILE"
-          echo "📝 Created test metadata file: $METADATA_FILE"
           echo "📝 Renamed XML file to: $JUNIT_NAME"
         else
           echo "⚠️  JUnit XML file not found - test results may not be available for upload"
@@ -155,10 +142,8 @@ runs:
 
     - name: Upload Test Results
       uses: actions/upload-artifact@v4
-      if: always() && inputs.dry_run != 'true'  # Skip upload in dry-run mode
+      if: always()  # Always upload test results, even if tests failed
       with:
-        name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}
-        path: |
-          test-results/pytest_test_report_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}.xml
-          test-results/test_metadata_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}.json
+        name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/pytest_test_report_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
         retention-days: 7

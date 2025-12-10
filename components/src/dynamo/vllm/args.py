@@ -69,6 +69,9 @@ class Config:
     # dump config to file
     dump_config_to: Optional[str] = None
 
+    # Use vLLM's tokenizer for pre/post processing
+    use_vllm_tokenizer: bool = False
+
     def has_connector(self, connector_name: str) -> bool:
         """
         Check if a specific connector is enabled.
@@ -201,6 +204,12 @@ def parse_args() -> Config:
         default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
+    parser.add_argument(
+        "--use-vllm-tokenizer",
+        action="store_true",
+        default=False,
+        help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
+    )
     add_config_dump_args(parser)
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -303,6 +312,7 @@ def parse_args() -> Config:
     config.mm_prompt_template = args.mm_prompt_template
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
+    config.use_vllm_tokenizer = args.use_vllm_tokenizer
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
@@ -370,24 +380,6 @@ def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     if not config.engine_args.enable_prefix_caching:
         logger.info("No kv_events_config required: prefix caching is disabled")
         return None
-
-    # There is a bug with KV events publishing when LORA is enabled.
-    # This is fixed in https://github.com/vllm-project/vllm/pull/27728 but not released yet.
-    # remove below check once new vLLM version is released with the fix.
-    if config.engine_args.enable_lora:
-        if config.engine_args.kv_events_config is None:
-            # No explicit kv events config provided by user, we'll disable kv cache because LoRA is enabled and its not supported yet.
-            return None
-        else:
-            # User provided their own kv events config and it'll not work when LoRA is enabled.
-            message = (
-                "KV events doesn't work when LoRA is enabled due to upstream vLLM bug. "
-                "Please see https://github.com/vllm-project/vllm/pull/27728."
-                "For now, either disable lora or dont use explicit kv envents config."
-                "Dont set both --kv-events-config and --enable-lora in vllm command line args."
-            )
-            logger.error(message)
-            raise ValueError(message)
 
     # If user provided their own config, use that
     if c := getattr(config.engine_args, "kv_events_config"):
