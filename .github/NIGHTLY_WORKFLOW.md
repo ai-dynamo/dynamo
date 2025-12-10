@@ -7,53 +7,6 @@ The nightly pipeline builds all frameworks for both architectures and runs compr
 
 ---
 
-## Pipeline Overview
-
-```mermaid
-flowchart TD
-    subgraph Trigger["⏰ Scheduled Trigger"]
-        A["Daily at 12:00 AM PST"]
-    end
-
-    subgraph Build["🔨 Build Stage"]
-        direction LR
-        subgraph AMD64["amd64"]
-            B1[vLLM]
-            B2[SGLang]
-            B3[TRT-LLM]
-        end
-        subgraph ARM64["arm64"]
-            B4[vLLM]
-            B5[SGLang]
-            B6[TRT-LLM]
-        end
-    end
-
-    subgraph Test["🧪 Test Stage"]
-        T1[Unit Tests]
-        T2[Integration Tests]
-        T3[E2E Single GPU]
-        T4[E2E Multi GPU]
-    end
-
-    subgraph Publish["📦 Publish"]
-        P1[Push to ECR]
-        P2[Push to ACR]
-    end
-
-    subgraph Report["📊 Results"]
-        R1[Summary]
-        R2[Slack Notification]
-    end
-
-    A --> Build
-    Build --> Test
-    Build --> Publish
-    Test --> R1 --> R2
-```
-
----
-
 ## Build Stage
 
 Each framework builds two images:
