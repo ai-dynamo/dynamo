@@ -390,7 +390,8 @@ mod tests {
         let instance = DiscoveryInstance::MetricsEndpoint {
             namespace: "test-ns".to_string(),
             instance_id: 123,
-            url: "http://localhost:8080/metrics".to_string(),
+            host: "localhost".to_string(),
+            port: 8080,
             gpu_uuids: vec![],
         };
 
@@ -409,7 +410,8 @@ mod tests {
             let instance = DiscoveryInstance::MetricsEndpoint {
                 namespace: "ns1".to_string(),
                 instance_id: i,
-                url: format!("http://localhost:808{}/metrics", i),
+                host: "localhost".to_string(),
+                port: 8080 + i as u16,
                 gpu_uuids: vec![],
             };
             metadata.register_metrics_endpoint(instance).unwrap();
@@ -419,7 +421,8 @@ mod tests {
             let instance = DiscoveryInstance::MetricsEndpoint {
                 namespace: "ns2".to_string(),
                 instance_id: i + 100,
-                url: format!("http://localhost:808{}/metrics", i + 100),
+                host: "localhost".to_string(),
+                port: 8080 + (i + 100) as u16,
                 gpu_uuids: vec![],
             };
             metadata.register_metrics_endpoint(instance).unwrap();
@@ -449,7 +452,8 @@ mod tests {
         let instance = DiscoveryInstance::MetricsEndpoint {
             namespace: "test-ns".to_string(),
             instance_id: 456,
-            url: "http://localhost:8080/metrics".to_string(),
+            host: "localhost".to_string(),
+            port: 8080,
             gpu_uuids: vec![],
         };
 

@@ -6,7 +6,6 @@ use crate::pipeline::PipelineError;
 use crate::pipeline::network::manager::NetworkManager;
 use crate::service::{ServiceClient, ServiceSet};
 use crate::storage::kv::{self, Store as _};
-use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     component::{self, ComponentBuilder, Endpoint, Namespace},
     discovery::Discovery,
@@ -249,7 +248,8 @@ impl DistributedRuntime {
                     let metrics_url = format!("http://{}:{}/metrics", advertise_host, addr.port());
                     let metrics_spec = crate::discovery::DiscoverySpec::MetricsEndpoint {
                         namespace: "system".to_string(),
-                        url: metrics_url.clone(),
+                        host: advertise_host,
+                        port: addr.port(),
                         gpu_uuids: system_status_server::get_local_gpu_uuids(),
                     };
 

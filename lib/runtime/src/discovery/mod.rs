@@ -92,7 +92,8 @@ pub enum DiscoverySpec {
     /// Metrics endpoint specification for registration
     MetricsEndpoint {
         namespace: String,
-        url: String,
+        host: String,
+        port: u16,
         gpu_uuids: Vec<String>,
     },
 }
@@ -165,12 +166,14 @@ impl DiscoverySpec {
             },
             Self::MetricsEndpoint {
                 namespace,
-                url,
+                host,
+                port,
                 gpu_uuids,
             } => DiscoveryInstance::MetricsEndpoint {
                 namespace,
                 instance_id,
-                url,
+                host,
+                port,
                 gpu_uuids,
             },
         }
@@ -200,7 +203,8 @@ pub enum DiscoveryInstance {
     MetricsEndpoint {
         namespace: String,
         instance_id: u64,
-        url: String,
+        host: String,
+        port: u16,
         gpu_uuids: Vec<String>,
     },
 }
@@ -280,7 +284,8 @@ mod tests {
         let instance = DiscoveryInstance::MetricsEndpoint {
             namespace: "test-namespace".to_string(),
             instance_id: 12345,
-            url: "http://localhost:8080/metrics".to_string(),
+            host: "localhost".to_string(),
+            port: 8080,
             gpu_uuids: vec!["GPU-12345".to_string(), "GPU-67890".to_string()],
         };
 
@@ -298,12 +303,14 @@ mod tests {
             DiscoveryInstance::MetricsEndpoint {
                 namespace,
                 instance_id,
-                url,
+                host,
+                port,
                 gpu_uuids,
             } => {
                 assert_eq!(namespace, "test-namespace");
                 assert_eq!(instance_id, 12345);
-                assert_eq!(url, "http://localhost:8080/metrics");
+                assert_eq!(host, "localhost");
+                assert_eq!(port, 8080);
                 assert_eq!(
                     gpu_uuids,
                     vec!["GPU-12345".to_string(), "GPU-67890".to_string()]
@@ -317,7 +324,8 @@ mod tests {
     fn test_metrics_endpoint_spec_with_instance_id() {
         let spec = DiscoverySpec::MetricsEndpoint {
             namespace: "test-ns".to_string(),
-            url: "http://localhost:8080/metrics".to_string(),
+            host: "localhost".to_string(),
+            port: 8080,
             gpu_uuids: vec!["GPU-abc123".to_string()],
         };
 
@@ -327,12 +335,14 @@ mod tests {
             DiscoveryInstance::MetricsEndpoint {
                 namespace,
                 instance_id,
-                url,
+                host,
+                port,
                 gpu_uuids,
             } => {
                 assert_eq!(namespace, "test-ns");
                 assert_eq!(instance_id, 999);
-                assert_eq!(url, "http://localhost:8080/metrics");
+                assert_eq!(host, "localhost");
+                assert_eq!(port, 8080);
                 assert_eq!(gpu_uuids, vec!["GPU-abc123".to_string()]);
             }
             _ => panic!("Expected MetricsEndpoint variant"),
@@ -344,7 +354,8 @@ mod tests {
         let instance = DiscoveryInstance::MetricsEndpoint {
             namespace: "test-ns".to_string(),
             instance_id: 777,
-            url: "http://localhost:8080/metrics".to_string(),
+            host: "localhost".to_string(),
+            port: 8080,
             gpu_uuids: vec![],
         };
 

@@ -202,15 +202,17 @@ impl Discovery for KVStoreDiscovery {
             DiscoveryInstance::MetricsEndpoint {
                 namespace,
                 instance_id,
-                url,
+                host,
+                port,
                 ..
             } => {
                 let key = Self::metrics_endpoint_key(namespace, *instance_id);
                 tracing::debug!(
-                    "KVStoreDiscovery::register: Registering metrics endpoint instance_id={}, namespace={}, url={}, key={}",
+                    "KVStoreDiscovery::register: Registering metrics endpoint instance_id={}, namespace={}, host={}, port={}, key={}",
                     instance_id,
                     namespace,
-                    url,
+                    host,
+                    port,
                     key
                 );
                 (METRICS_ENDPOINTS_BUCKET, key)
@@ -637,7 +639,8 @@ mod tests {
 
         let spec = DiscoverySpec::MetricsEndpoint {
             namespace: "test-ns".to_string(),
-            url: "http://localhost:8080/metrics".to_string(),
+            host: "localhost".to_string(),
+            port: 8080,
             gpu_uuids: Vec::new(),
         };
 
@@ -646,12 +649,14 @@ mod tests {
         match instance {
             DiscoveryInstance::MetricsEndpoint {
                 namespace,
-                url,
+                host,
+                port,
                 instance_id,
                 ..
             } => {
                 assert_eq!(namespace, "test-ns");
-                assert_eq!(url, "http://localhost:8080/metrics");
+                assert_eq!(host, "localhost");
+                assert_eq!(port, 8080);
                 assert_eq!(instance_id, client.instance_id());
             }
             _ => panic!("Expected MetricsEndpoint instance"),
@@ -668,21 +673,24 @@ mod tests {
         // Note: A single instance (same instance_id) can register metrics endpoints in multiple namespaces
         let spec1 = DiscoverySpec::MetricsEndpoint {
             namespace: "ns1".to_string(),
-            url: "http://localhost:8080/metrics".to_string(),
+            host: "localhost".to_string(),
+            port: 8080,
             gpu_uuids: Vec::new(),
         };
         client.register(spec1).await.unwrap();
 
         let spec2 = DiscoverySpec::MetricsEndpoint {
             namespace: "ns2".to_string(),
-            url: "http://localhost:8081/metrics".to_string(),
+            host: "localhost".to_string(),
+            port: 8081,
             gpu_uuids: Vec::new(),
         };
         client.register(spec2).await.unwrap();
 
         let spec3 = DiscoverySpec::MetricsEndpoint {
             namespace: "ns3".to_string(),
-            url: "http://localhost:8082/metrics".to_string(),
+            host: "localhost".to_string(),
+            port: 8082,
             gpu_uuids: Vec::new(),
         };
         client.register(spec3).await.unwrap();
@@ -738,7 +746,8 @@ mod tests {
 
             let spec = DiscoverySpec::MetricsEndpoint {
                 namespace: "test-ns".to_string(),
-                url: "http://localhost:8080/metrics".to_string(),
+                host: "localhost".to_string(),
+                port: 8080,
                 gpu_uuids: Vec::new(),
             };
             client_clone.register(spec).await.unwrap();
@@ -748,9 +757,10 @@ mod tests {
         let event = stream.next().await.unwrap().unwrap();
         match event {
             DiscoveryEvent::Added(instance) => match instance {
-                DiscoveryInstance::MetricsEndpoint { namespace, url, .. } => {
+                DiscoveryInstance::MetricsEndpoint { namespace, host, port, .. } => {
                     assert_eq!(namespace, "test-ns");
-                    assert_eq!(url, "http://localhost:8080/metrics");
+                    assert_eq!(host, "localhost");
+                    assert_eq!(port, 8080);
                 }
                 _ => panic!("Expected MetricsEndpoint instance"),
             },
