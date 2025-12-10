@@ -176,4 +176,20 @@ impl ToolCallConfig {
             },
         }
     }
+
+    pub fn deepseek_v3() -> Self {
+        // DeepSeek V3 format:
+        // <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>{type}<｜tool▁sep｜>{function_name}\n```json\n{arguments}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+        // There are some differences between DeepSeek V3 and DeepSeek V3.1
+        Self {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec!["<｜tool▁calls▁begin｜>".to_string()],
+                tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
+                tool_call_separator_tokens: vec!["<｜tool▁sep｜>".to_string()],
+                parser_type: JsonParserType::DeepseekV3,
+                ..Default::default()
+            },
+        }
+    }
 }

@@ -30,6 +30,7 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("phi4", ToolCallConfig::phi4());
         map.insert("pythonic", ToolCallConfig::pythonic());
         map.insert("harmony", ToolCallConfig::harmony());
+        map.insert("deepseek_v3", ToolCallConfig::deepseek_v3());
         map.insert("deepseek_v3_1", ToolCallConfig::deepseek_v3_1());
         map.insert("default", ToolCallConfig::default());
         map
@@ -185,6 +186,7 @@ mod tests {
             "phi4",
             "default",
             "pythonic",
+            "deepseek_v3",
             "deepseek_v3_1",
         ];
         for parser in available_parsers {
@@ -1510,6 +1512,28 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     }
 
     #[tokio::test]
+    async fn test_deepseek_v3_parser_basic() {
+        let input = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
+```json
+{"location": "Tokyo"}
+```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
+```json
+{"location": "Paris"}
+```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("deepseek_v3"))
+            .await
+            .unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_current_weather");
+        assert_eq!(args["location"], "Tokyo");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_current_weather");
+        assert_eq!(args["location"], "Paris");
+    }
+
+    #[tokio::test]
     async fn test_deepseek_v3_1_parser_basic() {
         let input = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Paris"}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
         let (result, content) = detect_and_parse_tool_call(input, Some("deepseek_v3_1"))
@@ -2412,17 +2436,38 @@ mod detect_parser_tests {
         assert!(result);
     }
 
+    // DeepSeek V3
+    #[test]
+    fn test_e2e_detect_incomplete_tool_call_start_deepseek_v3() {
+        let text = r#"<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
+```json
+{"location": "Tokyo"}
+```<｜tool▁call▁end｜>"#;
+        let result = detect_tool_call_start(text, Some("deepseek_v3")).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_e2e_detect_tool_call_start_deepseek_v3() {
+        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
+```json
+{"location": "Tokyo"}
+```<｜tool▁call▁end｜>"#;
+        let result = detect_tool_call_start(text, Some("deepseek_v3")).unwrap();
+        assert!(result);
+    }
+
+    // DeepSeek V3.1
     #[test]
     fn test_e2e_detect_incomplete_tool_call_start_deepseek_v3_1() {
-        let text =
-            r#"<｜tool▁call▁begin｜>get_current_weather{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
+        let text = r#"<｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3_1")).unwrap();
         assert!(!result);
     }
 
     #[test]
     fn test_e2e_detect_tool_call_start_deepseek_v3_1() {
-        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
+        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3_1")).unwrap();
         assert!(result);
     }
