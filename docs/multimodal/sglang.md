@@ -100,12 +100,6 @@ flowchart LR
   processor -.-> HTTP
 ```
 
-### Key Characteristics
-
-- **Vision Encoder in Python**: Encode worker loads vision model (AutoModel) and image processor (AutoImageProcessor)
-- **Token Expansion**: Single `<|image_pad|>` token replaced with N tokens based on embedding shape
-- **NIXL Transfer**: Embeddings transferred from Encoder → PD Worker using NIXL
-- **No Rust Processing**: All tokenization and image handling happens in Python
 
 ### Launch
 
