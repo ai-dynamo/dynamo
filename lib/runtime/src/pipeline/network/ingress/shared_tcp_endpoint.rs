@@ -102,8 +102,9 @@ impl SharedTcpServer {
     pub async fn unregister_endpoint(&self, endpoint_path: &str, endpoint_name: &str) {
         if let Some((_, handler)) = self.handlers.remove(endpoint_path) {
             tracing::info!(
-                "Unregistered endpoint '{}' from shared TCP server",
-                endpoint_name
+                endpoint_name = %endpoint_name,
+                endpoint_path = %endpoint_path,
+                "Unregistered TCP endpoint handler"
             );
 
             let inflight_count = handler.inflight.load(Ordering::SeqCst);
