@@ -14,7 +14,10 @@ from tests.serve.common import (
 )
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
+    TEXT_PROMPT,
+    chat_payload,
     chat_payload_default,
+    completion_payload,
     completion_payload_default,
     metric_payload_default,
     multimodal_payload_default,
@@ -91,6 +94,34 @@ trtllm_configs = {
             metric_payload_default(port=8082, min_num_requests=6, backend="trtllm"),
         ],
     ),
+    "aggregated_logprobs": TRTLLMConfig(
+        name="aggregated_logprobs",
+        directory=trtllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge, pytest.mark.trtllm],
+        model="Qwen/Qwen3-0.6B",
+        models_port=8000,
+        request_payloads=[
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=5),
+            chat_payload(content=TEXT_PROMPT, logprobs=False, top_logprobs=5),
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=None),
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=0),
+        ],
+    ),
+    "disaggregated_logprobs": TRTLLMConfig(
+        name="disaggregated_logprobs",
+        directory=trtllm_dir,
+        script_name="disagg.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.post_merge, pytest.mark.trtllm],
+        model="Qwen/Qwen3-0.6B",
+        models_port=8000,
+        request_payloads=[
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=5),
+            chat_payload(content=TEXT_PROMPT, logprobs=False, top_logprobs=5),
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=None),
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=0),
+        ],
+    ),
     "aggregated_router": TRTLLMConfig(
         name="aggregated_router",
         directory=trtllm_dir,
@@ -159,6 +190,7 @@ trtllm_configs = {
         },
         request_payloads=[
             completion_payload_default(),
+            completion_payload(prompt=TEXT_PROMPT, logprobs=3),
         ],
     ),
 }

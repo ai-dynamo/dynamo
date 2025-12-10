@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
+import json
 import logging
 import random
 import socket
@@ -10,9 +12,11 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 
 import sglang as sgl
+from sglang.srt.tracing import trace as sglang_trace
 from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Client, Component, Context
+from dynamo.common.utils.input_params import InputParamManager
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
@@ -49,6 +53,13 @@ class BaseWorkerHandler(ABC):
         self.prefill_client = prefill_client
         self.serving_mode = config.serving_mode
         self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
+        self.enable_trace = config.server_args.enable_trace
+
+        self.input_param_manager = InputParamManager(
+            self.engine.tokenizer_manager.tokenizer
+            if not self.skip_tokenizer_init
+            else None
+        )
 
     @abstractmethod
     async def generate(self, request: Dict[str, Any], context: Context):
@@ -68,23 +79,13 @@ class BaseWorkerHandler(ABC):
         pass
 
     def _get_input_param(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Get the appropriate input parameter for SGLang engine.
+        request_input = self.input_param_manager.get_input_param(
+            request, use_tokenizer=not self.skip_tokenizer_init
+        )
 
-        Args:
-            request: Request dict with token_ids or messages.
-
-        Returns:
-            Dict with either input_ids or prompt for engine.
-        """
-        if self.skip_tokenizer_init:
-            return {"input_ids": request["token_ids"]}
-        else:
-            # use sglang's chat templating itself but leave tokenization to the
-            # interal engine's TokenizerManager
-            prompt = self.engine.tokenizer_manager.tokenizer.apply_chat_template(
-                request["messages"], tokenize=False, add_generation_prompt=True
-            )
-            return {"prompt": prompt}
+        return {
+            "prompt" if isinstance(request_input, str) else "input_ids": request_input
+        }
 
     @staticmethod
     def _generate_bootstrap_room() -> int:
@@ -116,6 +117,39 @@ class BaseWorkerHandler(ABC):
             bootstrap_host = get_local_ip_auto()
 
         return bootstrap_host, bootstrap_port
+
+    def _propagate_trace_context_to_sglang(
+        self, context: Context, bootstrap_room: int = 0
+    ):
+        """Propagate Dynamo's trace context to SGLang for distributed tracing. SGLang expects a certain
+        format derived by loooking at https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/tracing/trace.py
+        in the to_dict() method.
+
+        Args:
+            context: Dynamo Context object containing trace information.
+            bootstrap_room: Bootstrap room ID (0 for aggregated, actual room for disaggregated).
+        """
+        trace_id = context.trace_id
+        span_id = context.span_id
+        if not trace_id or not span_id:
+            return
+
+        # Build trace context for SGLang
+        trace_context = {
+            str(bootstrap_room): {
+                "root_span": {"traceparent": f"00-{trace_id}-{span_id}-01"},
+                "prev_span": {
+                    "span_id": int(span_id, 16),
+                    "trace_id": int(trace_id, 16),
+                },
+            }
+        }
+
+        # Encode and propagate
+        base64_context = base64.b64encode(
+            json.dumps(trace_context, ensure_ascii=False).encode("utf-8")
+        ).decode("utf-8")
+        sglang_trace.trace_set_remote_propagate_context(base64_context)
 
     async def _handle_cancellation(
         self, request_id_future: asyncio.Future, context: Context
