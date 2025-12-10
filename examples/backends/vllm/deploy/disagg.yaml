@@ -13,28 +13,28 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:nightly-vllm-amd64
     VllmDecodeWorker:
       dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
-      replicas: 1
+      replicas: 2
       resources:
         limits:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/examples/backends/vllm
-          command:
-          - python3
-          - -m
-          - dynamo.vllm
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:nightly-vllm-amd64
+          command: ["/bin/sh", "-c"]
           args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --is-decode-worker
+            - |
+              git clone --depth 1 -b darfeen/backend-metrics https://github.com/ai-dynamo/dynamo.git /tmp/dynamo &&
+              PYTHONPATH=/tmp/dynamo/components/src:/tmp/dynamo/lib/bindings/python/src:$PYTHONPATH \
+              python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-decode-worker
+          env:
+            - name: DYN_SYSTEM_PORT
+              value: "8081"
     VllmPrefillWorker:
       dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
@@ -46,13 +46,13 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/examples/backends/vllm
-          command:
-          - python3
-          - -m
-          - dynamo.vllm
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:nightly-vllm-amd64
+          command: ["/bin/sh", "-c"]
           args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --is-prefill-worker
+            - |
+              git clone --depth 1 -b darfeen/backend-metrics https://github.com/ai-dynamo/dynamo.git /tmp/dynamo &&
+              PYTHONPATH=/tmp/dynamo/components/src:/tmp/dynamo/lib/bindings/python/src:$PYTHONPATH \
+              python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker
+          env:
+            - name: DYN_SYSTEM_PORT
+              value: "8081"

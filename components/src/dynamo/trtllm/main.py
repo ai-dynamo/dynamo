@@ -36,6 +36,7 @@ from torch.cuda import device_count
 from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
@@ -45,7 +46,6 @@ from dynamo.llm import (
     ModelType,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
-    prometheus_names,
     register_llm,
 )
 from dynamo.runtime import DistributedRuntime

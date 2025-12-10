@@ -10,9 +10,10 @@ import sys
 import sglang as sgl
 import uvloop
 
+from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
-from dynamo.llm import ModelInput, ModelType, prometheus_names
+from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args

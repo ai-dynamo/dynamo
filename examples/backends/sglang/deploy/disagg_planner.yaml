@@ -8,52 +8,53 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: dynamo
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:nightly-sglang-amd64
     Planner:
-      dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
       componentType: planner
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
-          workingDir: /workspace/components/src/dynamo/planner
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:nightly-sglang-amd64
+          env:
+            - name: PYTHONPATH
+              value: "/workspace/components/src:/workspace:${PYTHONPATH}"
+          workingDir: /workspace
           command:
-          - python3
-          - -m
-          - planner_sla
-          args:
-            - --environment=kubernetes
-            - --backend=sglang
-            - --adjustment-interval=60
-            - --profile-results-dir=/workspace/profiling_results
-          volumeMounts:
-            - name: planner-profile-data
-              mountPath: /workspace/profiling_results
-              readOnly: true
-        volumes:
-          - name: planner-profile-data
-            configMap:
-              # Must be pre-created before deployment by the profiler
-              # See docs/planner/sla_planner_quickstart.md for more details
-              name: planner-profile-data
+          - /bin/bash
+          - -c
+          - |
+            set -e
+            # Configure git safe directory (needed in containers)
+            git config --global --add safe.directory /workspace
+            # Check if it's already a git repo, if not initialize it
+            if [ ! -d .git ]; then
+              git init
+              git remote add origin https://github.com/ai-dynamo/dynamo.git
+            fi
+            # Ensure origin remote exists
+            git remote get-url origin || git remote add origin https://github.com/ai-dynamo/dynamo.git
+            # Fetch and checkout the branch (force to overwrite any local changes)
+            git fetch origin darfeen/migrate-planner-metrics
+            git checkout -f FETCH_HEAD
+            # Run the planner (PYTHONPATH set via env)
+            cd /workspace/components/src/dynamo/planner
+            python3 -m planner_sla --environment=kubernetes --backend=sglang --adjustment-interval=60 --profile-results-dir=/workspace/tests/planner/profiling_results/H200_TP1P_TP1D/
     decode:
-      dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
-      replicas: 2
+      replicas: 1
       resources:
         limits:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:nightly-sglang-amd64
           workingDir: /workspace/examples/backends/sglang
           command:
             - python3
@@ -79,17 +80,16 @@ spec:
             - --host
             - "0.0.0.0"
     prefill:
-      dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
-      replicas: 2
+      replicas: 1
       resources:
         limits:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:nightly-sglang-amd64
           workingDir: /workspace/examples/backends/sglang
           command:
             - python3
