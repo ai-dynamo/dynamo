@@ -274,7 +274,7 @@ curl http://localhost:8000/v1/chat/completions \
 **Solutions:**
 - Check `DYN_REQUEST_PLANE` spelling (valid values: `nats`, `tcp`, `http`)
 - Value is case-insensitive but must be one of the three options
-- If not set, defaults to `nats`
+- If not set, defaults to `tcp`
 
 ### Issue: Port Conflicts
 
