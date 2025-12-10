@@ -145,13 +145,14 @@ pub async fn run(
 
     // Register frontend metrics endpoint with discovery
     // Use the model's namespace if available, otherwise use a default namespace
+    // Frontends don't provide GPU UUIDs
+    let advertise_host =
+        dynamo_runtime::system_status_server::resolve_advertise_host(http_service.host());
     let protocol = if http_service.is_tls_enabled() {
         "https"
     } else {
         "http"
     };
-    let advertise_host =
-        dynamo_runtime::system_status_server::resolve_advertise_host(http_service.host());
     let metrics_url = format!(
         "{}://{}:{}/metrics",
         protocol,
@@ -160,7 +161,8 @@ pub async fn run(
     );
     let metrics_spec = dynamo_runtime::discovery::DiscoverySpec::MetricsEndpoint {
         namespace: namespace_for_metrics,
-        url: metrics_url.clone(),
+        host: advertise_host,
+        port: http_service.port(),
         gpu_uuids: Vec::new(),
     };
 

@@ -15,7 +15,7 @@ use axum::{
     Router,
     body::Bytes,
     extract::{Json, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{any, delete, get, post},
 };
@@ -262,10 +262,10 @@ pub async fn spawn_system_status_server(
             }),
         )
         .route(
-            "/metrics_endpoints",
+            "/http_sd_config",
             get({
                 let state = Arc::clone(&server_state);
-                move || metrics_endpoints_handler(state)
+                move || http_sd_config_handler(state)
             }),
         )
         .route(
@@ -686,9 +686,10 @@ async fn engine_route_handler(
     }
 }
 
-/// Metrics endpoints discovery handler
+/// HTTP service discovery config handler
+/// Returns Prometheus HTTP service discovery format
 #[tracing::instrument(skip_all, level = "trace")]
-async fn metrics_endpoints_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
+async fn http_sd_config_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     let discovery = state.drt().discovery();
 
     let metrics_endpoints = match discovery
@@ -698,8 +699,14 @@ async fn metrics_endpoints_handler(state: Arc<SystemStatusState>) -> impl IntoRe
         Ok(endpoints) => endpoints,
         Err(e) => {
             tracing::error!("Failed to list metrics endpoints: {}", e);
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
+                headers,
                 Json(json!({
                     "error": "Failed to list metrics endpoints",
                     "message": e.to_string(),
@@ -709,49 +716,62 @@ async fn metrics_endpoints_handler(state: Arc<SystemStatusState>) -> impl IntoRe
         }
     };
 
-    let endpoints = metrics_endpoints
+    // Convert to Prometheus http_sd format
+    let targets: Vec<HttpSdTarget> = metrics_endpoints
         .into_iter()
         .filter_map(|instance| {
             if let crate::discovery::DiscoveryInstance::MetricsEndpoint {
                 namespace,
                 instance_id,
-                url,
+                host,
+                port,
                 gpu_uuids,
             } = instance
             {
-                Some(MetricsEndpointListing {
-                    namespace,
-                    instance_id: format!("{:x}", instance_id),
-                    url,
-                    gpu_uuids,
+                // Use host and port directly for targets
+                let target = format!("{}:{}", host, port);
+
+                // Build labels
+                let mut labels = serde_json::Map::new();
+                labels.insert("namespace".to_string(), json!(namespace));
+                labels.insert("instance_id".to_string(), json!(format!("{:x}", instance_id)));
+                // Construct URL for __meta_url label (assume http scheme)
+                let url = format!("http://{}:{}/metrics", host, port);
+                labels.insert("__meta_url".to_string(), json!(url));
+                if !gpu_uuids.is_empty() {
+                    labels.insert("gpu_uuids".to_string(), json!(gpu_uuids.join(",")));
+                    // Add individual GPU labels (gpu0, gpu1, etc.)
+                    for (index, uuid) in gpu_uuids.iter().enumerate() {
+                        labels.insert(format!("gpu{}", index), json!(uuid));
+                    }
+                }
+
+                Some(HttpSdTarget {
+                    targets: vec![target],
+                    labels,
                 })
             } else {
                 None
             }
         })
-        .collect::<Vec<_>>();
+        .collect();
 
-    tracing::trace!("Returning {} metrics endpoints", endpoints.len());
+    tracing::trace!("Returning {} metrics endpoints in http_sd format", targets.len());
 
-    Json(ListMetricsEndpoints {
-        object: "list",
-        data: endpoints,
-    })
-    .into_response()
+    // Set Content-Type header as required by Prometheus http_sd spec
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+
+    (StatusCode::OK, headers, Json(targets)).into_response()
 }
 
 #[derive(Serialize)]
-struct ListMetricsEndpoints {
-    object: &'static str,
-    data: Vec<MetricsEndpointListing>,
-}
-
-#[derive(Serialize)]
-struct MetricsEndpointListing {
-    namespace: String,
-    instance_id: String,
-    url: String,
-    gpu_uuids: Vec<String>,
+struct HttpSdTarget {
+    targets: Vec<String>,
+    labels: serde_json::Map<String, serde_json::Value>,
 }
 
 // Regular tests: cargo test system_status_server --lib
@@ -1245,7 +1265,7 @@ mod integration_tests {
                 let addr = system_info.socket_addr;
 
                 let client = reqwest::Client::new();
-                let url = format!("http://{}{}", addr, "/metrics_endpoints");
+                let url = format!("http://{}{}", addr, "/http_sd_config");
                 let response = client.get(&url).send().await.unwrap();
                 assert_eq!(
                     response.status(),
@@ -1253,27 +1273,58 @@ mod integration_tests {
                     "metrics endpoints route should return 200"
                 );
 
+                // Verify Content-Type header
+                assert_eq!(
+                    response.headers().get("content-type"),
+                    Some(&reqwest::header::HeaderValue::from_static("application/json")),
+                    "response should have Content-Type: application/json"
+                );
+
                 let body = response.text().await.unwrap();
-                let parsed: serde_json::Value =
-                    serde_json::from_str(&body).expect("response should be valid JSON");
+                let parsed: Vec<serde_json::Value> =
+                    serde_json::from_str(&body).expect("response should be valid JSON array");
 
-                assert_eq!(parsed["object"], "list");
-                let data = parsed["data"].as_array().expect("data should be an array");
-
-                let entry = data
+                // Find the system namespace entry
+                let entry = parsed
                     .iter()
                     .find(|entry| {
-                        entry.get("namespace").and_then(|ns| ns.as_str()) == Some("system")
+                        entry
+                            .get("labels")
+                            .and_then(|l| l.get("namespace"))
+                            .and_then(|ns| ns.as_str())
+                            == Some("system")
                     })
                     .expect("system namespace entry should exist");
 
-                let url = entry
-                    .get("url")
-                    .and_then(|val| val.as_str())
-                    .expect("url should be present");
+                // Verify Prometheus http_sd format
+                assert!(
+                    entry.get("targets").is_some(),
+                    "entry should have 'targets' field"
+                );
+                assert!(
+                    entry.get("labels").is_some(),
+                    "entry should have 'labels' field"
+                );
+
+                let targets = entry
+                    .get("targets")
+                    .and_then(|t| t.as_array())
+                    .expect("targets should be an array");
+                assert_eq!(targets.len(), 1, "should have one target");
+
+                let labels = entry
+                    .get("labels")
+                    .and_then(|l| l.as_object())
+                    .expect("labels should be an object");
+
+                // Verify __meta_url label contains the resolved hostname
+                let meta_url = labels
+                    .get("__meta_url")
+                    .and_then(|u| u.as_str())
+                    .expect("__meta_url should be present");
 
                 assert_eq!(
-                    url,
+                    meta_url,
                     format!("http://ipp1-0807:{}/metrics", addr.port()),
                     "metric endpoint should advertise resolved hostname"
                 );
