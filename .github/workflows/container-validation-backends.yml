@@ -444,8 +444,6 @@ jobs:
           echo "🧪 Fault tolerance tests completed with exit code: ${TEST_EXIT_CODE}"
 
           exit ${TEST_EXIT_CODE}
-        continue-on-error: true
-
       - name: Process Fault Tolerance Test Results
         if: always()
         run: |
@@ -708,8 +706,6 @@ jobs:
           echo "Test passed: Response matches expected format and content"
         fi
         exit $TEST_RESULT
-      continue-on-error: true
-
     - name: Process Deployment Test Results
       if: always()
       run: |
@@ -745,6 +741,7 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE
 
         # For debugging purposes, list all the resources before we delete
+        kubectl get dynamographdeployments
         kubectl get all
 
         echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
@@ -830,6 +827,7 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
 
         # For debugging purposes, list all the resources before we uninstall
+        kubectl get dynamographdeployments
         kubectl get all
 
         echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
