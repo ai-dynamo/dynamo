@@ -99,7 +99,14 @@ runs:
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
           GPU_FLAGS=""
-          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
+          # DEBUG: First try importing key test dependencies to catch import-time errors
+          # Then run pytest with extra verbosity to see collection details
+          PYTEST_CMD="echo '=== DEBUG: Testing key imports ===' && \
+            python -c 'import dynamo; print(\"dynamo OK\")' 2>&1 || echo 'dynamo import FAILED' && \
+            python -c 'import tensorrt_llm; print(\"tensorrt_llm OK\")' 2>&1 || echo 'tensorrt_llm import FAILED' && \
+            python -c 'import torch; print(\"torch OK\")' 2>&1 || echo 'torch import FAILED' && \
+            echo '=== DEBUG: Running pytest with extra verbosity ===' && \
+            pytest -vvv --collect-only --tb=short -m \"${{ inputs.pytest_marks }}\" 2>&1"
         else
           echo "🚀 Running pytest in normal mode"
           PYTEST_CMD="pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
