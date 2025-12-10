@@ -127,15 +127,6 @@ flowchart TD
     I --> D
 ```
 
-**What to Do**:
-
-1. ✅ **Wait for a maintainer** - An NVIDIA team member will review your PR
-2. ✅ **Respond to feedback** - Address any review comments
-3. ✅ **Maintainer triggers CI** - Once approved, they'll comment to trigger CI
-4. ❌ **Don't worry** - This is normal for external contributions
-
-**For Maintainers**: Comment with the appropriate trigger phrase to have `copy-pr-bot` create an internal PR branch that can run CI with secrets access.
-
 ---
 
 ## Required Checks Failing
