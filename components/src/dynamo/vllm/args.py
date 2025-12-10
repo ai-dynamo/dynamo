@@ -69,6 +69,9 @@ class Config:
     # dump config to file
     dump_config_to: Optional[str] = None
 
+    # Use vLLM's tokenizer for pre/post processing
+    use_vllm_tokenizer: bool = False
+
     def has_connector(self, connector_name: str) -> bool:
         """
         Check if a specific connector is enabled.
@@ -201,6 +204,12 @@ def parse_args() -> Config:
         default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
+    parser.add_argument(
+        "--use-vllm-tokenizer",
+        action="store_true",
+        default=False,
+        help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
+    )
     add_config_dump_args(parser)
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -303,6 +312,7 @@ def parse_args() -> Config:
     config.mm_prompt_template = args.mm_prompt_template
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
+    config.use_vllm_tokenizer = args.use_vllm_tokenizer
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:

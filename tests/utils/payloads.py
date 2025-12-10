@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import math
 import re
 import time
 from copy import deepcopy
@@ -183,6 +184,14 @@ class ChatPayloadWithLogprobs(ChatPayload):
                         "top_logprobs" in item
                     ), "Missing 'top_logprobs' in logprobs content"
 
+                    # Sanity check: logprob should be valid (not nan/inf/positive)
+                    logprob_val = item["logprob"]
+                    assert not math.isnan(logprob_val), "logprob is NaN"
+                    assert not math.isinf(logprob_val), "logprob is infinite"
+                    assert (
+                        logprob_val <= 0
+                    ), f"logprob should be <= 0, got {logprob_val}"
+
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
                 )
@@ -281,6 +290,20 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
                 assert len(token_logprobs) == len(
                     tokens
                 ), "Mismatch between token_logprobs and tokens length"
+
+                # Sanity check: each logprob should be valid (not nan/inf/positive)
+                for i, logprob_val in enumerate(token_logprobs):
+                    if logprob_val is not None:  # First token can be None
+                        assert not math.isnan(
+                            logprob_val
+                        ), f"logprob at index {i} is NaN"
+                        assert not math.isinf(
+                            logprob_val
+                        ), f"logprob at index {i} is infinite"
+                        assert (
+                            logprob_val <= 0
+                        ), f"logprob at index {i} should be <= 0, got {logprob_val}"
+
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(token_logprobs)} tokens with logprobs"
                 )

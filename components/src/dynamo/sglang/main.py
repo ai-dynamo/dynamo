@@ -168,8 +168,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     handler = DecodeWorkerHandler(
         component, engine, config, publisher, prefill_client, prefill_router_client
     )
-
-    health_check_payload = SglangHealthCheckPayload(engine).to_dict()
+    print(f"Config: {config}")
+    health_check_payload = SglangHealthCheckPayload(
+        engine, use_text_input=dynamo_args.use_sglang_tokenizer
+    ).to_dict()
 
     logging.info(
         f"Registering model with endpoint types: {dynamo_args.dyn_endpoint_types}"
@@ -319,7 +321,9 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     ready_event = asyncio.Event()
 
     handler = EmbeddingWorkerHandler(component, engine, config, publisher)
-    health_check_payload = SglangHealthCheckPayload(engine).to_dict()
+    health_check_payload = SglangHealthCheckPayload(
+        engine, use_text_input=dynamo_args.use_sglang_tokenizer
+    ).to_dict()
 
     try:
         # Start endpoint immediately and register model concurrently
