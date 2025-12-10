@@ -100,11 +100,28 @@ impl SharedTcpServer {
     }
 
     pub async fn unregister_endpoint(&self, endpoint_path: &str, endpoint_name: &str) {
-        self.handlers.remove(endpoint_path);
-        tracing::info!(
-            "Unregistered endpoint '{}' from shared TCP server",
-            endpoint_name
-        );
+        if let Some((_, handler)) = self.handlers.remove(endpoint_path) {
+            tracing::info!(
+                "Unregistered endpoint '{}' from shared TCP server",
+                endpoint_name
+            );
+
+            let inflight_count = handler.inflight.load(Ordering::SeqCst);
+            if inflight_count > 0 {
+                tracing::info!(
+                    endpoint_name = %endpoint_name,
+                    inflight_count = inflight_count,
+                    "Waiting for inflight TCP requests to complete"
+                );
+                while handler.inflight.load(Ordering::SeqCst) > 0 {
+                    handler.notify.notified().await;
+                }
+                tracing::info!(
+                    endpoint_name = %endpoint_name,
+                    "All inflight TCP requests completed"
+                );
+            }
+        }
     }
 
     pub async fn start(self: Arc<Self>) -> Result<()> {
