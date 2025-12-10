@@ -92,6 +92,9 @@ DEFAULT_MOCK_TARGETS = [
     "scipy.interpolate",
     "nats",
     "dynamo._core",
+    "psutil",
+    "requests",
+    "numpy",
 ]
 
 # Project paths for local imports
@@ -345,7 +348,18 @@ def run_collection(test_path: str, use_mocking: bool) -> tuple[int, Report]:
 
     plugin = MarkerReportPlugin()
     exitcode = pytest.main(
-        ["--collect-only", "-qq", "--disable-warnings", test_path],
+        [
+            "--collect-only",
+            "-qq",
+            "--disable-warnings",
+            # Override config from pyproject.toml to avoid picking up options
+            # that require plugins/modules not installed in this environment
+            "-o",
+            "addopts=",
+            "-o",
+            "filterwarnings=",
+            test_path,
+        ],
         plugins=[plugin],
     )
     return exitcode, plugin.build_report()
