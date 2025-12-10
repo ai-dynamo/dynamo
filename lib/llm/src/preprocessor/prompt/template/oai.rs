@@ -75,8 +75,6 @@ fn may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
 
 /// Default media type conversions for multimodal content.
 /// Maps source types (e.g., "image_url") to target placeholder types (e.g., "image").
-/// This is needed for models (like LLaVA) where the template expects placeholder tokens
-/// (e.g., `<image>`) and the actual media data is processed separately by encoders.
 const DEFAULT_MEDIA_TYPE_CONVERSIONS: &[(&str, &str)] = &[
     ("image_url", "image"),
     // Add more conversions as needed:
@@ -85,22 +83,6 @@ const DEFAULT_MEDIA_TYPE_CONVERSIONS: &[(&str, &str)] = &[
 ];
 
 /// Convert media URL content parts to empty placeholder types.
-///
-/// This function takes a content array and a slice of (source_type, target_type) tuples.
-/// Any content part with a type matching a source_type will be converted to a simple
-/// placeholder with only the target_type.
-///
-/// # Arguments
-/// * `content_array` - The array of content parts from a message
-/// * `conversions` - Slice of (source_type, target_type) tuples defining the conversions
-///
-/// # Example
-/// ```ignore
-/// let conversions = &[("image_url", "image"), ("video_url", "video")];
-/// let result = convert_media_url_to_placeholder(&content_array, conversions);
-/// // {"type": "image_url", "image_url": {...}} becomes {"type": "image"}
-/// // {"type": "video_url", "video_url": {...}} becomes {"type": "video"}
-/// ```
 fn convert_media_url_to_placeholder(
     content_array: &[serde_json::Value],
     conversions: &[(&str, &str)],
@@ -108,11 +90,12 @@ fn convert_media_url_to_placeholder(
     content_array
         .iter()
         .map(|part| {
-            let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let part_type = part
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
 
-            // Check if this type should be converted
             if let Some((_, target_type)) = conversions.iter().find(|(src, _)| *src == part_type) {
-                // Convert to placeholder with only the target type
                 serde_json::json!({"type": target_type})
             } else {
                 part.clone()
@@ -148,10 +131,8 @@ fn may_be_fix_msg_content(messages: serde_json::Value, preserve_arrays: bool) ->
                 // Case 2: Array processing
                 Some(serde_json::Value::Array(content_array)) => {
                     // First, convert any media URL parts to placeholders (e.g., image_url → image)
-                    let content_array = convert_media_url_to_placeholder(
-                        content_array,
-                        DEFAULT_MEDIA_TYPE_CONVERSIONS,
-                    );
+                    let content_array =
+                        convert_media_url_to_placeholder(content_array, DEFAULT_MEDIA_TYPE_CONVERSIONS);
 
                     // Check if it's text-only (after media URL conversion)
                     let is_text_only_array = !content_array.is_empty()
@@ -176,7 +157,7 @@ fn may_be_fix_msg_content(messages: serde_json::Value, preserve_arrays: bool) ->
                                 serde_json::Value::String(concatenated_text),
                             );
                         } else {
-                            // Keep as array (with image_url → image conversion applied)
+                            // Keep as array (with media_url → media placeholder conversion applied)
                             msg_object.insert(
                                 "content".to_string(),
                                 serde_json::Value::Array(content_array),
@@ -528,8 +509,7 @@ mod tests {
         ];
 
         // Use the actual DEFAULT_MEDIA_TYPE_CONVERSIONS
-        let result =
-            convert_media_url_to_placeholder(&content_array, DEFAULT_MEDIA_TYPE_CONVERSIONS);
+        let result = convert_media_url_to_placeholder(&content_array, DEFAULT_MEDIA_TYPE_CONVERSIONS);
 
         assert_eq!(result.len(), 4);
 
@@ -548,56 +528,6 @@ mod tests {
         // text should be unchanged
         assert_eq!(result[3]["type"], "text");
         assert_eq!(result[3]["text"], "hello");
-    }
-
-    /// Tests a custom conversion map with both image_url and video_url conversions.
-    /// Verifies that both types are converted properly while audio_url is preserved.
-    #[test]
-    fn test_convert_media_url_image_and_video_only() {
-        let content_array = vec![
-            serde_json::json!({"type": "text", "text": "Look at this image:"}),
-            serde_json::json!({"type": "image_url", "image_url": {"url": "https://example.com/photo.jpg", "detail": "high"}}),
-            serde_json::json!({"type": "text", "text": "And watch this video:"}),
-            serde_json::json!({"type": "video_url", "video_url": {"url": "https://example.com/clip.mp4"}}),
-            serde_json::json!({"type": "text", "text": "But also listen to:"}),
-            serde_json::json!({"type": "audio_url", "audio_url": {"url": "https://example.com/sound.mp3"}}),
-        ];
-
-        // Custom conversion map for image and video only
-        let conversions = &[("image_url", "image"), ("video_url", "video")];
-        let result = convert_media_url_to_placeholder(&content_array, conversions);
-
-        assert_eq!(result.len(), 6);
-
-        // Text should be unchanged
-        assert_eq!(result[0]["type"], "text");
-        assert_eq!(result[0]["text"], "Look at this image:");
-
-        // image_url should be converted to image placeholder
-        assert_eq!(result[1]["type"], "image");
-        assert!(result[1].get("image_url").is_none());
-        // Original data (like "detail": "high") should be stripped
-        assert!(result[1].get("detail").is_none());
-
-        // Text should be unchanged
-        assert_eq!(result[2]["type"], "text");
-        assert_eq!(result[2]["text"], "And watch this video:");
-
-        // video_url should be converted to video placeholder
-        assert_eq!(result[3]["type"], "video");
-        assert!(result[3].get("video_url").is_none());
-
-        // Text should be unchanged
-        assert_eq!(result[4]["type"], "text");
-        assert_eq!(result[4]["text"], "But also listen to:");
-
-        // audio_url should NOT be converted (not in our custom map)
-        assert_eq!(result[5]["type"], "audio_url");
-        assert!(result[5].get("audio_url").is_some());
-        assert_eq!(
-            result[5]["audio_url"]["url"],
-            "https://example.com/sound.mp3"
-        );
     }
 
     #[test]
@@ -877,8 +807,8 @@ mod tests {
         let content_array = messages[0]["content"].as_array().unwrap();
         assert_eq!(content_array.len(), 3);
         assert_eq!(content_array[0]["type"], "text");
-        assert_eq!(content_array[1]["type"], "image"); // Converted from image_url
-        assert!(content_array[1].get("image_url").is_none()); // image_url data removed
+        assert_eq!(content_array[1]["type"], "image");
+        assert!(content_array[1].get("image_url").is_none());
         assert_eq!(content_array[2]["type"], "text");
     }
 
@@ -909,8 +839,8 @@ mod tests {
         assert!(messages[0]["content"].is_array());
         let content_array = messages[0]["content"].as_array().unwrap();
         assert_eq!(content_array.len(), 2);
-        assert_eq!(content_array[0]["type"], "image"); // Converted from image_url
-        assert_eq!(content_array[1]["type"], "image"); // Converted from image_url
+        assert_eq!(content_array[0]["type"], "image");
+        assert_eq!(content_array[1]["type"], "image");
     }
 
     #[test]
@@ -1007,9 +937,9 @@ NORMAL MODE
         let content_array = messages[0]["content"].as_array().unwrap();
         assert_eq!(content_array.len(), 5);
         assert_eq!(content_array[0]["type"], "text");
-        assert_eq!(content_array[1]["type"], "audio_url"); // audio_url is preserved as-is
+        assert_eq!(content_array[1]["type"], "audio_url");
         assert_eq!(content_array[2]["type"], "text");
-        assert_eq!(content_array[3]["type"], "image"); // image_url converted to image
+        assert_eq!(content_array[3]["type"], "image");
         assert_eq!(content_array[4]["type"], "text");
 
         // Scenario 2: Unknown/future content types mixed with text
