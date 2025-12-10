@@ -334,6 +334,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             --exclude libnixl.so \
             --exclude libnixl_build.so \
             --exclude libnixl_common.so \
+            --exclude 'lib*.so*' \
             --plat manylinux_2_28_${ARCH_ALT} \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \
