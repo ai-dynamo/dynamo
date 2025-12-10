@@ -273,9 +273,11 @@ impl HealthCheckManager {
         // Without this, the first health check can fail due to a race condition
         // where the watch stream hasn't completed its initial discovery yet.
         match tokio::time::timeout(
-            Duration::from_secs(10),  // 10 second timeout for discovery
-            router.client.wait_for_instances()
-        ).await {
+            Duration::from_secs(10), // 10 second timeout for discovery
+            router.client.wait_for_instances(),
+        )
+        .await
+        {
             Ok(Ok(instances)) => {
                 debug!(
                     "Health check for {}: watch stream ready, found {} instance(s)",
