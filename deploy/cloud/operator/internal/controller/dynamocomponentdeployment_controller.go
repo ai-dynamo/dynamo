@@ -453,7 +453,7 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplic
 		Reason:  componentReconcileResult.reason,
 		Message: componentReconcileResult.message,
 	}
-	_, err := r.setStatusConditions(ctx, req, condition)
+	dynamoComponentDeployment, err := r.setStatusConditions(ctx, req, condition)
 	if err != nil {
 		return fmt.Errorf("failed to set status condition: %w", err)
 	}
