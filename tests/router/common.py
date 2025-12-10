@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import string
 import time
@@ -38,6 +39,7 @@ class KVRouterProcess(ManagedProcess):
         store_backend: str = "etcd",
         enforce_disagg: bool = False,
         busy_threshold: float | None = None,
+        request_plane: str = "nats",
     ):
         command = [
             "python3",
@@ -61,8 +63,12 @@ class KVRouterProcess(ManagedProcess):
         if busy_threshold is not None:
             command.extend(["--busy-threshold", str(busy_threshold)])
 
+        env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = request_plane
+
         super().__init__(
             command=command,
+            env=env,
             timeout=60,
             display_output=True,
             health_check_ports=[frontend_port],
@@ -1895,6 +1901,7 @@ def _test_busy_threshold_endpoint(
     frontend_port: int,
     test_payload: dict,
     store_backend: str = "etcd",
+    request_plane: str = "nats",
 ):
     """Test that the /busy_threshold endpoint can be hit and responds correctly.
 
@@ -1912,6 +1919,7 @@ def _test_busy_threshold_endpoint(
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload (used to extract model name)
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        request_plane: Request plane to use ("nats" or "tcp"). Defaults to "nats".
 
     Raises:
         AssertionError: If endpoint responses are incorrect
@@ -1929,6 +1937,7 @@ def _test_busy_threshold_endpoint(
             engine_workers.namespace,
             store_backend,
             busy_threshold=initial_threshold,
+            request_plane=request_plane,
         )
         kv_router.__enter__()
 

@@ -175,6 +175,7 @@ class MockerProcess:
         mocker_args: Optional[Dict[str, Any]] = None,
         num_mockers: int = 1,
         store_backend: str = "etcd",
+        request_plane: str = "nats",
     ):
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
@@ -191,8 +192,12 @@ class MockerProcess:
             mocker_args=mocker_args,
         )
 
+        env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = request_plane
+
         self._process = ManagedProcess(
             command=command,
+            env=env,
             timeout=60,
             display_output=True,
             health_check_ports=[],
@@ -649,8 +654,9 @@ def test_router_disagg_decisions(
 
 
 @pytest.mark.parallel
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_busy_threshold_endpoint(
-    request, runtime_services_session, predownload_tokenizers
+    request, runtime_services_session, predownload_tokenizers, request_plane
 ):
     """Test that the /busy_threshold endpoint can be hit and responds correctly.
 
@@ -661,14 +667,19 @@ def test_busy_threshold_endpoint(
 
     For now, this test only verifies the endpoint is accessible and returns valid responses.
     """
-    logger.info("Starting busy_threshold endpoint test")
+    logger.info(
+        f"Starting busy_threshold endpoint test with request_plane={request_plane}"
+    )
 
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
     try:
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         mockers = MockerProcess(
-            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+            request,
+            mocker_args=mocker_args,
+            num_mockers=NUM_MOCKERS,
+            request_plane=request_plane,
         )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
@@ -681,6 +692,7 @@ def test_busy_threshold_endpoint(
             request=request,
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
+            request_plane=request_plane,
         )
 
     finally:
