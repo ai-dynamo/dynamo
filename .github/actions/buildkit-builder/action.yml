@@ -1,0 +1,69 @@
+name: 'Buildkit Builder'
+description: 'Create a Kubernetes-based Docker Buildx builder'
+
+inputs:
+  builder_name:
+    description: 'Builder name'
+    required: true
+  mode:
+    description: 'Builder mode: "create" for new builder, "append" to add node to existing builder'
+    required: false
+  platform:
+    description: 'Platform (e.g. linux/amd64)'
+    required: true
+  ephemeral_storage:
+    description: 'Requests for ephemeral storage'
+    required: false
+    default: '32Gi'
+  namespace:
+    description: 'Kubernetes namespace for buildkit'
+    required: false
+    default: 'buildkit'
+  replicas:
+    description: 'Number of replicas'
+    required: true
+  requests_cpu:
+    description: 'Requests for CPU'
+    required: false
+    default: '2'
+  requests_memory:
+    description: 'Requests for Memory'
+    required: false
+    default: '12Gi'
+  limits_memory:
+    description: 'Limits for Memory'
+    required: false
+    default: '14Gi'
+  nodeselector:
+    description: 'Node selector for buildkit pods'
+    required: true
+  tolerations:
+    description: 'Tolerations for buildkit pods'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Create builder
+      shell: bash
+      run: |
+        MODE_FLAG="--use"
+        if [ "${{ inputs.mode }}" = "append" ]; then
+          MODE_FLAG="--append"
+        fi
+        docker buildx create ${MODE_FLAG} --name ${{ inputs.builder_name }} --driver kubernetes --platform=${{ inputs.platform }} \
+          --driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }} \
+          --driver-opt=namespace=${{ inputs.namespace }} \
+          --driver-opt=loadbalance=sticky \
+          --driver-opt=replicas=${{ inputs.replicas }} \
+          --driver-opt=requests.cpu=${{ inputs.requests_cpu }} \
+          --driver-opt=requests.memory=${{ inputs.requests_memory }} \
+          --driver-opt=limits.memory=${{ inputs.limits_memory }} \
+          '--driver-opt="nodeselector=${{ inputs.nodeselector }}"' \
+          '--driver-opt="tolerations=${{ inputs.tolerations }}"'
+
+    - name: Bootstrap buildkit builder
+      shell: bash
+      run: |
+        docker buildx inspect --bootstrap
+
