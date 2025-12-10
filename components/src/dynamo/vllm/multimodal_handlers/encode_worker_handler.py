@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import os
+import time
 from typing import AsyncIterator
 
+import safetensors
 from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
 
@@ -36,6 +39,8 @@ except ImportError as e:
 
 CACHE_SIZE_MAXIMUM = 8
 
+TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 0))
+
 
 class EncodeWorkerHandler:
     def __init__(
@@ -59,6 +64,8 @@ class EncodeWorkerHandler:
             self.model, self.vision_model
         )
         self._connector = None
+        self._accumulated_time = 0.0
+        self._processed_requests = 0
 
     def cleanup(self):
         pass
@@ -95,6 +102,7 @@ class EncodeWorkerHandler:
         # 8. Yield the encode response.
 
         try:
+            time_start = time.perf_counter()
             if not request.multimodal_input.image_url:
                 raise ValueError("image_url is required for the encode worker.")
 
@@ -124,13 +132,23 @@ class EncodeWorkerHandler:
 
             # Move embeddings to CPU for NIXL transfer to avoid UCX/InfiniBand issues
             embeddings_cpu = embeddings.cpu()
+            time_end = time.perf_counter()
+            self._accumulated_time += time_end - time_start
+            self._processed_requests += 1
+            logger.info(
+                f"Encoded image for request {{ id: {request_id} }} in {time_end - time_start:.4f} seconds. "
+                f"Average encoding time: {self._accumulated_time / self._processed_requests:.4f} seconds over {self._processed_requests} requests."
+            )
 
             request.image_grid_thw = image_grid_thw
             request.embeddings_shape = tuple(embeddings.shape)
-            descriptor = connect.Descriptor(embeddings_cpu)
 
-            with await self._connector.create_readable(descriptor) as readable:
-                request.serialized_request = readable.metadata()
+            if TRANSFER_LOCAL:
+                logger.info("ENCODER: saving local safetensors file")
+                tensors = {"ec_cache": embeddings_cpu}
+                safetensors.torch.save_file(tensors, "/tmp/encoder_cache.safetensors")
+                # FIXME: only use one file to transfer for performance, need to extend if helps
+                request.serialized_request = "/tmp/encoder_cache.safetensors"
                 # Clear the image URL as hint that the image is passed as embeddings.
                 request.multimodal_input.image_url = None
 
@@ -140,7 +158,6 @@ class EncodeWorkerHandler:
                 response_generator = await self.pd_worker_client.round_robin(
                     request.model_dump_json(), context=context
                 )
-                await readable.wait_for_completion()
 
                 async for response in response_generator:
                     output = MyRequestOutput.model_validate_json(response.data())
@@ -152,6 +169,32 @@ class EncodeWorkerHandler:
                         outputs=output.outputs,
                         finished=output.finished,
                     ).model_dump_json()
+            else:
+                descriptor = connect.Descriptor(embeddings_cpu)
+
+                with self._connector.create_readable(descriptor) as readable:
+                    request.serialized_request = readable.metadata()
+                    # Clear the image URL as hint that the image is passed as embeddings.
+                    request.multimodal_input.image_url = None
+
+                    logger.debug(f"Request: {request.model_dump_json()}")
+
+                    # Get the response generator
+                    response_generator = await self.pd_worker_client.round_robin(
+                        request.model_dump_json(), context=context
+                    )
+                    await readable.wait_for_completion()
+
+                    async for response in response_generator:
+                        output = MyRequestOutput.model_validate_json(response.data())
+                        yield MyRequestOutput(
+                            request_id=output.request_id,
+                            prompt=output.prompt,
+                            prompt_token_ids=output.prompt_token_ids,
+                            prompt_logprobs=output.prompt_logprobs,
+                            outputs=output.outputs,
+                            finished=output.finished,
+                        ).model_dump_json()
 
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")
