@@ -58,6 +58,43 @@ runs:
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
 
+        # DEBUG: Run diagnostic commands inside the container first
+        echo "=========================================="
+        echo "🔍 DEBUG: Running container diagnostics"
+        echo "=========================================="
+        
+        echo "📋 Checking container environment..."
+        docker run --rm ${{ inputs.image_tag }} bash -c "
+          echo '--- Container Info ---'
+          uname -a
+          echo ''
+          echo '--- Python Location ---'
+          which python || echo 'python not found'
+          which python3 || echo 'python3 not found'
+          echo ''
+          echo '--- Python Version ---'
+          python --version 2>&1 || python3 --version 2>&1 || echo 'Python not available'
+          echo ''
+          echo '--- Pytest Location ---'
+          which pytest || echo 'pytest not found in PATH'
+          echo ''
+          echo '--- Pytest Version ---'
+          pytest --version 2>&1 || echo 'pytest command failed'
+          echo ''
+          echo '--- PATH ---'
+          echo \$PATH
+          echo ''
+          echo '--- /workspace contents ---'
+          ls -la /workspace 2>/dev/null || echo '/workspace does not exist or is empty'
+          echo ''
+          echo '--- pip list (pytest related) ---'
+          pip list 2>/dev/null | grep -i pytest || echo 'pip list failed or no pytest packages'
+        " || echo "DEBUG: Container diagnostic command failed with exit code: $?"
+        
+        echo "=========================================="
+        echo "🔍 DEBUG: Diagnostics complete"
+        echo "=========================================="
+
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
@@ -82,6 +119,10 @@ runs:
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
+        echo "🔧 DEBUG: About to run pytest with command: ${PYTEST_CMD}"
+        echo "🔧 DEBUG: GPU_FLAGS: ${GPU_FLAGS}"
+        echo "🔧 DEBUG: Image tag: ${{ inputs.image_tag }}"
+
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
@@ -93,6 +134,15 @@ runs:
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+        
+        # DEBUG: Additional exit code interpretation
+        if [[ ${TEST_EXIT_CODE} -eq 127 ]]; then
+          echo "❌ DEBUG: Exit code 127 = Command not found (pytest or bash missing from container)"
+        elif [[ ${TEST_EXIT_CODE} -eq 139 ]]; then
+          echo "❌ DEBUG: Exit code 139 = Segmentation fault (SIGSEGV) - likely a crash in pytest or imported modules"
+        elif [[ ${TEST_EXIT_CODE} -eq 137 ]]; then
+          echo "❌ DEBUG: Exit code 137 = OOM killed (SIGKILL)"
+        fi
 
         # Verify test results were written (only in normal mode)
         if [[ "${{ inputs.dry_run }}" != "true" ]]; then
