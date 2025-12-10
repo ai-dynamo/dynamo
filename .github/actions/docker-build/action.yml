@@ -142,7 +142,8 @@ runs:
           --target ${{ inputs.target }} \
           --vllm-max-jobs 10 \
           --framework ${{ inputs.framework }} \
-          --platform ${{ inputs.platform }}
+          --platform ${{ inputs.platform }} \
+          $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 
