@@ -1,6 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""
+Test Execution Times (Last Run: 2025-12-09):
+- test_request_migration_trtllm_worker_failure: ~95s (gpu_1)
+- test_request_migration_trtllm_graceful_shutdown: ~95s (gpu_1, skipped)
+- test_no_request_migration_trtllm_worker_failure: ~60s (gpu_1)
+- test_no_request_migration_trtllm_graceful_shutdown: ~60s (gpu_1, skipped)
+- Total: ~155s (0:02:35) for enabled tests
+"""
+
 import logging
 import os
 import shutil
@@ -8,9 +17,9 @@ import shutil
 import pytest
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
-from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess, terminate_process_tree
 from tests.utils.payloads import check_models_api
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 # Import utilities from the refactored utils module
 from .utils import (
@@ -35,8 +44,19 @@ pytestmark = [
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with TRT-LLM backend"""
 
-    def __init__(self, request, worker_id: str, migration_limit: int = 3):
+    def __init__(
+        self,
+        request,
+        worker_id: str,
+        frontend_port: int,
+        migration_limit: int = 3,
+    ):
         self.worker_id = worker_id
+        self.frontend_port = frontend_port
+
+        # Allocate system port for this worker
+        system_port = allocate_port(9100)
+        self.system_port = system_port
 
         command = [
             "python3",
@@ -64,7 +84,7 @@ class DynamoWorkerProcess(ManagedProcess):
         # intermittent failures
         env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
-        env["DYN_SYSTEM_PORT"] = f"808{worker_id[-1]}"
+        env["DYN_SYSTEM_PORT"] = str(system_port)
 
         # TODO: Have the managed process take a command name explicitly to distinguish
         #       between processes started with the same command.
@@ -82,8 +102,8 @@ class DynamoWorkerProcess(ManagedProcess):
             command=command,
             env=env,
             health_check_urls=[
-                (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
-                (f"http://localhost:808{worker_id[-1]}/health", self.is_ready),
+                (f"http://localhost:{frontend_port}/v1/models", check_models_api),
+                (f"http://localhost:{system_port}/health", self.is_ready),
             ],
             timeout=300,
             display_output=True,
@@ -91,9 +111,15 @@ class DynamoWorkerProcess(ManagedProcess):
             log_dir=log_dir,
         )
 
-    def get_pid(self):
-        """Get the PID of the worker process"""
-        return self.proc.pid if self.proc else None
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Release allocated port when worker exits."""
+        try:
+            # system_port is always allocated in __init__
+            deallocate_port(self.system_port)
+        except Exception as e:
+            logging.warning(f"Failed to release TRT-LLM worker port: {e}")
+
+        return super().__exit__(exc_type, exc_val, exc_tb)
 
     def is_ready(self, response) -> bool:
         """Check the health of the worker process"""
@@ -123,7 +149,7 @@ class DynamoWorkerProcess(ManagedProcess):
     indirect=True,
 )
 def test_request_migration_trtllm_worker_failure(
-    request, runtime_services, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with migration support using TRT-LLM.
@@ -131,21 +157,30 @@ def test_request_migration_trtllm_worker_failure(
     This test verifies that when a worker is killed during request processing,
     the system can handle the failure gracefully and migrate the request to
     another worker.
+
+    Timing (Last Run: 2025-12-09): ~95s total (2 workers at 45% GPU each)
+    - Engine initialization: ~52s (frontend: 2s, worker1: 25s, worker2: 25s sequential)
+    - Test execution (request + migration): ~40s
+    - Teardown: ~3s
     """
 
-    # Step 1: Start the frontend
+    # Step 1: Start the frontend (allocates its own frontend_port)
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start 2 workers sequentially
-        with DynamoWorkerProcess(request, "worker1") as worker1:
+        with DynamoWorkerProcess(request, "worker1", frontend.frontend_port) as worker1:
             logger.info(f"Worker 1 PID: {worker1.get_pid()}")
 
-            with DynamoWorkerProcess(request, "worker2") as worker2:
+            with DynamoWorkerProcess(
+                request, "worker2", frontend.frontend_port
+            ) as worker2:
                 logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
                 # Step 3: Send the request
-                request_thread, response_list = start_completion_request()
+                request_thread, response_list = start_completion_request(
+                    frontend.frontend_port
+                )
 
                 # Step 4: Use polling to determine which worker received the request
                 worker, worker_name = determine_request_receiving_worker(
@@ -178,7 +213,7 @@ def test_request_migration_trtllm_worker_failure(
     indirect=True,
 )
 def test_request_migration_trtllm_graceful_shutdown(
-    request, runtime_services, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration support using TRT-LLM.
@@ -188,21 +223,30 @@ def test_request_migration_trtllm_graceful_shutdown(
     the request to another worker. Unlike the abrupt kill test, this simulates a more
     controlled shutdown scenario where the worker has time to clean up and notify the
     system about its shutdown.
+
+    Timing (Last Run: 2025-12-09): ~95s total (2 workers at 45% GPU each)
+    - Engine initialization: ~52s (frontend: 2s, worker1: 25s, worker2: 25s sequential)
+    - Test execution (request + graceful migration): ~40s
+    - Teardown: ~3s
     """
 
-    # Step 1: Start the frontend
+    # Step 1: Start the frontend (allocates its own frontend_port)
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start 2 workers sequentially
-        with DynamoWorkerProcess(request, "worker1") as worker1:
+        with DynamoWorkerProcess(request, "worker1", frontend.frontend_port) as worker1:
             logger.info(f"Worker 1 PID: {worker1.get_pid()}")
 
-            with DynamoWorkerProcess(request, "worker2") as worker2:
+            with DynamoWorkerProcess(
+                request, "worker2", frontend.frontend_port
+            ) as worker2:
                 logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
                 # Step 3: Send the request
-                request_thread, response_list = start_completion_request()
+                request_thread, response_list = start_completion_request(
+                    frontend.frontend_port
+                )
 
                 # Step 4: Use polling to determine which worker received the request
                 worker, worker_name = determine_request_receiving_worker(
@@ -237,7 +281,7 @@ def test_request_migration_trtllm_graceful_shutdown(
     indirect=True,
 )
 def test_no_request_migration_trtllm_worker_failure(
-    request, runtime_services, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with migration disabled using TRT-LLM.
@@ -245,21 +289,38 @@ def test_no_request_migration_trtllm_worker_failure(
     This test verifies that when migration is disabled (migration_limit=0) and a worker
     is killed during request processing, the request fails as expected without migration.
     This is the opposite behavior of test_request_migration_trtllm_worker_failure.
+
+    Timing (Last Run: 2025-12-09): ~60s total (2 workers at 45% GPU each)
+    - Engine initialization: ~52s (frontend: 2s, worker1: 25s, worker2: 25s sequential)
+    - Test execution (request failure): ~6s
+    - Teardown: ~2s
     """
 
-    # Step 1: Start the frontend
+    # Step 1: Start the frontend (allocates its own frontend_port)
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start 2 workers sequentially with migration disabled
-        with DynamoWorkerProcess(request, "worker1", migration_limit=0) as worker1:
+        with DynamoWorkerProcess(
+            request,
+            "worker1",
+            frontend.frontend_port,
+            migration_limit=0,
+        ) as worker1:
             logger.info(f"Worker 1 PID: {worker1.get_pid()}")
 
-            with DynamoWorkerProcess(request, "worker2", migration_limit=0) as worker2:
+            with DynamoWorkerProcess(
+                request,
+                "worker2",
+                frontend.frontend_port,
+                migration_limit=0,
+            ) as worker2:
                 logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
                 # Step 3: Send the request
-                request_thread, response_list = start_completion_request()
+                request_thread, response_list = start_completion_request(
+                    frontend.frontend_port
+                )
 
                 # Step 4: Use polling to determine which worker received the request
                 worker, worker_name = determine_request_receiving_worker(
@@ -308,7 +369,7 @@ def test_no_request_migration_trtllm_worker_failure(
     indirect=True,
 )
 def test_no_request_migration_trtllm_graceful_shutdown(
-    request, runtime_services, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration disabled using TRT-LLM.
@@ -317,21 +378,38 @@ def test_no_request_migration_trtllm_graceful_shutdown(
     receives a graceful shutdown signal (SIGTERM) during request processing, the request
     fails as expected without migration. This is the opposite behavior of
     test_request_migration_trtllm_graceful_shutdown.
+
+    Timing (Last Run: 2025-12-09): ~60s total (2 workers at 45% GPU each)
+    - Engine initialization: ~52s (frontend: 2s, worker1: 25s, worker2: 25s sequential)
+    - Test execution (graceful shutdown failure): ~6s
+    - Teardown: ~2s
     """
 
-    # Step 1: Start the frontend
+    # Step 1: Start the frontend (allocates its own frontend_port)
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start 2 workers sequentially with migration disabled
-        with DynamoWorkerProcess(request, "worker1", migration_limit=0) as worker1:
+        with DynamoWorkerProcess(
+            request,
+            "worker1",
+            frontend.frontend_port,
+            migration_limit=0,
+        ) as worker1:
             logger.info(f"Worker 1 PID: {worker1.get_pid()}")
 
-            with DynamoWorkerProcess(request, "worker2", migration_limit=0) as worker2:
+            with DynamoWorkerProcess(
+                request,
+                "worker2",
+                frontend.frontend_port,
+                migration_limit=0,
+            ) as worker2:
                 logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
                 # Step 3: Send the request
-                request_thread, response_list = start_completion_request()
+                request_thread, response_list = start_completion_request(
+                    frontend.frontend_port
+                )
 
                 # Step 4: Use polling to determine which worker received the request
                 worker, worker_name = determine_request_receiving_worker(

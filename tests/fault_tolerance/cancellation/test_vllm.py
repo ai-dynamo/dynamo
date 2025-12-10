@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""
+Test Execution Times (Last Run: 2025-12-09):
+- test_request_cancellation_vllm_aggregated: ~55s (gpu_1)
+- test_request_cancellation_vllm_decode_cancel: ~53s (gpu_2)
+- test_request_cancellation_vllm_prefill_cancel: ~53s (gpu_2)
+- Total: 161.65s (0:02:41)
+"""
+
 import logging
 import os
 import shutil
@@ -14,9 +22,9 @@ from tests.fault_tolerance.cancellation.utils import (
     send_cancellable_request,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
-from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +40,17 @@ pytestmark = [
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with vLLM backend"""
 
-    def __init__(self, request, is_prefill: bool = False):
+    def __init__(
+        self,
+        request,
+        frontend_port: int,
+        is_prefill: bool = False,
+    ):
+        # Allocate system port for this worker
+        system_port = allocate_port(9100)
+        self.system_port = system_port
+        self.frontend_port = frontend_port
+
         command = [
             "python3",
             "-m",
@@ -48,21 +66,20 @@ class DynamoWorkerProcess(ManagedProcess):
             "3",
         ]
 
-        # Set port based on worker type
-        port = "8082" if is_prefill else "8081"
-
         # Configure health check based on worker type
         if is_prefill:
             # Prefill workers check their own status endpoint
             command.append("--is-prefill-worker")
-            health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
+            health_check_urls = [
+                (f"http://localhost:{system_port}/health", self.is_ready)
+            ]
         else:
             # Decode workers should also check their own status endpoint first,
             # then verify the frontend sees the model
             health_check_urls = [
-                (f"http://localhost:{port}/health", self.is_ready),
-                (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
-                (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
+                (f"http://localhost:{system_port}/health", self.is_ready),
+                (f"http://localhost:{frontend_port}/v1/models", check_models_api),
+                (f"http://localhost:{frontend_port}/health", check_health_generate),
             ]
 
         # Set environment variables
@@ -76,13 +93,16 @@ class DynamoWorkerProcess(ManagedProcess):
         # intermittent failures
         env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
-        env["DYN_SYSTEM_PORT"] = port
+        env["DYN_SYSTEM_PORT"] = str(system_port)
+        env["DYN_HTTP_PORT"] = str(frontend_port)
 
         # Set KV event port and NIXL side channel port only for prefill worker
         # to avoid conflicts with decode worker
         if is_prefill:
-            env["DYN_VLLM_KV_EVENT_PORT"] = "20082"
-            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = "5601"
+            env["DYN_VLLM_KV_EVENT_PORT"] = "20082"  # TODO: use dynamic port allocation
+            env[
+                "VLLM_NIXL_SIDE_CHANNEL_PORT"
+            ] = "5601"  # TODO: use dynamic port allocation
 
         # Set log directory based on worker type
         worker_type = "prefill_worker" if is_prefill else "worker"
@@ -119,6 +139,16 @@ class DynamoWorkerProcess(ManagedProcess):
         """Get the PID of the worker process"""
         return self.proc.pid if self.proc else None
 
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Release allocated port when worker exits."""
+        try:
+            # system_port is always allocated in __init__
+            deallocate_port(self.system_port)
+        except Exception as e:
+            logging.warning(f"Failed to release vLLM worker port: {e}")
+
+        return super().__exit__(exc_type, exc_val, exc_tb)
+
     def is_ready(self, response) -> bool:
         """Check the health of the worker process"""
         try:
@@ -137,7 +167,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(110)  # 3x average
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
-def test_request_cancellation_vllm_aggregated(request, runtime_services):
+def test_request_cancellation_vllm_aggregated(request, runtime_services_dynamic_ports):
     """
     End-to-end test for request cancellation functionality in aggregated mode.
 
@@ -147,14 +177,19 @@ def test_request_cancellation_vllm_aggregated(request, runtime_services):
     1. Completion request
     2. Chat completion request (non-streaming)
     3. Chat completion request (streaming)
+
+    Timing (Last Run: 2025-12-09): ~55s total
+    - Engine initialization: ~15s
+    - Testing 3 scenarios: ~38s (~12s each)
+    - Teardown: ~2s
     """
 
-    # Step 1: Start the frontend
+    # Step 1: Start the frontend (allocates its own frontend_port)
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start a single worker
-        with DynamoWorkerProcess(request) as worker:
+        # Step 2: Start a single worker (allocates its own system_port)
+        with DynamoWorkerProcess(request, frontend.frontend_port) as worker:
             logger.info(f"Worker PID: {worker.get_pid()}")
 
             # Step 3: Test request cancellation with polling approach
@@ -173,7 +208,9 @@ def test_request_cancellation_vllm_aggregated(request, runtime_services):
                 logger.info(f"Testing {description.lower()}...")
 
                 # Send the request (non-blocking)
-                cancellable_req = send_cancellable_request(request_type)
+                cancellable_req = send_cancellable_request(
+                    frontend.frontend_port, request_type
+                )
 
                 # Poll for "Decode Request ID" pattern (vLLM v2 pattern)
                 request_id, worker_log_offset = poll_for_pattern(
@@ -221,7 +258,7 @@ def test_request_cancellation_vllm_aggregated(request, runtime_services):
     indirect=True,
 )
 def test_request_cancellation_vllm_decode_cancel(
-    request, runtime_services, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for request cancellation during decode phase.
@@ -229,18 +266,27 @@ def test_request_cancellation_vllm_decode_cancel(
     This test verifies that when a request is cancelled by the client during the decode phase,
     the system properly handles the cancellation and cleans up resources
     on the decode worker side in a disaggregated setup.
+
+    Timing (Last Run: 2025-12-09): ~53s total (requires 2 GPUs)
+    - Engine initialization: ~23s (decode + prefill workers)
+    - Testing stream cancellation during decode: ~28s
+    - Teardown: ~2s
     """
 
-    # Step 1: Start the frontend
+    # Step 1: Start the frontend (allocates its own frontend_port)
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start the prefill worker
-        with DynamoWorkerProcess(request, is_prefill=True) as prefill_worker:
+        # Step 2: Start the prefill worker (allocates its own system_port)
+        with DynamoWorkerProcess(
+            request, frontend.frontend_port, is_prefill=True
+        ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
-            # Step 3: Start the decode worker
-            with DynamoWorkerProcess(request, is_prefill=False) as decode_worker:
+            # Step 3: Start the decode worker (allocates its own system_port)
+            with DynamoWorkerProcess(
+                request, frontend.frontend_port, is_prefill=False
+            ) as decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
                 # Step 4: Test request cancellation for streaming scenario
@@ -249,7 +295,9 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
                 # Send streaming request (non-blocking)
-                cancellable_req = send_cancellable_request("chat_completion_stream")
+                cancellable_req = send_cancellable_request(
+                    frontend.frontend_port, "chat_completion_stream"
+                )
 
                 # Poll for "Decode Request ID" pattern in decode worker (vLLM v2 pattern)
                 request_id, decode_log_offset = poll_for_pattern(
@@ -302,7 +350,7 @@ def test_request_cancellation_vllm_decode_cancel(
     indirect=True,
 )
 def test_request_cancellation_vllm_prefill_cancel(
-    request, runtime_services, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
 ):
     """
     End-to-end test for request cancellation during prefill phase.
@@ -310,18 +358,27 @@ def test_request_cancellation_vllm_prefill_cancel(
     This test verifies that when a request is cancelled by the client during the prefill phase,
     the system properly handles the cancellation and cleans up resources
     on both the decode and prefill workers in a disaggregated setup.
+
+    Timing (Last Run: 2025-12-09): ~53s total (requires 2 GPUs)
+    - Engine initialization: ~23s (decode + prefill workers)
+    - Testing cancellation during prefill: ~28s
+    - Teardown: ~2s
     """
 
-    # Step 1: Start the frontend
+    # Step 1: Start the frontend (allocates its own frontend_port)
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start the prefill worker
-        with DynamoWorkerProcess(request, is_prefill=True) as prefill_worker:
+        # Step 2: Start the prefill worker (allocates its own system_port)
+        with DynamoWorkerProcess(
+            request, frontend.frontend_port, is_prefill=True
+        ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
-            # Step 3: Start the decode worker
-            with DynamoWorkerProcess(request, is_prefill=False) as decode_worker:
+            # Step 3: Start the decode worker (allocates its own system_port)
+            with DynamoWorkerProcess(
+                request, frontend.frontend_port, is_prefill=False
+            ) as decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
                 # Step 4: Test request cancellation during prefill phase
@@ -333,7 +390,7 @@ def test_request_cancellation_vllm_prefill_cancel(
 
                 # Send request with long prompt (non-blocking)
                 cancellable_req = send_cancellable_request(
-                    "completion", use_long_prompt=True
+                    frontend.frontend_port, "completion", use_long_prompt=True
                 )
 
                 # Poll for "Prefill Request ID" pattern in prefill worker (vLLM v2 pattern)
