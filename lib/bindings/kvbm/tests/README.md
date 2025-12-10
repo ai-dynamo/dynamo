@@ -334,6 +334,6 @@ blocks = [torch.randn(..., dtype=torch.float32) for _ in range(n)]
 
 ## Further Reading
 
-- [KVBM Kernels README](../../../lib/kvbm-kernels/README.md) - Detailed explanation of kernel layouts
+- [KVBM Kernels README](../../../kvbm-kernels/README.md) - Detailed explanation of kernel layouts
 - [PyO3 Documentation](https://pyo3.rs/) - Python-Rust FFI framework
 - [CUDA Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/) - CUDA fundamentals
