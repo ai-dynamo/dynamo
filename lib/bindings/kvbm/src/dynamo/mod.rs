@@ -3,11 +3,15 @@
 
 //! Python bindings for Dynamo Runtime.
 
+use std::sync::{Arc, OnceLock, Weak};
+
+use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
+use pyo3::types::{PyCapsule, PyCapsuleMethods};
 
-use dynamo_runtime::{self as rs, logging, RuntimeConfig};
+use dynamo_runtime::{self as rs, CancellationToken, RuntimeConfig, logging};
 
-pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn add_to_module(_m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize tokio runtime first to avoid panics when OTEL_EXPORT_ENABLED=1
     init_pyo3_tokio_rt();
 
@@ -77,9 +81,8 @@ pub fn get_current_cancel_token() -> CancellationToken {
 
 #[pyclass]
 #[derive(Clone)]
-#[allow(dead_code)]
-struct Component {
-    inner: rs::component::Component,
+pub struct Component {
+    pub inner: rs::component::Component,
 }
 
 pub fn extract_distributed_runtime_from_obj(

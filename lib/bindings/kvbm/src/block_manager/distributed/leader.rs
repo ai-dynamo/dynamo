@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::dynamo::extract_distributed_runtime_from_obj;
+
 use super::*;
 
 use dynamo_llm::{self as llm_rs};

@@ -8,14 +8,15 @@
 
 use pyo3::Bound;
 use pyo3::prelude::*;
+
 use std::collections::HashSet;
 use std::sync::Arc;
-
-use dynamo_kvbm::integrations::connector::leader::{ConnectorLeader, FinishedStatus, Request};
-use dynamo_kvbm::{BlockId, InstanceId};
-
-use dynamo_nova_backend::WorkerAddress;
 use uuid::Uuid;
+
+use dynamo_kvbm::{
+    BlockId, InstanceId, WorkerAddress,
+    integrations::connector::leader::{ConnectorLeader, FinishedStatus, Request},
+};
 
 use crate::to_pyerr;
 use crate::v2::runtime::PyKvbmRuntime;

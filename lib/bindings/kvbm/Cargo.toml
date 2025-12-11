@@ -20,16 +20,17 @@ name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["dynamo", "v1", "v2"]
+default = ["v1", "v2"]
 dynamo = ["dep:dynamo-runtime"]
 v1 = ["dynamo", "dep:dynamo-llm", "dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
-v2 = ["dep:dynamo-kvbm"]
-kernels = ["dep:dynamo-kvbm-kernels"]
+v2 = ["dep:dynamo-kvbm", "dep:dynamo-memory"]
+kernels = ["dep:dynamo-kvbm-kernels", "dep:dynamo-memory"]
 
 [dependencies]
 dynamo-llm = { path = "../../llm", optional = true }
 dynamo-kvbm = { path = "../../kvbm", optional = true }
 dynamo-kvbm-kernels = { path = "../../kvbm-kernels", package = "dynamo-kvbm-kernels", optional = true }
+dynamo-memory = { path = "../../memory", optional = true }
 dynamo-runtime = { path = "../../runtime", optional = true }
 
 anyhow = { version = "1" }

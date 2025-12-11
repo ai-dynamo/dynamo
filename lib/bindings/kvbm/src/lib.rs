@@ -1,12 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use pyo3::exceptions::{PyRuntimeError, PyTypeError};
-use pyo3::types::{PyCapsule, PyCapsuleMethods};
 use pyo3::{exceptions::PyException, prelude::*};
-use std::sync::OnceLock;
-use std::sync::Weak;
 use std::{fmt::Display, sync::Arc};
-use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "dynamo")]
 mod dynamo;
