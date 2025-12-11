@@ -44,10 +44,10 @@ ARG CARGO_BUILD_JOBS
 ARG CUDA_VERSION
 
 # For multi-arch builds, TARGETARCH is automatically set by buildx (amd64 or arm64)
-# For single-arch builds, it falls back to amd64
-ARG TARGETARCH=amd64
-ARG ARCH=${TARGETARCH}
-ARG ARCH_ALT=x86_64
+# For single-arch builds, pass --build-arg ARCH=amd64 (or arm64)
+ARG TARGETARCH
+ARG ARCH=${TARGETARCH:-amd64}
+ARG ARCH_ALT
 
 # sccache configuration - inherit from base build
 ARG USE_SCCACHE
@@ -116,11 +116,12 @@ FROM quay.io/pypa/manylinux_2_28_x86_64 AS wheel_builder_base_amd64
 FROM quay.io/pypa/manylinux_2_28_aarch64 AS wheel_builder_base_arm64
 
 # Select the correct base image based on target architecture
-ARG TARGETARCH=amd64
+# TARGETARCH is automatically set by buildkit (amd64 or arm64)
+ARG TARGETARCH
 FROM wheel_builder_base_${TARGETARCH} AS wheel_builder
 
-# Redeclare ARGs for this stage and derive ARCH_ALT from TARGETARCH
-ARG TARGETARCH=amd64
+# Redeclare ARGs for this stage
+ARG TARGETARCH
 ARG ARCH=${TARGETARCH}
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
