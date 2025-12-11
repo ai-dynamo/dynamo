@@ -251,13 +251,7 @@ def test_request_cancellation_vllm_aggregated(request, runtime_services_dynamic_
 @pytest.mark.timeout(150)  # 3x average
 @pytest.mark.parametrize(
     "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
+    ["nats", "tcp"],
     indirect=True,
 )
 def test_request_cancellation_vllm_decode_cancel(
@@ -343,13 +337,7 @@ def test_request_cancellation_vllm_decode_cancel(
 @pytest.mark.timeout(150)  # 3x average
 @pytest.mark.parametrize(
     "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
+    ["nats", "tcp"],
     indirect=True,
 )
 def test_request_cancellation_vllm_prefill_cancel(

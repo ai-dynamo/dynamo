@@ -257,13 +257,7 @@ def test_request_cancellation_trtllm_aggregated(
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.parametrize(
     "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
+    ["nats", "tcp"],
     indirect=True,
 )
 def test_request_cancellation_trtllm_decode_cancel(
@@ -352,13 +346,7 @@ def test_request_cancellation_trtllm_decode_cancel(
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.parametrize(
     "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
+    ["nats", "tcp"],
     indirect=True,
 )
 def test_request_cancellation_trtllm_prefill_cancel(

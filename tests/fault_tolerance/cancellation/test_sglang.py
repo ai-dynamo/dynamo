@@ -298,13 +298,7 @@ def test_request_cancellation_sglang_aggregated(
 @pytest.mark.gpu_2
 @pytest.mark.parametrize(
     "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
+    ["nats", "tcp"],
     indirect=True,
 )
 def test_request_cancellation_sglang_decode_cancel(
