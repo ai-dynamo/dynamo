@@ -426,6 +426,7 @@ impl LocalModel {
 
     /// Attach this model to the endpoint. This registers it on the network
     /// allowing ingress to discover it.
+    /// Returns the ModelDeploymentCard we registered.
     ///
     /// For base models, pass `lora_name = None`.
     /// For LoRA adapters, pass `lora_name = Some("adapter-name")`.
@@ -435,7 +436,7 @@ impl LocalModel {
         model_type: ModelType,
         model_input: ModelInput,
         lora_name: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<ModelDeploymentCard> {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
 
@@ -467,7 +468,7 @@ impl LocalModel {
         )?;
         let _instance = discovery.register(spec).await?;
 
-        Ok(())
+        Ok(self.card.clone())
     }
 
     /// Helper associated function to detach a model from an endpoint

@@ -28,6 +28,7 @@ pub async fn run(
     distributed_runtime: DistributedRuntime,
     path: String,
     engine_config: EngineConfig,
+    metrics_labels: Option<Vec<(String, String)>>,
 ) -> anyhow::Result<()> {
     let cancel_token = distributed_runtime.primary_token().clone();
     let endpoint_id: EndpointId = path.parse()?;
@@ -79,7 +80,12 @@ pub async fn run(
                 .attach(&endpoint, model_type, ModelInput::Tokens, None)
                 .await?;
 
-            let fut = endpoint.endpoint_builder().handler(ingress).start();
+            let fut = endpoint
+                .endpoint_builder()
+                .metrics_labels(metrics_labels)
+                .graceful_shutdown(true)
+                .handler(ingress)
+                .start();
             Box::pin(fut)
         }
         EngineConfig::Dynamic(_) => {
@@ -162,10 +168,9 @@ mod integration_tests {
         let engine_config_clone = engine_config.clone();
         let valid_path_clone = valid_path.to_string();
 
-        let service_handle =
-            tokio::spawn(
-                async move { run(runtime_clone, valid_path_clone, engine_config_clone).await },
-            );
+        let service_handle = tokio::spawn(async move {
+            run(runtime_clone, valid_path_clone, engine_config_clone, None).await
+        });
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
@@ -206,7 +211,7 @@ mod integration_tests {
             .expect("Failed to create test environment");
 
         // Call run() directly - it should fail quickly for invalid endpoints
-        let result = run(runtime, invalid_path.to_string(), engine_config).await;
+        let result = run(runtime, invalid_path.to_string(), engine_config, None).await;
 
         // Should return an error for invalid endpoints
         assert!(

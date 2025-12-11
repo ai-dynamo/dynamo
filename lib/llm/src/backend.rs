@@ -115,6 +115,39 @@ impl Backend {
 #[async_trait]
 impl
     Operator<
+        SingleIn<serde_json::Value>,           // PreprocessedRequest
+        ManyOut<Annotated<serde_json::Value>>, // BackendOutput
+        SingleIn<PreprocessedRequest>,
+        ManyOut<Annotated<LLMEngineOutput>>,
+    > for Backend
+{
+    async fn generate(
+        &self,
+        request: SingleIn<serde_json::Value>,
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+    ) -> Result<ManyOut<Annotated<serde_json::Value>>> {
+        let context = request.context();
+        let typed_request = request.try_map(serde_json::from_value::<PreprocessedRequest>)?;
+        //let typed_request: PreprocessedRequest = serde_json::from_value(request.content().clone())?;
+        // self.generate(typed_request, next).await?;
+        let typed_stream = <Backend as Operator<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<BackendOutput>>,
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+        >>::generate(self, typed_request, next)
+        .await?;
+        let stream = typed_stream.map(move |output| {
+            output.map_data(|data| serde_json::to_value(data).map_err(|err| err.to_string()))
+        });
+
+        Ok(ResponseStream::new(Box::pin(stream), context))
+    }
+}
+
+#[async_trait]
+impl
+    Operator<
         SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<BackendOutput>>,
         SingleIn<PreprocessedRequest>,
@@ -154,6 +187,8 @@ impl
                         return Some((output, state));
                     }
 
+                    // If already de-tokenized by the engine, we're done.
+                    //
                     // if we have a data field without an event, then we might need to update the data
                     if let Some(data) = &output.data
                         && data.text.is_some()
