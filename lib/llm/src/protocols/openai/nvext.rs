@@ -22,11 +22,11 @@ pub struct WorkerIdInfo {
     pub decode_worker_id: Option<u64>,
 }
 
-/// Query stage response for disaggregated serving (Stage 1)
+/// Response for query_instance_id annotation (GAIE Stage 1)
 /// Returns selected worker IDs without executing prefill/decode
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct QueryStageResponse {
-    /// Whether the query stage completed successfully
+pub struct QueryInstanceIdResponse {
+    /// Whether the query completed successfully
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query_complete: Option<bool>,
 
@@ -50,9 +50,9 @@ pub struct NvExtResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<WorkerIdInfo>,
 
-    /// Query stage response data for disaggregated serving (Stage 1)
+    /// Response for query_instance_id annotation (GAIE Stage 1)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub query_stage: Option<QueryStageResponse>,
+    pub query_instance_id: Option<QueryInstanceIdResponse>,
 }
 
 /// NVIDIA LLM extensions to the OpenAI API

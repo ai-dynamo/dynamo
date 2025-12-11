@@ -263,63 +263,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
         // create choice
         let index = delta.index.unwrap_or(0);
-        let mut response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
-
-        // Extract worker_id and query_stage from disaggregated_params and inject into nvext if present
-        if let Some(params) = delta.disaggregated_params.as_ref() {
-            use crate::protocols::openai::nvext::{NvExtResponse, QueryStageResponse, WorkerIdInfo};
-
-            let mut nvext_response = NvExtResponse::default();
-
-            // Extract worker_id if present
-            if let Some(worker_id_json) = params.get("worker_id") {
-                let prefill_worker_id = worker_id_json
-                    .get("prefill_worker_id")
-                    .and_then(|v| v.as_u64());
-                let decode_worker_id = worker_id_json
-                    .get("decode_worker_id")
-                    .and_then(|v| v.as_u64());
-
-                nvext_response.worker_id = Some(WorkerIdInfo {
-                    prefill_worker_id,
-                    decode_worker_id,
-                });
-            }
-
-            // Extract query_stage if present (Stage 1 response)
-            if let Some(query_stage_json) = params.get("query_stage") {
-                // Extract token_ids as Vec<u32>
-                let token_ids = query_stage_json
-                    .get("token_ids")
-                    .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok());
-
-                let query_stage = QueryStageResponse {
-                    query_complete: query_stage_json
-                        .get("query_complete")
-                        .and_then(|v| v.as_bool()),
-                    prefill_worker_id: query_stage_json
-                        .get("prefill_worker_id")
-                        .and_then(|v| v.as_u64()),
-                    decode_worker_id: query_stage_json
-                        .get("decode_worker_id")
-                        .and_then(|v| v.as_u64()),
-                    token_ids,
-                };
-
-                nvext_response.query_stage = Some(query_stage);
-            }
-
-            // Only inject nvext if we have data
-            if (nvext_response.worker_id.is_some() || nvext_response.query_stage.is_some())
-                && let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
-                    response.inner.nvext = Some(nvext_json);
-                    tracing::debug!(
-                        "Injected nvext into completions: worker_id={:?}, query_stage={:?}",
-                        nvext_response.worker_id,
-                        nvext_response.query_stage
-                    );
-                }
-        }
+        let response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
 
         Ok(response)
     }

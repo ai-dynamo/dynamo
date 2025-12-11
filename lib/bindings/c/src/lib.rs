@@ -716,7 +716,7 @@ pub unsafe extern "C" fn dynamo_query_workers_for_disagg(
     };
 
     unsafe {
-        *query_complete_out = if result.query_stage_complete.unwrap_or(false) { 1 } else { 0 };
+        *query_complete_out = if result.query_complete.unwrap_or(false) { 1 } else { 0 };
         *prefill_worker_id_out = result.prefill_worker_id.unwrap_or(0);
         *decode_worker_id_out = result.decode_worker_id.unwrap_or(0);
         *token_ids_out = tokens_ptr;
@@ -816,8 +816,8 @@ pub unsafe extern "C" fn dynamo_free_worker_selection_result(
 pub struct WorkerSelectionResult {
     pub worker_id: i64,
     pub tokens: Vec<u32>,
-    // Query stage results (only populated when query_workers annotation is used)
-    pub query_stage_complete: Option<bool>,
+    // Query instance ID results (only populated when query_instance_id annotation is used)
+    pub query_complete: Option<bool>,
     pub prefill_worker_id: Option<i64>,
     pub decode_worker_id: Option<i64>,
 }
@@ -832,26 +832,26 @@ pub async fn extract_worker_selection_from_stream(
     let mut result = WorkerSelectionResult::default();
 
     while let Some(response) = stream.next().await {
-        // Check for query_stage data in nvext (from disaggregated serving Stage 1)
+        // Check for query_instance_id data in nvext (from GAIE Stage 1)
         if let Some(data) = response.data.as_ref()
             && let Some(nvext_value) = data.nvext.as_ref()
                 && let Ok(nvext_response) = serde_json::from_value::<NvExtResponse>(nvext_value.clone()) {
-                    // Extract query_stage data if present
-                    if let Some(query_stage) = nvext_response.query_stage {
-                        result.query_stage_complete = query_stage.query_complete;
-                        result.prefill_worker_id = query_stage.prefill_worker_id.map(|id| id as i64);
-                        result.decode_worker_id = query_stage.decode_worker_id.map(|id| id as i64);
-                        // Extract token_ids from query_stage for Stage 2 optimization
-                        if let Some(tokens) = query_stage.token_ids {
+                    // Extract query_instance_id data if present
+                    if let Some(query_data) = nvext_response.query_instance_id {
+                        result.query_complete = query_data.query_complete;
+                        result.prefill_worker_id = query_data.prefill_worker_id.map(|id| id as i64);
+                        result.decode_worker_id = query_data.decode_worker_id.map(|id| id as i64);
+                        // Extract token_ids from query_instance_id for Stage 2 optimization
+                        if let Some(tokens) = query_data.token_ids {
                             result.tokens = tokens;
                             tracing::debug!(
-                                "Extracted {} tokens from query_stage for Stage 2",
+                                "Extracted {} tokens from query_instance_id for Stage 2",
                                 result.tokens.len()
                             );
                         }
                         tracing::debug!(
-                            "Extracted query_stage from nvext: complete={:?}, prefill_worker={:?}, decode_worker={:?}, tokens={}",
-                            result.query_stage_complete,
+                            "Extracted query_instance_id from nvext: complete={:?}, prefill_worker={:?}, decode_worker={:?}, tokens={}",
+                            result.query_complete,
                             result.prefill_worker_id,
                             result.decode_worker_id,
                             result.tokens.len()
@@ -933,10 +933,10 @@ pub async fn extract_worker_selection_from_stream(
     }
 
     tracing::info!(
-        "Final worker_id={}, tokens.len()={}, query_stage_complete={:?}",
+        "Final worker_id={}, tokens.len()={}, query_complete={:?}",
         result.worker_id,
         result.tokens.len(),
-        result.query_stage_complete
+        result.query_complete
     );
     Ok(result)
 }
@@ -1020,7 +1020,7 @@ fn set_kv_annotation(
 ///
 /// This annotation signals the PrefillRouter to perform KV-aware worker selection
 /// without actually executing prefill. The response will contain prefill_worker_id
-/// and decode_worker_id in the nvext.query_stage field.
+/// and decode_worker_id in the nvext.query_instance_id field.
 ///
 /// Note: This is the same annotation used by KvPushRouter for decode worker selection.
 /// When used with PrefillRouter active, it triggers the full query stage flow.

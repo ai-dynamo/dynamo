@@ -93,7 +93,7 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_prefill_worker_id: Option<u64>,
 
-    /// Target decode worker ID for disaggregated serving (Stage 2)
+    /// For GAIE disaggregated serving (Stage 2) we pass the prefill and decode worker ids in nvext
     /// When set along with target_prefill_worker_id, routes to these specific workers
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]

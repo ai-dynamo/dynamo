@@ -45,10 +45,11 @@ pub enum PrefillError {
 /// Result from calling the prefill router
 /// Either just a worker ID (query only) or full prefill result with worker ID
 enum PrefillCallResult {
-    /// Query only mode: just the selected worker ID
+    /// Query only mode: just the selected worker ID.
+    /// This is used for GAIE to communicate the choices to the gateway during scheduling stage.
     WorkerIdOnly(u64),
-    /// Full prefill mode: prefill result and optional worker ID
-    Full(PrefillResult, Option<u64>),
+    /// This is Dynamo Standard mode of operation. Used to pass the info from the prefill to decode worker.
+    Full(PrefillResult),
 }
 
 /// The inner router used by PrefillRouter
@@ -191,12 +192,12 @@ impl PrefillRouter {
     /// # Arguments
     /// * `request` - The preprocessed request
     /// * `request_id` - Request ID for context
-    /// * `query_only` - If true, only query worker selection without executing prefill
+    /// * `query_only` - If true, only query worker selection without executing prefill. Used for GAIE.
     /// * `engine_ctx` - Optional engine context for linking child contexts (required for full prefill)
     ///
     /// # Returns
     /// * `PrefillCallResult::WorkerIdOnly` - When query_only=true, returns just worker ID
-    /// * `PrefillCallResult::Full` - When query_only=false, returns PrefillResult + worker ID
+    /// * `PrefillCallResult::Full` - When query_only=false, returns PrefillResult
     async fn call_prefill(
         &self,
         request: &PreprocessedRequest,
@@ -209,7 +210,8 @@ impl PrefillRouter {
             return Err(PrefillError::NotActivated);
         };
 
-        // Prepare request - add query_instance_id annotation if query_only
+        // Prepare request - add query_instance_id annotation if query_only so that the prefill only picks
+        // the prefill worker but does not execute the actual prefill.
         let mut req = request.clone();
         if query_only {
             req.annotations.push("query_instance_id".to_string());
@@ -233,7 +235,7 @@ impl PrefillRouter {
                 .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
         };
 
-        // Query-only mode: extract worker_instance_id from annotation event
+        // GAIE Query-only mode: extract worker_instance_id from annotation event
         if query_only {
             while let Some(item) = response.next().await {
                 if let Some(event) = item.event.as_ref()
@@ -251,7 +253,7 @@ impl PrefillRouter {
             ));
         }
 
-        // Full prefill mode: extract PrefillResult from LLMEngineOutput
+        // Standard Dynamo prefill mode: extract PrefillResult from LLMEngineOutput
         let Some(first_output) = response.next().await else {
             return Err(PrefillError::PrefillError(
                 "Prefill router returned no output (stream ended)".to_string(),
@@ -293,22 +295,10 @@ impl PrefillRouter {
             ));
         };
 
-        // Extract prefill worker ID from disaggregated_params
-        let prefill_worker_id = disaggregated_params
-            .get("worker_id")
-            .and_then(|worker_id_json| {
-                worker_id_json
-                    .get("prefill_worker_id")
-                    .and_then(|v| v.as_u64())
-            });
-
-        Ok(PrefillCallResult::Full(
-            PrefillResult {
-                disaggregated_params,
-                prompt_tokens_details,
-            },
-            prefill_worker_id,
-        ))
+        Ok(PrefillCallResult::Full(PrefillResult {
+            disaggregated_params,
+            prompt_tokens_details,
+        }))
     }
 }
 
@@ -338,7 +328,7 @@ impl
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
 
-        // ===== Stage 1: Query Workers Only =====
+        // GAIE integration scheduling stage: figure out the prefill and decode workers only
         // If query_instance_id annotation is present, only return worker IDs without execution
         if req.has_annotation("query_instance_id") {
             tracing::debug!(
@@ -346,12 +336,12 @@ impl
                 "Stage 1 (query_instance_id): Querying prefill and decode worker selection"
             );
             return self
-                .handle_query_stage(req, context, next, &request_id, &engine_ctx)
+                .handle_query_instance_id(req, context, next, &request_id, &engine_ctx)
                 .await;
         }
 
-        // ===== Prefill + Decode Flow =====
-        // Works for both Stage 2 (with target workers) and normal flow (router decides)
+        // Standard Dynamo Flow, same as GAIE stage 2 flow.
+        // The only difference is that for the GAIE the workers IDs were already selected in stage 1.
         let target_prefill_worker = req.target_prefill_worker_id;
         let target_decode_worker = req.target_decode_worker_id;
         let has_target_workers = target_prefill_worker.is_some() && target_decode_worker.is_some();
@@ -361,7 +351,7 @@ impl
                 request_id = %request_id,
                 prefill_worker = ?target_prefill_worker,
                 decode_worker = ?target_decode_worker,
-                "Stage 2 (execute): Using provided worker IDs for disaggregated serving"
+                "GAIE state 2: Using provided worker IDs for disaggregated serving"
             );
         }
 
@@ -381,7 +371,7 @@ impl
 
 impl PrefillRouter {
     /// Execute prefill and decode with optional target worker IDs
-    /// Unified function for both Stage 2 (with target workers) and normal flow (router decides)
+    /// Unified function for both GAIE Stage 2 (with target workers) and normal Dynamo flow
     #[allow(clippy::too_many_arguments)]
     async fn execute_prefill_and_decode(
         &self,
@@ -421,14 +411,14 @@ impl PrefillRouter {
 
         // Handle prefill result
         match prefill_result {
-            Ok(PrefillCallResult::Full(prefill_result, prefill_worker_id)) => {
+            Ok(PrefillCallResult::Full(prefill_result)) => {
                 tracing::debug!("Prefill succeeded, using disaggregated params for decode");
                 Self::route_to_decode(
                     req,
                     context,
                     next,
                     prefill_result,
-                    prefill_worker_id.or(target_prefill_worker),
+                    target_prefill_worker,
                     original_max_tokens,
                     target_decode_worker,
                 )
@@ -509,9 +499,9 @@ impl PrefillRouter {
         next.generate(decode_request).await
     }
 
-    /// Stage 1: Query worker selection without executing prefill/decode
-    /// Returns prefill_worker_id and decode_worker_id in the response
-    async fn handle_query_stage(
+    /// GAIE Stage 1: Handle query_instance_id annotation
+    /// Returns prefill_worker_id and decode_worker_id without executing prefill/decode.
+    async fn handle_query_instance_id(
         &self,
         req: PreprocessedRequest,
         _context: Context<()>,
@@ -522,7 +512,7 @@ impl PrefillRouter {
         // Query prefill worker using KV-aware routing (query_only=true, no engine_ctx needed)
         let prefill_worker_id = match self.call_prefill(&req, request_id, true, None).await {
             Ok(PrefillCallResult::WorkerIdOnly(id)) => Some(id),
-            Ok(PrefillCallResult::Full(_, _)) => {
+            Ok(PrefillCallResult::Full(_)) => {
                 // Shouldn't happen with query_only=true
                 tracing::error!("Unexpected Full result in query-only mode");
                 None
@@ -562,8 +552,8 @@ impl PrefillRouter {
             }
         }
 
-        // Build query stage response with token_ids for Stage 2 optimization
-        let query_stage_response = LLMEngineOutput {
+        // Build query_instance_id response with token_ids for Stage 2 optimization
+        let query_response = LLMEngineOutput {
             token_ids: vec![],
             tokens: None,
             text: None,
@@ -573,7 +563,7 @@ impl PrefillRouter {
             finish_reason: None,
             index: None,
             disaggregated_params: Some(json!({
-                "query_stage": {
+                "query_instance_id": {
                     "query_complete": true,
                     "prefill_worker_id": prefill_worker_id,
                     "decode_worker_id": decode_worker_id,
@@ -588,10 +578,13 @@ impl PrefillRouter {
             request_id = %request_id,
             prefill_worker_id = ?prefill_worker_id,
             decode_worker_id = ?decode_worker_id,
-            "Query stage complete, returning worker IDs"
+            "query_instance_id complete, returning worker IDs"
         );
 
-        let response_stream = stream::once(async { Annotated::from_data(query_stage_response) });
-        Ok(ResponseStream::new(Box::pin(response_stream), engine_ctx.clone()))
+        let response_stream = stream::once(async { Annotated::from_data(query_response) });
+        Ok(ResponseStream::new(
+            Box::pin(response_stream),
+            engine_ctx.clone(),
+        ))
     }
 }
