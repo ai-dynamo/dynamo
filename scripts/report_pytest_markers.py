@@ -354,7 +354,7 @@ def run_collection(test_path: str, use_stubbing: bool) -> tuple[int, Report]:
 
         # Special case: pytest-benchmark needs a real Warning subclass
         try:
-            sys.modules["pytest_benchmark.logger"].PytestBenchmarkWarning = type(
+            sys.modules["pytest_benchmark.logger"].PytestBenchmarkWarning = type(  # type: ignore[attr-defined]
                 "PytestBenchmarkWarning", (Warning,), {}
             )
         except (KeyError, AttributeError):
@@ -430,7 +430,7 @@ def main() -> int:
 
     # Write JSON report if requested
     if args.json:
-        with open(args.json, "w") as f:
+        with open(args.json, "w", encoding="utf-8") as f:
             json.dump(asdict(report), f, indent=2)
         LOG.info("Wrote JSON report to %s", args.json)
 
