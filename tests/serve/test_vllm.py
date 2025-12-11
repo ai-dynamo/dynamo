@@ -237,8 +237,8 @@ vllm_configs = {
             )
         ],
     ),
-    "multimodal_agg_llava_epd_2gpu": VLLMConfig(
-        name="multimodal_agg_llava_epd_2gpu",
+    "multimodal_agg_llava_epd": VLLMConfig(
+        name="multimodal_agg_llava_epd",
         directory=vllm_dir,
         script_name="agg_multimodal_epd.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.nightly],
