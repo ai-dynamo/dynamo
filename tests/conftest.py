@@ -412,11 +412,52 @@ class SharedNatsServer(SharedManagedProcess):
         return server
 
 
+@pytest.fixture
+def store_kv(request):
+    """
+    KV store for runtime. Defaults to "etcd".
+
+    To iterate over multiple stores in a test:
+        @pytest.mark.parametrize("store_kv", ["file", "etcd"], indirect=True)
+        def test_example(runtime_services):
+            ...
+    """
+    return getattr(request, "param", "etcd")
+
+
+@pytest.fixture
+def request_plane(request):
+    """
+    Request plane for runtime. Defaults to "nats".
+
+    To iterate over multiple transports in a test:
+        @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+        def test_example(runtime_services):
+            ...
+    """
+    return getattr(request, "param", "nats")
+
+
 @pytest.fixture()
-def runtime_services(request):
-    with NatsServer(request) as nats_process:
+def runtime_services(request, store_kv, request_plane):
+    """
+    Start runtime services (NATS and/or etcd) based on store_kv and request_plane.
+
+    - If store_kv != "etcd", etcd is not started (returns None)
+    - If request_plane != "nats", NATS is not started (returns None)
+    """
+    if request_plane == "nats" and store_kv == "etcd":
+        with NatsServer(request) as nats_process:
+            with EtcdServer(request) as etcd_process:
+                yield nats_process, etcd_process
+    elif request_plane == "nats":
+        with NatsServer(request) as nats_process:
+            yield nats_process, None
+    elif store_kv == "etcd":
         with EtcdServer(request) as etcd_process:
-            yield nats_process, etcd_process
+            yield None, etcd_process
+    else:
+        yield None, None
 
 
 @pytest.fixture(scope="session")
