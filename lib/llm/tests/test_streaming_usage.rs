@@ -208,11 +208,29 @@ async fn test_streaming_without_usage() {
     // Collect all chunks
     let chunks: Vec<_> = transformed_stream.collect().await;
 
-    // Verify we got exactly 3 chunks (no extra usage chunk)
-    assert_eq!(chunks.len(), 3, "Should have exactly 3 content chunks");
+    // Filter out metrics annotation events (events without SSE data payload)
+    let content_chunks: Vec<_> = chunks
+        .into_iter()
+        .filter(|chunk| {
+            // Metrics annotation events have event=Some(ANNOTATION_LLM_METRICS) and data=None
+            !(chunk
+                .event
+                .as_ref()
+                .map(|e| e == "llm_metrics")
+                .unwrap_or(false)
+                && chunk.data.is_none())
+        })
+        .collect();
+
+    // Verify we got exactly 3 content chunks (no extra usage chunk)
+    assert_eq!(
+        content_chunks.len(),
+        3,
+        "Should have exactly 3 content chunks"
+    );
 
     // Verify all chunks have usage: None
-    for (i, chunk) in chunks.iter().enumerate() {
+    for (i, chunk) in content_chunks.iter().enumerate() {
         if let Some(response) = &chunk.data {
             assert!(
                 response.usage.is_none(),
@@ -322,15 +340,29 @@ async fn test_streaming_with_usage_false() {
     // Collect all chunks
     let chunks: Vec<_> = transformed_stream.collect().await;
 
+    // Filter out metrics annotation events (events without SSE data payload)
+    let content_chunks: Vec<_> = chunks
+        .into_iter()
+        .filter(|chunk| {
+            // Metrics annotation events have event=Some(ANNOTATION_LLM_METRICS) and data=None
+            !(chunk
+                .event
+                .as_ref()
+                .map(|e| e == "llm_metrics")
+                .unwrap_or(false)
+                && chunk.data.is_none())
+        })
+        .collect();
+
     // Verify we got exactly 3 chunks (no extra usage chunk when explicitly false)
     assert_eq!(
-        chunks.len(),
+        content_chunks.len(),
         3,
         "Should have exactly 3 content chunks when include_usage is false"
     );
 
     // Verify all chunks have usage: None
-    for (i, chunk) in chunks.iter().enumerate() {
+    for (i, chunk) in content_chunks.iter().enumerate() {
         if let Some(response) = &chunk.data {
             assert!(
                 response.usage.is_none(),
