@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import hashlib
 import logging
 import time
 from io import BytesIO
@@ -28,62 +27,6 @@ from tensorrt_llm.inputs import default_multimodal_input_loader
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
-
-
-def apply_mm_hashes(mm_data: Any) -> int:
-    """
-    Compute a hash for multimodal data.
-
-    This function creates a deterministic hash from multimodal objects (images, videos, etc.)
-    to uniquely identify them for KV cache routing. The hash is computed from the
-    actual tensor data to ensure identical content produces identical hashes.
-
-    Args:
-        mm_data: Multimodal data - can be a torch.Tensor, dict with tensors, or other format
-
-    Returns:
-        A 64-bit unsigned integer hash (as Python int)
-    """
-    try:
-        # Handle different input formats
-        if isinstance(mm_data, torch.Tensor):
-            # For tensor, hash the raw bytes
-            data_bytes = mm_data.cpu().numpy().tobytes()
-        elif isinstance(mm_data, dict):
-            # For dictionary (e.g., with 'mm_embeddings'), hash the main embeddings
-            if "mm_embeddings" in mm_data:
-                data_bytes = mm_data["mm_embeddings"].cpu().numpy().tobytes()
-            else:
-                # Fallback: concatenate all tensor values
-                all_bytes = b""
-                for key in sorted(mm_data.keys()):
-                    if isinstance(mm_data[key], torch.Tensor):
-                        all_bytes += mm_data[key].cpu().numpy().tobytes()
-                data_bytes = all_bytes
-        elif isinstance(mm_data, (list, tuple)):
-            # For list/tuple of tensors, concatenate all
-            all_bytes = b""
-            for item in mm_data:
-                if isinstance(item, torch.Tensor):
-                    all_bytes += item.cpu().numpy().tobytes()
-            data_bytes = all_bytes
-        else:
-            # Fallback: try to convert to bytes
-            data_bytes = str(mm_data).encode("utf-8")
-
-        # Use xxHash-like algorithm via Python's built-in hash with SHA256 for consistency
-        # We use SHA256 to get a deterministic 64-bit hash across processes
-        hash_digest = hashlib.sha256(data_bytes).digest()
-        # Take first 8 bytes and convert to uint64
-        mm_hash = int.from_bytes(hash_digest[:8], byteorder="little", signed=False)
-
-        logging.debug(f"Computed MM hash: {mm_hash} for data type: {type(mm_data)}")
-        return mm_hash
-
-    except Exception as e:
-        logging.error(f"Failed to compute MM hash: {e}")
-        # Return a deterministic fallback hash
-        return hash(str(type(mm_data))) & 0xFFFFFFFFFFFFFFFF
 
 
 class TokenizerProtocol(Protocol):
@@ -213,11 +156,7 @@ class MultimodalRequestProcessor:
     async def process_openai_request(
         self, request: Dict, embeddings: Any
     ) -> Optional[Any]:
-        """
-        Process OpenAI request and return with multimodal data.
-
-        Also computes mm_hash for the multimodal objects to enable KV cache routing.
-        """
+        """Process OpenAI request and return with multimodal data."""
         # Extract messages - check extra_args first (from Rust preprocessor for multimodal)
         # Fall back to direct messages field for backward compatibility
         messages = request.get("extra_args", {}).get(
@@ -232,26 +171,18 @@ class MultimodalRequestProcessor:
             return None
 
         loader_kwargs = {}
-        mm_data_for_hash = None
-
         if embeddings is not None:
             # EPD flow
             loader_kwargs["mm_embeddings"] = [embeddings]
-            mm_data_for_hash = embeddings
             logging.debug(f"Using NIXL embeddings in prefill worker: {embeddings}")
         elif image_urls:
             # Image-only flow
             loader_kwargs["media"] = [image_urls]
-            # For image URLs, we'll compute hash after loading in TRTLLM
-            # Store URL as fallback for now
-            mm_data_for_hash = image_urls[0] if image_urls else None
         elif embedding_paths:
             # PD flow with no NIXL and no encoder
-            loaded_embeddings = [
+            loader_kwargs["mm_embeddings"] = [
                 self.load_tensor_from_path_or_url(path) for path in embedding_paths
             ]
-            loader_kwargs["mm_embeddings"] = loaded_embeddings
-            mm_data_for_hash = loaded_embeddings[0] if loaded_embeddings else None
             logging.debug(f"Using embedding paths in prefill worker: {embedding_paths}")
 
         # Process with default_multimodal_input_loader
@@ -265,24 +196,6 @@ class MultimodalRequestProcessor:
             device="cuda",
             **loader_kwargs,
         )
-
-        # Compute MM hash if we have the data
-        mm_hash = None
-        if mm_data_for_hash is not None:
-            try:
-                mm_hash = apply_mm_hashes(mm_data_for_hash)
-                logging.debug(f"Computed mm_hash: {mm_hash}")
-            except Exception as e:
-                logging.warning(f"Failed to compute mm_hash: {e}")
-
-        # Store mm_hash in the request for later use by router
-        # This will be used to construct RequestExtraInfo
-        if mm_hash is not None:
-            if "extra_args" not in request:
-                request["extra_args"] = {}
-            if not isinstance(request["extra_args"], dict):
-                request["extra_args"] = {}
-            request["extra_args"]["mm_hash"] = mm_hash
 
         # Return the first processed input if available
         if processed_inputs:
