@@ -335,7 +335,7 @@ impl ModelManager {
         // Build transport for router endpoint based on request plane mode
         // Use KV_ROUTER_COMPONENT as the component name to distinguish from the generate endpoint's component
         let router_endpoint_id = router_endpoint_id(endpoint.id().namespace);
-        let transport = build_transport_type(request_plane_mode, &router_endpoint_id, instance_id);
+        let transport = build_transport_type(request_plane_mode, &router_endpoint_id, instance_id)?;
 
         let discovery_spec = DiscoverySpec::Endpoint {
             namespace: router_endpoint_id.namespace.clone(),

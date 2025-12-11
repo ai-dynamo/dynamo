@@ -27,15 +27,26 @@ use tokio_util::sync::CancellationToken;
 static ACTUAL_TCP_RPC_PORT: OnceLock<u16> = OnceLock::new();
 
 /// Get the actual TCP RPC port that the server is listening on.
-/// Returns 0 if the TCP server hasn't been started yet.
-pub fn get_actual_tcp_rpc_port() -> u16 {
-    ACTUAL_TCP_RPC_PORT.get().copied().unwrap_or(0)
+pub fn get_actual_tcp_rpc_port() -> anyhow::Result<u16> {
+    ACTUAL_TCP_RPC_PORT.get().copied().ok_or_else(|| {
+        tracing::error!(
+            "TCP RPC port not set - request_plane_server() must be called before get_actual_tcp_rpc_port()"
+        );
+        anyhow::anyhow!(
+            "TCP RPC port not initialized. This is not expected."
+        )
+    })
 }
 
 /// Set the actual TCP RPC port (called internally after server binds).
 fn set_actual_tcp_rpc_port(port: u16) {
-    // Ignore if already set (shouldn't happen in normal operation)
-    let _ = ACTUAL_TCP_RPC_PORT.set(port);
+    if let Err(existing) = ACTUAL_TCP_RPC_PORT.set(port) {
+        tracing::warn!(
+            existing_port = existing,
+            new_port = port,
+            "TCP RPC port already set, ignoring new value"
+        );
+    }
 }
 
 /// Network configuration loaded from environment variables
@@ -158,12 +169,35 @@ impl NetworkManager {
     ) -> Self {
         let config = NetworkConfig::from_env(nats_client);
 
-        tracing::info!(
-            %mode,
-            http_port = config.http_port,
-            tcp_port = ?config.tcp_port,
-            "Initializing NetworkManager (tcp_port=None means OS will assign free port)"
-        );
+        match mode {
+            RequestPlaneMode::Http => {
+                tracing::info!(
+                    %mode,
+                    host = %config.http_host,
+                    port = config.http_port,
+                    rpc_root = %config.http_rpc_root,
+                    "Initializing NetworkManager with HTTP request plane"
+                );
+            }
+            RequestPlaneMode::Tcp => {
+                let port_display = config
+                    .tcp_port
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "OS-assigned".to_string());
+                tracing::info!(
+                    %mode,
+                    host = %config.tcp_host,
+                    port = %port_display,
+                    "Initializing NetworkManager with TCP request plane"
+                );
+            }
+            RequestPlaneMode::Nats => {
+                tracing::info!(
+                    %mode,
+                    "Initializing NetworkManager with NATS request plane"
+                );
+            }
+        }
 
         Self {
             mode,

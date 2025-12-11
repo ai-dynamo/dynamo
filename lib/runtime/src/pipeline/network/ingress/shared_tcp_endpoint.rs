@@ -58,7 +58,9 @@ impl SharedTcpServer {
     pub fn new(bind_addr: SocketAddr, cancellation_token: CancellationToken) -> Arc<Self> {
         Arc::new(Self {
             handlers: Arc::new(DashMap::new()),
+            // address we requested to bind to.
             bind_addr,
+            // actual address after free port assignment (if DYN_TCP_RPC_PORT is not specified)
             actual_addr: std::sync::RwLock::new(None),
             cancellation_token,
         })
@@ -116,7 +118,7 @@ impl SharedTcpServer {
                             let handlers = self.handlers.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = Self::handle_connection(stream, handlers).await {
-                                    tracing::debug!("TCP connection error: {}", e);
+                                    tracing::error!("TCP connection error: {}", e);
                                 }
                             });
                         }
@@ -166,7 +168,7 @@ impl SharedTcpServer {
         tracing::info!(
             "Registered endpoint '{}' with shared TCP server on {}",
             endpoint_name,
-            self.bind_addr
+            self.actual_address().unwrap_or(self.bind_addr)
         );
 
         Ok(())
