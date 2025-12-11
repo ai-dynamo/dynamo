@@ -43,6 +43,8 @@ pub mod test_config;
 pub mod testing;
 
 pub use dynamo_identity::InstanceId;
+pub use dynamo_kvbm_config::KvbmConfig;
+pub use dynamo_nova::{PeerInfo, WorkerAddress};
 pub use dynamo_tokens::{PositionalSequenceHash, SequenceHash as SequenceHashV1};
 
 pub type BlockId = usize;

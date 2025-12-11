@@ -3,6 +3,9 @@
 
 use super::*;
 
+use dynamo_llm::{self as llm_rs};
+use dynamo_runtime::{self as rs};
+
 use derive_getters::Dissolve;
 use llm_rs::block_manager::distributed::{
     KvbmLeader as KvbmLeaderImpl, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig,
