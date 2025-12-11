@@ -40,7 +40,11 @@ impl WorkerLoadState {
     /// 3. If neither check can be performed (missing data), that dp_rank is considered free.
     ///
     /// The worker is busy only if ALL dp_ranks are busy.
-    pub fn is_busy(&self, active_decode_blocks_threshold: f64, active_prefill_tokens_threshold: f64) -> bool {
+    pub fn is_busy(
+        &self,
+        active_decode_blocks_threshold: f64,
+        active_prefill_tokens_threshold: f64,
+    ) -> bool {
         // Get all dp_ranks we know about
         let all_dp_ranks: std::collections::HashSet<_> = self
             .active_decode_blocks
@@ -108,16 +112,20 @@ impl KvWorkerMonitor {
     ///
     /// Both thresholds can be dynamically updated via `set_active_decode_blocks_threshold()` and
     /// `set_active_prefill_tokens_threshold()`.
-    pub fn new(client: Client, active_decode_blocks_threshold: f64, active_prefill_tokens_threshold: f64) -> Self {
+    pub fn new(
+        client: Client,
+        active_decode_blocks_threshold: f64,
+        active_prefill_tokens_threshold: f64,
+    ) -> Self {
         Self {
             client,
             worker_load_states: Arc::new(RwLock::new(HashMap::new())),
-            active_decode_blocks_threshold: Arc::new(AtomicU32::new(Self::active_decode_blocks_threshold_to_scaled(
-                active_decode_blocks_threshold,
-            ))),
-            active_prefill_tokens_threshold: Arc::new(AtomicU64::new(Self::active_prefill_tokens_threshold_to_scaled(
-                active_prefill_tokens_threshold,
-            ))),
+            active_decode_blocks_threshold: Arc::new(AtomicU32::new(
+                Self::active_decode_blocks_threshold_to_scaled(active_decode_blocks_threshold),
+            )),
+            active_prefill_tokens_threshold: Arc::new(AtomicU64::new(
+                Self::active_prefill_tokens_threshold_to_scaled(active_prefill_tokens_threshold),
+            )),
             started: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -148,7 +156,9 @@ impl KvWorkerMonitor {
 
     /// Get the current active decode blocks threshold value as f64.
     pub fn active_decode_blocks_threshold(&self) -> f64 {
-        Self::scaled_to_active_decode_blocks_threshold(self.active_decode_blocks_threshold.load(Ordering::Relaxed))
+        Self::scaled_to_active_decode_blocks_threshold(
+            self.active_decode_blocks_threshold.load(Ordering::Relaxed),
+        )
     }
 
     /// Set the active decode blocks threshold value from f64.
@@ -161,7 +171,9 @@ impl KvWorkerMonitor {
 
     /// Get the current active prefill tokens threshold value as f64.
     pub fn active_prefill_tokens_threshold(&self) -> f64 {
-        Self::scaled_to_active_prefill_tokens_threshold(self.active_prefill_tokens_threshold.load(Ordering::Relaxed))
+        Self::scaled_to_active_prefill_tokens_threshold(
+            self.active_prefill_tokens_threshold.load(Ordering::Relaxed),
+        )
     }
 
     /// Set the active prefill tokens threshold value from f64.

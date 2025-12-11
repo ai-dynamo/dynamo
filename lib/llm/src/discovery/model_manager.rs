@@ -501,7 +501,11 @@ impl ModelManager {
     /// # Returns
     ///
     /// The threshold value as f64, or `None` if no monitor exists for this model.
-    pub fn active_decode_blocks_threshold(&self, model: &str, threshold: Option<f64>) -> Option<f64> {
+    pub fn active_decode_blocks_threshold(
+        &self,
+        model: &str,
+        threshold: Option<f64>,
+    ) -> Option<f64> {
         let monitors = self.worker_monitors.read();
         let monitor = monitors.get(model)?;
 
@@ -526,7 +530,11 @@ impl ModelManager {
     /// # Returns
     ///
     /// The threshold value as f64, or `None` if no monitor exists for this model.
-    pub fn active_prefill_tokens_threshold(&self, model: &str, threshold: Option<f64>) -> Option<f64> {
+    pub fn active_prefill_tokens_threshold(
+        &self,
+        model: &str,
+        threshold: Option<f64>,
+    ) -> Option<f64> {
         let monitors = self.worker_monitors.read();
         let monitor = monitors.get(model)?;
 
@@ -568,7 +576,11 @@ impl ModelManager {
             existing.set_active_prefill_tokens_threshold(active_prefill_tokens_threshold);
             existing.clone()
         } else {
-            let monitor = KvWorkerMonitor::new(client, active_decode_blocks_threshold, active_prefill_tokens_threshold);
+            let monitor = KvWorkerMonitor::new(
+                client,
+                active_decode_blocks_threshold,
+                active_prefill_tokens_threshold,
+            );
             monitors.insert(model.to_string(), monitor.clone());
             monitor
         }

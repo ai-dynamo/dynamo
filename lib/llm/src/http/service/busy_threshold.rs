@@ -134,7 +134,10 @@ async fn busy_threshold_handler(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!(ErrorResponse {
-                error: format!("active_prefill_tokens_threshold must be >= 0.0, got {}", threshold),
+                error: format!(
+                    "active_prefill_tokens_threshold must be >= 0.0, got {}",
+                    threshold
+                ),
             })),
         );
     }
@@ -142,12 +145,18 @@ async fn busy_threshold_handler(
     let manager = state.manager();
 
     // Get or set the thresholds via the model's worker monitor
-    let active_decode_blocks_threshold = manager.active_decode_blocks_threshold(&request.model, request.active_decode_blocks_threshold);
-    let active_prefill_tokens_threshold = manager.active_prefill_tokens_threshold(&request.model, request.active_prefill_tokens_threshold);
+    let active_decode_blocks_threshold = manager
+        .active_decode_blocks_threshold(&request.model, request.active_decode_blocks_threshold);
+    let active_prefill_tokens_threshold = manager
+        .active_prefill_tokens_threshold(&request.model, request.active_prefill_tokens_threshold);
 
     // If trying to SET but model has no monitor, return 404
-    let is_setting = request.active_decode_blocks_threshold.is_some() || request.active_prefill_tokens_threshold.is_some();
-    if is_setting && active_decode_blocks_threshold.is_none() && active_prefill_tokens_threshold.is_none() {
+    let is_setting = request.active_decode_blocks_threshold.is_some()
+        || request.active_prefill_tokens_threshold.is_some();
+    if is_setting
+        && active_decode_blocks_threshold.is_none()
+        && active_prefill_tokens_threshold.is_none()
+    {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!(ErrorResponse {
@@ -188,10 +197,12 @@ async fn list_busy_thresholds_handler(
         thresholds: thresholds
             .into_iter()
             .map(
-                |(model, active_decode_blocks_threshold, active_prefill_tokens_threshold)| BusyThresholdResponse {
-                    model,
-                    active_decode_blocks_threshold: Some(active_decode_blocks_threshold),
-                    active_prefill_tokens_threshold: Some(active_prefill_tokens_threshold),
+                |(model, active_decode_blocks_threshold, active_prefill_tokens_threshold)| {
+                    BusyThresholdResponse {
+                        model,
+                        active_decode_blocks_threshold: Some(active_decode_blocks_threshold),
+                        active_prefill_tokens_threshold: Some(active_prefill_tokens_threshold),
+                    }
                 },
             )
             .collect(),
