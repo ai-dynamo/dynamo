@@ -70,3 +70,7 @@ runs:
         requests_memory: '48Gi'
         limits_memory: '52Gi'
 
+    - name: Inspect Buildkit Builders
+      shell: bash
+      run: |
+        docker buildx inspect
