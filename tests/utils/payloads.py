@@ -275,8 +275,6 @@ class LoraTestChatPayload(ChatPayload):
     def _ensure_lora_loaded(self) -> None:
         """Ensure the LoRA adapter is loaded before making inference requests"""
         if not self._lora_loaded:
-            import time
-
             import requests
 
             # Import the load_lora_adapter function
@@ -293,13 +291,12 @@ class LoraTestChatPayload(ChatPayload):
             # Wait for the LoRA model to appear in /v1/models
             models_url = f"http://{self.host}:{self.port}/v1/models"
             start_time = time.time()
-            max_wait = 60  # 1 minute timeout
 
             logger.info(
                 f"Waiting for LoRA model '{self.lora_name}' to appear in /v1/models..."
             )
 
-            while time.time() - start_time < max_wait:
+            while time.time() - start_time < self.timeout:
                 try:
                     response = requests.get(models_url, timeout=5)
                     if response.status_code == 200:
@@ -323,7 +320,7 @@ class LoraTestChatPayload(ChatPayload):
                 time.sleep(1)
 
             raise RuntimeError(
-                f"Timeout: LoRA model '{self.lora_name}' did not appear in /v1/models within {max_wait}s"
+                f"Timeout: LoRA model '{self.lora_name}' did not appear in /v1/models within {self.timeout}s"
             )
 
     def url(self) -> str:
