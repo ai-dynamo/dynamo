@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DYN-1556: Reproduce NIXL timeout issue with long-context KV transfer
+# DeepSeek-R1-Distill-Llama-70B disaggregated setup (TP8, PP1, DP1)
+# Fails at 120k token context during KV cache transfer between prefill and decode
+# Updated to match llama-3-70b recipe conventions
+#
+# ADDITIONS NOT IN RECIPE (kept for bug reproduction):
+# - Frontend: Explicit command/args (recipe uses image default)
+# - Workers: --enforce-eager (recipe uses CUDA graphs by default)
+# - Workers: --connector nixl (recipe uses default connector)
+# - Workers: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=300 (recipe doesn't set)
+# - Workers: VLLM_RPC_TIMEOUT=400000 (recipe doesn't set - may not help NIXL layer)
+# - Mount path: /models instead of /opt/models (our PVC convention)
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-r1-disagg-repro
+  namespace: keivenc-dyn-1556-repro-nixl-timeout
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      dynamoNamespace: deepseek-r1-disagg-repro
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /models
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post1
+          workingDir: /workspace/examples/backends/vllm
+          # NOTE: Recipe doesn't set explicit frontend command - uses image default
+          command:
+          - /bin/sh
+          - -c
+          args:
+            - "python -m dynamo.frontend --router-mode kv --http-port 8787"
+      envs:
+        - name: HF_HOME
+          value: /models/hub
+      replicas: 1
+
+    VllmPrefillWorker:
+      componentType: worker
+      dynamoNamespace: deepseek-r1-disagg-repro
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /models
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        mainContainer:
+          env:
+            - name: HF_HOME
+              value: /models/hub
+            # NOTE: Recipe doesn't set these timeout env vars
+            - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+              value: "300"
+            - name: VLLM_RPC_TIMEOUT
+              value: "400000"
+          # Liveness probe: Allow time for service discovery registration (working deployments use 240s delay)
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /live
+              port: system
+            initialDelaySeconds: 240
+            periodSeconds: 30
+            timeoutSeconds: 5
+          args:
+          # Recipe args: --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 8 --data-parallel-size 1 --disable-log-requests --is-prefill-worker --gpu-memory-utilization 0.95 --no-enable-prefix-caching --block-size 128
+          # Our additions: --enforce-eager, --connector nixl (NOT in recipe)
+          # Removed from ours: --pipeline-parallel-size 1 (recipe doesn't have it, uses default)
+          - "python3 -m dynamo.vllm --model deepseek-ai/DeepSeek-R1-Distill-Llama-70B --tensor-parallel-size 8 --data-parallel-size 1 --disable-log-requests --is-prefill-worker --gpu-memory-utilization 0.95 --no-enable-prefix-caching --block-size 128 --enforce-eager --connector nixl"
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post1
+          workingDir: /workspace/examples/backends/vllm
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+        requests:
+          gpu: "8"
+
+    VllmDecodeWorker:
+      componentType: worker
+      dynamoNamespace: deepseek-r1-disagg-repro
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /models
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        mainContainer:
+          env:
+            - name: HF_HOME
+              value: /models/hub
+            # NOTE: Recipe doesn't set these timeout env vars
+            - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+              value: "300"
+            - name: VLLM_RPC_TIMEOUT
+              value: "400000"
+          # Liveness probe: Allow time for service discovery registration (working deployments use 240s delay)
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /live
+              port: system
+            initialDelaySeconds: 240
+            periodSeconds: 30
+            timeoutSeconds: 5
+          args:
+          # Recipe args: --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 8 --data-parallel-size 1 --disable-log-requests --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128
+          # Our additions: --enforce-eager, --connector nixl (NOT in recipe)
+          # Removed from ours: --pipeline-parallel-size 1 (recipe doesn't have it, uses default)
+          # NOTE: Recipe decode worker does NOT have --is-decode-worker flag
+          - "python3 -m dynamo.vllm --model deepseek-ai/DeepSeek-R1-Distill-Llama-70B --tensor-parallel-size 8 --data-parallel-size 1 --disable-log-requests --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128 --enforce-eager --connector nixl"
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post1
+          workingDir: /workspace/examples/backends/vllm
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+        requests:
+          gpu: "8"
