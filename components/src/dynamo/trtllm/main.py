@@ -22,7 +22,6 @@ if "TLLM_LOG_LEVEL" not in os.environ and os.getenv(
 import uvloop
 from prometheus_client import REGISTRY
 from tensorrt_llm.llmapi import (
-    BuildConfig,
     CapacitySchedulerPolicy,
     DynamicBatchConfig,
     KvCacheConfig,
