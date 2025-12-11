@@ -128,8 +128,6 @@ impl
     ) -> Result<ManyOut<Annotated<serde_json::Value>>> {
         let context = request.context();
         let typed_request = request.try_map(serde_json::from_value::<PreprocessedRequest>)?;
-        //let typed_request: PreprocessedRequest = serde_json::from_value(request.content().clone())?;
-        // self.generate(typed_request, next).await?;
         let typed_stream = <Backend as Operator<
             SingleIn<PreprocessedRequest>,
             ManyOut<Annotated<BackendOutput>>,

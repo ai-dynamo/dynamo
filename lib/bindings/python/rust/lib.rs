@@ -776,8 +776,6 @@ impl Endpoint {
 
         let ingress = match &self.model_card.lock().take() {
             Some(card) => {
-                tracing::debug!("+++ New way");
-
                 // JSON in and out, to communicate with Python
                 let json_in_out = SegmentSource::<
                     SingleIn<serde_json::Value>,
@@ -797,10 +795,7 @@ impl Endpoint {
                     .map_err(to_pyerr)?;
                 JsonServerStreamingIngress::for_pipeline(pipeline).map_err(to_pyerr)?
             }
-            None => {
-                tracing::debug!("--- Old way");
-                JsonServerStreamingIngress::for_engine(engine.clone()).map_err(to_pyerr)?
-            }
+            None => JsonServerStreamingIngress::for_engine(engine.clone()).map_err(to_pyerr)?,
         };
 
         // Convert Python dict to serde_json::Value if provided and validate it's an object
