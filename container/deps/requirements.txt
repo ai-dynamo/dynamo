@@ -11,9 +11,9 @@
 #   maximum versions available on different platforms (x86_64 vs aarch64, different CUDA versions)
 
 # For Multimodal EPD (required for device_map="auto" in vision model loading)
-accelerate==1.12.0
-aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@5554d2eb8206738c66048bf2d72183e9bcd85759
-aiofiles==24.1.0
+accelerate
+aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@bdc142609b97c23a298115f09a9f88ae143f48d8
+aiofiles
 aiperf @ git+https://github.com/ai-dynamo/aiperf.git@4d3fa29403c8f75da22a14f1f7b3aeb27db9288f
 av==15.0.0
 fastapi==0.120.1

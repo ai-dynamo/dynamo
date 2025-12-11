@@ -142,9 +142,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.timeout(140)  # 3x average
-def test_request_cancellation_trtllm_aggregated(
-    request, runtime_services, predownload_models
-):
+def test_request_cancellation_trtllm_aggregated(request, runtime_services):
     """
     End-to-end test for request cancellation functionality in aggregated mode.
 
@@ -216,9 +214,7 @@ def test_request_cancellation_trtllm_aggregated(
 
 
 @pytest.mark.timeout(350)  # 3x average
-def test_request_cancellation_trtllm_decode_cancel(
-    request, runtime_services, predownload_models
-):
+def test_request_cancellation_trtllm_decode_cancel(request, runtime_services):
     """
     End-to-end test for request cancellation during decode phase with unified frontend.
 
@@ -289,9 +285,7 @@ def test_request_cancellation_trtllm_decode_cancel(
 
 
 @pytest.mark.timeout(350)  # 3x average
-def test_request_cancellation_trtllm_prefill_cancel(
-    request, runtime_services, predownload_models
-):
+def test_request_cancellation_trtllm_prefill_cancel(request, runtime_services):
     """
     End-to-end test for request cancellation during prefill phase with unified frontend.
 
@@ -376,9 +370,7 @@ def test_request_cancellation_trtllm_prefill_cancel(
     reason="May fail due to unknown reason with TRT-LLM or backend implementation",
     strict=False,
 )
-def test_request_cancellation_trtllm_kv_transfer_cancel(
-    request, runtime_services, predownload_models
-):
+def test_request_cancellation_trtllm_kv_transfer_cancel(request, runtime_services):
     """
     End-to-end test for request cancellation during prefill to decode KV transfer phase.
 

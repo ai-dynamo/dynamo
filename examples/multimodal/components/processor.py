@@ -17,8 +17,8 @@ from transformers import AutoTokenizer
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
 from vllm.outputs import RequestOutput
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import FlexibleArgumentParser
+from vllm.tokenizers import TokenizerLike as AnyTokenizer
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker

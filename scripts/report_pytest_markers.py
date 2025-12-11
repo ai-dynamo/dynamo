@@ -98,6 +98,10 @@ STUB_MODULES = [
     "requests",
     "numpy",
     "gradio",
+    "aiconfigurator",
+    "aiconfigurator.webapp",
+    "aiconfigurator.webapp.components",
+    "aiconfigurator.webapp.components.profiling",
 ]
 
 # Project paths for local imports
