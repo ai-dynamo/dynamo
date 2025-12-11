@@ -77,8 +77,12 @@ class DynamoWorkerProcess(ManagedProcess):
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
 
-        env["DYN_VLLM_KV_EVENT_PORT"] = f"2008{worker_id[-1]}"  # TODO: use dynamic port allocation
-        env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = f"560{worker_id[-1]}"  # TODO: use dynamic port allocation
+        env[
+            "DYN_VLLM_KV_EVENT_PORT"
+        ] = f"2008{worker_id[-1]}"  # TODO: use dynamic port allocation
+        env[
+            "VLLM_NIXL_SIDE_CHANNEL_PORT"
+        ] = f"560{worker_id[-1]}"  # TODO: use dynamic port allocation
 
         env["DYN_LOG"] = "debug"
         # Disable canary health check - these tests expect full control over requests

@@ -165,7 +165,9 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(140)  # 3x average
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
-def test_request_cancellation_trtllm_aggregated(request, runtime_services_dynamic_ports):
+def test_request_cancellation_trtllm_aggregated(
+    request, runtime_services_dynamic_ports
+):
     """
     End-to-end test for request cancellation functionality in aggregated mode.
 
@@ -261,7 +263,9 @@ def test_request_cancellation_trtllm_aggregated(request, runtime_services_dynami
     ],
     indirect=True,
 )
-def test_request_cancellation_trtllm_decode_cancel(request, runtime_services_dynamic_ports):
+def test_request_cancellation_trtllm_decode_cancel(
+    request, runtime_services_dynamic_ports
+):
     """
     End-to-end test for request cancellation during decode phase with unified frontend.
 
@@ -354,7 +358,9 @@ def test_request_cancellation_trtllm_decode_cancel(request, runtime_services_dyn
     ],
     indirect=True,
 )
-def test_request_cancellation_trtllm_prefill_cancel(request, runtime_services_dynamic_ports):
+def test_request_cancellation_trtllm_prefill_cancel(
+    request, runtime_services_dynamic_ports
+):
     """
     End-to-end test for request cancellation during prefill phase with unified frontend.
 
