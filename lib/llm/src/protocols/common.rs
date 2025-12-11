@@ -22,6 +22,7 @@ use super::TokenIdType;
 pub mod llm_backend;
 pub mod postprocessor;
 pub mod preprocessor;
+pub mod timing;
 
 /// SamplingOptionsProvider is a trait that allows the caller to extract the sampling options from
 /// the object that implements it. This will mutate the object.
