@@ -83,4 +83,4 @@ If you're running Kubernetes/cloud deployment examples (EKS, AKS, GKE), you'll a
 | **kubectl** | v1.24+ | [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) |
 | **Helm** | v3.0+ | [Install Helm](https://helm.sh/docs/intro/install/) |
 
-See the [Kubernetes Installation Guide](../kubernetes/installation_guide.md#prerequisites) for detailed setup instructions and pre-deployment checks.
+See the [Kubernetes Installation Guide](../docs/kubernetes/installation_guide.md#prerequisites) for detailed setup instructions and pre-deployment checks.
