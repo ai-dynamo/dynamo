@@ -1004,13 +1004,21 @@ async fn chat_completions(
                 .map_err(|e| {
                     tracing::error!(
                         request_id,
-                        "Failed to parse chat completion response: {:?}",
+                        "Failed to fold chat completions stream for: {:?}",
                         e
                     );
-                    ErrorMessage::internal_server_error(&format!(
-                        "Failed to parse chat completion response: {}",
-                        e
-                    ))
+                    // Return 400 Bad Request for Python ValueError exceptions
+                    if e.contains("ValueError") {
+                        ErrorMessage::from_http_error(HttpError {
+                            code: 400,
+                            message: format!("Failed to fold chat completions stream: {}", e),
+                        })
+                    } else {
+                        ErrorMessage::internal_server_error(&format!(
+                            "Failed to fold chat completions stream: {}",
+                            e
+                        ))
+                    }
                 })?;
 
         inflight_guard.mark_ok();
@@ -1232,10 +1240,18 @@ async fn responses(
                     "Failed to fold chat completions stream for: {:?}",
                     e
                 );
-                ErrorMessage::internal_server_error(&format!(
-                    "Failed to fold chat completions stream: {}",
-                    e
-                ))
+                // Return 400 Bad Request for Python ValueError exceptions
+                if e.contains("ValueError") {
+                    ErrorMessage::from_http_error(HttpError {
+                        code: 400,
+                        message: format!("Failed to fold chat completions stream: {}", e),
+                    })
+                } else {
+                    ErrorMessage::internal_server_error(&format!(
+                        "Failed to fold chat completions stream: {}",
+                        e
+                    ))
+                }
             })?;
 
     // Convert NvCreateChatCompletionResponse --> NvResponse

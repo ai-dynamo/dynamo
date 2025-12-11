@@ -128,6 +128,9 @@ impl PythonServerStreamingEngine {
 
 #[derive(Debug, thiserror::Error)]
 enum ResponseProcessingError {
+    #[error("python value error exception: {0}")]
+    ValueError(String),
+
     #[error("python exception: {0}")]
     PythonException(String),
 
@@ -252,6 +255,13 @@ where
                             ResponseProcessingError::PyGeneratorExit(_) => {
                                 "Stream ended before generation completed".to_string()
                             }
+                            ResponseProcessingError::ValueError(e) => {
+                                let msg = format!(
+                                    "a python value error exception was caught while processing the async generator: {}",
+                                    e
+                                );
+                                msg
+                            }
                             ResponseProcessingError::PythonException(e) => {
                                 let msg = format!(
                                     "a python exception was caught while processing the async generator: {}",
@@ -310,12 +320,16 @@ where
     let item = item.map_err(|e| {
         println!();
         let mut is_py_generator_exit = false;
+        let mut is_py_value_error = false;
         Python::with_gil(|py| {
             e.display(py);
             is_py_generator_exit = e.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py);
+            is_py_value_error = e.is_instance_of::<pyo3::exceptions::PyValueError>(py);
         });
         if is_py_generator_exit {
             ResponseProcessingError::PyGeneratorExit(e.to_string())
+        } else if is_py_value_error {
+            ResponseProcessingError::ValueError(e.to_string())
         } else {
             ResponseProcessingError::PythonException(e.to_string())
         }
