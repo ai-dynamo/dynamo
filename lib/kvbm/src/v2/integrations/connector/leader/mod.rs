@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod control;
 mod request;
 mod slot;
 
@@ -41,6 +42,9 @@ pub struct ConnectorLeader {
     oracle: Arc<dyn Oracle>,
     /// Offload engine for G1→G2→G3 transfers (initialized in initialize_async)
     offload_engine: OnceLock<OffloadEngine>,
+    /// Control server shutdown handle (initialized in initialize_async)
+    #[allow(dead_code)] // Kept for RAII-based shutdown on drop
+    control_server_shutdown: OnceLock<oneshot::Sender<()>>,
 }
 
 #[derive(Default, Clone)]
@@ -83,6 +87,7 @@ impl ConnectorLeader {
             slots: DashMap::new(),
             oracle: Arc::new(DefaultOracle::default()),
             offload_engine: OnceLock::new(),
+            control_server_shutdown: OnceLock::new(),
         }
     }
 

@@ -89,6 +89,14 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for LruBackend<T> {
     fn has_block(&self, seq_hash: SequenceHash) -> bool {
         self.cache.peek(&seq_hash).is_some()
     }
+
+    fn allocate_all(&mut self) -> Vec<Block<T, Registered>> {
+        let mut allocated = Vec::with_capacity(self.cache.len());
+        while let Some((_seq_hash, block)) = self.cache.pop_lru() {
+            allocated.push(block);
+        }
+        allocated
+    }
 }
 
 #[cfg(test)]

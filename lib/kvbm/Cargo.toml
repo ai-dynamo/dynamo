@@ -31,6 +31,7 @@ futures = { workspace = true }
 uuid = { workspace = true }
 validator = { workspace = true }
 xxhash-rust = { workspace = true }
+axum = { workspace = true }
 
 aligned-vec = "0.6.4"
 bincode = { version = "2.0.1", features = ["serde", "derive"] }

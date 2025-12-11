@@ -73,7 +73,7 @@ impl ConnectorLeader {
 
     /// Initialize all workers via leader-driven deferred init flow (async version).
     /// This is primarily used for use and testing outside of the ConnectorAPI.
-    pub(crate) async fn initialize_async(&self) -> Result<()> {
+    pub(crate) async fn initialize_async(self: Arc<Self>) -> Result<()> {
         tracing::debug!("Starting initialize_async");
 
         // Step 1: Gather layout config futures while holding the lock
@@ -529,6 +529,18 @@ impl ConnectorLeader {
         tracing::debug!("initialize_async completed successfully");
         let workers = self.init.lock().clone();
         let _ = self.workers.set(Arc::new(workers));
+
+        // Start the control server
+        tracing::debug!("Starting control server");
+        match super::control::start_control_server(self.clone(), self.runtime.tokio()).await {
+            Ok(shutdown_tx) => {
+                let _ = self.control_server_shutdown.set(shutdown_tx);
+                tracing::info!("Control server started successfully");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start control server: {}. Continuing without it.", e);
+            }
+        }
 
         Ok(())
     }

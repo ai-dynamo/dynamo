@@ -645,7 +645,7 @@ impl TestConnectorInstance {
     /// the leader's initialize_workers uses block_on internally.
     pub async fn initialize(&self) -> Result<()> {
         // Call the async version of initialize_workers
-        self.leader.initialize_async().await
+        self.leader.clone().initialize_async().await
     }
 
     /// Access the InstanceLeader (available after initialize()).

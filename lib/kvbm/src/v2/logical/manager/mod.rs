@@ -108,6 +108,13 @@ pub enum BlockManagerBuilderError {
     ValidationError(String),
 }
 
+/// Error types for BlockManager reset operations
+#[derive(Debug, thiserror::Error)]
+pub enum BlockManagerResetError {
+    #[error("Reset pool count mismatch: expected {expected}, got {actual}")]
+    BlockCountMismatch { expected: usize, actual: usize },
+}
+
 /// BlockManager v2 with pluggable inactive pool backends
 pub struct BlockManager<T: BlockMetadata> {
     reset_pool: ResetPool<T>,
@@ -149,6 +156,37 @@ impl<T: BlockMetadata> BlockManager<T> {
             }
             None => None,
         }
+    }
+
+    /// Reset the inactive pool by draining all blocks and returning them to the reset pool.
+    ///
+    /// This method:
+    /// 1. Acquires the inactive pool lock and allocates all blocks
+    /// 2. Releases the inactive pool lock
+    /// 3. Drops the allocated blocks, which returns them to the reset pool via RAII
+    /// 4. Verifies the reset pool contains the expected number of blocks
+    ///
+    /// # Returns
+    /// - `Ok(())` if all blocks were successfully returned to the reset pool
+    /// - `Err(BlockManagerResetError::BlockCountMismatch)` if the final count doesn't match
+    ///   (this can happen under contention when blocks are in active use)
+    pub fn reset_inactive_pool(&self) -> Result<(), BlockManagerResetError> {
+        // 1. Allocate all blocks from inactive pool (acquires lock internally)
+        let blocks = self.inactive_pool.allocate_all_blocks();
+
+        // 2. Drop blocks - RAII returns them to reset pool
+        drop(blocks);
+
+        // 3. Verify block count (may fail under contention - that's OK)
+        let reset_count = self.reset_pool.len();
+        if reset_count != self.total_blocks {
+            return Err(BlockManagerResetError::BlockCountMismatch {
+                expected: self.total_blocks,
+                actual: reset_count,
+            });
+        }
+
+        Ok(())
     }
 
     pub fn register_blocks(&self, blocks: Vec<CompleteBlock<T>>) -> Vec<ImmutableBlock<T>> {

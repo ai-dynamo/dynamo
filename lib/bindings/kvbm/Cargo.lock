@@ -1873,6 +1873,7 @@ dependencies = [
  "aligned-vec",
  "anyhow",
  "async-trait",
+ "axum",
  "bincode 2.0.1",
  "blake3",
  "bytes",
