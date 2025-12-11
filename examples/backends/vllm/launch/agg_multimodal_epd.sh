@@ -60,7 +60,7 @@ elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
     PROMPT_TEMPLATE="USER: <image>\n<prompt> ASSISTANT:"
 elif [[ "$MODEL_NAME" == "microsoft/Phi-3.5-vision-instruct" ]]; then
     PROMPT_TEMPLATE="<|user|>\n<|image_1|>\n<prompt><|end|>\n<|assistant|>\n"
-elif [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
+elif [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]] || [[ "$MODEL_NAME" == "Qwen/Qwen2-VL-2B-Instruct" ]]; then
     PROMPT_TEMPLATE="<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><prompt><|im_end|>\n<|im_start|>assistant\n"
 else
     echo "No multi-modal prompt template is defined for the model: $MODEL_NAME"
@@ -78,8 +78,7 @@ python -m dynamo.frontend &
 # Multi-GPU mode: Each worker gets its own GPU, so use higher memory settings
 EXTRA_ARGS=""
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    # Single GPU mode: reduce memory utilization to allow both workers to fit
-    EXTRA_ARGS="--gpu-memory-utilization 0.3 --max-model-len 1024"
+    EXTRA_ARGS="--gpu-memory-utilization 0.25 --max-model-len 3072 --enforce-eager"
 else
     # Multi-GPU mode: standard memory settings
     EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"

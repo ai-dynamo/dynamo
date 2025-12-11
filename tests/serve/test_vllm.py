@@ -211,13 +211,13 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
-    "multimodal_agg_llava_epd": VLLMConfig(
-        name="multimodal_agg_llava_epd",
+    "multimodal_agg_qwen2vl_2b_epd": VLLMConfig(
+        name="multimodal_agg_qwen2vl_2b_epd",
         directory=vllm_dir,
         script_name="agg_multimodal_epd.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
-        model="llava-hf/llava-1.5-7b-hf",
-        script_args=["--model", "llava-hf/llava-1.5-7b-hf", "--single-gpu"],
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen2-VL-2B-Instruct", "--single-gpu"],
         request_payloads=[
             chat_payload(
                 [
