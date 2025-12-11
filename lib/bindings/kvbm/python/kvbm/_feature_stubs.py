@@ -54,6 +54,10 @@ def _make_module_stub(module_name: str, feature: str):
     """
 
     class ModuleStub:
+        def is_available(self):
+            """Check if the feature is available. Returns False for stubs."""
+            return False
+
         def __getattr__(self, name):
             raise ImportError(
                 f"'{module_name}.{name}' requires the '{feature}' feature. "

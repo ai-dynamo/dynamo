@@ -10,7 +10,16 @@ pub mod vllm;
 
 use pyo3::prelude::*;
 
+/// Check if the v2 feature is available.
+///
+/// This function always returns `true` when the v2 module is compiled.
+#[pyfunction]
+fn is_available() -> bool {
+    true
+}
+
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(is_available, m)?)?;
     m.add_class::<vllm::PyKvbmVllmConfig>()?;
     m.add_class::<torch::PyTensor>()?;
     m.add_class::<runtime::PyKvbmRuntime>()?;
