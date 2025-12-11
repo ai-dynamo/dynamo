@@ -199,7 +199,6 @@ get_options() {
             fi
             ;;
         --base-image)
-            # Note: --base-image cannot be used with --dev-image
             if [ "$2" ]; then
                 BASE_IMAGE=$2
                 shift
@@ -218,14 +217,6 @@ get_options() {
         --target)
             if [ "$2" ]; then
                 TARGET=$2
-                shift
-            else
-                missing_requirement "$1"
-            fi
-            ;;
-        --dev-image)
-            if [ "$2" ]; then
-                DEV_IMAGE_INPUT=$2
                 shift
             else
                 missing_requirement "$1"
@@ -353,20 +344,10 @@ get_options() {
         shift
     done
 
-    # Validate argument combinations
-    if [[ -n "${DEV_IMAGE_INPUT:-}" && -n "${BASE_IMAGE:-}" ]]; then
-        error "ERROR: --dev-image cannot be used with --base-image. Use --dev-image to build from existing images or --base-image to build new images."
-    fi
-
-    # Validate that --target and --dev-image cannot be used together
-    if [[ -n "${DEV_IMAGE_INPUT:-}" && -n "${TARGET:-}" ]]; then
-        error "ERROR: --target cannot be used with --dev-image. Use --target to build from scratch or --dev-image to build from existing images."
-    fi
-
-    # Validate that --uid and --gid are only used with local-dev related options
+    # Validate that --uid and --gid are only used with local-dev target
     if [[ -n "${CUSTOM_UID:-}" || -n "${CUSTOM_GID:-}" ]]; then
-        if [[ -z "${DEV_IMAGE_INPUT:-}" && "${TARGET:-}" != "local-dev" ]]; then
-            error "ERROR: --uid and --gid can only be used with --dev-image or --target local-dev"
+        if [[ "${TARGET:-}" != "local-dev" ]]; then
+            error "ERROR: --uid and --gid can only be used with --target local-dev"
         fi
     fi
 
@@ -468,9 +449,8 @@ show_help() {
     echo "  [--cache-from cache location to start from]"
     echo "  [--cache-to location where to cache the build output]"
     echo "  [--tag tag for image]"
-    echo "  [--dev-image dev image to build local-dev from]"
-    echo "  [--uid user ID for local-dev images (only with --dev-image or --target local-dev)]"
-    echo "  [--gid group ID for local-dev images (only with --dev-image or --target local-dev)]"
+    echo "  [--uid user ID for local-dev images (only with --target local-dev)]"
+    echo "  [--gid group ID for local-dev images (only with --target local-dev)]"
     echo "  [--no-cache disable docker build cache]"
     echo "  [--dry-run print docker commands without running]"
     echo "  [--build-context name=path to add build context]"
@@ -876,54 +856,27 @@ fi
 
 show_image_options
 
-if [ -z "$RUN_PREFIX" ]; then
-    set -x
+# Always build the main image first
+# Create build log directory for BuildKit reports
+BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
+mkdir -p "${BUILD_LOG_DIR}"
+SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
+
+# Use BuildKit for enhanced metadata
+if docker buildx version &>/dev/null; then
+    $RUN_PREFIX docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+    BUILD_EXIT_CODE=${PIPESTATUS[0]}
+else
+    $RUN_PREFIX DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+    BUILD_EXIT_CODE=${PIPESTATUS[0]}
 fi
 
-
-# Skip Build 1 and Build 2 if DEV_IMAGE_INPUT is set (we'll handle it at the bottom)
-if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
-    # Create build log directory for BuildKit reports
-    BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
-    mkdir -p "${BUILD_LOG_DIR}"
-    SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
-
-    # Use BuildKit for enhanced metadata
-    if [ -z "$RUN_PREFIX" ]; then
-        if docker buildx version &>/dev/null; then
-            docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
-            BUILD_EXIT_CODE=${PIPESTATUS[0]}
-        else
-            DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
-            BUILD_EXIT_CODE=${PIPESTATUS[0]}
-        fi
-
-        if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
-            exit ${BUILD_EXIT_CODE}
-        fi
-    else
-        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-    fi
+if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+    exit ${BUILD_EXIT_CODE}
 fi
 
-# Handle --dev-image option (build local-dev from existing dev image)
-if [[ -n "${DEV_IMAGE_INPUT:-}" ]]; then
-    # Validate that the dev image is not already a local-dev image
-    if [[ "$DEV_IMAGE_INPUT" == *"-local-dev" ]]; then
-        echo "ERROR: Cannot use local-dev image as dev image input: '$DEV_IMAGE_INPUT'"
-        exit 1
-    fi
-
-    # Build tag arguments - always add -local-dev suffix for --dev-image
-    # Generate local-dev tag from input image
-    if [[ "$DEV_IMAGE_INPUT" == *:* ]]; then
-        LOCAL_DEV_TAG="--tag ${DEV_IMAGE_INPUT}-local-dev"
-    else
-        LOCAL_DEV_TAG="--tag ${DEV_IMAGE_INPUT}:latest-local-dev"
-    fi
-
-    build_local_dev_with_header "$DEV_IMAGE_INPUT" "$LOCAL_DEV_TAG" "Successfully built local-dev image: ${LOCAL_DEV_TAG#--tag }" "Building Local-Dev Image"
-elif [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
+# Handle local-dev target
+if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
     # Use the first tag name (TAG) if available, otherwise use latest
     if [[ -n "$TAG" ]]; then
         DEV_IMAGE=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
