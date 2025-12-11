@@ -306,7 +306,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 	}
 
 	serviceReplicaStatus := v1alpha1.ServiceReplicaStatus{
-		ComponentKind:     "Deployment",
+		ComponentKind:     v1alpha1.ComponentKindDeployment,
 		ComponentName:     deployment.Name,
 		Replicas:          deployment.Status.Replicas,
 		UpdatedReplicas:   deployment.Status.UpdatedReplicas,
@@ -466,7 +466,7 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplic
 
 func getLeaderWorkerSetReplicasStatus(leaderWorkerSet *leaderworkersetv1.LeaderWorkerSet) v1alpha1.ServiceReplicaStatus {
 	return v1alpha1.ServiceReplicaStatus{
-		ComponentKind:   "LeaderWorkerSet",
+		ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 		ComponentName:   leaderWorkerSet.Name,
 		Replicas:        leaderWorkerSet.Status.Replicas,
 		UpdatedReplicas: leaderWorkerSet.Status.UpdatedReplicas,

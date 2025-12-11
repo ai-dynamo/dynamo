@@ -1297,7 +1297,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				reason:   "AllLeaderWorkerSetsReady",
 				message:  "All LeaderWorkerSets are ready",
 				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
-					ComponentKind:   "LeaderWorkerSet",
+					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
 					ReadyReplicas:   ptr.To(int32(1)),
 					UpdatedReplicas: 1,
@@ -1376,7 +1376,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				reason:   "SomeLeaderWorkerSetsNotReady",
 				message:  "Some LeaderWorkerSets are not ready",
 				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
-					ComponentKind:   "LeaderWorkerSet",
+					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
 					ReadyReplicas:   ptr.To(int32(2)),
 					UpdatedReplicas: 2,
@@ -1455,7 +1455,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				reason:   "AllLeaderWorkerSetsReady",
 				message:  "All LeaderWorkerSets are ready",
 				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
-					ComponentKind:   "LeaderWorkerSet",
+					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
 					ReadyReplicas:   ptr.To(int32(3)),
 					UpdatedReplicas: 3,
@@ -1600,7 +1600,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				reason:   "DeploymentReady",
 				message:  "Deployment is ready",
 				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
-					ComponentKind:     "Deployment",
+					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
 					Replicas:          2,
 					UpdatedReplicas:   2,
@@ -1641,7 +1641,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				reason:   "DeploymentNotReady",
 				message:  "Deployment is not ready",
 				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
-					ComponentKind:     "Deployment",
+					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
 					Replicas:          1,
 					UpdatedReplicas:   1,
@@ -1747,7 +1747,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				reason:   "DeploymentNotReady",
 				message:  "Deployment is not ready",
 				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
-					ComponentKind:     "Deployment",
+					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
 					Replicas:          1,
 					UpdatedReplicas:   1,
@@ -1759,7 +1759,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			wantConditionReason:  "DeploymentNotReady",
 			wantConditionMessage: "Deployment is not ready",
 			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:     "Deployment",
+				ComponentKind:     v1alpha1.ComponentKindDeployment,
 				ComponentName:     "test-component",
 				Replicas:          1,
 				UpdatedReplicas:   1,
@@ -1775,7 +1775,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				reason:   "DeploymentReady",
 				message:  "Deployment is ready",
 				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
-					ComponentKind:     "Deployment",
+					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
 					Replicas:          2,
 					UpdatedReplicas:   2,
@@ -1787,7 +1787,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			wantConditionReason:  "DeploymentReady",
 			wantConditionMessage: "Deployment is ready",
 			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:     "Deployment",
+				ComponentKind:     v1alpha1.ComponentKindDeployment,
 				ComponentName:     "test-component",
 				Replicas:          2,
 				UpdatedReplicas:   2,
@@ -1803,7 +1803,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				reason:   "SomeLeaderWorkerSetsNotReady",
 				message:  "Some LeaderWorkerSets are not ready",
 				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
-					ComponentKind:   "LeaderWorkerSet",
+					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
 					Replicas:        3,
 					UpdatedReplicas: 2,
@@ -1814,7 +1814,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			wantConditionReason:  "SomeLeaderWorkerSetsNotReady",
 			wantConditionMessage: "Some LeaderWorkerSets are not ready",
 			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:   "LeaderWorkerSet",
+				ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 				ComponentName:   "test-component-0",
 				Replicas:        3,
 				UpdatedReplicas: 2,
@@ -1829,7 +1829,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				reason:   "AllLeaderWorkerSetsReady",
 				message:  "All LeaderWorkerSets are ready",
 				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
-					ComponentKind:   "LeaderWorkerSet",
+					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
 					Replicas:        3,
 					UpdatedReplicas: 3,
@@ -1840,7 +1840,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			wantConditionReason:  "AllLeaderWorkerSetsReady",
 			wantConditionMessage: "All LeaderWorkerSets are ready",
 			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
-				ComponentKind:   "LeaderWorkerSet",
+				ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 				ComponentName:   "test-component-0",
 				Replicas:        3,
 				UpdatedReplicas: 3,

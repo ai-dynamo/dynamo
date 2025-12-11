@@ -67,6 +67,26 @@ _Appears in:_
 
 
 
+#### ComponentKind
+
+_Underlying type:_ _string_
+
+ComponentKind represents the type of underlying Kubernetes resource.
+
+_Validation:_
+- Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet]
+
+_Appears in:_
+- [ServiceReplicaStatus](#servicereplicastatus)
+
+| Field | Description |
+| --- | --- |
+| `PodClique` | ComponentKindPodClique represents a PodClique resource.<br /> |
+| `PodCliqueScalingGroup` | ComponentKindPodCliqueScalingGroup represents a PodCliqueScalingGroup resource.<br /> |
+| `Deployment` | ComponentKindDeployment represents a Deployment resource.<br /> |
+| `LeaderWorkerSet` | ComponentKindLeaderWorkerSet represents a LeaderWorkerSet resource.<br /> |
+
+
 #### ConfigMapKeySelector
 
 
@@ -753,12 +773,12 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `componentKind` _string_ | ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet"). |  |  |
+| `componentKind` _[ComponentKind](#componentkind)_ | ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet"). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br /> |
 | `componentName` _string_ | ComponentName is the name of the underlying resource. |  |  |
-| `replicas` _integer_ | Replicas is the total number of non-terminated replicas.<br />Always populated for all component kinds. |  |  |
-| `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Always populated for all component kinds. |  |  |
-| `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  |  |
-| `availableReplicas` _integer_ | AvailableReplicas is the number of available replicas.<br />For Deployment: replicas ready for >= minReadySeconds.<br />For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.<br />Not available for PodClique or LeaderWorkerSet.<br />When nil, the field is omitted from the API response. |  |  |
+| `replicas` _integer_ | Replicas is the total number of non-terminated replicas.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
+| `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
+| `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br /> |
+| `availableReplicas` _integer_ | AvailableReplicas is the number of available replicas.<br />For Deployment: replicas ready for >= minReadySeconds.<br />For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.<br />Not available for PodClique or LeaderWorkerSet.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br /> |
 
 
 #### SharedMemorySpec

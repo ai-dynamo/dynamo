@@ -394,7 +394,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
-						ComponentKind:   "PodClique",
+						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-frontend",
 						Replicas:        2,
 						UpdatedReplicas: 2,
@@ -454,14 +454,14 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Message: Message("Resources not ready: test-dgd: podclique/test-dgd-0-decode: desired=2, ready=1"),
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
-						ComponentKind:   "PodClique",
+						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-frontend",
 						Replicas:        1,
 						UpdatedReplicas: 1,
 						ReadyReplicas:   ptr.To(int32(1)),
 					},
 					"decode": {
-						ComponentKind:   "PodClique",
+						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-decode",
 						Replicas:        2,
 						UpdatedReplicas: 1,
@@ -527,14 +527,14 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"decode": {
-						ComponentKind:     "PodCliqueScalingGroup",
+						ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 						ComponentName:     "test-dgd-0-decode",
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						AvailableReplicas: ptr.To(int32(1)),
 					},
 					"prefill": {
-						ComponentKind:     "PodCliqueScalingGroup",
+						ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 						ComponentName:     "test-dgd-0-prefill",
 						Replicas:          1,
 						UpdatedReplicas:   1,
@@ -597,14 +597,14 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Message: Message("Resources not ready: test-dgd: pcsg/test-dgd-0-aggregated: desired=2, available=1"),
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
-						ComponentKind:   "PodClique",
+						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-frontend",
 						Replicas:        1,
 						UpdatedReplicas: 1,
 						ReadyReplicas:   ptr.To(int32(1)),
 					},
 					"aggregated": {
-						ComponentKind:     "PodCliqueScalingGroup",
+						ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 						ComponentName:     "test-dgd-0-aggregated",
 						Replicas:          2,
 						UpdatedReplicas:   2,
@@ -707,7 +707,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 							},
 						},
 						Service: v1alpha1.ServiceReplicaStatus{
-							ComponentKind:     "Deployment",
+							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-frontend-deployment",
 							Replicas:          2,
 							UpdatedReplicas:   2,
@@ -723,7 +723,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
-						ComponentKind:     "Deployment",
+						ComponentKind:     v1alpha1.ComponentKindDeployment,
 						ComponentName:     "test-dgd-frontend-deployment",
 						Replicas:          2,
 						UpdatedReplicas:   2,
@@ -767,7 +767,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 							},
 						},
 						Service: v1alpha1.ServiceReplicaStatus{
-							ComponentKind:     "Deployment",
+							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-frontend-deployment",
 							Replicas:          2,
 							UpdatedReplicas:   1,
@@ -783,7 +783,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				Message: "Resources not ready: test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
-						ComponentKind:     "Deployment",
+						ComponentKind:     v1alpha1.ComponentKindDeployment,
 						ComponentName:     "test-dgd-frontend-deployment",
 						Replicas:          2,
 						UpdatedReplicas:   1,
@@ -839,7 +839,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 							},
 						},
 						Service: v1alpha1.ServiceReplicaStatus{
-							ComponentKind:     "Deployment",
+							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-frontend-deployment",
 							Replicas:          1,
 							UpdatedReplicas:   1,
@@ -868,7 +868,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 							},
 						},
 						Service: v1alpha1.ServiceReplicaStatus{
-							ComponentKind:     "Deployment",
+							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-decode-deployment",
 							Replicas:          2,
 							UpdatedReplicas:   2,
@@ -897,7 +897,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 							},
 						},
 						Service: v1alpha1.ServiceReplicaStatus{
-							ComponentKind:     "Deployment",
+							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-prefill-deployment",
 							Replicas:          3,
 							UpdatedReplicas:   3,
@@ -913,7 +913,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
-						ComponentKind:     "Deployment",
+						ComponentKind:     v1alpha1.ComponentKindDeployment,
 						ComponentName:     "test-dgd-frontend-deployment",
 						Replicas:          1,
 						UpdatedReplicas:   1,
@@ -921,7 +921,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						AvailableReplicas: ptr.To(int32(1)),
 					},
 					"decode": {
-						ComponentKind:     "Deployment",
+						ComponentKind:     v1alpha1.ComponentKindDeployment,
 						ComponentName:     "test-dgd-decode-deployment",
 						Replicas:          2,
 						UpdatedReplicas:   2,
@@ -929,7 +929,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						AvailableReplicas: ptr.To(int32(2)),
 					},
 					"prefill": {
-						ComponentKind:     "Deployment",
+						ComponentKind:     v1alpha1.ComponentKindDeployment,
 						ComponentName:     "test-dgd-prefill-deployment",
 						Replicas:          3,
 						UpdatedReplicas:   3,
@@ -985,7 +985,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 							},
 						},
 						Service: v1alpha1.ServiceReplicaStatus{
-							ComponentKind:     "Deployment",
+							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-frontend-deployment",
 							Replicas:          1,
 							UpdatedReplicas:   1,
@@ -1014,7 +1014,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 							},
 						},
 						Service: v1alpha1.ServiceReplicaStatus{
-							ComponentKind:     "Deployment",
+							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-decode-deployment",
 							Replicas:          2,
 							UpdatedReplicas:   1,
@@ -1043,7 +1043,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 							},
 						},
 						Service: v1alpha1.ServiceReplicaStatus{
-							ComponentKind:     "Deployment",
+							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-prefill-deployment",
 							Replicas:          3,
 							UpdatedReplicas:   3,
@@ -1059,7 +1059,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				Message: "Resources not ready: test-dgd-decode: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
-						ComponentKind:     "Deployment",
+						ComponentKind:     v1alpha1.ComponentKindDeployment,
 						ComponentName:     "test-dgd-frontend-deployment",
 						Replicas:          1,
 						UpdatedReplicas:   1,
@@ -1067,7 +1067,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						AvailableReplicas: ptr.To(int32(1)),
 					},
 					"decode": {
-						ComponentKind:     "Deployment",
+						ComponentKind:     v1alpha1.ComponentKindDeployment,
 						ComponentName:     "test-dgd-decode-deployment",
 						Replicas:          2,
 						UpdatedReplicas:   1,
@@ -1075,7 +1075,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						AvailableReplicas: ptr.To(int32(0)),
 					},
 					"prefill": {
-						ComponentKind:     "Deployment",
+						ComponentKind:     v1alpha1.ComponentKindDeployment,
 						ComponentName:     "test-dgd-prefill-deployment",
 						Replicas:          3,
 						UpdatedReplicas:   3,
@@ -1125,7 +1125,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 							},
 						},
 						Service: v1alpha1.ServiceReplicaStatus{
-							ComponentKind:     "Deployment",
+							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-frontend-deployment",
 							Replicas:          1,
 							UpdatedReplicas:   0,
@@ -1154,7 +1154,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 							},
 						},
 						Service: v1alpha1.ServiceReplicaStatus{
-							ComponentKind:     "Deployment",
+							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-decode-deployment",
 							Replicas:          2,
 							UpdatedReplicas:   1,
@@ -1170,7 +1170,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				Message: "Resources not ready: test-dgd-frontend: Component deployment not ready - Available condition not true; test-dgd-decode: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
-						ComponentKind:     "Deployment",
+						ComponentKind:     v1alpha1.ComponentKindDeployment,
 						ComponentName:     "test-dgd-frontend-deployment",
 						Replicas:          1,
 						UpdatedReplicas:   0,
@@ -1178,7 +1178,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						AvailableReplicas: ptr.To(int32(0)),
 					},
 					"decode": {
-						ComponentKind:     "Deployment",
+						ComponentKind:     v1alpha1.ComponentKindDeployment,
 						ComponentName:     "test-dgd-decode-deployment",
 						Replicas:          2,
 						UpdatedReplicas:   1,

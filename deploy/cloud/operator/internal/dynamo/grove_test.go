@@ -361,7 +361,7 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			wantReason: "podclique/test-dgd-0-frontend: desired=2, ready=1",
 			wantServiceStatuses: map[string]v1alpha1.ServiceReplicaStatus{
 				"frontend": {
-					ComponentKind:   "PodClique",
+					ComponentKind:   v1alpha1.ComponentKindPodClique,
 					ComponentName:   "test-dgd-0-frontend",
 					Replicas:        2,
 					UpdatedReplicas: 2,
@@ -427,14 +427,14 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			wantReason: "",
 			wantServiceStatuses: map[string]v1alpha1.ServiceReplicaStatus{
 				"decode": {
-					ComponentKind:     "PodCliqueScalingGroup",
+					ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 					ComponentName:     "test-dgd-0-decode",
 					Replicas:          2,
 					UpdatedReplicas:   2,
 					AvailableReplicas: ptr.To(int32(2)),
 				},
 				"prefill": {
-					ComponentKind:     "PodCliqueScalingGroup",
+					ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 					ComponentName:     "test-dgd-0-prefill",
 					Replicas:          3,
 					UpdatedReplicas:   3,
@@ -477,7 +477,7 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			wantReason: "pcsg/test-dgd-0-worker: desired=2, available=1",
 			wantServiceStatuses: map[string]v1alpha1.ServiceReplicaStatus{
 				"worker": {
-					ComponentKind:     "PodCliqueScalingGroup",
+					ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 					ComponentName:     "test-dgd-0-worker",
 					Replicas:          2,
 					UpdatedReplicas:   2,
@@ -563,21 +563,21 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			wantReason: "pcsg/test-dgd-0-decode: desired=2, available=1",
 			wantServiceStatuses: map[string]v1alpha1.ServiceReplicaStatus{
 				"frontend": {
-					ComponentKind:   "PodClique",
+					ComponentKind:   v1alpha1.ComponentKindPodClique,
 					ComponentName:   "test-dgd-0-frontend",
 					Replicas:        1,
 					UpdatedReplicas: 1,
 					ReadyReplicas:   ptr.To(int32(1)),
 				},
 				"decode": {
-					ComponentKind:     "PodCliqueScalingGroup",
+					ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 					ComponentName:     "test-dgd-0-decode",
 					Replicas:          2,
 					UpdatedReplicas:   2,
 					AvailableReplicas: ptr.To(int32(1)),
 				},
 				"prefill": {
-					ComponentKind:     "PodCliqueScalingGroup",
+					ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 					ComponentName:     "test-dgd-0-prefill",
 					Replicas:          2,
 					UpdatedReplicas:   2,

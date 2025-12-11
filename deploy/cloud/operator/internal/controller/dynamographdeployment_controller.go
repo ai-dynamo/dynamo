@@ -25,7 +25,6 @@ import (
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
-	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
 
@@ -677,7 +676,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 
 		// Use SyncResource to handle creation/updates/deletion
 		// When toDelete=true, SyncResource will delete the existing resource if it exists
-		_, _, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter, bool, error) {
+		_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter, bool, error) {
 			adapterName := generateAdapterName(dynamoDeployment.Name, serviceName)
 			adapter := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{
 				ObjectMeta: metav1.ObjectMeta{

@@ -107,7 +107,7 @@ func checkPodCliqueReady(ctx context.Context, client client.Client, resourceName
 	readyReplicas := podClique.Status.ReadyReplicas
 
 	serviceStatus := v1alpha1.ServiceReplicaStatus{
-		ComponentKind:   "PodClique",
+		ComponentKind:   v1alpha1.ComponentKindPodClique,
 		ComponentName:   resourceName,
 		Replicas:        podClique.Status.Replicas,
 		UpdatedReplicas: podClique.Status.UpdatedReplicas,
@@ -144,7 +144,7 @@ func checkPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 	availableReplicas := pcsg.Status.AvailableReplicas
 
 	serviceStatus := v1alpha1.ServiceReplicaStatus{
-		ComponentKind:     "PodCliqueScalingGroup",
+		ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 		ComponentName:     resourceName,
 		Replicas:          pcsg.Status.Replicas,
 		UpdatedReplicas:   pcsg.Status.UpdatedReplicas,
