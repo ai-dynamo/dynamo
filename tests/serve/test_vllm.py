@@ -6,6 +6,7 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
+from typing import Optional
 
 import pytest
 
@@ -15,6 +16,7 @@ from tests.serve.common import (
     run_serve_deployment,
 )
 from tests.serve.conftest import MULTIMODAL_IMG_PATH, MULTIMODAL_IMG_URL
+from tests.serve.lora_utils import MinioLoraConfig
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload,
@@ -24,7 +26,7 @@ from tests.utils.payload_builder import (
     completion_payload_with_logprobs,
     metric_payload_default,
 )
-from tests.utils.payloads import ToolCallingChatPayload
+from tests.utils.payloads import LoraTestChatPayload, ToolCallingChatPayload
 
 logger = logging.getLogger(__name__)
 
@@ -606,3 +608,153 @@ def test_multimodal_b64(request, runtime_services, predownload_models):
     )
 
     run_serve_deployment(config, request)
+
+
+# LoRA Test Directory
+lora_dir = os.path.join(vllm_dir, "launch/lora")
+
+
+def lora_chat_payload(
+    lora_name: str,
+    s3_uri: str,
+    system_port: int = 8081,
+    repeat_count: int = 2,
+    expected_response: Optional[list] = None,
+    expected_log: Optional[list] = None,
+    max_tokens: int = 100,
+    temperature: float = 0.0,
+) -> LoraTestChatPayload:
+    """Create a LoRA-enabled chat payload for testing"""
+    return LoraTestChatPayload(
+        body={
+            "model": lora_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "What is deep learning? Answer in one sentence.",
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        },
+        lora_name=lora_name,
+        s3_uri=s3_uri,
+        system_port=system_port,
+        repeat_count=repeat_count,
+        expected_response=expected_response
+        or ["learning", "neural", "network", "AI", "model"],
+        expected_log=expected_log or [],
+    )
+
+
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.timeout(600)
+@pytest.mark.nightly
+def test_lora_aggregated(
+    request, runtime_services, predownload_models, minio_lora_service
+):
+    """
+    Test LoRA inference with aggregated vLLM deployment.
+
+    This test:
+    1. Uses MinIO fixture to provide S3-compatible storage with uploaded LoRA
+    2. Starts vLLM with LoRA support enabled
+    3. Loads the LoRA adapter via system API
+    4. Runs inference with the LoRA model
+    """
+    minio_config: MinioLoraConfig = minio_lora_service
+
+    # Create payload that loads LoRA and tests inference
+    lora_payload = lora_chat_payload(
+        lora_name=minio_config.lora_name,
+        s3_uri=minio_config.get_s3_uri(),
+        system_port=8081,
+        repeat_count=2,
+    )
+
+    # Create test config with MinIO environment variables
+    config = VLLMConfig(
+        name="test_lora_aggregated",
+        directory=vllm_dir,
+        script_name="lora/agg_lora.sh",
+        marks=[],  # markers at function-level
+        model="Qwen/Qwen3-0.6B",
+        timeout=600,
+        env=minio_config.get_env_vars(),
+        request_payloads=[lora_payload],
+    )
+
+    run_serve_deployment(config, request, extra_env=minio_config.get_env_vars())
+
+
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.gpu_2
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.timeout(600)
+@pytest.mark.nightly
+def test_lora_aggregated_router(
+    request, runtime_services, predownload_models, minio_lora_service
+):
+    """
+    Test LoRA inference with aggregated vLLM deployment using KV router.
+
+    This test:
+    1. Uses MinIO fixture to provide S3-compatible storage with uploaded LoRA
+    2. Starts multiple vLLM workers with LoRA support and KV router
+    3. Loads the LoRA adapter on both workers via system API
+    4. Runs inference with the LoRA model, verifying KV cache routing
+    """
+    minio_config: MinioLoraConfig = minio_lora_service
+
+    # Create payloads that load LoRA on both workers and test inference
+    # Worker 1 (port 8081)
+    lora_payload_worker1 = lora_chat_payload(
+        lora_name=minio_config.lora_name,
+        s3_uri=minio_config.get_s3_uri(),
+        system_port=8081,
+        repeat_count=1,
+    )
+
+    # Worker 2 (port 8082)
+    lora_payload_worker2 = lora_chat_payload(
+        lora_name=minio_config.lora_name,
+        s3_uri=minio_config.get_s3_uri(),
+        system_port=8082,
+        repeat_count=1,
+    )
+
+    # Additional inference payload to test routing (LoRA already loaded)
+    inference_payload = chat_payload(
+        content="Explain machine learning in simple terms.",
+        repeat_count=2,
+        expected_response=["learn", "data", "algorithm", "model", "pattern"],
+        max_tokens=150,
+        temperature=0.0,
+    ).with_model(minio_config.lora_name)
+
+    # Add env vars including PYTHONHASHSEED for deterministic KV event IDs
+    env_vars = minio_config.get_env_vars()
+    env_vars["PYTHONHASHSEED"] = "0"
+
+    # Create test config with MinIO environment variables
+    config = VLLMConfig(
+        name="test_lora_aggregated_router",
+        directory=vllm_dir,
+        script_name="lora/agg_lora_router.sh",
+        marks=[],  # markers at function-level
+        model="Qwen/Qwen3-0.6B",
+        timeout=600,
+        env=env_vars,
+        request_payloads=[
+            lora_payload_worker1,
+            lora_payload_worker2,
+            inference_payload,
+        ],
+    )
+
+    run_serve_deployment(config, request, extra_env=env_vars)
