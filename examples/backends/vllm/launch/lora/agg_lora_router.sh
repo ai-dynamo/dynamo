@@ -13,8 +13,6 @@ export AWS_ALLOW_HTTP=true
 # Dynamo LoRA Configuration
 export DYN_LORA_ENABLED=true
 export DYN_LORA_PATH=/tmp/dynamo_loras_minio
-export DYN_LOG=debug
-# export DYN_LOG_LEVEL=debug
 
 mkdir -p $DYN_LORA_PATH
 
