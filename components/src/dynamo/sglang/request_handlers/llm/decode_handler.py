@@ -14,6 +14,8 @@ from dynamo.sglang.protocol import DisaggPreprocessedRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
+logger = logging.getLogger(__name__)
+
 
 class DecodeWorkerHandler(BaseWorkerHandler):
     """Handler for decode workers in both aggregated and disaggregated serving modes."""
@@ -77,6 +79,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Token-based request format
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
+            output_options = request.get("output_options", {})
 
             param_mapping = {
                 "temperature": sampling_opts.get("temperature"),
@@ -85,6 +88,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
             }
+
+            # Handle logprobs from output_options
+            logprobs_value = output_options.get("logprobs")
+            if logprobs_value is not None and logprobs_value != "":
+                try:
+                    parsed_logprobs = int(logprobs_value)
+                    if parsed_logprobs < 0:
+                        logger.warning(
+                            f"Invalid logprobs value: {logprobs_value} (must be non-negative), ignoring"
+                        )
+                    else:
+                        param_mapping["return_logprob"] = True
+                        param_mapping["top_logprobs_num"] = parsed_logprobs
+                except (ValueError, TypeError):
+                    logger.warning(
+                        f"Invalid logprobs value: {logprobs_value} (must be integer), ignoring"
+                    )
         else:
             # OpenAI request format
             param_mapping = {
@@ -93,6 +113,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "top_k": request.get("top_k"),
                 "max_new_tokens": request.get("max_tokens"),
             }
+
+            # Handle logprobs from OpenAI format
+            logprobs = request.get("logprobs")
+            top_logprobs = request.get("top_logprobs")
+            if logprobs:
+                param_mapping["return_logprob"] = True
+                if top_logprobs is not None:
+                    param_mapping["top_logprobs_num"] = top_logprobs
 
         return {k: v for k, v in param_mapping.items() if v is not None}
 
@@ -193,6 +221,82 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(agg, context):
                     yield out
 
+    @staticmethod
+    def _extract_logprobs(
+        res: Dict[str, Any], num_output_tokens_so_far: int
+    ) -> tuple[list[float] | None, list[list[dict]] | None]:
+        """
+        Extract logprobs from SGLang response for new tokens.
+
+        Args:
+            res: SGLang response dict
+            num_output_tokens_so_far: Number of tokens already processed
+
+        Returns:
+            Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
+            - log_probs: List of log probabilities for each new token
+            - top_logprobs: List of top logprobs dicts for each new token
+        """
+        meta_info = res.get("meta_info", {})
+
+        # SGLang uses "output_token_logprobs" for selected token logprobs
+        # Format: [(logprob, token_id, decoded_text), ...] - one tuple per token
+        output_token_logprobs = meta_info.get("output_token_logprobs")
+
+        # SGLang uses "output_top_logprobs" for top-k alternatives
+        # Format: [[(logprob, token_id, text), ...], ...] - list of lists
+        output_top_logprobs = meta_info.get("output_top_logprobs")
+
+        if not output_token_logprobs:
+            return None, None
+
+        # Get logprobs for new tokens only
+        new_token_logprobs = output_token_logprobs[num_output_tokens_so_far:]
+        if not new_token_logprobs:
+            return None, None
+
+        log_probs = []
+        top_logprobs = []
+
+        # Extract selected token logprobs
+        for token_data in new_token_logprobs:
+            if token_data is None:
+                continue
+            # SGLang format: (logprob, token_id, decoded_text)
+            logprob_val = token_data[0]
+            if logprob_val is not None:
+                log_probs.append(float(logprob_val))
+
+        # Extract top logprobs if available
+        if output_top_logprobs:
+            new_top_logprobs = output_top_logprobs[num_output_tokens_so_far:]
+            for token_top_list in new_top_logprobs:
+                if not token_top_list:
+                    top_logprobs.append([])
+                    continue
+
+                token_top_logprobs = []
+                for rank, alt_data in enumerate(token_top_list):
+                    if alt_data is None:
+                        continue
+                    # SGLang format: (logprob, token_id, decoded_text)
+                    logprob_val = alt_data[0]
+                    token_id = alt_data[1]
+                    decoded_text = alt_data[2] if len(alt_data) > 2 else None
+                    token_top_logprobs.append(
+                        {
+                            "rank": rank,
+                            "token_id": token_id,
+                            "token": decoded_text,
+                            "logprob": (
+                                float(logprob_val) if logprob_val is not None else None
+                            ),
+                        }
+                    )
+                top_logprobs.append(token_top_logprobs)
+
+        return log_probs if log_probs else None, top_logprobs if top_logprobs else None
+
     async def _process_token_stream(
         self,
         stream_source: AsyncGenerator[Dict[str, Any], None],
@@ -239,6 +343,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 next_total_toks = len(output_ids)
                 out["token_ids"] = output_ids[num_output_tokens_so_far:]
+
+                # Extract logprobs for new tokens
+                log_probs, top_logprobs = self._extract_logprobs(
+                    res, num_output_tokens_so_far
+                )
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    out["top_logprobs"] = top_logprobs
+
                 num_output_tokens_so_far = next_total_toks
                 if finish_reason:
                     input_tokens = res["meta_info"]["prompt_tokens"]
