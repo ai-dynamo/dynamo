@@ -65,10 +65,12 @@ class MetricsPublisher:
         self.socket.bind(f"tcp://*:{port}")
 
     def publish(self, num_waiting_reqs: int, kv_cache_usage: float):
-        self.socket.send_json({
-            "num_waiting_reqs": num_waiting_reqs,
-            "kv_cache_usage": kv_cache_usage,
-        })
+        self.socket.send_json(
+            {
+                "num_waiting_reqs": num_waiting_reqs,
+                "kv_cache_usage": kv_cache_usage,
+            }
+        )
 
     def close(self):
         self.socket.close()
@@ -182,7 +184,7 @@ def parse_stored_blocks(
     blocks_data: list[dict], block_size: int, partial_hashes: set[int]
 ) -> tuple[list[dict], list[int]]:
     """Parse stored blocks from TRTLLM event data.
-    
+
     Returns:
         Tuple of (blocks list, all token_ids)
     """
@@ -196,11 +198,13 @@ def parse_stored_blocks(
 
         if num_tokens == block_size:
             token_ids = [int(t["token_id"]) for t in tokens]
-            blocks.append({
-                "block_hash": block_hash,
-                "token_ids": token_ids,
-                "num_tokens": num_tokens,
-            })
+            blocks.append(
+                {
+                    "block_hash": block_hash,
+                    "token_ids": token_ids,
+                    "num_tokens": num_tokens,
+                }
+            )
             all_token_ids.extend(token_ids)
         elif num_tokens < block_size:
             # Partial block - track but don't publish
@@ -361,7 +365,9 @@ class TrtllmWorker:
     def _update_window_size(self, event: dict):
         """Update max window size from created events."""
         window_size = event.get("window_size")
-        if window_size and (self.max_window_size is None or window_size > self.max_window_size):
+        if window_size and (
+            self.max_window_size is None or window_size > self.max_window_size
+        ):
             self.max_window_size = window_size
 
     def _handle_stored_event(self, data: dict):
@@ -505,7 +511,9 @@ class TrtllmWorkers:
         self, prompt_input, worker_id: int, sampling_params: dict
     ) -> AsyncGenerator[dict, None]:
         """Send request to a specific worker."""
-        async for output in self.workers[worker_id].generate(prompt_input, sampling_params):
+        async for output in self.workers[worker_id].generate(
+            prompt_input, sampling_params
+        ):
             yield output
 
     def shutdown_all(self):

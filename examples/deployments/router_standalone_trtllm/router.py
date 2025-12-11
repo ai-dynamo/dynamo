@@ -52,6 +52,7 @@ class RouterResponse(BaseModel):
 
 class InjectEventRequest(BaseModel):
     """For testing: inject a KV event directly into RadixTree."""
+
     worker_id: int
     tokens_hash: int
     block_hash: int | None = None
@@ -104,11 +105,15 @@ class KvRouter:
         # ZMQ setup
         self.context = zmq.Context()
         self.load_listeners = [
-            create_zmq_subscriber(self.context, f"tcp://localhost:{base_metrics_port + i}")
+            create_zmq_subscriber(
+                self.context, f"tcp://localhost:{base_metrics_port + i}"
+            )
             for i in range(num_workers)
         ]
         self.kv_listeners = [
-            ZmqKvEventListener(f"tcp://localhost:{base_kv_events_port + i}", "", block_size)
+            ZmqKvEventListener(
+                f"tcp://localhost:{base_kv_events_port + i}", "", block_size
+            )
             for i in range(num_workers)
         ]
 
@@ -157,7 +162,9 @@ class KvRouter:
                 for event_str in events:
                     event = json.loads(event_str)
                     dump_kv_event(worker_id, event)
-                    self.radix_tree.apply_event(worker_id, json.dumps(event).encode("utf-8"))
+                    self.radix_tree.apply_event(
+                        worker_id, json.dumps(event).encode("utf-8")
+                    )
             except zmq.Again:
                 pass
             except Exception as e:
@@ -206,10 +213,7 @@ class KvRouter:
         logger.info(f"Router: raw_scores={raw_scores}")
 
         # raw_scores is keyed by (worker_id, dp_rank); assume dp_rank=0
-        return {
-            wid: raw_scores.get((wid, 0), 0)
-            for wid in range(self.num_workers)
-        }
+        return {wid: raw_scores.get((wid, 0), 0) for wid in range(self.num_workers)}
 
     def _compute_logits(self, overlap_scores: dict[int, float]) -> list[float]:
         """Compute routing logits for each worker."""
@@ -276,7 +280,9 @@ class RouterAPI:
             "base_metrics_port": base_metrics_port,
         }
         self.router: KvRouter | None = None
-        self.app = FastAPI(title="KV Router API", version="0.0.1", lifespan=self.lifespan)
+        self.app = FastAPI(
+            title="KV Router API", version="0.0.1", lifespan=self.lifespan
+        )
         self._setup_routes()
 
     def _require_router(self) -> KvRouter:
@@ -302,7 +308,9 @@ class RouterAPI:
                 wid, overlap, matched = await router.get_best_worker(
                     request.local_hashes, request.num_tokens
                 )
-                return RouterResponse(worker_id=wid, overlap=overlap, matched_blocks=matched)
+                return RouterResponse(
+                    worker_id=wid, overlap=overlap, matched_blocks=matched
+                )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
@@ -321,30 +329,46 @@ class RouterAPI:
                 "data": {
                     "stored": {
                         "parent_hash": None,
-                        "blocks": [{
-                            "block_hash": block_hash,
-                            "tokens_hash": request.tokens_hash,
-                            "mm_extra_info": request.mm_extra_info,
-                        }]
+                        "blocks": [
+                            {
+                                "block_hash": block_hash,
+                                "tokens_hash": request.tokens_hash,
+                                "mm_extra_info": request.mm_extra_info,
+                            }
+                        ],
                     }
-                }
+                },
             }
-            router.radix_tree.apply_event(request.worker_id, json.dumps(event).encode("utf-8"))
-            return {"status": "ok", "tokens_hash": request.tokens_hash, "worker_id": request.worker_id}
+            router.radix_tree.apply_event(
+                request.worker_id, json.dumps(event).encode("utf-8")
+            )
+            return {
+                "status": "ok",
+                "tokens_hash": request.tokens_hash,
+                "worker_id": request.worker_id,
+            }
 
     async def start(self):
         """Start the router API server."""
         logger.info(f"Starting Router API on port {self.port}")
-        config = uvicorn.Config(self.app, host="0.0.0.0", port=self.port, log_level="info")
+        config = uvicorn.Config(
+            self.app, host="0.0.0.0", port=self.port, log_level="info"
+        )
         await uvicorn.Server(config).serve()
 
 
 def main():
     parser = argparse.ArgumentParser(description="KV Router API Server")
-    parser.add_argument("--block-size", type=int, default=32, help="Block size (default: 32)")
+    parser.add_argument(
+        "--block-size", type=int, default=32, help="Block size (default: 32)"
+    )
     parser.add_argument("--num-workers", type=int, default=2, help="Number of workers")
-    parser.add_argument("--base-kv-events-port", type=int, default=5557, help="Base KV events port")
-    parser.add_argument("--base-metrics-port", type=int, default=5657, help="Base metrics port")
+    parser.add_argument(
+        "--base-kv-events-port", type=int, default=5557, help="Base KV events port"
+    )
+    parser.add_argument(
+        "--base-metrics-port", type=int, default=5657, help="Base metrics port"
+    )
     parser.add_argument("--port", type=int, default=7000, help="Router API port")
     args = parser.parse_args()
 

@@ -105,6 +105,7 @@ class ErrorResponse(BaseModel):
 @dataclass(frozen=True)
 class ServingParams:
     """Configuration parameters for the serving API."""
+
     model: str
     model_type: str  # e.g., "qwen2_vl", "llava"
     block_size: int
@@ -118,6 +119,7 @@ class ServingParams:
 @dataclass
 class ParsedRequest:
     """Parsed and preprocessed request data."""
+
     messages_dict: list[dict]
     image_urls: list[str]
     max_tokens: int
@@ -129,6 +131,7 @@ class ParsedRequest:
 @dataclass
 class ProcessedInput:
     """Processed input ready for routing and generation."""
+
     tokens: list[int]
     mm_input: dict | None  # For multimodal requests
     mm_hash: int | None
@@ -153,14 +156,17 @@ class ServiceAPI:
     # Request Parsing Helpers
     # -------------------------------------------------------------------------
 
-    def _parse_request(self, request: ChatCompletionRequest) -> ParsedRequest | ErrorResponse:
+    def _parse_request(
+        self, request: ChatCompletionRequest
+    ) -> ParsedRequest | ErrorResponse:
         """Parse and validate the incoming request."""
         max_tokens = request.max_completion_tokens or request.max_tokens
         if max_tokens is None:
             return ErrorResponse(
                 error=make_error(
                     "Either max_tokens or max_completion_tokens must be specified",
-                    "invalid_request_error", 400
+                    "invalid_request_error",
+                    400,
                 )
             )
 
@@ -175,7 +181,9 @@ class ServiceAPI:
             model=request.model,
         )
 
-    def _extract_messages(self, messages: list[Message]) -> tuple[list[dict], list[str]]:
+    def _extract_messages(
+        self, messages: list[Message]
+    ) -> tuple[list[dict], list[str]]:
         """Extract text messages and image URLs from request messages."""
         messages_dict = []
         image_urls = []
@@ -190,7 +198,9 @@ class ServiceAPI:
                         text_parts.append(part.text)
                     elif part.type == "image_url" and part.image_url:
                         image_urls.append(part.image_url.url)
-                messages_dict.append({"role": msg.role, "content": " ".join(text_parts)})
+                messages_dict.append(
+                    {"role": msg.role, "content": " ".join(text_parts)}
+                )
 
         return messages_dict, image_urls
 
@@ -253,7 +263,9 @@ class ServiceAPI:
                 image_offsets=None,
             )
 
-    def _get_mm_tokens(self, prompt: str, image_urls: list[str]) -> tuple[list[int], list[int] | None]:
+    def _get_mm_tokens(
+        self, prompt: str, image_urls: list[str]
+    ) -> tuple[list[int], list[int] | None]:
         """Get tokens with visual expansion and find image token positions."""
         if self.processor is None:
             return self.tokenizer.encode(prompt), None
@@ -264,8 +276,12 @@ class ServiceAPI:
         )
         tokens = processor_output["input_ids"][0].tolist()
 
-        image_token_id = getattr(self.processor, "image_token_id", QWEN2_VL_IMAGE_TOKEN_ID)
-        return self._replace_image_tokens(tokens, image_token_id, QWEN2_VL_REPLACEMENT_ID)
+        image_token_id = getattr(
+            self.processor, "image_token_id", QWEN2_VL_IMAGE_TOKEN_ID
+        )
+        return self._replace_image_tokens(
+            tokens, image_token_id, QWEN2_VL_REPLACEMENT_ID
+        )
 
     def _replace_image_tokens(
         self, tokens: list[int], image_token_id: int, replacement_id: int
@@ -306,16 +322,22 @@ class ServiceAPI:
         if mm_hash is None or image_offsets is None:
             return None
 
-        num_blocks = (num_tokens + self.init_params.block_size - 1) // self.init_params.block_size
+        num_blocks = (
+            num_tokens + self.init_params.block_size - 1
+        ) // self.init_params.block_size
         return [
             {"mm_objects": [{"mm_hash": mm_hash, "offsets": [image_offsets]}]}
             for _ in range(num_blocks)
         ]
 
-    async def _route_request(self, local_hashes: list[int], num_tokens: int) -> int | ErrorResponse:
+    async def _route_request(
+        self, local_hashes: list[int], num_tokens: int
+    ) -> int | ErrorResponse:
         """Query router for best worker ID."""
         try:
-            router_request = RouterRequest(local_hashes=local_hashes, num_tokens=num_tokens)
+            router_request = RouterRequest(
+                local_hashes=local_hashes, num_tokens=num_tokens
+            )
             response = await self.http_client.post(
                 f"http://localhost:{self.init_params.router_port}/find_best_worker",
                 json=router_request.model_dump(),
@@ -326,7 +348,9 @@ class ServiceAPI:
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             logger.error(f"Router request failed: {e}")
             return ErrorResponse(
-                error=make_error("Router service unavailable", "service_unavailable", 503)
+                error=make_error(
+                    "Router service unavailable", "service_unavailable", 503
+                )
             )
 
     # -------------------------------------------------------------------------
@@ -345,13 +369,21 @@ class ServiceAPI:
                 if isinstance(output, dict):
                     text = output.get("text_diff") or output.get("text", "")
                 else:
-                    text = getattr(output, "text_diff", None) or getattr(output, "text", "")
+                    text = getattr(output, "text_diff", None) or getattr(
+                        output, "text", ""
+                    )
 
                 if not text and not first_chunk:
                     continue
 
-                delta = {"role": "assistant", "content": text} if first_chunk else {"content": text}
-                yield self._format_chunk(request_id, created, request.model, delta, None)
+                delta = (
+                    {"role": "assistant", "content": text}
+                    if first_chunk
+                    else {"content": text}
+                )
+                yield self._format_chunk(
+                    request_id, created, request.model, delta, None
+                )
                 first_chunk = False
 
             # Final chunk
@@ -363,7 +395,12 @@ class ServiceAPI:
             yield f"data: {json.dumps({'error': make_error(str(e), 'internal_error', 500)})}\n\n"
 
     def _format_chunk(
-        self, request_id: str, created: int, model: str, delta: dict, finish_reason: str | None
+        self,
+        request_id: str,
+        created: int,
+        model: str,
+        delta: dict,
+        finish_reason: str | None,
     ) -> str:
         """Format a single SSE chunk."""
         chunk = {
@@ -383,7 +420,11 @@ class ServiceAPI:
         @self.app.post("/v1/chat/completions")
         async def chat_completions(request: ChatCompletionRequest):
             # Check service readiness
-            if self.workers is None or self.tokenizer is None or self.http_client is None:
+            if (
+                self.workers is None
+                or self.tokenizer is None
+                or self.http_client is None
+            ):
                 return ErrorResponse(
                     error=make_error("Service not ready", "service_unavailable", 503)
                 )
@@ -411,7 +452,9 @@ class ServiceAPI:
                 # Validate tokens
                 if not processed.tokens:
                     return ErrorResponse(
-                        error=make_error("Input prompt is empty", "invalid_request_error", 400)
+                        error=make_error(
+                            "Input prompt is empty", "invalid_request_error", 400
+                        )
                     )
 
                 # Compute block hashes for routing
@@ -433,7 +476,9 @@ class ServiceAPI:
                 )
 
                 # Route to best worker
-                worker_id = await self._route_request(local_hashes, len(processed.tokens))
+                worker_id = await self._route_request(
+                    local_hashes, len(processed.tokens)
+                )
                 if isinstance(worker_id, ErrorResponse):
                     return worker_id
 
@@ -446,7 +491,9 @@ class ServiceAPI:
                 }
                 prompt_input = processed.mm_input or processed.tokens
                 logger.debug(f"Sending to worker {worker_id}")
-                result_generator = self.workers.direct(prompt_input, worker_id, sampling_params)
+                result_generator = self.workers.direct(
+                    prompt_input, worker_id, sampling_params
+                )
 
                 return StreamingResponse(
                     self._stream_response(request, result_generator, request_id),
@@ -520,15 +567,21 @@ def main():
     parser = argparse.ArgumentParser(description="TensorRT-LLM Router API Server")
 
     parser.add_argument(
-        "--model", type=str, default="Qwen/Qwen2-VL-2B-Instruct",
+        "--model",
+        type=str,
+        default="Qwen/Qwen2-VL-2B-Instruct",
         help="Model name to use (VLM for multimodal support)",
     )
     parser.add_argument(
-        "--model-type", type=str, default="qwen2_vl",
+        "--model-type",
+        type=str,
+        default="qwen2_vl",
         help="Model type for TRTLLM (e.g., qwen2_vl, llava, phi3_v)",
     )
     parser.add_argument(
-        "--block-size", type=int, default=32,
+        "--block-size",
+        type=int,
+        default=32,
         help="Block size for caching (TensorRT-LLM uses 32)",
     )
     parser.add_argument(

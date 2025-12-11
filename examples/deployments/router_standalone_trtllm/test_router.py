@@ -57,13 +57,15 @@ def make_mm_request(text: str, image_url: str, max_tokens: int = 10) -> dict:
     """Create a multimodal chat completion request with image."""
     return {
         "model": "test",
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": text},
-                {"type": "image_url", "image_url": {"url": image_url}}
-            ]
-        }],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": text},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }
+        ],
         "stream": True,
         "max_tokens": max_tokens,
     }
@@ -205,21 +207,28 @@ class KvRouterTests:
         # Check blocks after first request
         after_first = get_tree_info(self.client, self.config.router_url)
         blocks_added = after_first["num_blocks"] - initial_blocks
-        self.log(f"Blocks after first: {after_first['num_blocks']} (added {blocks_added})")
+        self.log(
+            f"Blocks after first: {after_first['num_blocks']} (added {blocks_added})"
+        )
 
         # Second request - should hit cache
         self.log("Sending second request (should hit cache)...")
         if not send_request(self.client, self.config.api_url, payload):
-            self.results.append(TestResult("full_match", False, "Second request failed"))
+            self.results.append(
+                TestResult("full_match", False, "Second request failed")
+            )
             return
 
         # Success: either new blocks were added, or blocks already existed (from previous runs)
         # Either way, the second request should show overlap > 0 in server logs
         total_blocks = after_first["num_blocks"]
-        self.results.append(TestResult(
-            "full_match", True,
-            f"OK - Tree has {total_blocks} blocks. Check server logs for 'overlap > 0'."
-        ))
+        self.results.append(
+            TestResult(
+                "full_match",
+                True,
+                f"OK - Tree has {total_blocks} blocks. Check server logs for 'overlap > 0'.",
+            )
+        )
 
     def _test_partial_match(self):
         """
@@ -231,7 +240,7 @@ class KvRouterTests:
 
         # Request A: 5 repetitions (~64 tokens, ~2 full blocks)
         content_a = (self.base_phrase * 5).strip()
-        
+
         # Request B: 8 repetitions (~100 tokens, ~3 full blocks)
         # First 2 blocks should match A, third block is new
         content_b = (self.base_phrase * 8).strip()
@@ -261,11 +270,14 @@ class KvRouterTests:
 
         # B should add new blocks (the non-matching suffix)
         # The matching prefix blocks already exist
-        self.results.append(TestResult(
-            "partial_match", True,
-            f"OK - Request B added {new_blocks} new blocks. "
-            f"Check server logs for partial overlap (0 < overlap < 1)."
-        ))
+        self.results.append(
+            TestResult(
+                "partial_match",
+                True,
+                f"OK - Request B added {new_blocks} new blocks. "
+                f"Check server logs for partial overlap (0 < overlap < 1).",
+            )
+        )
 
     def _test_no_match(self):
         """
@@ -296,10 +308,13 @@ class KvRouterTests:
             return
 
         # No need to wait - we're checking overlap on this request, not the next
-        self.results.append(TestResult(
-            "no_match", True,
-            "OK - Check server logs for 'overlap = 0.000' (no cache hit expected)."
-        ))
+        self.results.append(
+            TestResult(
+                "no_match",
+                True,
+                "OK - Check server logs for 'overlap = 0.000' (no cache hit expected).",
+            )
+        )
 
     def _test_mm_hash_computation(self):
         """
@@ -330,23 +345,32 @@ class KvRouterTests:
 
         # Verify all hashes are different
         if hash_no_mm == hash_with_mm1:
-            self.results.append(TestResult(
-                "mm_hash_computation", False,
-                "FAIL - Hash without MM equals hash with MM"
-            ))
+            self.results.append(
+                TestResult(
+                    "mm_hash_computation",
+                    False,
+                    "FAIL - Hash without MM equals hash with MM",
+                )
+            )
             return
 
         if hash_with_mm1 == hash_with_mm2:
-            self.results.append(TestResult(
-                "mm_hash_computation", False,
-                "FAIL - Different mm_hash produced same block_hash"
-            ))
+            self.results.append(
+                TestResult(
+                    "mm_hash_computation",
+                    False,
+                    "FAIL - Different mm_hash produced same block_hash",
+                )
+            )
             return
 
-        self.results.append(TestResult(
-            "mm_hash_computation", True,
-            "OK - Different mm_hash values produce different block hashes"
-        ))
+        self.results.append(
+            TestResult(
+                "mm_hash_computation",
+                True,
+                "OK - Different mm_hash values produce different block hashes",
+            )
+        )
 
     def _test_mm_routing_distinction(self):
         """
@@ -361,28 +385,42 @@ class KvRouterTests:
         block_size = 32
 
         # Simulate Image A cached on worker 0
-        mm_info_a = {"mm_objects": [{"mm_hash": 0x1111111111111111, "offsets": [[0, 64]]}]}
-        hashes_a = compute_block_hash_for_seq_py(tokens, block_size, [mm_info_a, mm_info_a])
+        mm_info_a = {
+            "mm_objects": [{"mm_hash": 0x1111111111111111, "offsets": [[0, 64]]}]
+        }
+        hashes_a = compute_block_hash_for_seq_py(
+            tokens, block_size, [mm_info_a, mm_info_a]
+        )
 
         # Simulate Image B cached on worker 1
-        mm_info_b = {"mm_objects": [{"mm_hash": 0x2222222222222222, "offsets": [[0, 64]]}]}
-        hashes_b = compute_block_hash_for_seq_py(tokens, block_size, [mm_info_b, mm_info_b])
+        mm_info_b = {
+            "mm_objects": [{"mm_hash": 0x2222222222222222, "offsets": [[0, 64]]}]
+        }
+        hashes_b = compute_block_hash_for_seq_py(
+            tokens, block_size, [mm_info_b, mm_info_b]
+        )
 
         self.log(f"Hashes for Image A: {hashes_a}")
         self.log(f"Hashes for Image B: {hashes_b}")
 
         # Verify hashes are different
         if hashes_a == hashes_b:
-            self.results.append(TestResult(
-                "mm_routing_distinction", False,
-                "FAIL - Same tokens with different images produced same hashes"
-            ))
+            self.results.append(
+                TestResult(
+                    "mm_routing_distinction",
+                    False,
+                    "FAIL - Same tokens with different images produced same hashes",
+                )
+            )
             return
 
-        self.results.append(TestResult(
-            "mm_routing_distinction", True,
-            "OK - Router can distinguish requests with different images"
-        ))
+        self.results.append(
+            TestResult(
+                "mm_routing_distinction",
+                True,
+                "OK - Router can distinguish requests with different images",
+            )
+        )
 
     def _test_mm_hash_consistency(self):
         """
@@ -408,16 +446,22 @@ class KvRouterTests:
         self.log(f"Hash 3: {hash3}")
 
         if hash1 != hash2 or hash2 != hash3:
-            self.results.append(TestResult(
-                "mm_hash_consistency", False,
-                f"FAIL - Same inputs produced different hashes: {hash1}, {hash2}, {hash3}"
-            ))
+            self.results.append(
+                TestResult(
+                    "mm_hash_consistency",
+                    False,
+                    f"FAIL - Same inputs produced different hashes: {hash1}, {hash2}, {hash3}",
+                )
+            )
             return
 
-        self.results.append(TestResult(
-            "mm_hash_consistency", True,
-            f"OK - Hash computation is idempotent: {hash1[0]}"
-        ))
+        self.results.append(
+            TestResult(
+                "mm_hash_consistency",
+                True,
+                f"OK - Hash computation is idempotent: {hash1[0]}",
+            )
+        )
 
     def _test_mm_offset_affects_hash(self):
         """
@@ -433,15 +477,21 @@ class KvRouterTests:
 
         # Image covers first block only
         mm_info_first = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [[0, 32]]}]}
-        hash_first = compute_block_hash_for_seq_py(tokens, block_size, [mm_info_first, None])
+        hash_first = compute_block_hash_for_seq_py(
+            tokens, block_size, [mm_info_first, None]
+        )
 
         # Image covers second block only
         mm_info_second = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [[32, 64]]}]}
-        hash_second = compute_block_hash_for_seq_py(tokens, block_size, [None, mm_info_second])
+        hash_second = compute_block_hash_for_seq_py(
+            tokens, block_size, [None, mm_info_second]
+        )
 
         # Image covers both blocks
         mm_info_both = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [[0, 64]]}]}
-        hash_both = compute_block_hash_for_seq_py(tokens, block_size, [mm_info_both, mm_info_both])
+        hash_both = compute_block_hash_for_seq_py(
+            tokens, block_size, [mm_info_both, mm_info_both]
+        )
 
         self.log(f"Hash (first block MM):  {hash_first}")
         self.log(f"Hash (second block MM): {hash_second}")
@@ -450,16 +500,22 @@ class KvRouterTests:
         # Block 0 with mm_info should differ from block 0 without mm_info
         # Block 1 with mm_info should differ from block 1 without mm_info
         if hash_first[0] == hash_second[0]:
-            self.results.append(TestResult(
-                "mm_offset_affects_hash", False,
-                "FAIL - First block hash should differ based on MM presence"
-            ))
+            self.results.append(
+                TestResult(
+                    "mm_offset_affects_hash",
+                    False,
+                    "FAIL - First block hash should differ based on MM presence",
+                )
+            )
             return
 
-        self.results.append(TestResult(
-            "mm_offset_affects_hash", True,
-            "OK - Different MM offsets produce different block hashes"
-        ))
+        self.results.append(
+            TestResult(
+                "mm_offset_affects_hash",
+                True,
+                "OK - Different MM offsets produce different block hashes",
+            )
+        )
 
     def _test_mm_block_boundary(self):
         """
@@ -490,30 +546,36 @@ class KvRouterTests:
         # Block 0 and 2 should be the same (no image tokens)
         # Block 1 should be different (has image tokens + mm_hash)
         if hashes_with_mm[0] != hashes_without_mm[0]:
-            self.results.append(TestResult(
-                "mm_block_boundary", False,
-                "FAIL - Block 0 should be same (no MM)"
-            ))
+            self.results.append(
+                TestResult(
+                    "mm_block_boundary", False, "FAIL - Block 0 should be same (no MM)"
+                )
+            )
             return
 
         if hashes_with_mm[1] == hashes_without_mm[1]:
-            self.results.append(TestResult(
-                "mm_block_boundary", False,
-                "FAIL - Block 1 should differ (has MM)"
-            ))
+            self.results.append(
+                TestResult(
+                    "mm_block_boundary", False, "FAIL - Block 1 should differ (has MM)"
+                )
+            )
             return
 
         if hashes_with_mm[2] != hashes_without_mm[2]:
-            self.results.append(TestResult(
-                "mm_block_boundary", False,
-                "FAIL - Block 2 should be same (no MM)"
-            ))
+            self.results.append(
+                TestResult(
+                    "mm_block_boundary", False, "FAIL - Block 2 should be same (no MM)"
+                )
+            )
             return
 
-        self.results.append(TestResult(
-            "mm_block_boundary", True,
-            "OK - MM info correctly applies only to relevant blocks"
-        ))
+        self.results.append(
+            TestResult(
+                "mm_block_boundary",
+                True,
+                "OK - MM info correctly applies only to relevant blocks",
+            )
+        )
 
     def _test_mm_same_image_cache_hit(self):
         """
@@ -532,9 +594,9 @@ class KvRouterTests:
         # First request - populates the cache
         self.log("Sending first MM request...")
         if not send_request(self.client, self.config.api_url, payload):
-            self.results.append(TestResult(
-                "mm_same_image", False, "First MM request failed"
-            ))
+            self.results.append(
+                TestResult("mm_same_image", False, "First MM request failed")
+            )
             return
 
         # Wait for KV events to propagate
@@ -542,22 +604,25 @@ class KvRouterTests:
         time.sleep(self.config.kv_settle_time)
 
         after_first = get_tree_info(self.client, self.config.router_url)
-        blocks_added = after_first['num_blocks'] - initial['num_blocks']
-        self.log(f"Blocks after first: {after_first['num_blocks']} (added {blocks_added})")
+        blocks_added = after_first["num_blocks"] - initial["num_blocks"]
+        self.log(
+            f"Blocks after first: {after_first['num_blocks']} (added {blocks_added})"
+        )
 
         if blocks_added == 0:
-            self.results.append(TestResult(
-                "mm_same_image", False,
-                "FAIL - No blocks added after first request"
-            ))
+            self.results.append(
+                TestResult(
+                    "mm_same_image", False, "FAIL - No blocks added after first request"
+                )
+            )
             return
 
         # Second identical request - should hit cache
         self.log("Sending second MM request (same image)...")
         if not send_request(self.client, self.config.api_url, payload):
-            self.results.append(TestResult(
-                "mm_same_image", False, "Second MM request failed"
-            ))
+            self.results.append(
+                TestResult("mm_same_image", False, "Second MM request failed")
+            )
             return
 
         # Query router to check overlap (simulating what the second request saw)
@@ -567,14 +632,17 @@ class KvRouterTests:
         self.log(f"Blocks after second: {after_second['num_blocks']}")
 
         # The second request should reuse cached blocks, so minimal new blocks added
-        new_blocks_second = after_second['num_blocks'] - after_first['num_blocks']
+        new_blocks_second = after_second["num_blocks"] - after_first["num_blocks"]
         self.log(f"New blocks from second request: {new_blocks_second}")
 
-        self.results.append(TestResult(
-            "mm_same_image", True,
-            f"OK - First added {blocks_added} blocks, second added {new_blocks_second}. "
-            f"Check logs for 'overlap > 0' on second request."
-        ))
+        self.results.append(
+            TestResult(
+                "mm_same_image",
+                True,
+                f"OK - First added {blocks_added} blocks, second added {new_blocks_second}. "
+                f"Check logs for 'overlap > 0' on second request.",
+            )
+        )
 
     def _test_mm_different_images_no_cache_hit(self):
         """
@@ -593,49 +661,59 @@ class KvRouterTests:
 
         self.log(f"Sending request with image 1: {TEST_IMAGE_2}")
         if not send_request(self.client, self.config.api_url, payload_1):
-            self.results.append(TestResult(
-                "mm_different_images", False, "Image 1 request failed"
-            ))
+            self.results.append(
+                TestResult("mm_different_images", False, "Image 1 request failed")
+            )
             return
 
         time.sleep(self.config.kv_settle_time)
 
         after_img1 = get_tree_info(self.client, self.config.router_url)
         blocks_img1 = after_img1["num_blocks"] - initial["num_blocks"]
-        self.log(f"Blocks after image 1: {after_img1['num_blocks']} (added {blocks_img1})")
+        self.log(
+            f"Blocks after image 1: {after_img1['num_blocks']} (added {blocks_img1})"
+        )
 
         # Second image (same text, different image)
         payload_2 = make_mm_request("Describe this image in detail", TEST_IMAGE_3)
 
         self.log(f"Sending request with image 2: {TEST_IMAGE_3}")
         if not send_request(self.client, self.config.api_url, payload_2):
-            self.results.append(TestResult(
-                "mm_different_images", False, "Image 2 request failed"
-            ))
+            self.results.append(
+                TestResult("mm_different_images", False, "Image 2 request failed")
+            )
             return
 
         time.sleep(self.config.kv_settle_time)
 
         after_img2 = get_tree_info(self.client, self.config.router_url)
         blocks_img2 = after_img2["num_blocks"] - after_img1["num_blocks"]
-        self.log(f"Blocks after image 2: {after_img2['num_blocks']} (added {blocks_img2})")
+        self.log(
+            f"Blocks after image 2: {after_img2['num_blocks']} (added {blocks_img2})"
+        )
 
         # Different images should add similar number of blocks
         # If image 2 had cache hit, it would add fewer blocks
         if blocks_img2 == 0:
-            self.results.append(TestResult(
-                "mm_different_images", False,
-                f"FAIL - Image 2 added 0 blocks (unexpected full cache hit)"
-            ))
+            self.results.append(
+                TestResult(
+                    "mm_different_images",
+                    False,
+                    "FAIL - Image 2 added 0 blocks (unexpected full cache hit)",
+                )
+            )
             return
 
         # Image 2 should add approximately same number of blocks as image 1
         # (since different mm_hash means image blocks don't match)
-        self.results.append(TestResult(
-            "mm_different_images", True,
-            f"OK - Image 1 added {blocks_img1} blocks, image 2 added {blocks_img2} blocks. "
-            f"Different images = different block hashes."
-        ))
+        self.results.append(
+            TestResult(
+                "mm_different_images",
+                True,
+                f"OK - Image 1 added {blocks_img1} blocks, image 2 added {blocks_img2} blocks. "
+                f"Different images = different block hashes.",
+            )
+        )
 
     def _test_text_cache_hit_with_overlap(self):
         """
@@ -656,9 +734,9 @@ class KvRouterTests:
         # First request
         self.log("Sending first text request...")
         if not send_request(self.client, self.config.api_url, payload):
-            self.results.append(TestResult(
-                "text_cache_hit_overlap", False, "First request failed"
-            ))
+            self.results.append(
+                TestResult("text_cache_hit_overlap", False, "First request failed")
+            )
             return
 
         # Wait for KV events
@@ -672,23 +750,26 @@ class KvRouterTests:
         # Second request - should see cache hit
         self.log("Sending second text request (should hit cache)...")
         if not send_request(self.client, self.config.api_url, payload):
-            self.results.append(TestResult(
-                "text_cache_hit_overlap", False, "Second request failed"
-            ))
+            self.results.append(
+                TestResult("text_cache_hit_overlap", False, "Second request failed")
+            )
             return
 
         # For a true verification, we'd need to intercept the router response
         # or add an endpoint that returns the last routing decision
         # For now, we verify by checking if blocks increased (they shouldn't much)
         tree_info_after = get_tree_info(self.client, self.config.router_url)
-        new_blocks = tree_info_after['num_blocks'] - tree_info['num_blocks']
+        new_blocks = tree_info_after["num_blocks"] - tree_info["num_blocks"]
         self.log(f"New blocks after second request: {new_blocks}")
 
-        self.results.append(TestResult(
-            "text_cache_hit_overlap", True,
-            f"OK - Second request added {new_blocks} new blocks. "
-            f"Check logs for 'overlap > 0' (cache hit)."
-        ))
+        self.results.append(
+            TestResult(
+                "text_cache_hit_overlap",
+                True,
+                f"OK - Second request added {new_blocks} new blocks. "
+                f"Check logs for 'overlap > 0' (cache hit).",
+            )
+        )
 
     def _print_summary(self) -> bool:
         """Print test results summary."""
@@ -698,7 +779,7 @@ class KvRouterTests:
 
         all_passed = True
         for r in self.results:
-            status = "PASS" if r.passed else "FAIL"
+            _ = "PASS" if r.passed else "FAIL"
             symbol = "[OK]" if r.passed else "[X]"
             print(f"  {symbol} {r.name}: {r.message}")
             if not r.passed:
@@ -722,20 +803,27 @@ class KvRouterTests:
 
 def main():
     parser = argparse.ArgumentParser(description="KV Router Test Suite")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed logs")
-    parser.add_argument("--api-url", default="http://localhost:8000", help="API server URL")
-    parser.add_argument("--router-url", default="http://localhost:7000", help="Router URL")
     parser.add_argument(
-        "--mm-only", action="store_true",
-        help="Run only multimodal local tests (no server needed)"
+        "--verbose", "-v", action="store_true", help="Show detailed logs"
     )
     parser.add_argument(
-        "--mm-server", action="store_true",
-        help="Run multimodal server tests (requires VLM model)"
+        "--api-url", default="http://localhost:8000", help="API server URL"
     )
     parser.add_argument(
-        "--all", action="store_true",
-        help="Run all tests including multimodal"
+        "--router-url", default="http://localhost:7000", help="Router URL"
+    )
+    parser.add_argument(
+        "--mm-only",
+        action="store_true",
+        help="Run only multimodal local tests (no server needed)",
+    )
+    parser.add_argument(
+        "--mm-server",
+        action="store_true",
+        help="Run multimodal server tests (requires VLM model)",
+    )
+    parser.add_argument(
+        "--all", action="store_true", help="Run all tests including multimodal"
     )
     args = parser.parse_args()
 

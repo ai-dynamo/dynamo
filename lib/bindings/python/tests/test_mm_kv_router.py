@@ -37,9 +37,7 @@ def make_mm_info(mm_hash: int, offsets: list[list[int]] | None = None) -> dict:
     """Create a block's MM extra info structure."""
     if offsets is None:
         offsets = [[0, 10]]
-    return {
-        "mm_objects": [{"mm_hash": mm_hash, "offsets": offsets}]
-    }
+    return {"mm_objects": [{"mm_hash": mm_hash, "offsets": offsets}]}
 
 
 def make_store_event(
@@ -100,7 +98,7 @@ def test_radix_tree_mm_routing_basic():
         blocks=[make_block(block_hash_w1, mm_info=make_mm_info(MM_HASH_2))],
     )
     radix_tree.apply_event(worker_1, event_w1)
-    
+
     # Verify both blocks are stored
     all_blocks = radix_tree.dump_tree_as_events()
     assert len(all_blocks) == 2

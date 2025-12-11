@@ -106,7 +106,7 @@ These events keep the router's view of worker state up-to-date in real-time.
      --router-port 7000 \
      --http-port 8000
    ```
-   
+
    Note: TensorRT-LLM uses block_size=32 by default, not 64 like vLLM.
 
    The script will:
