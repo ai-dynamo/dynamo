@@ -92,45 +92,45 @@ jobs:
         docker buildx inspect --bootstrap
 
 
-  test-building:
-    name: test building
-    needs: [create-buildkit-builders]
-    runs-on: builder-cpu-amd-runner
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  # test-building:
+  #   name: test building
+  #   needs: [create-buildkit-builders]
+  #   runs-on: builder-cpu-amd-runner
+  #   steps:
+  #   - name: Checkout code
+  #     uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
 
-    - name: Define amd64 builder
-      uses: ./.github/actions/buildkit-builder
-      with:
-        builder_name: ${{ env.BUILDER_NAME }}
-        mode: create
-        platform: linux/amd64
-        replicas: '4'
-        nodeselector: 'eks.amazonaws.com/nodegroup=cpu-amd-m5-2xlarge,kubernetes.io/arch=amd64'
-        tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
+  #   - name: Define amd64 builder
+  #     uses: ./.github/actions/buildkit-builder
+  #     with:
+  #       builder_name: ${{ env.BUILDER_NAME }}
+  #       mode: create
+  #       platform: linux/amd64
+  #       replicas: '4'
+  #       nodeselector: 'eks.amazonaws.com/nodegroup=cpu-amd-m5-2xlarge,kubernetes.io/arch=amd64'
+  #       tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
 
-    - name: Define arm64 builder
-      uses: ./.github/actions/buildkit-builder
-      with:
-        builder_name: ${{ env.BUILDER_NAME }}
-        mode: append
-        platform: linux/arm64
-        replicas: '4'
-        nodeselector: 'eks.amazonaws.com/nodegroup=cpu-arm-r8g-4xlarge,kubernetes.io/arch=arm64'
-        tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
+  #   - name: Define arm64 builder
+  #     uses: ./.github/actions/buildkit-builder
+  #     with:
+  #       builder_name: ${{ env.BUILDER_NAME }}
+  #       mode: append
+  #       platform: linux/arm64
+  #       replicas: '4'
+  #       nodeselector: 'eks.amazonaws.com/nodegroup=cpu-arm-r8g-4xlarge,kubernetes.io/arch=arm64'
+  #       tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
 
-    - name: debuggin
-      shell: bash
-      run: |
-        sleep 3600 
+  #   - name: debuggin
+  #     shell: bash
+  #     run: |
+  #       sleep 3600 
 
 
 
   cleanup-cluster-builder:
     name: Cleanup Builder
     runs-on: builder-cpu-amd-runner
-    needs: [test-building]
+    needs: [operator]
     if: always()
     steps:
     - name: Cleanup Buildkit Builder
@@ -139,82 +139,103 @@ jobs:
         docker buildx rm ${{ env.BUILDER_NAME }} || true
 
 
-  # operator:
-  #   # needs: changed-files
-  #   needs: [create-buildkit-builders]
-  #   # if: needs.changed-files.outputs.has_code_changes == 'true'
-  #   # strategy:
-  #   #   fail-fast: false
-  #     # matrix:
-  #     #   platform:
-  #     #     - { arch: amd64, runner: cpu-amd-m5-2xlarge }
-  #     #     - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-  #   name: Building operator (${{ matrix.platform.arch }})
-  #   runs-on: builder-cpu-amd-runner
-  #   env:
-  #     BUILD_PLATFORM: linux/amd64,linux/arm64
-  #   steps:
-  #     - name: Output Node Name
-  #       shell: bash
-  #       run: |
-  #         echo ${K8S_NODE_NAME}
-  #     - name: Checkout code
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-  #     - name: Docker Login
-  #       uses: ./.github/actions/docker-login
-  #       with:
-  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-  #     - name: Linter
-  #       shell: bash
-  #       env:
-  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #       run: |
-  #         cd deploy/cloud/operator
-  #         docker build --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-  #     - name: Tester
-  #       shell: bash
-  #       env:
-  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #       run: |
-  #         cd deploy/cloud/operator
-  #         docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-  #     - name: Set up Go
-  #       uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-  #       with:
-  #         go-version: '1.24'
-  #     - name: Check for uncommitted changes
-  #       shell: bash
-  #       env:
-  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #       run: |
-  #         sudo apt-get update && sudo apt-get install -y make
-  #         cd deploy/cloud/operator
-  #         make check
-  #     - name: Build Container
-  #       id: build-image
-  #       shell: bash
-  #       env:
-  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #       run: |
-  #         cd deploy/cloud/operator
-  #         docker buildx build --load \
-  #             --platform linux/${{ matrix.platform.arch }} \
-  #             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-  #             -f Dockerfile \
-  #             -t dynamo-operator:latest .
-  #     - name: Docker Tag and Push
-  #       uses: ./.github/actions/docker-tag-push
-  #       with:
-  #         local_image: dynamo-operator:latest
-  #         push_tags: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
-  #         aws_push: 'false'
-  #         azure_push: 'true'
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  operator:
+    # needs: changed-files
+    needs: [create-buildkit-builders]
+    # if: needs.changed-files.outputs.has_code_changes == 'true'
+    # strategy:
+    #   fail-fast: false
+      # matrix:
+      #   platform:
+      #     - { arch: amd64, runner: cpu-amd-m5-2xlarge }
+      #     - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    name: Building operator
+    runs-on: builder-cpu-amd-runner
+    env:
+      BUILD_PLATFORM: linux/amd64,linux/arm64
+    steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Define amd64 builder
+        uses: ./.github/actions/buildkit-builder
+        with:
+          builder_name: ${{ env.BUILDER_NAME }}
+          mode: create
+          platform: linux/amd64
+          replicas: '4'
+          nodeselector: 'eks.amazonaws.com/nodegroup=cpu-amd-m5-2xlarge,kubernetes.io/arch=amd64'
+          tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
+
+      - name: Define arm64 builder
+        uses: ./.github/actions/buildkit-builder
+        with:
+          builder_name: ${{ env.BUILDER_NAME }}
+          mode: append
+          platform: linux/arm64
+          replicas: '4'
+          nodeselector: 'eks.amazonaws.com/nodegroup=cpu-arm-r8g-4xlarge,kubernetes.io/arch=arm64'
+          tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
+
+
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Linter
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          cd deploy/cloud/operator
+          docker buildx build --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Tester
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          cd deploy/cloud/operator
+          docker buildx build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      # - name: Set up Go
+      #   uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+      #   with:
+      #     go-version: '1.24'
+      # - name: Check for uncommitted changes
+      #   shell: bash
+      #   env:
+      #     ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+      #   run: |
+      #     sudo apt-get update && sudo apt-get install -y make
+      #     cd deploy/cloud/operator
+      #     make check
+      # - name: Build Container
+      #   id: build-image
+      #   shell: bash
+      #   env:
+      #     ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+      #   run: |
+      #     cd deploy/cloud/operator
+      #     docker buildx build --load \
+      #         --platform linux/${{ matrix.platform.arch }} \
+      #         --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+      #         -f Dockerfile \
+      #         -t dynamo-operator:latest .
+      # - name: Docker Tag and Push
+      #   uses: ./.github/actions/docker-tag-push
+      #   with:
+      #     local_image: dynamo-operator:latest
+      #     push_tags: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
+      #     aws_push: 'false'
+      #     azure_push: 'true'
+      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
 
   # vllm:
   #   needs: changed-files
