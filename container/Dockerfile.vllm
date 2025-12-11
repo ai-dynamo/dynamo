@@ -289,6 +289,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.test.txt
 
 # Copy tests, benchmarks, deploy and components for CI
+COPY --chown=dynamo: benchmarks /workspace/benchmarks
 COPY --chown=dynamo: tests /workspace/tests
 COPY --chown=dynamo: examples /workspace/examples
 COPY --chown=dynamo: deploy /workspace/deploy
