@@ -19,6 +19,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 MODEL_NAME="llava-hf/llava-1.5-7b-hf"
 PROMPT_TEMPLATE="USER: <image>\n<prompt> ASSISTANT:"
 PROVIDED_PROMPT_TEMPLATE=""
+SINGLE_GPU=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -31,11 +32,16 @@ while [[ $# -gt 0 ]]; do
             PROVIDED_PROMPT_TEMPLATE=$2
             shift 2
             ;;
+        --single-gpu)
+            SINGLE_GPU=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --model <model_name> Specify the model to use (default: $MODEL_NAME)"
             echo "  --prompt-template <template> Specify the multi-modal prompt template to use. LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates."
+            echo "  --single-gpu         Run both encode and PD workers on GPU 0 (for pre-merge CI)"
             echo "  -h, --help           Show this help message"
             exit 0
             ;;
@@ -79,8 +85,14 @@ fi
 python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME --mm-prompt-template "$PROMPT_TEMPLATE" &
 
 # run E/P/D workers
-CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME &
-CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-worker --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $EXTRA_ARGS &
+# Use single GPU (GPU 0) for pre-merge CI, otherwise use GPU 0 for encode and GPU 1 for PD
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME &
+    CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-worker --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $EXTRA_ARGS &
+else
+    CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME &
+    CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --multimodal-worker --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $EXTRA_ARGS &
+fi
 
 # Wait for all background processes to complete
 wait

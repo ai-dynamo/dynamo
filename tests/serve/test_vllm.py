@@ -215,6 +215,32 @@ vllm_configs = {
         name="multimodal_agg_llava_epd",
         directory=vllm_dir,
         script_name="agg_multimodal_epd.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="llava-hf/llava-1.5-7b-hf",
+        script_args=["--model", "llava-hf/llava-1.5-7b-hf", "--single-gpu"],
+        request_payloads=[
+            chat_payload(
+                [
+                    {
+                        "type": "text",
+                        "text": "What colors are in the following image? Respond only with the colors.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["purple"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    "multimodal_agg_llava_epd_2gpu": VLLMConfig(
+        name="multimodal_agg_llava_epd_2gpu",
+        directory=vllm_dir,
+        script_name="agg_multimodal_epd.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="llava-hf/llava-1.5-7b-hf",
         script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
@@ -268,7 +294,7 @@ vllm_configs = {
         name="multimodal_agg_qwen",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
         delayed_start=0,
@@ -296,7 +322,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
         marks=[
-            pytest.mark.gpu_2,
+            pytest.mark.gpu_1,
             # https://github.com/ai-dynamo/dynamo/issues/4501
             pytest.mark.xfail(strict=False),
         ],
@@ -358,7 +384,7 @@ vllm_configs = {
         name="multimodal_audio_agg",
         directory="/workspace/examples/multimodal",
         script_name="audio_agg.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="Qwen/Qwen2-Audio-7B-Instruct",
         delayed_start=0,
         script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
