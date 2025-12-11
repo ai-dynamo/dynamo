@@ -70,7 +70,7 @@ runs:
         requests_memory: '48Gi'
         limits_memory: '52Gi'
 
-    - name: Inspect Buildkit Builders
+    - name: Bootstrap buildkit builder
       shell: bash
       run: |
-        docker buildx inspect
+        docker buildx inspect --bootstrap
