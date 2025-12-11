@@ -12,10 +12,12 @@ echo "=========================================="
 echo "Installing Prometheus & Grafana for Dynamo"
 echo "=========================================="
 
-# Step 1: Add Helm repository
+# Step 1: Add Helm repositories
 echo ""
-echo "Step 1: Adding prometheus-community Helm repository..."
+echo "Step 1: Adding required Helm repositories..."
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo add nvidia https://helm.ngc.nvidia.com/nvidia 2>/dev/null || true
+helm repo add nvidia-dynamo https://helm.ngc.nvidia.com/nvidia/ai-dynamo 2>/dev/null || true
 
 # Step 2: Update Helm repositories
 echo ""
@@ -48,6 +50,13 @@ echo "Step 6: Updating Dynamo operator with Prometheus endpoint..."
 # Detect currently installed version to avoid accidental upgrades
 DYNAMO_VERSION=$(helm list -n dynamo -o json | jq -r '.[] | select(.name=="dynamo-platform") | .chart' | sed 's/dynamo-platform-//')
 echo "Detected Dynamo Platform version: ${DYNAMO_VERSION}"
+
+# Delete the conflicting secret (grove-operator will recreate it)
+echo "Removing grove-webhook-server-cert to avoid conflict..."
+kubectl delete secret grove-webhook-server-cert -n dynamo --ignore-not-found=true
+
+# Perform the upgrade
+echo "Running Helm upgrade..."
 helm upgrade dynamo-platform nvidia-dynamo/dynamo-platform \
   --version "${DYNAMO_VERSION}" \
   --namespace dynamo \
@@ -92,7 +101,7 @@ fi
 # Step 9: Deploy Grafana dashboard ConfigMap
 echo ""
 echo "Step 9: Deploying Grafana disaggregated dashboard ConfigMap..."
-kubectl apply -f "$SCRIPT_DIR/../k8s/grafana-disagg-dashboard-configmap.yaml"
+kubectl apply -f "$SCRIPT_DIR/grafana-disagg-dashboard-configmap.yaml"
 echo "✅ Dashboard ConfigMap deployed - Grafana sidecar will auto-import it within a few seconds"
 
 # Step 10: Get Grafana credentials
