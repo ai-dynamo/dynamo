@@ -49,15 +49,6 @@ spec:
           - -c
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
-
-          livenessProbe:
-            httpGet:
-              path: /live
-              port: system
-            initialDelaySeconds: 240
-            periodSeconds: 30
-            timeoutSeconds: 5
-            failureThreshold: 3
       replicas: 1
       resources:
         limits:
