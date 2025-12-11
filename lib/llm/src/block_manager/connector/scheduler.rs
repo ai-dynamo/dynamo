@@ -407,7 +407,9 @@ impl Scheduler {
         debug_assert!(self.slots.contains_key(&request_id), "slot not found");
 
         // Cancel the cancel token for this request - this signals any waiting tasks to abort
-        self.cancel_tokens.remove(&request_id);
+        if let Some((_, token)) = self.cancel_tokens.remove(&request_id) {
+            token.cancel();
+        }
 
         self.slots.remove(&request_id);
 
@@ -433,7 +435,18 @@ impl Scheduler {
                             );
                             // Spawn cancellation - use a dummy completed counter since we don't care
                             let dummy_completed = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                            tokio::spawn(controller.execute(SchedulingDecision::Cancel, dummy_completed));
+                            let request_id_clone = request_id.clone();
+                            let uuid_clone = uuid;
+                            tokio::spawn(async move {
+                                if let Err(e) = controller.execute(SchedulingDecision::Cancel, dummy_completed).await {
+                                    tracing::debug!(
+                                        request_id = %request_id_clone,
+                                        uuid = %uuid_clone,
+                                        error = %e,
+                                        "Cancellation task failed during slot removal"
+                                    );
+                                }
+                            });
                         }
                         TransferRequestSource::Worker => {
                             // Worker was waiting for transfer - nothing to cancel, just log

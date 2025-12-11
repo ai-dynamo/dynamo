@@ -333,9 +333,6 @@ impl ObjectTransferHandler {
             num_blocks
         );
 
-        // Register in local cache for future lookups
-        self.local_registry.register(sequence_hashes);
-
         // Create RemoteDescriptors for all objects at once
         let bucket = self.config.resolve_bucket(self.transport.worker_id() as u32);
         let remote_descriptors: Vec<RemoteDescriptor> = sequence_hashes
@@ -353,6 +350,15 @@ impl ObjectTransferHandler {
                 &remote_descriptors,
             )
             .await?;
+
+        // Validate G4 transfer completed successfully
+        if g4_result.transferred != num_blocks {
+            tracing::warn!(
+                "G4 onboard transferred {} of {} blocks",
+                g4_result.transferred,
+                num_blocks
+            );
+        }
 
         // Batch transfer: Host (bounce buffers) -> Device
         let block_pairs: Vec<(usize, usize)> = host_block_ids
@@ -373,6 +379,9 @@ impl ObjectTransferHandler {
         )?;
 
         notification.await?;
+
+        // Register in local cache only after successful transfer
+        self.local_registry.register(sequence_hashes);
 
         tracing::debug!(
             onboarded = num_blocks,

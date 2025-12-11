@@ -130,7 +130,15 @@ impl TryFrom<u8> for MessageType {
 /// Format: `[type: 1][bucket_id: 8][count: 2][entries: count × 16]`
 ///
 /// Size: 11 + (count × 16) bytes
+///
+/// # Panics
+/// Panics if entries.len() exceeds u16::MAX (65535)
 pub fn encode_register(bucket_id: BucketId, entries: &[(SequenceHash, ObjectKey)]) -> Vec<u8> {
+    assert!(
+        entries.len() <= u16::MAX as usize,
+        "Too many entries: {} exceeds u16::MAX (65535)",
+        entries.len()
+    );
     let mut buf = Vec::with_capacity(11 + entries.len() * WireEntry::SIZE);
     buf.push(MessageType::Register as u8);
     buf.extend_from_slice(&bucket_id.to_le_bytes());
@@ -153,7 +161,15 @@ pub fn encode_register_hash_as_key(bucket_id: BucketId, hashes: &[SequenceHash])
 /// Format: `[type: 1][bucket_id: 8][count: 2][hashes: count × 8]`
 ///
 /// Size: 11 + (count × 8) bytes
+///
+/// # Panics
+/// Panics if hashes.len() exceeds u16::MAX (65535)
 pub fn encode_can_offload(bucket_id: BucketId, hashes: &[SequenceHash]) -> Vec<u8> {
+    assert!(
+        hashes.len() <= u16::MAX as usize,
+        "Too many hashes: {} exceeds u16::MAX (65535)",
+        hashes.len()
+    );
     let mut buf = Vec::with_capacity(11 + hashes.len() * 8);
     buf.push(MessageType::CanOffload as u8);
     buf.extend_from_slice(&bucket_id.to_le_bytes());
@@ -169,7 +185,15 @@ pub fn encode_can_offload(bucket_id: BucketId, hashes: &[SequenceHash]) -> Vec<u
 /// Format: `[type: 1][bucket_id: 8][count: 2][hashes: count × 8]`
 ///
 /// Size: 11 + (count × 8) bytes
+///
+/// # Panics
+/// Panics if hashes.len() exceeds u16::MAX (65535)
 pub fn encode_match_sequence(bucket_id: BucketId, hashes: &[SequenceHash]) -> Vec<u8> {
+    assert!(
+        hashes.len() <= u16::MAX as usize,
+        "Too many hashes: {} exceeds u16::MAX (65535)",
+        hashes.len()
+    );
     let mut buf = Vec::with_capacity(11 + hashes.len() * 8);
     buf.push(MessageType::MatchSequence as u8);
     buf.extend_from_slice(&bucket_id.to_le_bytes());

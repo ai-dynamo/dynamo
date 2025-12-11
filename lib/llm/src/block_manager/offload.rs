@@ -97,6 +97,7 @@ pub fn max_transfer_batch_size() -> usize {
 /// immediate error reporting.
 ///
 /// Set via: `DYN_KVBM_ASYNC_OFFLOAD=true`
+#[allow(dead_code)] // Reserved for future async offload implementation
 pub fn async_offload_enabled() -> bool {
     use dynamo_runtime::config::environment_names::kvbm::transfer;
 
