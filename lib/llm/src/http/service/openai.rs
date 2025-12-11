@@ -763,7 +763,12 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             return Some((message, code));
         }
 
-        return Some((comment_str, StatusCode::INTERNAL_SERVER_ERROR));
+        // Fallback: use error_code from Annotated if present, otherwise 500
+        let status_code = event
+            .error_code
+            .and_then(|c| StatusCode::from_u16(c).ok())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        return Some((comment_str, status_code));
     }
 
     // Check if the data payload itself contains an error structure with code >= 400
@@ -799,7 +804,12 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
         // Comments present with no data AND no event type indicates error
         // (events with event types like "request_id" or "event.dynamo.test.sentinel" are annotations)
         if event.data.is_none() && event.event.is_none() {
-            return Some((comment_str, StatusCode::INTERNAL_SERVER_ERROR));
+            // Use error_code from Annotated if present, otherwise 500
+            let status_code = event
+                .error_code
+                .and_then(|c| StatusCode::from_u16(c).ok())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            return Some((comment_str, status_code));
         }
     }
 
