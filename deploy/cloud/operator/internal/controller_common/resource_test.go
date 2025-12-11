@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func TestIsSpecChanged2(t *testing.T) {
+func TestGetSpecChangeResult(t *testing.T) {
 	tests := []struct {
 		name          string
 		current       client.Object
@@ -409,21 +409,21 @@ func TestIsSpecChanged2(t *testing.T) {
 			}
 			// Set both hash and generation annotations (generation=1 simulates initial state)
 			updateAnnotations(tt.current, hash, 1)
-			result, err := IsSpecChanged(tt.current, tt.desired)
+			result, err := GetSpecChangeResult(tt.current, tt.desired)
 			if err != nil {
 				t.Errorf("failed to check if spec has changed in test for resource %s: %s", tt.current.GetName(), err)
 			}
 			if tt.expectedHash && !result.NeedsUpdate {
-				t.Errorf("IsSpecChanged() NeedsUpdate = %v, want %v", result.NeedsUpdate, tt.expectedHash)
+				t.Errorf("GetSpecChangeResult() NeedsUpdate = %v, want %v", result.NeedsUpdate, tt.expectedHash)
 			}
 			if !tt.expectedHash && result.NeedsUpdate {
-				t.Errorf("IsSpecChanged() NeedsUpdate = %v, want %v", result.NeedsUpdate, tt.expectedHash)
+				t.Errorf("GetSpecChangeResult() NeedsUpdate = %v, want %v", result.NeedsUpdate, tt.expectedHash)
 			}
 		})
 	}
 }
 
-func TestIsSpecChanged_GenerationTracking(t *testing.T) {
+func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 	tests := []struct {
 		name                       string
 		currentGeneration          int64
@@ -432,7 +432,6 @@ func TestIsSpecChanged_GenerationTracking(t *testing.T) {
 		desiredReplicas            int64  // different from current (2) means hash will differ
 		expectNeedsUpdate          bool
 		expectManualChangeDetected bool
-		expectAnnotationOnly       bool
 		expectNewGeneration        int64 // 0 means don't check
 	}{
 		{
@@ -454,14 +453,16 @@ func TestIsSpecChanged_GenerationTracking(t *testing.T) {
 			expectNewGeneration:        8, // current(7) + 1
 		},
 		{
-			name:                  "missing generation annotation - annotation only update",
+			// Upgrade scenario: hash matches but no generation annotation yet.
+			// We do a full update to ensure spec is correct (could have been manual edits
+			// before we added generation tracking).
+			name:                  "missing generation annotation - full update for safety",
 			currentGeneration:     5,
 			lastAppliedGeneration: "", // missing
 			lastAppliedHash:       "match",
 			desiredReplicas:       2,
 			expectNeedsUpdate:     true,
-			expectAnnotationOnly:  true,
-			expectNewGeneration:   5, // current, not +1 (no spec change)
+			expectNewGeneration:   6, // current + 1
 		},
 		{
 			name:                  "missing hash annotation - needs full update",
@@ -576,11 +577,10 @@ func TestIsSpecChanged_GenerationTracking(t *testing.T) {
 				current.SetAnnotations(annotations)
 			}
 
-			result, err := IsSpecChanged(current, desired)
+			result, err := GetSpecChangeResult(current, desired)
 			g.Expect(err).To(gomega.BeNil())
 			g.Expect(result.NeedsUpdate).To(gomega.Equal(tt.expectNeedsUpdate), "NeedsUpdate mismatch")
 			g.Expect(result.ManualChangeDetected).To(gomega.Equal(tt.expectManualChangeDetected), "ManualChangeDetected mismatch")
-			g.Expect(result.AnnotationOnly).To(gomega.Equal(tt.expectAnnotationOnly), "AnnotationOnly mismatch")
 			if tt.expectNewGeneration != 0 {
 				g.Expect(result.NewGeneration).To(gomega.Equal(tt.expectNewGeneration), "NewGeneration mismatch")
 			}

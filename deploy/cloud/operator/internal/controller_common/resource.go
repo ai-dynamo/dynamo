@@ -155,70 +155,55 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 		}
 
 		// Check if the Spec has changed and update if necessary
-		var changeResult *SpecChangeResult
-		changeResult, err = IsSpecChanged(oldResource, resource)
+		var changeResult SpecChangeResult
+		changeResult, err = GetSpecChangeResult(oldResource, resource)
 		if err != nil {
 			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("CalculatePatch%s", resourceType), "Failed to calculate patch for %s %s: %s", resourceType, resourceNamespace, err)
 			return false, resource, fmt.Errorf("failed to check if spec has changed: %w", err)
 		}
 
-		if changeResult.NeedsUpdate {
-			// Log if manual changes were detected
-			if changeResult.ManualChangeDetected {
-				logs.Info(fmt.Sprintf("Manual changes detected on %s, will be overwritten", resourceType),
-					"currentGeneration", oldResource.GetGeneration(),
-					"lastAppliedGeneration", getAnnotation(oldResource, NvidiaAnnotationGenerationKey))
-			}
-
-			if changeResult.AnnotationOnly {
-				// Only update annotations using Patch (more efficient, no spec change)
-				patch := client.MergeFrom(oldResource.DeepCopyObject().(client.Object))
-				updateAnnotations(oldResource, *changeResult.NewHash, changeResult.NewGeneration)
-
-				err = r.Patch(ctx, oldResource, patch)
-				if err != nil {
-					logs.Error(err, fmt.Sprintf("Failed to patch annotations for %s.", resourceType))
-					r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("Patch%s", resourceType), "Failed to patch %s %s: %s", resourceType, resourceNamespace, err)
-					return
-				}
-				logs.Info(fmt.Sprintf("%s annotations updated.", resourceType))
-				res = oldResource
-			} else {
-				// Full spec update
-				// Generate and log diff before updating
-				diff, diffErr := generateSpecDiff(oldResource, resource)
-				if diffErr != nil {
-					logs.V(1).Info(fmt.Sprintf("Failed to generate diff for %s: %v", resourceType, diffErr))
-				} else if diff != "" {
-					logs.Info(fmt.Sprintf("%s spec changes detected", resourceType), "diff", diff)
-				}
-
-				// Update the spec of the current object with the desired spec
-				err = CopySpec(resource, oldResource)
-				if err != nil {
-					logs.Error(err, fmt.Sprintf("Failed to copy spec for %s.", resourceType))
-					r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("CopySpec%s", resourceType), "Failed to copy spec for %s %s: %s", resourceType, resourceNamespace, err)
-					return
-				}
-
-				updateAnnotations(oldResource, *changeResult.NewHash, changeResult.NewGeneration)
-
-				err = r.Update(ctx, oldResource)
-				if err != nil {
-					logs.Error(err, fmt.Sprintf("Failed to update %s.", resourceType))
-					r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("Update%s", resourceType), "Failed to update %s %s: %s", resourceType, resourceNamespace, err)
-					return
-				}
-				logs.Info(fmt.Sprintf("%s updated.", resourceType))
-				r.GetRecorder().Eventf(parentResource, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Updated %s %s", resourceType, resourceNamespace)
-				modified = true
-				res = oldResource
-			}
-		} else {
+		if !changeResult.NeedsUpdate {
 			logs.Info(fmt.Sprintf("%s spec is the same. Skipping update.", resourceType))
 			r.GetRecorder().Eventf(parentResource, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Skipping update %s %s", resourceType, resourceNamespace)
 			res = oldResource
+			return
 		}
+
+		// Log if manual changes were detected
+		if changeResult.ManualChangeDetected {
+			logs.Info(fmt.Sprintf("Manual changes detected on %s, will be overwritten", resourceType),
+				"currentGeneration", oldResource.GetGeneration(),
+				"lastAppliedGeneration", getAnnotation(oldResource, NvidiaAnnotationGenerationKey))
+		}
+
+		// Generate and log diff before updating
+		diff, diffErr := generateSpecDiff(oldResource, resource)
+		if diffErr != nil {
+			logs.V(1).Info(fmt.Sprintf("Failed to generate diff for %s: %v", resourceType, diffErr))
+		} else if diff != "" {
+			logs.Info(fmt.Sprintf("%s spec changes detected", resourceType), "diff", diff)
+		}
+
+		// Update the spec of the current object with the desired spec
+		err = CopySpec(resource, oldResource)
+		if err != nil {
+			logs.Error(err, fmt.Sprintf("Failed to copy spec for %s.", resourceType))
+			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("CopySpec%s", resourceType), "Failed to copy spec for %s %s: %s", resourceType, resourceNamespace, err)
+			return
+		}
+
+		updateAnnotations(oldResource, *changeResult.NewHash, changeResult.NewGeneration)
+
+		err = r.Update(ctx, oldResource)
+		if err != nil {
+			logs.Error(err, fmt.Sprintf("Failed to update %s.", resourceType))
+			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("Update%s", resourceType), "Failed to update %s %s: %s", resourceType, resourceNamespace, err)
+			return
+		}
+		logs.Info(fmt.Sprintf("%s updated.", resourceType))
+		r.GetRecorder().Eventf(parentResource, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Updated %s %s", resourceType, resourceNamespace)
+		modified = true
+		res = oldResource
 	}
 	return
 }
@@ -284,22 +269,20 @@ type SpecChangeResult struct {
 	NewGeneration int64
 	// NeedsUpdate indicates whether the resource needs to be updated
 	NeedsUpdate bool
-	// AnnotationOnly indicates whether only annotations need to be updated (no spec change)
-	AnnotationOnly bool
 	// ManualChangeDetected indicates whether a manual change was detected
 	ManualChangeDetected bool
 }
 
-// IsSpecChanged determines if a resource needs to be updated by comparing the desired spec hash
+// GetSpecChangeResult determines if a resource needs to be updated by comparing the desired spec hash
 // with the last applied hash annotation. It also tracks generation to detect manual changes.
 //
 // Returns:
 //   - SpecChangeResult with update information
 //   - error if hash computation fails
-func IsSpecChanged(current client.Object, desired client.Object) (*SpecChangeResult, error) {
+func GetSpecChangeResult(current client.Object, desired client.Object) (SpecChangeResult, error) {
 	desiredHash, err := GetSpecHash(desired)
 	if err != nil {
-		return nil, err
+		return SpecChangeResult{}, err
 	}
 
 	lastAppliedHash := getAnnotation(current, NvidiaAnnotationHashKey)
@@ -311,7 +294,7 @@ func IsSpecChanged(current client.Object, desired client.Object) (*SpecChangeRes
 	// This handles existing resources without our annotations - we're about to update them,
 	// so NewGeneration = currentGen + 1 is correct.
 	if lastAppliedHash == "" {
-		return &SpecChangeResult{
+		return SpecChangeResult{
 			NewHash:       &desiredHash,
 			NewGeneration: currentGen + 1,
 			NeedsUpdate:   true,
@@ -320,7 +303,7 @@ func IsSpecChanged(current client.Object, desired client.Object) (*SpecChangeRes
 
 	// Case 2: Hash different (spec changed)
 	if desiredHash != lastAppliedHash {
-		return &SpecChangeResult{
+		return SpecChangeResult{
 			NewHash:       &desiredHash,
 			NewGeneration: currentGen + 1,
 			NeedsUpdate:   true,
@@ -328,13 +311,14 @@ func IsSpecChanged(current client.Object, desired client.Object) (*SpecChangeRes
 	}
 
 	// Case 3: Hash same, but generation annotation missing (upgrade scenario)
-	// Only update annotation, not spec - use current gen (not +1) since spec isn't changing
+	// Do a full update to ensure spec is exactly what we want - there could have been
+	// manual edits before we added generation tracking. The cost is one extra Update
+	// per resource during upgrade, but on next reconcile generations will match.
 	if lastAppliedGenStr == "" {
-		return &SpecChangeResult{
-			NewHash:        &desiredHash,
-			NewGeneration:  currentGen,
-			NeedsUpdate:    true,
-			AnnotationOnly: true,
+		return SpecChangeResult{
+			NewHash:       &desiredHash,
+			NewGeneration: currentGen + 1,
+			NeedsUpdate:   true,
 		}, nil
 	}
 
@@ -342,7 +326,7 @@ func IsSpecChanged(current client.Object, desired client.Object) (*SpecChangeRes
 	lastAppliedGen, err := strconv.ParseInt(lastAppliedGenStr, 10, 64)
 	if err != nil {
 		// Corrupted annotation, force update to fix
-		return &SpecChangeResult{
+		return SpecChangeResult{
 			NewHash:       &desiredHash,
 			NewGeneration: currentGen + 1,
 			NeedsUpdate:   true,
@@ -352,7 +336,7 @@ func IsSpecChanged(current client.Object, desired client.Object) (*SpecChangeRes
 	// Detect manual changes: if current generation > last applied generation,
 	// someone else modified the resource after our last update
 	if currentGen > 0 && currentGen > lastAppliedGen {
-		return &SpecChangeResult{
+		return SpecChangeResult{
 			NewHash:              &desiredHash,
 			NewGeneration:        currentGen + 1,
 			NeedsUpdate:          true,
@@ -361,7 +345,7 @@ func IsSpecChanged(current client.Object, desired client.Object) (*SpecChangeRes
 	}
 
 	// No update needed
-	return &SpecChangeResult{
+	return SpecChangeResult{
 		NeedsUpdate: false,
 	}, nil
 }
