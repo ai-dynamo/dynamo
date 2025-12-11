@@ -59,7 +59,7 @@ pub use capabilities::TransferCapabilities;
 pub use checksum::{BlockChecksum, compute_block_checksums, compute_layer_checksums};
 pub use fill::{FillPattern, fill_blocks, fill_layers};
 pub use nixl_agent::{NixlAgent, NixlBackendConfig};
-pub use options::{DescriptorHint, TransferOptions, TransferOptionsBuilder};
+pub use options::{TransferOptions, TransferOptionsBuilder};
 pub use preferences::{NativeVsNixlPolicy, TransferPreferences};
 pub use strategy::{TransferPlan, TransferStrategy};
 pub use validation::BlockValidationError;
