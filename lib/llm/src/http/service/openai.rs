@@ -1001,22 +1001,22 @@ async fn chat_completions(
         let response =
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await
-                .map_err(|e| {
+                .map_err(|(code, msg)| {
                     tracing::error!(
                         request_id,
                         "Failed to fold chat completions stream for: {:?}",
-                        e
+                        msg
                     );
-                    // Return 400 Bad Request for Python ValueError exceptions
-                    if e.contains("ValueError") {
+                    // Use the error code if provided, otherwise default to 500
+                    if let Some(code) = code {
                         ErrorMessage::from_http_error(HttpError {
-                            code: 400,
-                            message: format!("Failed to fold chat completions stream: {}", e),
+                            code,
+                            message: format!("Failed to fold chat completions stream: {}", msg),
                         })
                     } else {
                         ErrorMessage::internal_server_error(&format!(
                             "Failed to fold chat completions stream: {}",
-                            e
+                            msg
                         ))
                     }
                 })?;
@@ -1234,22 +1234,22 @@ async fn responses(
     let response =
         NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
             .await
-            .map_err(|e| {
+            .map_err(|(code, msg)| {
                 tracing::error!(
                     request_id,
                     "Failed to fold chat completions stream for: {:?}",
-                    e
+                    msg
                 );
-                // Return 400 Bad Request for Python ValueError exceptions
-                if e.contains("ValueError") {
+                // Use the error code if provided, otherwise default to 500
+                if let Some(code) = code {
                     ErrorMessage::from_http_error(HttpError {
-                        code: 400,
-                        message: format!("Failed to fold chat completions stream: {}", e),
+                        code,
+                        message: format!("Failed to fold chat completions stream: {}", msg),
                     })
                 } else {
                     ErrorMessage::internal_server_error(&format!(
                         "Failed to fold chat completions stream: {}",
-                        e
+                        msg
                     ))
                 }
             })?;

@@ -259,7 +259,7 @@ impl AnnotationsProvider for NvCreateTensorRequest {
 
 pub struct DeltaAggregator {
     response: Option<NvCreateTensorResponse>,
-    error: Option<String>,
+    error: Option<(Option<u16>, String)>,
 }
 
 impl NvCreateTensorResponse {
@@ -275,9 +275,9 @@ impl NvCreateTensorResponse {
                 |mut aggregator, delta| async move {
                     let delta = match delta.ok() {
                         Ok(delta) => delta,
-                        Err(error) => {
+                        Err((code, error)) => {
                             if aggregator.error.is_none() {
-                                aggregator.error = Some(error);
+                                aggregator.error = Some((code, error));
                             }
                             return aggregator;
                         }
@@ -288,7 +288,7 @@ impl NvCreateTensorResponse {
                                 aggregator.response = Some(resp);
                             } else if aggregator.error.is_none() {
                                 aggregator.error =
-                                    Some("Multiple responses in non-streaming mode".to_string());
+                                    Some((None, "Multiple responses in non-streaming mode".to_string()));
                             }
                         }
                         None => {
@@ -299,7 +299,7 @@ impl NvCreateTensorResponse {
                 },
             )
             .await;
-        if let Some(error) = aggregator.error {
+        if let Some((_code, error)) = aggregator.error {
             Err(anyhow::anyhow!(error))
         } else if let Some(response) = aggregator.response {
             Ok(response)

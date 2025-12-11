@@ -18,7 +18,7 @@ pub struct DeltaAggregator {
     /// The accumulated embeddings response.
     response: Option<NvCreateEmbeddingResponse>,
     /// Optional error message if an error occurs during aggregation.
-    error: Option<String>,
+    error: Option<(Option<u16>, String)>,
 }
 
 impl Default for DeltaAggregator {
@@ -54,8 +54,8 @@ impl DeltaAggregator {
                 // Attempt to unwrap the delta, capturing any errors.
                 let delta = match delta.ok() {
                     Ok(delta) => delta,
-                    Err(error) => {
-                        aggregator.error = Some(error);
+                    Err((code, error)) => {
+                        aggregator.error = Some((code, error));
                         return aggregator;
                     }
                 };
@@ -85,7 +85,7 @@ impl DeltaAggregator {
             .await;
 
         // Return early if an error was encountered.
-        if let Some(error) = aggregator.error {
+        if let Some((_code, error)) = aggregator.error {
             return Err(error);
         }
 

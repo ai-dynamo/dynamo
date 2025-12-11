@@ -30,8 +30,8 @@ pub struct DeltaAggregator {
     system_fingerprint: Option<String>,
     /// Map of incremental response choices, keyed by index.
     choices: HashMap<u32, DeltaChoice>,
-    /// Optional error message if an error occurs during aggregation.
-    error: Option<String>,
+    /// Optional error (code, message) if an error occurs during aggregation.
+    error: Option<(Option<u16>, String)>,
     /// Optional service tier information for the response.
     service_tier: Option<dynamo_async_openai::types::ServiceTierResponse>,
     /// Aggregated nvext field from stream responses
@@ -111,18 +111,18 @@ impl DeltaAggregator {
     ///
     /// # Returns
     /// * `Ok(NvCreateChatCompletionResponse)` if aggregation is successful.
-    /// * `Err(String)` if an error occurs during processing.
+    /// * `Err((Option<u16>, String))` if an error occurs during processing, with optional HTTP status code.
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
         _parsing_options: ParsingOptions,
-    ) -> Result<NvCreateChatCompletionResponse, String> {
+    ) -> Result<NvCreateChatCompletionResponse, (Option<u16>, String)> {
         let aggregator = stream
             .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
                 // Attempt to unwrap the delta, capturing any errors.
                 let delta = match delta.ok() {
                     Ok(delta) => delta,
-                    Err(error) => {
-                        aggregator.error = Some(error);
+                    Err((code, error)) => {
+                        aggregator.error = Some((code, error));
                         return aggregator;
                     }
                 };
@@ -312,11 +312,11 @@ pub trait ChatCompletionAggregator {
     ///
     /// # Returns
     /// * `Ok(NvCreateChatCompletionResponse)` if aggregation succeeds.
-    /// * `Err(String)` if an error occurs.
+    /// * `Err((Option<u16>, String))` if an error occurs, with optional HTTP status code.
     async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateChatCompletionResponse, String>;
+    ) -> Result<NvCreateChatCompletionResponse, (Option<u16>, String)>;
 
     /// Converts an SSE stream into a [`NvCreateChatCompletionResponse`].
     ///
@@ -325,25 +325,25 @@ pub trait ChatCompletionAggregator {
     ///
     /// # Returns
     /// * `Ok(NvCreateChatCompletionResponse)` if aggregation succeeds.
-    /// * `Err(String)` if an error occurs.
+    /// * `Err((Option<u16>, String))` if an error occurs, with optional HTTP status code.
     async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateChatCompletionResponse, String>;
+    ) -> Result<NvCreateChatCompletionResponse, (Option<u16>, String)>;
 }
 
 impl ChatCompletionAggregator for dynamo_async_openai::types::CreateChatCompletionResponse {
     async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateChatCompletionResponse, String> {
+    ) -> Result<NvCreateChatCompletionResponse, (Option<u16>, String)> {
         DeltaAggregator::apply(stream, parsing_options).await
     }
 
     async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateChatCompletionResponse, String> {
+    ) -> Result<NvCreateChatCompletionResponse, (Option<u16>, String)> {
         let stream = convert_sse_stream::<NvCreateChatCompletionStreamResponse>(stream);
         NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options).await
     }
@@ -428,6 +428,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error_code: None,
         }
     }
 
@@ -652,6 +653,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error_code: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -711,6 +713,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error_code: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -753,6 +756,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error_code: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -795,6 +799,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error_code: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -835,6 +840,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error_code: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -879,6 +885,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error_code: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
@@ -921,6 +928,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error_code: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 

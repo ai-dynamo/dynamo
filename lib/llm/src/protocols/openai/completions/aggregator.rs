@@ -23,7 +23,7 @@ pub struct DeltaAggregator {
     usage: Option<dynamo_async_openai::types::CompletionUsage>,
     system_fingerprint: Option<String>,
     choices: HashMap<u32, DeltaChoice>,
-    error: Option<String>,
+    error: Option<(Option<u16>, String)>,
     nvext: Option<serde_json::Value>,
 }
 
@@ -64,8 +64,8 @@ impl DeltaAggregator {
             .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
                 let delta = match delta.ok() {
                     Ok(delta) => delta,
-                    Err(error) => {
-                        aggregator.error = Some(error);
+                    Err((code, error)) => {
+                        aggregator.error = Some((code, error));
                         return aggregator;
                     }
                 };
@@ -146,7 +146,7 @@ impl DeltaAggregator {
             .await;
 
         // If we have an error, return it
-        let aggregator = if let Some(error) = aggregator.error {
+        let aggregator = if let Some((_code, error)) = aggregator.error {
             return Err(anyhow::anyhow!(error));
         } else {
             aggregator
