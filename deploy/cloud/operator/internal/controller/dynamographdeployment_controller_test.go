@@ -1167,7 +1167,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			wantReconcileResult: ReconcileResult{
 				State:   PendingState,
 				Reason:  "some_resources_are_not_ready",
-				Message: "Resources not ready: test-dgd-frontend: Component deployment not ready - Available condition not true; test-dgd-decode: Component deployment not ready - Available condition not true",
+				Message: "Resources not ready: test-dgd-decode: Component deployment not ready - Available condition not true; test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,

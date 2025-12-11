@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
@@ -330,7 +331,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context
 		logger.Error(err, "failed to sync the Grove GangSet")
 		return nil, fmt.Errorf("failed to sync the Grove GangSet: %w", err)
 	}
-	return commoncontroller.NewResourceWithServiceStatuses(
+	syncedGrovePodCliqueSetAsResource, err := commoncontroller.NewResourceWithServiceStatuses(
 		syncedGrovePodCliqueSet,
 		func() (bool, string, map[string]v1alpha1.ServiceReplicaStatus) {
 			// Grove readiness: all underlying PodCliques and PodCliqueScalingGroups have replicas == availableReplicas
@@ -340,7 +341,12 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context
 			}
 			return true, "", serviceStatuses
 		},
-	), nil
+	)
+	if err != nil {
+		logger.Error(err, "failed to create the Grove PodClique Set resource")
+		return nil, fmt.Errorf("failed to create the Grove PodClique Set resource: %w", err)
+	}
+	return syncedGrovePodCliqueSetAsResource, nil
 }
 
 // reconcileGroveScaling handles scaling operations for Grove resources based on service replica changes
@@ -437,11 +443,16 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				logger.Error(err, "failed to sync the main component service")
 				return ReconcileResult{}, fmt.Errorf("failed to sync the main component service: %w", err)
 			}
-			mainComponentServiceAsResource := commoncontroller.NewResource(syncedMainComponentService,
-				func() (bool, string) {
-					return true, ""
-				})
-			resources = append(resources, mainComponentServiceAsResource)
+			if syncedMainComponentService != nil {
+				mainComponentServiceAsResource, err := commoncontroller.NewResource(syncedMainComponentService,
+					func() (bool, string) {
+						return true, ""
+					})
+				if err != nil {
+					return ReconcileResult{}, fmt.Errorf("failed to sync the main component service: %w", err)
+				}
+				resources = append(resources, mainComponentServiceAsResource)
+			}
 		}
 
 		if component.ComponentType == consts.ComponentTypeFrontend {
@@ -462,10 +473,16 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				logger.Error(err, "failed to sync the main component ingress")
 				return ReconcileResult{}, fmt.Errorf("failed to sync the main component ingress: %w", err)
 			}
-			resources = append(resources, commoncontroller.NewResource(syncedMainComponentIngress,
-				func() (bool, string) {
-					return true, ""
-				}))
+			if syncedMainComponentIngress != nil {
+				mainComponentIngressAsResource, err := commoncontroller.NewResource(syncedMainComponentIngress,
+					func() (bool, string) {
+						return true, ""
+					})
+				if err != nil {
+					return ReconcileResult{}, fmt.Errorf("failed to create the main component ingress resource: %w", err)
+				}
+				resources = append(resources, mainComponentIngressAsResource)
+			}
 			// generate the main component virtual service
 			if r.Config.IngressConfig.UseVirtualService() {
 				mainComponentVirtualService := dynamo.GenerateComponentVirtualService(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace, ingressSpec)
@@ -480,10 +497,16 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 					logger.Error(err, "failed to sync the main component virtual service")
 					return ReconcileResult{}, fmt.Errorf("failed to sync the main component virtual service: %w", err)
 				}
-				resources = append(resources, commoncontroller.NewResource(syncedMainComponentVirtualService,
-					func() (bool, string) {
-						return true, ""
-					}))
+				if syncedMainComponentVirtualService != nil {
+					mainComponentVirtualServiceAsResource, err := commoncontroller.NewResource(syncedMainComponentVirtualService,
+						func() (bool, string) {
+							return true, ""
+						})
+					if err != nil {
+						return ReconcileResult{}, fmt.Errorf("failed to create the main component virtual service resource: %w", err)
+					}
+					resources = append(resources, mainComponentVirtualServiceAsResource)
+				}
 			}
 		}
 	}
@@ -491,6 +514,11 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 }
 
 func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Resource) ReconcileResult {
+	// Sort resources by name to ensure deterministic ordering
+	sort.Slice(resources, func(i, j int) bool {
+		return resources[i].GetName() < resources[j].GetName()
+	})
+
 	var notReadyReasons []string
 	notReadyResources := []string{}
 	serviceStatuses := make(map[string]v1alpha1.ServiceReplicaStatus)

@@ -521,23 +521,33 @@ type Resource struct {
 	serviceStatuses map[string]v1alpha1.ServiceReplicaStatus
 }
 
-func NewResource[T client.Object](resource T, isReady func() (bool, string)) *Resource {
+func NewResource[T client.Object](resource T, isReady func() (bool, string)) (*Resource, error) {
+	v := reflect.ValueOf(resource)
+	// handles untype nil and typed nil
+	if !v.IsValid() || v.IsNil() {
+		return nil, fmt.Errorf("resource is nil")
+	}
 	ready, reason := isReady()
 	return &Resource{
 		object:      resource,
 		isReady:     ready,
 		readyReason: reason,
-	}
+	}, nil
 }
 
-func NewResourceWithServiceStatuses[T client.Object](resource T, isReadyAndServiceStatuses func() (bool, string, map[string]v1alpha1.ServiceReplicaStatus)) *Resource {
+func NewResourceWithServiceStatuses[T client.Object](resource T, isReadyAndServiceStatuses func() (bool, string, map[string]v1alpha1.ServiceReplicaStatus)) (*Resource, error) {
+	v := reflect.ValueOf(resource)
+	// handles untype nil and typed nil
+	if !v.IsValid() || v.IsNil() {
+		return nil, fmt.Errorf("resource is nil")
+	}
 	ready, reason, serviceStatuses := isReadyAndServiceStatuses()
 	return &Resource{
 		object:          resource,
 		isReady:         ready,
 		readyReason:     reason,
 		serviceStatuses: serviceStatuses,
-	}
+	}, nil
 }
 
 func (r *Resource) IsReady() (bool, string) {
