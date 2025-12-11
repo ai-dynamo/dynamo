@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::kv_router::{RouterConfigOverride, protocols::RequestExtraInfo};
-use crate::kv_router::RouterConfigOverride;
 #[cfg(feature = "media-nixl")]
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
