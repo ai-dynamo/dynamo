@@ -12,7 +12,6 @@ class InputParamManager:
         """
 
         if use_tokenizer:
-            print(f"Request: {request}")
             if self.tokenizer is None:
                 raise ValueError("Tokenizer is not available")
 
