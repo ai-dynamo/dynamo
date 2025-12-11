@@ -28,22 +28,9 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_engine import RequestPrompt
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.inputs.data import TokensPrompt
 from vllm.sampling_params import SamplingParams
-from vllm.tokenizers import TokenizerLike as AnyTokenizer
-
-
-class StubEngineClient:
-    """
-    Stub EngineClient for preprocessing-only use of OpenAIServingChat/Completion.
-    Provides the minimal attributes required by OpenAIServingModels.
-    """
-
-    def __init__(self, model_config: ModelConfig):
-        self.model_config = model_config
-        self.input_processor = None
-        self.io_processor = None
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 @runtime_checkable
@@ -133,19 +120,12 @@ class ChatProcessor:
     def __init__(self, tokenizer: AnyTokenizer, model_config: ModelConfig):
         self.tokenizer = tokenizer
         self.model_config = model_config
-        # Create stub engine client and models for preprocessing-only usage
-        stub_engine = StubEngineClient(model_config)
-        serving_models = OpenAIServingModels(
-            engine_client=stub_engine,
-            base_model_paths=[
-                BaseModelPath(name=model_config.model, model_path=model_config.model)
-            ],
-        )
         self.openai_serving = OpenAIServingChat(
-            engine_client=stub_engine,
-            models=serving_models,
-            response_role="assistant",
+            engine_client=None,
+            model_config=model_config,
+            models=None,
             request_logger=None,
+            response_role="assistant",
             chat_template=None,
             chat_template_content_format="auto",
         )
@@ -206,6 +186,7 @@ class ChatProcessor:
                 conversation,
                 self.tokenizer,
                 request_metadata,
+                enable_force_include_usage=False,
             ):
                 if raw_response.startswith("data: [DONE]"):
                     yield raw_response
@@ -239,6 +220,7 @@ class ChatProcessor:
                 conversation,
                 self.tokenizer,
                 request_metadata,
+                enable_force_include_usage=False,
             ):
                 if raw_response.startswith("data: [DONE]"):
                     break
@@ -285,17 +267,10 @@ class CompletionsProcessor:
     def __init__(self, tokenizer: AnyTokenizer, model_config: ModelConfig):
         self.tokenizer = tokenizer
         self.model_config = model_config
-        # Create stub engine client and models for preprocessing-only usage
-        stub_engine = StubEngineClient(model_config)
-        serving_models = OpenAIServingModels(
-            engine_client=stub_engine,
-            base_model_paths=[
-                BaseModelPath(name=model_config.model, model_path=model_config.model)
-            ],
-        )
         self.openai_serving = OpenAIServingCompletion(
-            engine_client=stub_engine,
-            models=serving_models,
+            engine_client=None,
+            model_config=model_config,
+            models=None,
             request_logger=None,
         )
 

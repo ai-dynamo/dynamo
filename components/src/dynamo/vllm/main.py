@@ -328,7 +328,7 @@ def setup_vllm_engine(config, stat_logger=None):
         vllm_config=vllm_config,
         usage_context=usage_context,
         stat_loggers=factory,
-        enable_log_requests=engine_args.enable_log_requests,
+        disable_log_requests=engine_args.disable_log_requests,
         disable_log_stats=engine_args.disable_log_stats,
     )
     if ENABLE_LMCACHE:

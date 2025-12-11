@@ -10,17 +10,17 @@ ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 ARG ENABLE_KVBM=false
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
-ARG CUDA_VERSION="12.9"
+ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
+ARG CUDA_VERSION="12.8"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="v0.12.0"
-# FlashInfer Ref used to install flashinfer-cubin and flashinfer-jit-cache
-ARG FLASHINF_REF="v0.5.3"
+ARG VLLM_REF="v0.11.0"
+# FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
+ARG FLASHINF_REF="v0.3.1"
+ARG TORCH_BACKEND="cu128"
 
 # If left blank, then we will fallback to vLLM defaults
 ARG DEEPGEMM_REF=""
-ARG LMCACHE_REF="0.3.10"
 
 # sccache configuration - inherit from base build
 ARG USE_SCCACHE
@@ -109,7 +109,7 @@ ARG VLLM_REF
 ARG VLLM_GIT_URL
 ARG DEEPGEMM_REF
 ARG FLASHINF_REF
-ARG LMCACHE_REF
+ARG TORCH_BACKEND
 ARG CUDA_VERSION
 
 ARG MAX_JOBS=16
@@ -143,7 +143,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
         cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
         chmod +x /tmp/install_vllm.sh && \
-        /tmp/install_vllm.sh --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} ${LMCACHE_REF:+--lmcache-ref "$LMCACHE_REF"} --cuda-version $CUDA_VERSION && \
+        /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} --torch-backend $TORCH_BACKEND --cuda-version $CUDA_VERSION && \
         /tmp/use-sccache.sh show-stats "vLLM";
 
 ENV LD_LIBRARY_PATH=\
@@ -206,7 +206,7 @@ RUN apt-get update && \
         # prometheus dependencies
         ca-certificates \
         # DeepGemm uses 'cuobjdump' which does not come with CUDA image
-        cuda-command-line-tools-12-9 && \
+        cuda-command-line-tools-12-8 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image
@@ -287,14 +287,8 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
 
-# Copy tests, benchmarks, deploy and components for CI
-COPY --chown=dynamo: benchmarks /workspace/benchmarks
-COPY --chown=dynamo: tests /workspace/tests
-COPY --chown=dynamo: examples /workspace/examples
-COPY --chown=dynamo: deploy /workspace/deploy
-COPY --chown=dynamo: recipes/ /workspace/recipes/
-COPY --chown=dynamo: components/ /workspace/components/
-COPY --chown=dynamo: lib/ /workspace/lib/
+# Copy benchmarks, examples, and tests for CI with correct ownership
+COPY --chown=dynamo: . /workspace/
 
 # Copy attribution files
 COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
@@ -379,7 +373,6 @@ COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
 
 # Install maturin, for maturin develop
 # Editable install of dynamo
-COPY pyproject.toml README.md hatch_build.py /workspace/
 RUN uv pip install maturin[patchelf] && \
     uv pip install --no-deps -e .
 
