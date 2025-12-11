@@ -127,7 +127,7 @@ class DynamoWorkerProcess(ManagedProcess):
     indirect=True,
 )
 def test_request_migration_sglang_worker_failure(
-    request, runtime_services, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm, predownload_models
 ):
     """
     End-to-end test for worker fault tolerance with migration support using SGLang.
@@ -182,7 +182,7 @@ def test_request_migration_sglang_worker_failure(
     indirect=True,
 )
 def test_request_migration_sglang_graceful_shutdown(
-    request, runtime_services, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm, predownload_models
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration support using SGLang.
@@ -241,7 +241,7 @@ def test_request_migration_sglang_graceful_shutdown(
     indirect=True,
 )
 def test_no_request_migration_sglang_worker_failure(
-    request, runtime_services, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm, predownload_models
 ):
     """
     End-to-end test for worker fault tolerance with migration disabled using SGLang.
@@ -312,7 +312,7 @@ def test_no_request_migration_sglang_worker_failure(
     indirect=True,
 )
 def test_no_request_migration_sglang_graceful_shutdown(
-    request, runtime_services, set_ucx_tls_no_mm
+    request, runtime_services, set_ucx_tls_no_mm, predownload_models
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration disabled using SGLang.

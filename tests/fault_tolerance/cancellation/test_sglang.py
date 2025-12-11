@@ -164,7 +164,9 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.gpu_1
 @pytest.mark.xfail(strict=False)
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
-def test_request_cancellation_sglang_aggregated(request, runtime_services):
+def test_request_cancellation_sglang_aggregated(
+    request, runtime_services, predownload_models
+):
     """
     End-to-end test for request cancellation functionality in aggregated mode.
 
@@ -259,7 +261,9 @@ def test_request_cancellation_sglang_aggregated(request, runtime_services):
     ],
     indirect=True,
 )
-def test_request_cancellation_sglang_decode_cancel(request, runtime_services):
+def test_request_cancellation_sglang_decode_cancel(
+    request, runtime_services, predownload_models
+):
     """
     End-to-end test for request cancellation during decode phase.
 
