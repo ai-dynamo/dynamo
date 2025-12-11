@@ -1,6 +1,18 @@
 # syntax=docker/dockerfile:1.10.0
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# NOTE FOR dynamo_base AND wheel_builder STAGES:
+#
+# All changes to dynamo_base and wheel_builder stages should be replicated across
+# Dockerfile and Dockerfile.<framework> images.:
+#   - Dockerfile
+#   - Dockerfile.vllm
+#   - Dockerfile.sglang
+#   - Dockerfile.trtllm
+# This duplication was introduced purposely to quickly enable Docker layer caching and
+# deduplication. Please ensure these stages stay in sync until the duplication can be
+# addressed.
 
 ##################################
 ########## Build Arguments ########
@@ -14,6 +26,7 @@ ARG BASE_IMAGE_TAG
 
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
+ARG ENABLE_MEDIA_NIXL
 ARG CARGO_BUILD_JOBS
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -35,9 +48,9 @@ ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
 
 # NIXL configuration
-ARG NIXL_UCX_REF=v1.19.0
-ARG NIXL_REF=0.7.1
-ARG NIXL_GDRCOPY_REF=v2.5.1
+ARG NIXL_UCX_REF
+ARG NIXL_REF
+ARG NIXL_GDRCOPY_REF
 
 ##################################
 ########## Base Image ############
@@ -201,10 +214,11 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
-    CC=${USE_SCCACHE:+sccache gcc} && \
-    CXX=${USE_SCCACHE:+sccache g++} && \
-    export CC=${CC} && \
-    export CXX=${CXX} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
     cd /usr/local/src && \
      git clone https://github.com/openucx/ucx.git && \
      cd ucx && 			     \
@@ -235,6 +249,11 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
     git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
@@ -260,6 +279,11 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
     cd /workspace/nixl && \
     uv build . --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
@@ -274,11 +298,20 @@ ARG ENABLE_KVBM
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export RUSTC_WRAPPER="sccache"; \
+    fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-    maturin build --release --out /opt/dynamo/dist && \
+    if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
+        maturin build --release --features dynamo-llm/media-nixl --out /opt/dynamo/dist; \
+    else \
+        maturin build --release --out /opt/dynamo/dist; \
+    fi && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out target/wheels && \
@@ -354,7 +387,7 @@ USER dynamo
 ENV HOME=/home/dynamo \
     DYNAMO_HOME=/opt/dynamo \
     CARGO_TARGET_DIR=/opt/dynamo/target
-ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda/compat/lib.real:${LD_LIBRARY_PATH}
 
 # Create and activate virtual environment
 ARG PYTHON_VERSION
@@ -379,10 +412,15 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
-        uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
-    fi \
-    && cd /workspace/benchmarks \
-    && UV_GIT_LFS=1 uv pip install --no-cache .
+        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
+        if [ -z "$KVBM_WHEEL" ]; then \
+            echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
+            exit 1; \
+        fi; \
+        uv pip install "$KVBM_WHEEL"; \
+    fi && \
+    cd /workspace/benchmarks && \
+    UV_GIT_LFS=1 uv pip install --no-cache .
 
 # Setup launch banner in common directory accessible to all users
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \

@@ -10,14 +10,14 @@ use crate::config::environment_names::runtime::canary as env_canary;
 use crate::config::environment_names::runtime::system as env_system;
 use crate::logging::make_request_span;
 use crate::metrics::MetricsHierarchy;
-use crate::metrics::prometheus_names::{nats_client, nats_service};
 use crate::traits::DistributedRuntimeProvider;
 use axum::{
     Router,
+    body::Bytes,
     extract::{Json, Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{any, delete, get, post},
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -183,6 +183,13 @@ pub async fn spawn_system_status_server(
             get({
                 let state = Arc::clone(&server_state);
                 move || metadata_handler(state)
+            }),
+        )
+        .route(
+            "/engine/{*path}",
+            any({
+                let state = Arc::clone(&server_state);
+                move |path, body| engine_route_handler(state, path, body)
             }),
         );
 
@@ -525,6 +532,77 @@ fn parse_lora_response(response_data: &serde_json::Value) -> LoraResponse {
     }
 }
 
+/// Engine route handler for /engine/* routes
+///
+/// This handler looks up registered callbacks in the engine routes registry
+/// and invokes them with the request body, returning the response as JSON.
+#[tracing::instrument(skip_all, level = "trace", fields(path = %path))]
+async fn engine_route_handler(
+    state: Arc<SystemStatusState>,
+    Path(path): Path<String>,
+    body: Bytes,
+) -> impl IntoResponse {
+    tracing::trace!("Engine route request to /engine/{}", path);
+
+    // Parse body as JSON (empty object for GET/empty body)
+    let body_json: serde_json::Value = if body.is_empty() {
+        serde_json::json!({})
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::warn!("Invalid JSON in request body: {}", e);
+                return (
+                    StatusCode::BAD_REQUEST,
+                    json!({
+                        "error": "Invalid JSON",
+                        "message": format!("{}", e)
+                    })
+                    .to_string(),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    // Look up callback
+    let callback = match state.drt().engine_routes().get(&path) {
+        Some(cb) => cb,
+        None => {
+            tracing::debug!("Route /engine/{} not found", path);
+            return (
+                StatusCode::NOT_FOUND,
+                json!({
+                    "error": "Route not found",
+                    "message": format!("Route /engine/{} not found", path)
+                })
+                .to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    // Call callback (it's async, so await it)
+    match callback(body_json).await {
+        Ok(response) => {
+            tracing::trace!("Engine route handler succeeded for /engine/{}", path);
+            (StatusCode::OK, response.to_string()).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Engine route handler error for /engine/{}: {}", path, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({
+                    "error": "Handler error",
+                    "message": format!("{}", e)
+                })
+                .to_string(),
+            )
+                .into_response()
+        }
+    }
+}
+
 // Regular tests: cargo test system_status_server --lib
 #[cfg(test)]
 mod tests {
@@ -606,26 +684,17 @@ mod integration_tests {
             let response = drt.metrics().prometheus_expfmt().unwrap();
             println!("Full metrics response:\n{}", response);
 
-            // Filter out NATS client metrics for comparison
-            let filtered_response: String = response
-                .lines()
-                .filter(|line| {
-                    !line.contains(nats_client::PREFIX) && !line.contains(nats_service::PREFIX)
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-
             // Check that uptime_seconds metric is present with correct namespace
             assert!(
-                filtered_response.contains("# HELP dynamo_component_uptime_seconds"),
+                response.contains("# HELP dynamo_component_uptime_seconds"),
                 "Should contain uptime_seconds help text"
             );
             assert!(
-                filtered_response.contains("# TYPE dynamo_component_uptime_seconds gauge"),
+                response.contains("# TYPE dynamo_component_uptime_seconds gauge"),
                 "Should contain uptime_seconds type"
             );
             assert!(
-                filtered_response.contains("dynamo_component_uptime_seconds"),
+                response.contains("dynamo_component_uptime_seconds"),
                 "Should contain uptime_seconds metric with correct namespace"
             );
         })
@@ -918,7 +987,6 @@ mod integration_tests {
                 // Start the service and endpoint with a health check payload
                 // This will automatically register the endpoint for health monitoring
                 tokio::spawn(async move {
-                    component.add_stats_service().await.unwrap();
                     let _ = component.endpoint(ENDPOINT_NAME)
                         .endpoint_builder()
                         .handler(ingress)
