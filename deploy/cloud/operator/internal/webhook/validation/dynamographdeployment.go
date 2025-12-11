@@ -22,6 +22,8 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	internalwebhook "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -51,30 +53,106 @@ func (v *DynamoGraphDeploymentValidator) Validate() (admission.Warnings, error) 
 		return nil, err
 	}
 
+	var allWarnings admission.Warnings
+
 	// Validate each service
 	for serviceName, service := range v.deployment.Spec.Services {
-		if err := v.validateService(serviceName, service); err != nil {
+		warnings, err := v.validateService(serviceName, service)
+		if err != nil {
 			return nil, err
 		}
+		allWarnings = append(allWarnings, warnings...)
 	}
 
-	return nil, nil
+	return allWarnings, nil
 }
 
 // ValidateUpdate performs stateful validation comparing old and new DynamoGraphDeployment.
+// userInfo is used for identity-based validation (replica protection).
+// If userInfo is nil, replica changes for DGDSA-enabled services are rejected (fail closed).
 // Returns warnings and error.
-func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.DynamoGraphDeployment) (admission.Warnings, error) {
-	// Validate that BackendFramework is not changed (immutable)
-	if v.deployment.Spec.BackendFramework != old.Spec.BackendFramework {
-		warning := "Changing spec.backendFramework may cause unexpected behavior"
-		return admission.Warnings{warning}, fmt.Errorf("spec.backendFramework is immutable and cannot be changed after creation")
+func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo *authenticationv1.UserInfo) (admission.Warnings, error) {
+	var warnings admission.Warnings
+
+	// Validate immutable fields
+	if err := v.validateImmutableFields(old, &warnings); err != nil {
+		return warnings, err
 	}
 
-	return nil, nil
+	// Validate replicas changes for services with scaling adapter enabled
+	// Pass userInfo (may be nil - will fail closed for DGDSA-enabled services)
+	if err := v.validateReplicasChanges(old, userInfo); err != nil {
+		return warnings, err
+	}
+
+	return warnings, nil
+}
+
+// validateImmutableFields checks that immutable fields have not been changed.
+// Appends warnings to the provided slice.
+func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv1alpha1.DynamoGraphDeployment, warnings *admission.Warnings) error {
+	if v.deployment.Spec.BackendFramework != old.Spec.BackendFramework {
+		*warnings = append(*warnings, "Changing spec.backendFramework may cause unexpected behavior")
+		return fmt.Errorf("spec.backendFramework is immutable and cannot be changed after creation")
+	}
+	return nil
+}
+
+// validateReplicasChanges checks if replicas were changed for services with scaling adapter enabled.
+// Only authorized service accounts (operator controller, planner) can modify these fields.
+// If userInfo is nil, all replica changes for DGDSA-enabled services are rejected (fail closed).
+func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo *authenticationv1.UserInfo) error {
+	// If the request comes from an authorized service account, allow the change
+	if userInfo != nil && internalwebhook.CanModifyDGDReplicas(*userInfo) {
+		return nil
+	}
+
+	var errs []error
+
+	for serviceName, newService := range v.deployment.Spec.Services {
+		// Check if scaling adapter is enabled for this service (enabled by default)
+		scalingAdapterEnabled := true
+		if newService.ScalingAdapter != nil && newService.ScalingAdapter.Disable {
+			scalingAdapterEnabled = false
+		}
+
+		if !scalingAdapterEnabled {
+			// Scaling adapter is disabled, users can modify replicas directly
+			continue
+		}
+
+		// Get old service (if exists)
+		oldService, exists := old.Spec.Services[serviceName]
+		if !exists {
+			// New service, no comparison needed
+			continue
+		}
+
+		// Check if replicas changed
+		oldReplicas := int32(1) // default
+		if oldService.Replicas != nil {
+			oldReplicas = *oldService.Replicas
+		}
+
+		newReplicas := int32(1) // default
+		if newService.Replicas != nil {
+			newReplicas = *newService.Replicas
+		}
+
+		if oldReplicas != newReplicas {
+			errs = append(errs, fmt.Errorf(
+				"spec.services[%s].replicas cannot be modified directly when scaling adapter is enabled; "+
+					"scale or update the related DynamoGraphDeploymentScalingAdapter instead",
+				serviceName))
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // validateService validates a single service configuration using SharedSpecValidator.
-func (v *DynamoGraphDeploymentValidator) validateService(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) error {
+// Returns warnings and error.
+func (v *DynamoGraphDeploymentValidator) validateService(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
 	// Use SharedSpecValidator to validate service spec (which is a DynamoComponentDeploymentSharedSpec)
 	fieldPath := fmt.Sprintf("spec.services[%s]", serviceName)
 	sharedValidator := NewSharedSpecValidator(service, fieldPath)

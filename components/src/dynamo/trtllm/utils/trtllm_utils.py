@@ -58,6 +58,7 @@ class Config:
         self.tool_call_parser: Optional[str] = None
         self.dump_config_to: Optional[str] = None
         self.custom_jinja_template: Optional[str] = None
+        self.dyn_endpoint_types: str = "chat,completions"
         self.store_kv: str = ""
         self.request_plane: str = ""
 
@@ -283,6 +284,12 @@ def cmd_line_args():
         help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
     )
     parser.add_argument(
+        "--dyn-endpoint-types",
+        type=str,
+        default="chat,completions",
+        help="Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Default: 'chat,completions'. Use 'completions' for models without chat templates.",
+    )
+    parser.add_argument(
         "--store-kv",
         type=str,
         choices=["etcd", "file", "mem"],
@@ -355,6 +362,7 @@ def cmd_line_args():
     config.reasoning_parser = args.dyn_reasoning_parser
     config.tool_call_parser = args.dyn_tool_call_parser
     config.dump_config_to = args.dump_config_to
+    config.dyn_endpoint_types = args.dyn_endpoint_types
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
 

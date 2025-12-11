@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: mocker-disagg
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: mocker-disagg
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/mocker-runtime:my-tag
+    prefill:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: mocker-disagg
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/mocker-runtime:my-tag
+          workingDir: /workspace
+          command:
+          - python3
+          - -m
+          - dynamo.mocker
+          args:
+            - --model-path
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --model-name
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --speedup-ratio
+            - "1.0"
+            - --planner-profile-data
+            - /workspace/tests/planner/profiling_results/H200_TP1P_TP1D
+            - --is-prefill-worker
+    decode:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: mocker-disagg
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/mocker-runtime:my-tag
+          workingDir: /workspace
+          command:
+          - python3
+          - -m
+          - dynamo.mocker
+          args:
+            - --model-path
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --model-name
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --speedup-ratio
+            - "1.0"
+            - --planner-profile-data
+            - /workspace/tests/planner/profiling_results/H200_TP1P_TP1D
+            - --is-decode-worker

@@ -98,7 +98,8 @@ pub struct RuntimeConfig {
 
     /// System status server port for health and metrics endpoints
     /// Set to -1 to disable the system status server (default)
-    /// Set to a positive port number (e.g. 8081) to enable it
+    /// Set to 0 to bind to a random available port
+    /// Set to a positive port number (e.g. 8081) to bind to a specific port
     /// Set this at runtime with environment variable DYN_SYSTEM_PORT
     #[builder(default = "DEFAULT_SYSTEM_PORT")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
@@ -335,11 +336,11 @@ impl RuntimeConfig {
     }
 
     /// Check if System server should be enabled
-    /// System server is enabled when DYN_SYSTEM_PORT is set to a positive value
+    /// System server is enabled when DYN_SYSTEM_PORT is set to 0 or a positive value
+    /// Port 0 binds to a random available port
     /// Negative values disable the server
-    /// TODO: Support port = 0 to bind to a random available port
     pub fn system_server_enabled(&self) -> bool {
-        self.system_port > 0
+        self.system_port >= 0
     }
 
     pub fn single_threaded() -> Self {

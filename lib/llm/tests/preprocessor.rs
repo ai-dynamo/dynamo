@@ -5,6 +5,7 @@ use anyhow::{Ok, Result};
 use dynamo_runtime::config::environment_names::model::huggingface as env_hf;
 
 use dynamo_llm::model_card::{ModelDeploymentCard, PromptContextMixin};
+use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::preprocessor::prompt::PromptFormatter;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use serde::{Deserialize, Serialize};
@@ -79,11 +80,20 @@ async fn maybe_download_model(local_path: &str, model: &str, revision: &str) -> 
     let repo = Repo::with_revision(String::from(model), RepoType::Model, String::from(revision));
 
     let files_to_download = vec!["config.json", "tokenizer.json", "tokenizer_config.json"];
+    let optional_files = vec!["generation_config.json", "chat_template.jinja"];
     let repo_builder = api.repo(repo);
 
     let mut downloaded_path = PathBuf::new();
     for file in &files_to_download {
         downloaded_path = repo_builder.get(file).await.unwrap();
+    }
+    for file in &optional_files {
+        if let Err(e) = repo_builder.get(file).await {
+            println!(
+                "Failed to download optional file {} for model {}: {}",
+                file, model, e
+            );
+        }
     }
     downloaded_path.parent().unwrap().display().to_string()
 }
@@ -494,6 +504,53 @@ async fn test_multi_turn_with_continuation() {
     }, {
       insta::assert_snapshot!(formatted_prompt);
     });
+}
+
+pub mod openai_preprocessor_tests {
+    // re-export all the tests from the parent module
+    pub use super::*;
+    use std::collections::HashSet;
+
+    #[tokio::test]
+    async fn test_stop_condition() {
+        if let Err(e) = get_hf_token() {
+            println!("HF_TOKEN is not set, skipping test: {}", e);
+            return;
+        }
+        let mdc = make_mdc_from_repo(
+            "tests/data/sample-models",
+            "openai/gpt-oss-120b",
+            "b5c939de8f754692c1647ca79fbf85e8c1e70f8a",
+            Some(vec![PromptContextMixin::OaiChat]),
+        )
+        .await;
+
+        let oai_preprocessor = OpenAIPreprocessor::new(mdc.clone()).unwrap();
+        let request = Request::from(SINGLE_CHAT_MESSAGE, None, None, mdc.slug().to_string());
+        let preprocessed_request = oai_preprocessor
+            .preprocess_request(&request)
+            .await
+            .unwrap()
+            .0;
+        assert!(
+            preprocessed_request
+                .stop_conditions
+                .stop_token_ids_hidden
+                .is_some()
+        );
+        // eos_token_ids can be in any order as long as the set is correct
+        let eos_token_id_set: HashSet<_> = preprocessed_request
+            .stop_conditions
+            .stop_token_ids_hidden
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        assert_eq!(
+            eos_token_id_set,
+            vec![200002, 199999, 200012].into_iter().collect()
+        );
+    }
 }
 
 // Helper to build message with media chunks (single or mixed types)

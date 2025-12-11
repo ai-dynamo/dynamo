@@ -155,10 +155,12 @@ def overwrite_args(config):
     defaults = {
         "task": "generate",
         "skip_tokenizer_init": False,
-        "disable_log_requests": True,
+        "enable_log_requests": False,
         "enable_prefix_caching": True,
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
+        # Enable multimodal embeddings input
+        "enable_mm_embeds": True,
         # Always setting up kv transfer for disagg
         "kv_transfer_config": KVTransferConfig(
             kv_connector="NixlConnector", kv_role="kv_both"

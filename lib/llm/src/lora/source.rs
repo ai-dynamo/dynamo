@@ -3,11 +3,13 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::StreamExt;
 use object_store::{ObjectStore, aws::AmazonS3Builder, path::Path as ObjectPath};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 use url::Url;
 
@@ -83,6 +85,57 @@ pub struct S3LoRASource {
     secret_access_key: String,
     region: String,
     endpoint: Option<String>,
+}
+
+/// Retry configuration for S3 operations
+impl S3LoRASource {
+    /// Maximum number of retry attempts for S3 operations
+    const MAX_RETRIES: u32 = 3;
+    /// Initial backoff duration in milliseconds
+    const INITIAL_BACKOFF_MS: u64 = 1000;
+    /// Maximum backoff duration in milliseconds
+    const MAX_BACKOFF_MS: u64 = 30000;
+
+    /// Download a single file with retry logic and exponential backoff
+    async fn download_file_with_retry(
+        store: &Arc<dyn ObjectStore>,
+        location: &ObjectPath,
+    ) -> Result<Bytes> {
+        for attempt in 1..=Self::MAX_RETRIES {
+            let result = store.get(location).await;
+            let error = match result {
+                Ok(get_result) => match get_result.bytes().await {
+                    Ok(bytes) => return Ok(bytes),
+                    Err(e) => anyhow::anyhow!("Failed to read bytes: {}", e),
+                },
+                Err(e) => anyhow::anyhow!("Failed to get object: {}", e),
+            };
+
+            if attempt >= Self::MAX_RETRIES {
+                return Err(error);
+            }
+
+            // Calculate backoff with exponential increase, capped at MAX_BACKOFF_MS
+            let backoff_ms = std::cmp::min(
+                Self::INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1),
+                Self::MAX_BACKOFF_MS,
+            );
+            tracing::warn!(
+                "S3 download failed (attempt {}/{}), retrying in {}ms: {}",
+                attempt,
+                Self::MAX_RETRIES,
+                backoff_ms,
+                error
+            );
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+        }
+
+        // This should be unreachable, but provide a fallback
+        Err(anyhow::anyhow!(
+            "S3 download failed after {} retries",
+            Self::MAX_RETRIES
+        ))
+    }
 }
 
 impl S3LoRASource {
@@ -173,12 +226,47 @@ impl LoRASource for S3LoRASource {
         let object_prefix = ObjectPath::from(prefix.clone());
         let mut list_stream = bucket_store.list(Some(&object_prefix));
 
-        // Create destination directory
-        tokio::fs::create_dir_all(dest_path).await?;
+        // Create a temporary directory in the same parent as dest_path for atomic download
+        // This prevents data loss if dest_path already exists
+        let parent = dest_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Destination path has no parent directory"))?;
+        let dest_name = dest_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("Destination path has no file name"))?;
+
+        // Generate unique temp directory name
+        let temp_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir_name = format!("{}.tmp.{}", dest_name, temp_suffix);
+        let temp_path = parent.join(&temp_dir_name);
+
+        // Create temporary directory
+        tokio::fs::create_dir_all(&temp_path)
+            .await
+            .context("Failed to create temporary directory")?;
+
+        // Cleanup closure that only removes the temp directory on error
+        let cleanup_on_error = async |err: anyhow::Error| -> anyhow::Error {
+            tracing::warn!(
+                "S3 download failed, cleaning up temporary directory at {:?}",
+                temp_path
+            );
+            if let Err(cleanup_err) = tokio::fs::remove_dir_all(&temp_path).await {
+                tracing::warn!("Failed to cleanup temporary directory: {}", cleanup_err);
+            }
+            err
+        };
 
         let mut file_count = 0;
         while let Some(meta_result) = list_stream.next().await {
-            let meta = meta_result?;
+            let meta = match meta_result {
+                Ok(m) => m,
+                Err(e) => return Err(cleanup_on_error(e.into()).await),
+            };
 
             // Get relative path (remove prefix)
             let rel_path = meta
@@ -192,24 +280,47 @@ impl LoRASource for S3LoRASource {
                 continue; // Skip the prefix itself
             }
 
-            let file_path = dest_path.join(rel_path);
+            let file_path = temp_path.join(rel_path);
 
             // Create parent directories
+            #[allow(clippy::collapsible_if)]
             if let Some(parent) = file_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
+                if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                    return Err(cleanup_on_error(e.into()).await);
+                }
             }
 
-            // Download file
-            let bytes = bucket_store.get(&meta.location).await?.bytes().await?;
-            tokio::fs::write(&file_path, &bytes).await?;
+            // Download file with retry logic
+            let bytes = match Self::download_file_with_retry(&bucket_store, &meta.location).await {
+                Ok(b) => b,
+                Err(e) => return Err(cleanup_on_error(e).await),
+            };
+
+            if let Err(e) = tokio::fs::write(&file_path, &bytes).await {
+                return Err(cleanup_on_error(e.into()).await);
+            }
 
             file_count += 1;
             tracing::debug!("Downloaded: {} ({} bytes)", rel_path, bytes.len());
         }
 
         if file_count == 0 {
-            anyhow::bail!("No files found at S3 URI: {}", s3_uri);
+            return Err(
+                cleanup_on_error(anyhow::anyhow!("No files found at S3 URI: {}", s3_uri)).await,
+            );
         }
+
+        // Atomically rename temp directory to final destination
+        // Remove dest_path if it exists (only after successful download to avoid data loss)
+        if dest_path.exists() {
+            tokio::fs::remove_dir_all(dest_path)
+                .await
+                .context("Failed to remove existing destination directory")?;
+        }
+        // Rename is atomic on most filesystems
+        tokio::fs::rename(&temp_path, dest_path)
+            .await
+            .context("Failed to atomically move temporary directory to destination")?;
 
         tracing::info!("Downloaded {} files from S3 to {:?}", file_count, dest_path);
 

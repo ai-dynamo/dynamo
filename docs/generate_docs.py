@@ -16,6 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 import os
 import re
@@ -282,9 +283,23 @@ def change_directory(path):
         os.chdir(original_directory)
 
 
+def update_project_json():
+    """Update project.json with the current version from DYNAMO_DOCS_VERSION env var."""
+    version = os.environ.get("DYNAMO_DOCS_VERSION", "dev")
+    project_json_path = os.path.join(dynamo_docs_abspath, "project.json")
+
+    project_data = {"name": "NVIDIA Dynamo", "version": version}
+
+    with open(project_json_path, "w") as f:
+        json.dump(project_data, f)
+
+    log_message(f"Updated project.json with version: {version}")
+
+
 def main():
     with change_directory(dynamo_docs_abspath):
         run_command("make clean")
+        update_project_json()
         preprocess_docs()
         run_command("make html")
 

@@ -260,6 +260,12 @@ etcd:
     # Whether to enable liveness probes (disabled to reduce startup complexity)
     enabled: false
 
+  # Pod Disruption Budget configuration
+  # Should be enabled for HA deployments with 3+ replicas
+  pdb:
+    # Whether to create a PodDisruptionBudget (disabled for single-node deployments)
+    create: false
+
   # Node tolerations for etcd pods (allows scheduling on specific nodes)
   tolerations: []
 

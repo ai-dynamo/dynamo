@@ -94,28 +94,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			errMsg:  "spec.services[main].replicas must be non-negative",
 		},
 		{
-			name: "service with invalid autoscaling",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"prefill": {
-							Autoscaling: &nvidiacomv1alpha1.Autoscaling{
-								Enabled:     true,
-								MinReplicas: 10,
-								MaxReplicas: 5,
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[prefill].autoscaling.maxReplicas must be > minReplicas",
-		},
-		{
 			name: "service with invalid ingress",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -441,7 +419,8 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			validator := NewDynamoGraphDeploymentValidator(tt.newDeployment)
-			warnings, err := validator.ValidateUpdate(tt.oldDeployment)
+			// Pass nil userInfo - these tests don't modify replicas, so it's safe
+			warnings, err := validator.ValidateUpdate(tt.oldDeployment, nil)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DynamoGraphDeploymentValidator.ValidateUpdate() error = %v, wantErr %v", err, tt.wantErr)

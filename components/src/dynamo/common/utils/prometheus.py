@@ -55,7 +55,7 @@ def register_engine_metrics_callback(
 
         # Include multiple metric prefixes
         register_engine_metrics_callback(
-            generate_endpoint, REGISTRY, metric_prefix_filter=["vllm:", "lmcache:"]
+            generate_endpoint, REGISTRY, metric_prefix_filters=["vllm:", "lmcache:"]
         )
 
         # With filtering and prefixing for TensorRT-LLM

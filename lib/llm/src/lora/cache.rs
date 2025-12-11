@@ -43,6 +43,13 @@ impl LoRACache {
         self.get_cache_path(lora_id).exists()
     }
 
+    /// Convert a LoRA URI to a cache key.
+    /// This is a static method to ensure consistent cache key generation
+    /// across Rust and Python code.
+    pub fn uri_to_cache_key(uri: &str) -> String {
+        uri.replace("://", "__").replace(['/', '\\', '.'], "_")
+    }
+
     /// Validate cached LoRA has required files
     /// TODO: Add support for other weight file formats supported by trtllm
     pub fn validate_cached(&self, lora_id: &str) -> Result<bool> {
@@ -120,5 +127,17 @@ mod tests {
         fs::write(lora_dir2.join("adapter_config.json"), "{}").unwrap();
 
         assert!(!cache.validate_cached("invalid-lora").unwrap());
+    }
+
+    #[test]
+    fn test_uri_to_cache_key() {
+        assert_eq!(
+            LoRACache::uri_to_cache_key("s3://bucket/path/to/lora"),
+            "s3__bucket_path_to_lora"
+        );
+        assert_eq!(
+            LoRACache::uri_to_cache_key("file:///local/path"),
+            "file___local_path"
+        );
     }
 }

@@ -11,6 +11,7 @@ import sglang as sgl
 import uvloop
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -102,11 +103,8 @@ async def init(runtime: DistributedRuntime, config: Config):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     # Prevent SGLang from blocking on non-leader nodes
-    # We can switch this to 0 and leverage our own metrics
-    # after https://github.com/sgl-project/sglang/pull/13686
-    # is merged in
     if server_args.node_rank >= 1:
-        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
+        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
     engine = sgl.Engine(server_args=server_args)
 
@@ -121,6 +119,23 @@ async def init(runtime: DistributedRuntime, config: Config):
     if server_args.node_rank >= 1:
         await _handle_non_leader_node(engine, generate_endpoint)
         return
+
+    # Register engine routes for profiling
+    async def start_profile_handler(body: dict) -> dict:
+        """Handle /engine/start_profile requests"""
+        await engine.tokenizer_manager.start_profile(**body)
+        return {"status": "ok", "message": "Profiling started"}
+
+    async def stop_profile_handler(body: dict) -> dict:
+        """Handle /engine/stop_profile requests"""
+        await engine.tokenizer_manager.stop_profile()
+        return {"status": "ok", "message": "Profiling stopped"}
+
+    runtime.register_engine_route("start_profile", start_profile_handler)
+    runtime.register_engine_route("stop_profile", stop_profile_handler)
+    logging.info(
+        "Registered engine routes: /engine/start_profile, /engine/stop_profile"
+    )
 
     prefill_client = None
     prefill_router_client = None
@@ -153,8 +168,22 @@ async def init(runtime: DistributedRuntime, config: Config):
     handler = DecodeWorkerHandler(
         component, engine, config, publisher, prefill_client, prefill_router_client
     )
+    print(f"Config: {config}")
+    health_check_payload = SglangHealthCheckPayload(
+        engine, use_text_input=dynamo_args.use_sglang_tokenizer
+    ).to_dict()
 
-    health_check_payload = SglangHealthCheckPayload(engine).to_dict()
+    logging.info(
+        f"Registering model with endpoint types: {dynamo_args.dyn_endpoint_types}"
+    )
+    if (
+        dynamo_args.custom_jinja_template
+        and "chat" not in dynamo_args.dyn_endpoint_types
+    ):
+        logging.warning(
+            "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
+            "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
+        )
 
     try:
         # Start endpoint immediately and register model concurrently
@@ -171,6 +200,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 generate_endpoint,
                 server_args,
                 dynamo_args,
+                output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
                 readiness_gate=ready_event,
             ),
         )
@@ -191,11 +221,8 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     # Prevent SGLang from blocking on non-leader nodes
-    # We can switch this to 0 and leverage our own metrics
-    # after https://github.com/sgl-project/sglang/pull/13686
-    # is merged in
     if server_args.node_rank >= 1:
-        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
+        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
     engine = sgl.Engine(server_args=server_args)
 
@@ -210,6 +237,23 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     if server_args.node_rank >= 1:
         await _handle_non_leader_node(engine, generate_endpoint)
         return
+
+    # Register engine routes for profiling
+    async def start_profile_handler(body: dict) -> dict:
+        """Handle /engine/start_profile requests"""
+        await engine.tokenizer_manager.start_profile(**body)
+        return {"status": "ok", "message": "Profiling started"}
+
+    async def stop_profile_handler(body: dict) -> dict:
+        """Handle /engine/stop_profile requests"""
+        await engine.tokenizer_manager.stop_profile()
+        return {"status": "ok", "message": "Profiling stopped"}
+
+    runtime.register_engine_route("start_profile", start_profile_handler)
+    runtime.register_engine_route("stop_profile", stop_profile_handler)
+    logging.info(
+        "Registered engine routes: /engine/start_profile, /engine/stop_profile"
+    )
 
     # Perform dummy warmup for prefill worker to avoid initial TTFT hit
     # Only needed on leader node that handles requests
@@ -277,7 +321,9 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     ready_event = asyncio.Event()
 
     handler = EmbeddingWorkerHandler(component, engine, config, publisher)
-    health_check_payload = SglangHealthCheckPayload(engine).to_dict()
+    health_check_payload = SglangHealthCheckPayload(
+        engine, use_text_input=dynamo_args.use_sglang_tokenizer
+    ).to_dict()
 
     try:
         # Start endpoint immediately and register model concurrently
@@ -382,16 +428,24 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
 
     await pd_worker_client.wait_for_instances()
 
-    tasks = [
-        generate_endpoint.serve_endpoint(
-            handler.generate,
-            graceful_shutdown=True,
-            metrics_labels=[("model", server_args.served_model_name)],
-        )
-    ]
+    ready_event = asyncio.Event()
 
     try:
-        await asyncio.gather(*tasks)
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[("model", server_args.served_model_name)],
+            ),
+            register_llm_with_readiness_gate(
+                None,  # encode worker doesn't have engine
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                input_type=ModelInput.Text,
+                readiness_gate=ready_event,
+            ),
+        )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
@@ -425,11 +479,24 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
 
     await handler.async_init()
 
+    health_check_payload = SglangHealthCheckPayload(engine).to_dict()
+    ready_event = asyncio.Event()
+
     try:
-        await generate_endpoint.serve_endpoint(
-            handler.generate,
-            metrics_labels=[("model", server_args.served_model_name)],
-            graceful_shutdown=True,
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                metrics_labels=[("model", server_args.served_model_name)],
+                graceful_shutdown=True,
+                health_check_payload=health_check_payload,
+            ),
+            register_llm_with_readiness_gate(
+                engine,
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                readiness_gate=ready_event,
+            ),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -454,6 +521,7 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
     await handler.async_init()
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
+    ready_event = asyncio.Event()
 
     try:
         await asyncio.gather(
@@ -462,7 +530,14 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
                 graceful_shutdown=True,
                 metrics_labels=[("model", server_args.served_model_name)],
                 health_check_payload=health_check_payload,
-            )
+            ),
+            register_llm_with_readiness_gate(
+                engine,
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                readiness_gate=ready_event,
+            ),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")

@@ -18,13 +18,6 @@ pub const DEFAULT_NAMESPACE: &str = "dyn_example_namespace";
 pub const DEFAULT_COMPONENT: &str = "dyn_example_component";
 pub const DEFAULT_ENDPOINT: &str = "dyn_example_endpoint";
 
-/// Stats structure returned by the endpoint's stats handler
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct MyStats {
-    // Example value for demonstration purposes
-    pub val: i32,
-}
-
 /// Custom metrics for system stats with data bytes tracking
 #[derive(Clone, Debug)]
 pub struct MySystemStatsMetrics {
@@ -103,17 +96,7 @@ pub async fn backend(drt: DistributedRuntime, endpoint_name: Option<&str>) -> an
     // Use the factory pattern - single line factory call with metrics
     let ingress = Ingress::for_engine(RequestHandler::with_metrics(system_metrics))?;
 
-    endpoint
-        .endpoint_builder()
-        .stats_handler(|_stats| {
-            println!("Stats handler called with stats: {:?}", _stats);
-            // TODO(keivenc): return a real stats object
-            let stats = MyStats { val: 10 };
-            serde_json::to_value(stats).unwrap()
-        })
-        .handler(ingress)
-        .start()
-        .await?;
+    endpoint.endpoint_builder().handler(ingress).start().await?;
 
     Ok(())
 }

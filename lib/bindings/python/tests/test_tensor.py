@@ -34,15 +34,12 @@ async def test_register(runtime: DistributedRuntime):
 
     assert model_config == runtime_config.get_tensor_model_config()
 
-    # [gluo FIXME] register_llm will attempt to load a LLM model,
-    # which is not well-defined for Tensor yet. Currently provide
-    # a valid model name to pass the registration.
+    # Use register_llm for tensor-based backends (skips HuggingFace downloads)
     await register_llm(
         ModelInput.Tensor,
         ModelType.TensorBased,
         endpoint,
-        "Qwen/Qwen3-0.6B",
-        "tensor",
+        "tensor",  # model_path (used as display name for tensor-based models)
         runtime_config=runtime_config,
     )
 

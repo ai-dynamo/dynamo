@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sync-hf-lora-to-minio
+spec:
+  template:
+    spec:
+      containers:
+      - name: uploader
+        image: python:3.10-slim
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -eux
+          pip install --no-cache-dir huggingface-hub awscli
+          hf download  $MODEL_NAME --local-dir /tmp/lora
+          rm -rf /tmp/lora/.cache
+          aws --endpoint-url=http://minio:9000 s3 mb s3://$LORA_ROOT_PATH || true
+          aws --endpoint-url=http://minio:9000 s3 sync /tmp/lora s3://$LORA_ROOT_PATH/$MODEL_NAME
+        envFrom:
+        - secretRef:
+            name: hf-token-secret
+        - secretRef:
+            name: minio-secret
+        env:
+        - name: AWS_REGION   # set this to your aws region
+          value: us-east-1
+        - name: AWS_ALLOW_HTTP # remove/disable this if you are using a S3 endpoint or secure MinIO
+          value: "true"
+        - name: LORA_ROOT_PATH
+          value: "my-loras"
+        - name: MODEL_NAME
+          value: codelion/Qwen3-0.6B-accuracy-recovery-lora
+      restartPolicy: Never
+  backoffLimit: 3

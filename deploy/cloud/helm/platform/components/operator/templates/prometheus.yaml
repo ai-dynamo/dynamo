@@ -57,6 +57,11 @@ spec:
   - interval: 5s
     path: /metrics
     port: system
+    relabelings:
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+      targetLabel: dynamo_namespace
   selector:
     matchLabels:
       nvidia.com/dynamo-component-type: worker

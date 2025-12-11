@@ -20,6 +20,9 @@ orchestration frameworks such as Kubernetes.
 | `DYN_SYSTEM_HEALTH_PATH` | Custom health endpoint path | `/health` | `/custom/health` |
 | `DYN_SYSTEM_LIVE_PATH` | Custom liveness endpoint path | `/live` | `/custom/live` |
 | `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` | Endpoints required for ready state | none | `["generate"]` |
+| `DYN_HEALTH_CHECK_ENABLED` | Enable canary health checks | `false` (K8s: `true`) | `true`, `false` |
+| `DYN_CANARY_WAIT_TIME` | Seconds before sending canary health check | `10` | `5`, `30` |
+| `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | Health check request timeout in seconds | `3` | `5`, `10` |
 
 ## Getting Started Quickly
 
@@ -212,6 +215,127 @@ date: Wed, 03 Sep 2025 13:42:45 GMT
   }
 }
 ```
+
+## Canary Health Checks (Active Monitoring)
+
+In addition to the HTTP endpoints described above, Dynamo includes a **canary health check** system that actively monitors worker endpoints.
+
+### Overview
+
+The canary health check system:
+- **Monitors endpoint health** by sending periodic test requests to worker endpoints
+- **Only activates during idle periods** - if there's ongoing traffic, health checks are skipped to avoid overhead
+- **Automatically enabled in Kubernetes** deployments via the operator
+- **Disabled by default** in local/development environments
+
+### How It Works
+
+1. **Idle Detection**: After no activity on an endpoint for a configurable wait time (default: 10 seconds), a canary health check is triggered
+2. **Health Check Request**: A lightweight test request is sent to the endpoint with a minimal payload (generates 1 token)
+3. **Activity Resets Timer**: If normal requests arrive, the canary timer resets and no health check is sent
+4. **Timeout Handling**: If a health check doesn't respond within the timeout (default: 3 seconds), the endpoint is marked as unhealthy
+
+### Configuration
+
+#### In Kubernetes (Enabled by Default)
+
+Health checks are automatically enabled by the Dynamo operator. No additional configuration is required.
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-deployment
+spec:
+  services:
+    VllmWorker:
+      componentType: worker
+      replicas: 2
+      # Health checks automatically enabled by operator
+```
+
+#### In Local/Development Environments (Disabled by Default)
+
+To enable health checks locally:
+
+```bash
+# Enable health checks
+export DYN_HEALTH_CHECK_ENABLED=true
+
+# Optional: Customize timing
+export DYN_CANARY_WAIT_TIME=5  # Wait 5 seconds before sending health check
+export DYN_HEALTH_CHECK_REQUEST_TIMEOUT=5  # 5 second timeout
+
+# Start worker
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B
+```
+
+#### Configuration Options
+
+| Environment Variable | Description | Default | Notes |
+|---------------------|-------------|---------|-------|
+| `DYN_HEALTH_CHECK_ENABLED` | Enable/disable canary health checks | `false` (K8s: `true`) | Automatically set to `true` in K8s |
+| `DYN_CANARY_WAIT_TIME` | Seconds to wait (during idle) before sending health check | `10` | Lower values = more frequent checks |
+| `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | Max seconds to wait for health check response | `3` | Higher values = more tolerance for slow responses |
+
+### Health Check Payloads
+
+Each backend defines its own minimal health check payload:
+
+- **vLLM**: Single token generation with minimal sampling options
+- **TensorRT-LLM**: Single token with BOS token ID
+- **SGLang**: Single token generation request
+
+These payloads are designed to:
+- Complete quickly (< 100ms typically)
+- Minimize GPU overhead
+- Verify the full inference stack is working
+
+### Observing Health Checks
+
+When health checks are enabled, you'll see logs like:
+
+```
+INFO Health check manager started (canary_wait_time: 10s, request_timeout: 3s)
+INFO Spawned health check task for endpoint: generate
+INFO Canary timer expired for generate, sending health check
+INFO Health check successful for generate
+```
+
+If an endpoint fails:
+
+```
+WARN Health check timeout for generate
+ERROR Health check request failed for generate: connection refused
+```
+
+### When to Use Canary Health Checks
+
+**Enable in production (Kubernetes):**
+- ✅ Detect unhealthy workers before they affect user traffic
+- ✅ Enable faster failure detection and recovery
+- ✅ Monitor worker availability continuously
+
+**Disable in development:**
+- ✅ Reduce log noise during debugging
+- ✅ Avoid overhead when not needed
+- ✅ Simplify local testing
+
+### Troubleshooting
+
+**Health checks timing out:**
+- Increase `DYN_HEALTH_CHECK_REQUEST_TIMEOUT`
+- Check worker logs for errors
+- Verify network connectivity
+
+**Too many health check logs:**
+- Increase `DYN_CANARY_WAIT_TIME` to reduce frequency
+- Or disable with `DYN_HEALTH_CHECK_ENABLED=false` in dev
+
+**Health checks not running:**
+- Verify `DYN_HEALTH_CHECK_ENABLED=true` is set
+- Check that `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` includes the endpoint
+- Ensure the worker is serving the endpoint
 
 ## Related Documentation
 

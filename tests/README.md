@@ -71,7 +71,8 @@ Markers are required for all tests. They are used for test selection in CI and l
 | Test Type [required]    | unit, integration, e2e, benchmark, stress, multimodal   | Nature of the test                 |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2,  gpu_4, gpu_8, h100      | Number/type of GPUs required       |
 | Component/Framework     | vllm, trtllm, sglang, kvbm, planner, router    | Backend or component specificity   |
-| Other                   | slow, skip, xfail        | Special handling                   |
+| Execution               | parallel                 | Test can run in parallel with pytest-xdist |
+| Other                   | slow, skip, xfail, mypy, custom_build        | Special handling                   |
 
 ### Example
 ```python

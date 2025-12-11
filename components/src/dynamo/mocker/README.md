@@ -25,6 +25,7 @@ The mocker engine now supports a vLLM-style CLI interface with individual argume
 - `--speedup-ratio`: Speed multiplier for token generation (default: 1.0). Higher values make the simulation engines run faster
 - `--data-parallel-size`: Number of data parallel workers to simulate (default: 1)
 - `--num-workers`: Number of mocker workers to launch in the same process (default: 1). All workers share the same tokio runtime and thread pool
+- `--is-prefill-worker` / `--is-decode-worker`: Whether the worker is a prefill or decode worker for disaggregated deployment. If not specified, mocker will be in aggregated mode.
 
 ### Example with individual arguments (vLLM-style):
 ```bash
@@ -66,3 +67,12 @@ python benchmarks/profiler/profile_sla.py \
 ```
 
 Then use the resulting profile results directory directly with `--planner-profile-data`.
+
+## Deploying Mocker in K8s
+
+We provide the example DGD yaml configurations for aggregated and disaggregated deployment in `examples/backends/mocker/deploy/`. You can deploy the mocker engine in K8s by running:
+
+```bash
+kubectl apply -f examples/backends/mocker/deploy/agg.yaml # or, for disaggregated
+kubectl apply -f examples/backends/mocker/deploy/disagg.yaml
+```

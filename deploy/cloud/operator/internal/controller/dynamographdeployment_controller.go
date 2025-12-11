@@ -86,6 +86,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/finalizers,verbs=update
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentscalingadapters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
@@ -223,6 +224,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	if err != nil {
 		logger.Error(err, "Failed to reconcile top-level PVCs")
 		return "", "", "", fmt.Errorf("failed to reconcile top-level PVCs: %w", err)
+	}
+
+	// Reconcile DynamoGraphDeploymentScalingAdapters for each service
+	err = r.reconcileScalingAdapters(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile scaling adapters")
+		return "", "", "", fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 	}
 
 	// Reconcile the SA, Role and RoleBinding if k8s discovery is enabled
@@ -607,6 +615,89 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVCs(ctx context.Context, dyn
 	return nil
 }
 
+// reconcileScalingAdapters ensures a DynamoGraphDeploymentScalingAdapter exists for each service in the DGD
+// that has scaling adapter enabled (default). Services with scalingAdapter.disable=true will not have a DGDSA.
+// This enables pluggable autoscaling via HPA, KEDA, or Planner.
+func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	logger := log.FromContext(ctx)
+
+	// Process each service - SyncResource handles create, update, and delete via toDelete flag
+	for serviceName, component := range dynamoDeployment.Spec.Services {
+		// Check if scaling adapter is disabled for this service
+		scalingAdapterDisabled := component.ScalingAdapter != nil && component.ScalingAdapter.Disable
+
+		// Get current replicas (default to 1 if not set)
+		currentReplicas := int32(1)
+		if component.Replicas != nil {
+			currentReplicas = *component.Replicas
+		}
+
+		// Use SyncResource to handle creation/updates/deletion
+		// When toDelete=true, SyncResource will delete the existing resource if it exists
+		_, _, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter, bool, error) {
+			adapterName := generateAdapterName(dynamoDeployment.Name, serviceName)
+			adapter := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      adapterName,
+					Namespace: dynamoDeployment.Namespace,
+					Labels: map[string]string{
+						consts.KubeLabelDynamoGraphDeploymentName: dynamoDeployment.Name,
+						consts.KubeLabelDynamoComponent:           serviceName,
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
+					Replicas: currentReplicas,
+					DGDRef: nvidiacomv1alpha1.DynamoGraphDeploymentServiceRef{
+						Name:        dynamoDeployment.Name,
+						ServiceName: serviceName,
+					},
+				},
+			}
+			// Return toDelete=true if scaling adapter is disabled
+			return adapter, scalingAdapterDisabled, nil
+		})
+
+		if err != nil {
+			logger.Error(err, "Failed to sync DynamoGraphDeploymentScalingAdapter", "service", serviceName)
+			return err
+		}
+	}
+
+	// Clean up adapters for services that were removed from DGD entirely
+	adapterList := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapterList{}
+	if err := r.List(ctx, adapterList,
+		client.InNamespace(dynamoDeployment.Namespace),
+		client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dynamoDeployment.Name},
+	); err != nil {
+		logger.Error(err, "Failed to list DynamoGraphDeploymentScalingAdapters")
+		return err
+	}
+
+	for i := range adapterList.Items {
+		adapter := &adapterList.Items[i]
+		serviceName := adapter.Spec.DGDRef.ServiceName
+
+		// Delete adapter if service no longer exists in DGD
+		if _, exists := dynamoDeployment.Spec.Services[serviceName]; !exists {
+			logger.Info("Deleting orphaned DynamoGraphDeploymentScalingAdapter", "adapter", adapter.Name, "service", serviceName)
+			if err := r.Delete(ctx, adapter); err != nil && !errors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete orphaned adapter", "adapter", adapter.Name)
+				return err
+			}
+			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "AdapterDeleted",
+				"Deleted orphaned scaling adapter %s for removed service %s", adapter.Name, serviceName)
+		}
+	}
+
+	return nil
+}
+
+// generateAdapterName creates a consistent name for a DynamoGraphDeploymentScalingAdapter
+// Service names are lowercased to comply with Kubernetes DNS subdomain naming requirements
+func generateAdapterName(dgdName, serviceName string) string {
+	return fmt.Sprintf("%s-%s", dgdName, strings.ToLower(serviceName))
+}
+
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
 	// for now doing nothing
 	return nil
@@ -625,6 +716,13 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
+		})).
+		Owns(&nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{}, builder.WithPredicates(predicate.Funcs{
+			// ignore creation cause we don't want to be called again after we create the adapter
+			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(de event.UpdateEvent) bool { return false }, // Adapter updates are handled by adapter controller
+			GenericFunc: func(ge event.GenericEvent) bool { return false },
 		})).
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the PVC

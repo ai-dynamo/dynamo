@@ -60,11 +60,17 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": None,
         "help": "Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository. This template will be applied by Dynamo's preprocessor and cannot be used with --use-sglang-tokenizer.",
     },
+    "endpoint-types": {
+        "flags": ["--dyn-endpoint-types"],
+        "type": str,
+        "default": "chat,completions",
+        "help": "Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Default: 'chat,completions'. Use 'completions' for models without chat templates.",
+    },
     "use-sglang-tokenizer": {
         "flags": ["--use-sglang-tokenizer"],
         "action": "store_true",
         "default": False,
-        "help": "Use SGLang's tokenizer. This will skip tokenization of the input and output and only v1/chat/completions will be available when using the dynamo frontend. Cannot be used with --custom-jinja-template.",
+        "help": "Use SGLang's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend. Cannot be used with --custom-jinja-template.",
     },
     "multimodal-processor": {
         "flags": ["--multimodal-processor"],
@@ -126,6 +132,9 @@ class DynamoArgs:
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
     custom_jinja_template: Optional[str] = None
+
+    # endpoint types to enable
+    dyn_endpoint_types: str = "chat,completions"
 
     # preprocessing options
     use_sglang_tokenizer: bool = False
@@ -461,6 +470,7 @@ async def parse_args(args: list[str]) -> Config:
         tool_call_parser=tool_call_parser,
         reasoning_parser=reasoning_parser,
         custom_jinja_template=expanded_template_path,
+        dyn_endpoint_types=parsed_args.dyn_endpoint_types,
         use_sglang_tokenizer=parsed_args.use_sglang_tokenizer,
         multimodal_processor=parsed_args.multimodal_processor,
         multimodal_encode_worker=parsed_args.multimodal_encode_worker,

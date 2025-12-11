@@ -156,6 +156,7 @@ When LMCache is enabled with `--connector lmcache` and `DYN_SYSTEM_PORT` is set,
 **Requirements to access LMCache metrics:**
 - `--connector lmcache` - Enables LMCache
 - `DYN_SYSTEM_PORT=8081` - Enables metrics HTTP endpoint
+- `PROMETHEUS_MULTIPROC_DIR` (optional) - If not set, Dynamo manages it internally. Only set explicitly if you need control over the metrics directory.
 
 For detailed information on LMCache metrics, including the complete list of available metrics and how to access them, see the **[LMCache Metrics section](prometheus.md#lmcache-metrics)** in the vLLM Prometheus Metrics Guide.
 

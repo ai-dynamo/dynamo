@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 
@@ -40,8 +41,15 @@ class DynamoConnectorMetadata(KVConnectorMetadata):
 
 
 class DynamoConnector(KVConnectorBase_V1):
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: Optional["KVCacheConfig"] = None,
+    ):
+        super().__init__(
+            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
+        )
 
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
@@ -90,13 +98,19 @@ class DynamoConnector(KVConnectorBase_V1):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         self._worker.register_kv_caches(kv_caches)
 
+    @override
     def bind_connector_metadata(
         self, connector_metadata: DynamoConnectorMetadata
     ) -> None:
+        # Must call super() to set _connector_metadata so has_connector_metadata() returns True
+        # This is required for save_kv_layer to be called during the forward pass
+        super().bind_connector_metadata(connector_metadata)
         assert isinstance(connector_metadata.metadata, bytes)
         self._worker.bind_connector_metadata(connector_metadata.metadata)
 
+    @override
     def clear_connector_metadata(self) -> None:
+        super().clear_connector_metadata()
         self._worker.clear_connector_metadata()
 
     @override

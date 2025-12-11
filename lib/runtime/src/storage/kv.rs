@@ -265,8 +265,8 @@ impl Manager {
         Self::new(KeyValueStoreEnum::Etcd(EtcdStore::new(etcd_client)))
     }
 
-    pub fn file<P: Into<PathBuf>>(root: P) -> Self {
-        Self::new(KeyValueStoreEnum::File(FileStore::new(root)))
+    pub fn file<P: Into<PathBuf>>(cancel_token: CancellationToken, root: P) -> Self {
+        Self::new(KeyValueStoreEnum::File(FileStore::new(cancel_token, root)))
     }
 
     fn new(s: KeyValueStoreEnum) -> Manager {

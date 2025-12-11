@@ -39,7 +39,6 @@ use url::Url;
 use validator::{Validate, ValidationError};
 
 use crate::config::environment_names::nats as env_nats;
-use crate::metrics::prometheus_names::nats_client as nats_metrics;
 pub use crate::slug::Slug;
 use tracing as log;
 
@@ -884,110 +883,6 @@ impl EventPublisher for NatsQueue {
         } else {
             Err(anyhow::anyhow!("Client not connected"))
         }
-    }
-}
-
-/// Prometheus metrics that mirror the NATS client statistics (in primitive types)
-/// to be used for the System Status Server.
-///
-/// ⚠️  IMPORTANT: These Prometheus Gauges are COPIES of NATS client data, not live references!
-///
-/// How it works:
-/// 1. NATS client provides source data via client.statistics() and connection_state()
-/// 2. set_from_client_stats() reads current NATS values and updates these Prometheus Gauges
-/// 3. Prometheus scrapes these Gauge values (snapshots, not live data)
-///
-/// Flow: NATS Client → Client Statistics → set_from_client_stats() → Prometheus Gauge
-/// Note: These are snapshots updated when set_from_client_stats() is called.
-#[derive(Debug, Clone)]
-pub struct DRTNatsClientPrometheusMetrics {
-    nats_client: client::Client,
-    /// Number of bytes received (excluding protocol overhead)
-    pub in_bytes: IntGauge,
-    /// Number of bytes sent (excluding protocol overhead)
-    pub out_bytes: IntGauge,
-    /// Number of messages received
-    pub in_messages: IntGauge,
-    /// Number of messages sent
-    pub out_messages: IntGauge,
-    /// Number of times connection was established
-    pub connects: IntGauge,
-    /// Current connection state (0 = disconnected, 1 = connected, 2 = reconnecting)
-    pub connection_state: IntGauge,
-}
-
-impl DRTNatsClientPrometheusMetrics {
-    /// Create a new instance of NATS client metrics using a DistributedRuntime's Prometheus constructors
-    pub fn new(drt: &crate::DistributedRuntime, nats_client: client::Client) -> Result<Self> {
-        let metrics = drt.metrics();
-        let in_bytes = metrics.create_intgauge(
-            nats_metrics::IN_TOTAL_BYTES,
-            "Total number of bytes received by NATS client",
-            &[],
-        )?;
-        let out_bytes = metrics.create_intgauge(
-            nats_metrics::OUT_OVERHEAD_BYTES,
-            "Total number of bytes sent by NATS client",
-            &[],
-        )?;
-        let in_messages = metrics.create_intgauge(
-            nats_metrics::IN_MESSAGES,
-            "Total number of messages received by NATS client",
-            &[],
-        )?;
-        let out_messages = metrics.create_intgauge(
-            nats_metrics::OUT_MESSAGES,
-            "Total number of messages sent by NATS client",
-            &[],
-        )?;
-        let connects = metrics.create_intgauge(
-            nats_metrics::CURRENT_CONNECTIONS,
-            "Current number of active connections for NATS client",
-            &[],
-        )?;
-        let connection_state = metrics.create_intgauge(
-            nats_metrics::CONNECTION_STATE,
-            "Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)",
-            &[],
-        )?;
-
-        Ok(Self {
-            nats_client,
-            in_bytes,
-            out_bytes,
-            in_messages,
-            out_messages,
-            connects,
-            connection_state,
-        })
-    }
-
-    /// Copy statistics from the stored NATS client to these Prometheus metrics
-    pub fn set_from_client_stats(&self) {
-        let stats = self.nats_client.statistics();
-
-        // Get current values from the client statistics
-        let in_bytes = stats.in_bytes.load(Ordering::Relaxed);
-        let out_bytes = stats.out_bytes.load(Ordering::Relaxed);
-        let in_messages = stats.in_messages.load(Ordering::Relaxed);
-        let out_messages = stats.out_messages.load(Ordering::Relaxed);
-        let connects = stats.connects.load(Ordering::Relaxed);
-
-        // Get connection state
-        let connection_state = match self.nats_client.connection_state() {
-            State::Connected => 1,
-            // treat Disconnected and Pending as "down"
-            State::Disconnected | State::Pending => 0,
-        };
-
-        // Update Prometheus metrics
-        // Using gauges allows us to set absolute values directly
-        self.in_bytes.set(in_bytes as i64);
-        self.out_bytes.set(out_bytes as i64);
-        self.in_messages.set(in_messages as i64);
-        self.out_messages.set(out_messages as i64);
-        self.connects.set(connects as i64);
-        self.connection_state.set(connection_state);
     }
 }
 

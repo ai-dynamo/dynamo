@@ -27,8 +27,10 @@ python3 -m dynamo.frontend &
 DYNAMO_PID=$!
 
 # run worker
+# Additional command line args can be passed
 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --modality "$MODALITY" \
-  --extra-engine-args "$AGG_ENGINE_ARGS"
+  --extra-engine-args "$AGG_ENGINE_ARGS" \
+  "$@"

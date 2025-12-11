@@ -378,6 +378,7 @@ mod integration_tests {
                 &test_endpoint,
                 dynamo_llm::model_type::ModelType::Chat,
                 dynamo_llm::model_type::ModelInput::Text,
+                None,
             )
             .await
             .unwrap();

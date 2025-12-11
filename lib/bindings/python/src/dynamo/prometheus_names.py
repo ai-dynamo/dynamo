@@ -55,6 +55,8 @@ class frontend_service:
     INPUT_SEQUENCE_TOKENS = "input_sequence_tokens"
     # Output sequence length in tokens
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
+    # Number of cached tokens (prefix cache hits) per request
+    CACHED_TOKENS = "cached_tokens"
     # Total number of output tokens generated (counter that updates in real-time)
     OUTPUT_TOKENS_TOTAL = "output_tokens_total"
     # Time to first token in seconds
@@ -93,6 +95,10 @@ class kvbm:
     ONBOARD_BLOCKS_D2D = "onboard_blocks_d2d"
     # The number of matched tokens
     MATCHED_TOKENS = "matched_tokens"
+    # Host cache hit rate (0.0-1.0) from the sliding window
+    HOST_CACHE_HIT_RATE = "host_cache_hit_rate"
+    # Disk cache hit rate (0.0-1.0) from the sliding window
+    DISK_CACHE_HIT_RATE = "disk_cache_hit_rate"
 
 
 class kvrouter:
