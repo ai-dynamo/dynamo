@@ -350,7 +350,7 @@ jobs:
         uses: ./.github/actions/define-buildkit-builders
         with:
           builder_name: ${{ env.BUILDER_NAME }}-sglang
-          replicas: 1'
+          replicas: '1'
           linux_amd64: 'false'
           linux_arm64: 'true'
           linux_amd64_gpu: 'true'

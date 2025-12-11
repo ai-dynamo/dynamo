@@ -501,7 +501,8 @@ if [ "$MULTI_ARCH" = "true" ]; then
         error "ERROR: --multi-arch requires docker buildx to be installed"
     fi
     # Check if --platform was also passed (mutually exclusive with --multi-arch)
-    if [ "$PLATFORM" != "linux/amd64" ]; then
+    # Note: PLATFORM has been transformed to "--platform linux/amd64" by get_options
+    if [ "$PLATFORM" != "--platform linux/amd64" ]; then
         error "ERROR: --multi-arch and --platform are mutually exclusive. Use --multi-arch for linux/amd64,linux/arm64 or --platform for a specific architecture."
     fi
     # Set multi-arch platform
