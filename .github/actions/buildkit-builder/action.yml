@@ -54,7 +54,6 @@ runs:
         docker buildx create ${MODE_FLAG} --name ${{ inputs.builder_name }} --driver kubernetes --platform=${{ inputs.platform }} \
           --driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }} \
           --driver-opt=namespace=${{ inputs.namespace }} \
-          --driver-opt=loadbalance=sticky \
           --driver-opt=replicas=${{ inputs.replicas }} \
           --driver-opt=requests.cpu=${{ inputs.requests_cpu }} \
           --driver-opt=requests.memory=${{ inputs.requests_memory }} \
