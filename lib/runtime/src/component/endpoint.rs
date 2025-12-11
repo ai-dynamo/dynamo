@@ -119,7 +119,7 @@ impl EndpointConfigBuilder {
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
             // Build transport based on request plane mode
-            let transport = build_transport_type(request_plane_mode, &endpoint_id, connection_id)?;
+            let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
 
             let instance = Instance {
                 component: endpoint_id.component.clone(),
@@ -198,7 +198,7 @@ impl EndpointConfigBuilder {
         let discovery = endpoint.drt().discovery();
 
         // Build transport for discovery service based on request plane mode
-        let transport = build_transport_type(request_plane_mode, &endpoint_id, connection_id)?;
+        let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
 
         let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
             namespace: endpoint_id.namespace.clone(),
@@ -235,7 +235,7 @@ impl EndpointConfigBuilder {
 ///
 /// # Errors
 /// Returns an error if TCP mode is used but the TCP server hasn't been started yet.
-pub fn build_transport_type(
+fn build_transport_type_inner(
     mode: RequestPlaneMode,
     endpoint_id: &EndpointId,
     connection_id: u64,
@@ -259,10 +259,12 @@ pub fn build_transport_type(
         }
         RequestPlaneMode::Tcp => {
             let tcp_host = crate::utils::get_tcp_rpc_host_from_env();
-            // Get the actual TCP port from the global reference (set by TCP server after binding).
-            // If user explicitly set DYN_TCP_RPC_PORT, that value is used during binding.
-            // If port was OS-assigned (0), this returns the actual assigned port.
-            let tcp_port = crate::pipeline::network::manager::get_actual_tcp_rpc_port()?;
+            // If a fixed port is explicitly configured, use it directly (no init ordering dependency).
+            // Otherwise, use the actual bound port (set by TCP server after binding when port 0 is used).
+            let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
 
             // Include endpoint name for proper TCP routing
             // TCP client parses this format and adds x-endpoint-path header for server-side routing
@@ -275,4 +277,32 @@ pub fn build_transport_type(
             connection_id,
         ))),
     }
+}
+
+/// Build transport type, ensuring TCP server is initialized when needed.
+///
+/// In TCP mode with an OS-assigned port (`DYN_TCP_RPC_PORT` unset or invalid), the server must bind
+/// before we can construct a correct transport address. This helper ensures that initialization
+/// occurs, then delegates to the internal builder.
+pub async fn build_transport_type(
+    endpoint: &Endpoint,
+    endpoint_id: &EndpointId,
+    connection_id: u64,
+) -> Result<TransportType> {
+    let mode = endpoint.drt().request_plane();
+
+    if mode == RequestPlaneMode::Tcp {
+        // Only force server init when we *don't* have a valid explicit port.
+        let has_fixed_port = std::env::var("DYN_TCP_RPC_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .is_some();
+
+        if !has_fixed_port {
+            // Ensure request plane server is initialized before building transport.
+            let _ = endpoint.drt().request_plane_server().await?;
+        }
+    }
+
+    build_transport_type_inner(mode, endpoint_id, connection_id)
 }
