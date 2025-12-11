@@ -71,6 +71,7 @@ pub struct LLMMetricAnnotation {
     pub input_tokens: usize,
     pub output_tokens: usize,
     pub chunk_tokens: usize,
+    pub cached_tokens: Option<usize>,
 }
 
 impl LLMMetricAnnotation {
@@ -646,6 +647,7 @@ impl OpenAIPreprocessor {
                         input_tokens: isl,
                         output_tokens: current_osl,
                         chunk_tokens,
+                        cached_tokens: None,
                     };
 
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
@@ -673,20 +675,39 @@ impl OpenAIPreprocessor {
                     // again. The stream is exhausted and will panic if polled after None.
                     inner.finished = true;
 
-                    // Check if we need to send a usage chunk
-                    if inner.response_generator.is_usage_enabled()
-                        && inner.finish_reason_sent
-                        && !inner.usage_chunk_sent
-                    {
+                    if inner.finish_reason_sent && !inner.usage_chunk_sent {
                         inner.usage_chunk_sent = true;
 
-                        // Create the final usage chunk
                         let usage_chunk = inner.response_generator.create_usage_chunk();
+                        let usage = inner.response_generator.get_usage();
+                        let llm_metrics = LLMMetricAnnotation {
+                            input_tokens: usage.prompt_tokens as usize,
+                            output_tokens: usage.completion_tokens as usize,
+                            chunk_tokens: 0,
+                            cached_tokens: usage
+                                .prompt_tokens_details
+                                .as_ref()
+                                .and_then(|d| d.cached_tokens.map(|c| c as usize)),
+                        };
+
+                        // Create annotation string
+                        let annotation = llm_metrics.to_annotation::<()>().unwrap_or_else(|e| {
+                            tracing::warn!("Failed to serialize metrics: {}", e);
+                            Annotated::<()>::from_data(())
+                        });
+
+                        // Send the usage chunk if needed
+                        let data = if inner.response_generator.is_usage_enabled() {
+                            Some(usage_chunk)
+                        } else {
+                            None
+                        };
+
                         let annotated_usage = Annotated::<Resp> {
                             id: None,
-                            data: Some(usage_chunk),
-                            event: None,
-                            comment: None,
+                            data,
+                            event: Some(ANNOTATION_LLM_METRICS.to_string()),
+                            comment: annotation.comment,
                         };
 
                         tracing::trace!(

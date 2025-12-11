@@ -96,15 +96,6 @@ To deploy `Llama-4-Maverick-17B-128E-Instruct` in disaggregated mode, you will n
 
 For high-performance multimodal inference, Dynamo supports pre-computed embeddings with an **Encode-Prefill-Decode (EPD)** flow using **NIXL (RDMA)** for zero-copy tensor transfer.
 
-### Enabling the Feature
-
-This is an experimental feature that requires using a specific TensorRT-LLM commit.
-To enable it build the dynamo container with the `--tensorrtllm-commit` flag:
-
-```bash
-./container/build.sh --framework trtllm --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM.git --tensorrtllm-commit v1.2.0rc3
-```
-
 ### Supported File Types
 
 - `.pt` - PyTorch tensor files

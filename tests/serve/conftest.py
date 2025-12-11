@@ -8,6 +8,7 @@ import pytest
 from pytest_httpserver import HTTPServer
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
+from tests.serve.lora_utils import MinioLoraConfig, MinioService
 
 # Shared constants for multimodal testing
 IMAGE_SERVER_PORT = 8765
@@ -50,3 +51,47 @@ def image_server(httpserver: HTTPServer):
     )
 
     return httpserver
+
+
+@pytest.fixture(scope="function")
+def minio_lora_service():
+    """
+    Provide a MinIO service with a pre-uploaded LoRA adapter for testing.
+
+    This fixture:
+    1. Starts a MinIO Docker container
+    2. Creates the required S3 bucket
+    3. Downloads the LoRA adapter from Hugging Face Hub
+    4. Uploads it to MinIO
+    5. Yields the MinioLoraConfig with connection details
+    6. Cleans up after the test
+
+    Usage:
+        def test_lora(minio_lora_service):
+            config = minio_lora_service
+            # Use config.get_env_vars() for environment setup
+            # Use config.get_s3_uri() to get the S3 URI for loading LoRA
+    """
+    config = MinioLoraConfig()
+    service = MinioService(config)
+
+    try:
+        # Start MinIO
+        service.start()
+
+        # Create bucket
+        service.create_bucket()
+
+        # Download and upload LoRA
+        local_path = service.download_lora()
+        service.upload_lora(local_path)
+
+        # Clean up downloaded files (keep MinIO running)
+        service.cleanup_temp()
+
+        yield config
+
+    finally:
+        # Stop MinIO and clean up
+        service.stop()
+        service.cleanup_temp()

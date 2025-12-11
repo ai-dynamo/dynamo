@@ -113,6 +113,9 @@ pub mod frontend_service {
     /// Output sequence length in tokens
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "output_sequence_tokens";
 
+    /// Number of cached tokens (prefix cache hits) per request
+    pub const CACHED_TOKENS: &str = "cached_tokens";
+
     /// Total number of output tokens generated (counter that updates in real-time)
     pub const OUTPUT_TOKENS_TOTAL: &str = "output_tokens_total";
 

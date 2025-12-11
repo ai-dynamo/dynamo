@@ -161,23 +161,6 @@ The `build.sh` script is responsible for building Docker images for different AI
 ./build.sh --build-arg CUSTOM_ARG=value
 ```
 
-### build.sh --dev-image - Local Development Image Builder
-
-The `build.sh --dev-image` option takes a dev image and then builds a local-dev image, which contains proper local user permissions. It also includes extra developer utilities (debugging tools, text editors, system monitors, etc.).
-
-**Common Usage Examples:**
-
-```bash
-# Build local-dev image from dev image dynamo:latest-vllm
-./build.sh --dev-image dynamo:latest-vllm --framework vllm
-
-# Build with custom tag from dev image dynamo:latest-vllm
-./build.sh --dev-image dynamo:latest-vllm --framework vllm --tag my-local:dev
-
-# Dry run to see what would be built
-./build.sh --dev-image dynamo:latest-vllm --framework vllm --dry-run
-```
-
 ### Building the Frontend Image
 
 The frontend image is a specialized container that includes the Dynamo components (NATS, etcd, dynamo, NIXL, etc) along with the Endpoint Picker (EPP) for Kubernetes Gateway API Inference Extension integration. This image is primarily used for inference gateway deployments.
