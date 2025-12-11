@@ -123,13 +123,7 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.timeout(290)  # 3x average
 @pytest.mark.parametrize(
     "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
+    ["nats", "tcp"],
     indirect=True,
 )
 def test_request_migration_vllm_worker_failure(
@@ -178,13 +172,7 @@ def test_request_migration_vllm_worker_failure(
 @pytest.mark.timeout(280)  # 3x average
 @pytest.mark.parametrize(
     "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
+    ["nats", "tcp"],
     indirect=True,
 )
 def test_request_migration_vllm_graceful_shutdown(
@@ -237,13 +225,7 @@ def test_request_migration_vllm_graceful_shutdown(
 @pytest.mark.timeout(150)  # 3x average
 @pytest.mark.parametrize(
     "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
+    ["nats", "tcp"],
     indirect=True,
 )
 def test_no_request_migration_vllm_worker_failure(
@@ -308,13 +290,7 @@ def test_no_request_migration_vllm_worker_failure(
 @pytest.mark.timeout(140)  # 3x average
 @pytest.mark.parametrize(
     "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
+    ["nats", "tcp"],
     indirect=True,
 )
 def test_no_request_migration_vllm_graceful_shutdown(

@@ -120,13 +120,7 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.timeout(235)  # 3x average
 @pytest.mark.parametrize(
     "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
+    ["nats", "tcp"],
     indirect=True,
 )
 def test_request_migration_sglang_worker_failure(
@@ -175,13 +169,7 @@ def test_request_migration_sglang_worker_failure(
 @pytest.mark.skip(reason="SGLang graceful shutdown not yet implemented")
 @pytest.mark.parametrize(
     "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
+    ["nats", "tcp"],
     indirect=True,
 )
 def test_request_migration_sglang_graceful_shutdown(
@@ -234,13 +222,7 @@ def test_request_migration_sglang_graceful_shutdown(
 @pytest.mark.timeout(135)  # 3x average
 @pytest.mark.parametrize(
     "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
+    ["nats", "tcp"],
     indirect=True,
 )
 def test_no_request_migration_sglang_worker_failure(
@@ -305,13 +287,7 @@ def test_no_request_migration_sglang_worker_failure(
 @pytest.mark.skip(reason="SGLang graceful shutdown not yet implemented")
 @pytest.mark.parametrize(
     "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
+    ["nats", "tcp"],
     indirect=True,
 )
 def test_no_request_migration_sglang_graceful_shutdown(
