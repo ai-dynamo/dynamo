@@ -89,8 +89,10 @@ class DynamoWorkerProcess(ManagedProcess):
         else:  # agg (aggregated mode)
             port = "8081"
 
-        # Set debug logging environment
+        # Set environment variables
         env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
+
         env["DYN_LOG"] = "debug"
         # Disable canary health check - these tests expect full control over requests
         # sent to the workers where canary health check intermittently sends dummy
@@ -161,6 +163,7 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.timeout(160)  # 3x average
 @pytest.mark.gpu_1
 @pytest.mark.xfail(strict=False)
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_request_cancellation_sglang_aggregated(request, runtime_services):
     """
     End-to-end test for request cancellation functionality in aggregated mode.
@@ -245,6 +248,17 @@ def test_request_cancellation_sglang_aggregated(request, runtime_services):
 
 @pytest.mark.timeout(185)  # 3x average
 @pytest.mark.gpu_2
+@pytest.mark.parametrize(
+    "request_plane",
+    [
+        "nats",
+        pytest.param(
+            "tcp",
+            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
+        ),
+    ],
+    indirect=True,
+)
 def test_request_cancellation_sglang_decode_cancel(request, runtime_services):
     """
     End-to-end test for request cancellation during decode phase.

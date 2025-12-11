@@ -314,6 +314,7 @@ COPY components/ /opt/dynamo/components/
 
 # Build dynamo wheels
 ARG ENABLE_KVBM
+ARG USE_SCCACHE
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
@@ -453,7 +454,7 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         sed -i 's/pip3 install/uv pip install/g' /tmp/install_tensorrt.sh && \
         bash /tmp/install_tensorrt.sh && \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
-        # TRTLLM 1.2.0rc2 has issues installing from pypi with uv, installing from direct wheel link works best
+        # TRTLLM 1.2.0rc5 has issues installing from pypi with uv, installing from direct wheel link works best
         # explicitly installing triton 3.5.0 as trtllm only lists triton as dependency on x64_64 for some reason
         if echo "${TENSORRTLLM_PIP_WHEEL}" | grep -q '^tensorrt-llm=='; then \
             TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/tensorrt-llm==([0-9a-zA-Z.+-]+).*/\1/'); \

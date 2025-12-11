@@ -53,8 +53,10 @@ class DynamoWorkerProcess(ManagedProcess):
             str(migration_limit),
         ]
 
-        # Set debug logging environment
+        # Set environment variables
         env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
+
         env["DYN_VLLM_KV_EVENT_PORT"] = f"2008{worker_id[-1]}"
         env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = f"560{worker_id[-1]}"
 
@@ -114,6 +116,17 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.timeout(290)  # 3x average
+@pytest.mark.parametrize(
+    "request_plane",
+    [
+        "nats",
+        pytest.param(
+            "tcp",
+            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
+        ),
+    ],
+    indirect=True,
+)
 def test_request_migration_vllm_worker_failure(
     request, runtime_services, set_ucx_tls_no_mm
 ):
@@ -158,6 +171,17 @@ def test_request_migration_vllm_worker_failure(
 
 
 @pytest.mark.timeout(280)  # 3x average
+@pytest.mark.parametrize(
+    "request_plane",
+    [
+        "nats",
+        pytest.param(
+            "tcp",
+            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
+        ),
+    ],
+    indirect=True,
+)
 def test_request_migration_vllm_graceful_shutdown(
     request, runtime_services, set_ucx_tls_no_mm
 ):
@@ -206,6 +230,17 @@ def test_request_migration_vllm_graceful_shutdown(
 
 
 @pytest.mark.timeout(150)  # 3x average
+@pytest.mark.parametrize(
+    "request_plane",
+    [
+        "nats",
+        pytest.param(
+            "tcp",
+            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
+        ),
+    ],
+    indirect=True,
+)
 def test_no_request_migration_vllm_worker_failure(
     request, runtime_services, set_ucx_tls_no_mm
 ):
@@ -266,6 +301,17 @@ def test_no_request_migration_vllm_worker_failure(
 
 
 @pytest.mark.timeout(140)  # 3x average
+@pytest.mark.parametrize(
+    "request_plane",
+    [
+        "nats",
+        pytest.param(
+            "tcp",
+            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
+        ),
+    ],
+    indirect=True,
+)
 def test_no_request_migration_vllm_graceful_shutdown(
     request, runtime_services, set_ucx_tls_no_mm
 ):

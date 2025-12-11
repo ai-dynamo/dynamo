@@ -26,8 +26,8 @@ class DynamoFrontendProcess(ManagedProcess):
     def __init__(self, request):
         command = ["python", "-m", "dynamo.frontend"]
 
-        # Set debug logging environment
         env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
         env["DYN_LOG"] = "debug"
         # Disable canary health check - these tests expect full control over requests
         # sent to the workers where canary health check intermittently sends dummy

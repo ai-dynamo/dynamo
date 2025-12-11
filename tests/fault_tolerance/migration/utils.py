@@ -23,13 +23,14 @@ class DynamoFrontendProcess(ManagedProcess):
     def __init__(self, request):
         command = ["python", "-m", "dynamo.frontend", "--router-mode", "round-robin"]
 
-        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
         env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
         # Disable canary health check - these tests expect full control over requests
         # sent to the workers where canary health check intermittently sends dummy
         # requests to workers interfering with the test process which may cause
         # intermittent failures
         env["DYN_HEALTH_CHECK_ENABLED"] = "false"
+        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
         env.pop("DYN_SYSTEM_PORT", None)
 
         log_dir = f"{request.node.name}_frontend"
