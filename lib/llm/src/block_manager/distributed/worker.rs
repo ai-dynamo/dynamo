@@ -628,7 +628,9 @@ impl Handler for G4OnboardDispatch {
         let completion_handle = if let Some(connector_req) = request.connector_req {
             let client = v2_handler
                 .scheduler_client()
-                .expect("scheduler client is required for G4 onboard with connector_req");
+                .ok_or_else(|| anyhow::anyhow!(
+                    "scheduler client is required for G4 onboard with connector_req"
+                ))?;
 
             let handle = client.schedule_transfer(connector_req).await?;
             assert_eq!(
