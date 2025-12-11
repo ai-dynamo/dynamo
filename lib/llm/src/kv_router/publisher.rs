@@ -2115,8 +2115,7 @@ mod test_integration_publisher {
     }
 }
 
-// #[cfg(all(test, feature = "integration"))]
-#[cfg(test)]
+#[cfg(all(test, feature = "integration"))]
 mod test_integration_publisher_with_kvindexer {
     use super::*;
 
