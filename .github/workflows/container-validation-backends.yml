@@ -56,7 +56,7 @@ jobs:
 
   create-buildkit-builders:
     name: Create Build Builders
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: builder-cpu-amd-runner
     steps:
     - name: Checkout code
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
