@@ -357,18 +357,8 @@ get_options() {
 
     # Validate that --uid and --gid are only used with local-dev target
     if [[ -n "${CUSTOM_UID:-}" || -n "${CUSTOM_GID:-}" ]]; then
-<<<<<<< HEAD
-<<<<<<< HEAD
-        if [[ "${TARGET:-}" != "local-dev" ]]; then
-            error "ERROR: --uid and --gid can only be used with --target local-dev"
-=======
         if [[ -z "${DEV_IMAGE_INPUT:-}" && "${TARGET:-}" != "local-dev" && "${TARGET:-}" != "local-dev-aws" ]]; then
             error "ERROR: --uid and --gid can only be used with --dev-image or --target local-dev or --target local-dev-aws"
->>>>>>> e951a215c (feat: Add option for --target local-dev-aws in addition to local-dev)
-=======
-        if [[ -z "${DEV_IMAGE_INPUT:-}" && "${TARGET:-}" != "local-dev" ]]; then
-            error "ERROR: --uid and --gid can only be used with --dev-image or --target local-dev"
->>>>>>> b098a368a (fix: Simplify AWS container by adding dedicated Dockerfile.aws)
         fi
     fi
 
@@ -954,7 +944,6 @@ if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
     exit ${BUILD_EXIT_CODE}
 fi
 
-<<<<<<< HEAD
 # Handle local-dev target
 if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
     # Use the first tag name (TAG) if available, otherwise use latest
@@ -981,25 +970,6 @@ if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
     # Extract first tag for success message
     FIRST_TAG=$(echo "$LOCAL_DEV_TAGS" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
     build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built $FIRST_TAG" "Building Local-Dev Image"
-=======
-# Handle --dev-image option (build local-dev from existing dev image)
-if [[ -n "${DEV_IMAGE_INPUT:-}" ]]; then
-    # Validate that the dev image is not already a local-dev image
-    if [[ "$DEV_IMAGE_INPUT" == *"-local-dev" ]]; then
-        echo "ERROR: Cannot use local-dev image as dev image input: '$DEV_IMAGE_INPUT'"
-        exit 1
-    fi
-
-    # Build tag arguments - always add -local-dev suffix for --dev-image
-    # Generate local-dev tag from input image
-    if [[ "$DEV_IMAGE_INPUT" == *:* ]]; then
-        LOCAL_DEV_TAG="--tag ${DEV_IMAGE_INPUT}-local-dev"
-    else
-        LOCAL_DEV_TAG="--tag ${DEV_IMAGE_INPUT}:latest-local-dev"
-    fi
-
-    build_local_dev_with_header "$DEV_IMAGE_INPUT" "$LOCAL_DEV_TAG" "Successfully built local-dev image: ${LOCAL_DEV_TAG#--tag }" "Building Local-Dev Image"
->>>>>>> b098a368a (fix: Simplify AWS container by adding dedicated Dockerfile.aws)
 fi
 
 # Handle --make-efa flag: add AWS EFA layer on top of the built image
