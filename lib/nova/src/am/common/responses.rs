@@ -41,6 +41,16 @@
 //! When a slot's generation counter reaches the maximum value (u48), the slot is
 //! permanently retired and will not be returned to the free list. This prevents
 //! generation counter wraparound issues.
+//!
+//! # Client/Handler Pairing
+//!
+//! Active message handlers (`am_handler`, `am_handler_async`) now correctly send
+//! ACK/NACK responses when paired with `am_sync` clients. The `AmExecutorAdapter`
+//! checks `ResponseType` and:
+//! - `FireAndForget` (`am_send`): No response sent (fire-and-forget)
+//! - `AckNack` (`am_sync`): ACK on success, NACK on error
+//!
+//! For request-response patterns with payloads, use `unary`/`unary_handler_async`.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dashmap::DashSet;

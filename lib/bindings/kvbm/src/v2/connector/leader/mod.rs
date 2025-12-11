@@ -6,16 +6,25 @@
 //! Provides a PyO3 wrapper around the Rust ConnectorLeader, enabling Python code
 //! to send Nova RPCs to workers for leader-driven initialization.
 
+use pyo3::Bound;
 use pyo3::prelude::*;
+use std::collections::HashSet;
+use std::sync::Arc;
 
-use dynamo_kvbm::InstanceId;
-use dynamo_kvbm::integrations::connector::leader::ConnectorLeader;
+use dynamo_kvbm::integrations::connector::leader::{ConnectorLeader, FinishedStatus, Request};
+use dynamo_kvbm::{BlockId, InstanceId};
 
-use dynamo_nova_backend::{PeerInfo, WorkerAddress};
+use dynamo_nova_backend::WorkerAddress;
 use uuid::Uuid;
 
 use crate::to_pyerr;
 use crate::v2::runtime::PyKvbmRuntime;
+
+mod request;
+pub use request::PyRequest;
+
+mod scheduler;
+pub use scheduler::PySchedulerOutput;
 
 /// Python wrapper for WorkerClient.
 ///
@@ -28,7 +37,7 @@ use crate::v2::runtime::PyKvbmRuntime;
 ///     metadata = service.configure_layouts(instance_id, host_block_count=1000)
 #[pyclass(name = "ConnectorLeader")]
 pub struct PyConnectorLeader {
-    inner: ConnectorLeader,
+    inner: Arc<ConnectorLeader>,
 }
 
 #[pymethods]
@@ -41,10 +50,89 @@ impl PyConnectorLeader {
     /// Raises:
     ///     RuntimeError: If the runtime doesn't have a Nova instance
     #[new]
-    pub fn new(runtime: &PyKvbmRuntime) -> PyResult<Self> {
+    pub fn new(runtime: &PyKvbmRuntime, block_size: usize) -> PyResult<Self> {
         let runtime = runtime.inner();
-        let leader = ConnectorLeader::new(runtime);
+        let leader = Arc::new(ConnectorLeader::new(runtime, block_size));
         Ok(Self { inner: leader })
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.inner.block_size()
+    }
+
+    pub fn has_slot(&self, request_id: &str) -> bool {
+        self.inner.has_slot(request_id)
+    }
+
+    pub fn create_slot(&self, request: PyRequest) -> PyResult<()> {
+        self.inner
+            .create_slot(request.inner.clone())
+            .map_err(to_pyerr)
+    }
+
+    pub fn get_num_new_matched_tokens(
+        &self,
+        request_id: &str,
+        num_computed_tokens: usize,
+    ) -> PyResult<(Option<usize>, bool)> {
+        self.inner
+            .get_num_new_matched_tokens(request_id, num_computed_tokens)
+            .map_err(to_pyerr)
+    }
+
+    pub fn update_state_after_alloc(
+        &self,
+        request_id: &str,
+        block_ids: Vec<BlockId>,
+        num_external_tokens: usize,
+    ) -> PyResult<()> {
+        self.inner
+            .update_state_after_alloc(request_id, block_ids, num_external_tokens)
+            .map_err(to_pyerr)
+    }
+
+    /// See [`ConnectorLeader::request_finished`] for more details.
+    pub fn request_finished(&self, request_id: &str) -> bool {
+        match self.inner.request_finished(request_id) {
+            FinishedStatus::Finished => false,
+            FinishedStatus::Pending => true,
+            FinishedStatus::UntrackedRequest => false,
+        }
+    }
+
+    /// See [`ConnectorLeader::update_connector_output`] for more details.
+    pub fn update_connector_output(
+        &self,
+        finished_sending: &Bound<'_, PyAny>,
+        finished_recving: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let finished_sending: HashSet<String> = finished_sending.extract()?;
+        let finished_recving: HashSet<String> = finished_recving.extract()?;
+
+        self.inner
+            .update_connector_output(finished_sending, finished_recving)
+            .map_err(to_pyerr)?;
+        Ok(())
+    }
+
+    /// Build connector metadata from scheduler output.
+    ///
+    /// This processes the scheduler output and generates connector metadata
+    /// that workers use to execute KV transfers.
+    ///
+    /// Args:
+    ///     output: The scheduler output containing scheduled requests
+    ///
+    /// Returns:
+    ///     bytes: Serialized connector metadata
+    pub fn build_connector_metadata(&self, output: &PySchedulerOutput) -> PyResult<Vec<u8>> {
+        let rust_output = output.inner();
+        let metadata = self
+            .inner
+            .build_connector_meta(rust_output)
+            .map_err(to_pyerr)?;
+        let bytes = serde_json::to_vec(&metadata).map_err(to_pyerr)?;
+        Ok(bytes)
     }
 
     /// Register a worker peer with Nova.
@@ -88,69 +176,9 @@ impl PyConnectorLeader {
         Ok(())
     }
 
+    /// After all workers have been registered, initialize them all.
     pub fn initialize_workers(&self) -> PyResult<()> {
-        self.inner.initialize_workers().map_err(to_pyerr)?;
+        self.inner.initialize().map_err(to_pyerr)?;
         Ok(())
     }
-
-    // /// Send a configure_layouts RPC to a worker to trigger deferred initialization.
-    // ///
-    // /// This is called by the leader after collecting handshake metadata from all workers.
-    // /// It triggers the worker to complete NIXL registration and create G1/G2/G3 layouts.
-    // ///
-    // /// Args:
-    // ///     instance_id_bytes: 16-byte UUID of the target worker instance
-    // ///     host_block_count: Number of host/pinned blocks for G2 tier
-    // ///     disk_block_count: Number of disk blocks for G3 tier (None = no disk tier)
-    // ///     enable_posix: Enable POSIX backend for host memory transfers
-    // ///     enable_gds: Enable GDS backend for GPU Direct Storage
-    // ///
-    // /// Returns:
-    // ///     bytes: Serialized metadata from the worker after configuration
-    // ///
-    // /// Raises:
-    // ///     ValueError: If instance_id is not 16 bytes
-    // ///     RuntimeError: If the RPC fails or worker returns an error
-    // #[pyo3(signature = (instance_id_bytes, host_block_count, disk_block_count=None, enable_posix=false, enable_gds=false))]
-    // pub fn configure_layouts<'py>(
-    //     &self,
-    //     py: Python<'py>,
-    //     instance_id_bytes: &[u8],
-    //     host_block_count: usize,
-    //     disk_block_count: Option<usize>,
-    //     enable_posix: bool,
-    //     enable_gds: bool,
-    // ) -> PyResult<Bound<'py, PyBytes>> {
-    //     // Parse instance ID from bytes (16-byte UUID)
-    //     if instance_id_bytes.len() != 16 {
-    //         return Err(pyo3::exceptions::PyValueError::new_err(format!(
-    //             "instance_id must be 16 bytes, got {}",
-    //             instance_id_bytes.len()
-    //         )));
-    //     }
-    //     let uuid_bytes: [u8; 16] = instance_id_bytes.try_into().map_err(to_pyerr)?;
-    //     let uuid = Uuid::from_bytes(uuid_bytes);
-    //     let instance_id = InstanceId::from(uuid);
-
-    //     // Build the config
-    //     let config = LeaderLayoutConfig {
-    //         host_block_count,
-    //         disk_block_count,
-    //         backend_config: NixlBackendConfigMessage {
-    //             enable_posix,
-    //             enable_gds,
-    //             gds_params: None,
-    //         },
-    //     };
-
-    //     // Send the RPC and block on the result
-    //     let handle = self.inner.nova().runtime().clone();
-    //     let result = handle
-    //         .block_on(async { self.inner.configure_layouts(instance_id, config).await })
-    //         .map_err(to_pyerr)?;
-
-    //     // Serialize the metadata response
-    //     let metadata_bytes = serde_json::to_vec(&result.metadata).map_err(to_pyerr)?;
-    //     Ok(PyBytes::new(py, &metadata_bytes))
-    // }
 }

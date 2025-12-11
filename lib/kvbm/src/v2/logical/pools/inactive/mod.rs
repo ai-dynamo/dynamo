@@ -46,6 +46,14 @@ pub(crate) trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
     }
 
     fn has_block(&self, seq_hash: SequenceHash) -> bool;
+
+    /// Allocate all blocks from the pool, removing them from the backend.
+    /// Default implementation calls len() then allocate(), which is atomic
+    /// since the caller holds the lock.
+    fn allocate_all(&mut self) -> Vec<Block<T, Registered>> {
+        let count = self.len();
+        self.allocate(count)
+    }
 }
 /// Pool for managing registered (immutable) blocks
 ///
@@ -80,10 +88,23 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
 
         let inner_clone = inner.clone();
         let return_fn = Arc::new(move |block: Arc<Block<T, Registered>>| {
-            let mut inner = inner_clone.write();
+            let seq_hash = block.sequence_hash();
+            let strong_count = Arc::strong_count(&block);
 
-            if let Ok(block) = Arc::try_unwrap(block) {
-                inner.backend.insert(block);
+            let mut inner = inner_clone.write();
+            match Arc::try_unwrap(block) {
+                Ok(block) => {
+                    let block_id = block.block_id();
+                    inner.backend.insert(block);
+                    tracing::trace!(?seq_hash, block_id, "Block returned to inactive pool");
+                }
+                Err(_block) => {
+                    tracing::warn!(
+                        ?seq_hash,
+                        strong_count,
+                        "Arc::try_unwrap failed - block NOT returned to pool"
+                    );
+                }
             }
         }) as Arc<dyn Fn(Arc<Block<T, Registered>>) + Send + Sync>;
 
@@ -184,6 +205,20 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
 
     pub(crate) fn return_fn(&self) -> RegisteredReturnFn<T> {
         self.return_fn.clone()
+    }
+
+    /// Allocate all blocks from the pool, converting them to MutableBlocks.
+    /// The MutableBlocks will return to the ResetPool when dropped via RAII.
+    pub fn allocate_all_blocks(&self) -> Vec<MutableBlock<T>> {
+        let mut inner = self.inner.write();
+        let blocks = inner.backend.allocate_all();
+        blocks
+            .into_iter()
+            .map(|registered_block| {
+                let reset_block = registered_block.reset();
+                MutableBlock::new(reset_block, self.reset_return_fn.clone())
+            })
+            .collect()
     }
 }
 

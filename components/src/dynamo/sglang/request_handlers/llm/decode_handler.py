@@ -112,6 +112,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             RuntimeError: If no bootstrap info received from prefill worker.
         """
         logging.debug(f"New Request ID: {context.id()}")
+        trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
@@ -154,6 +155,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if not bootstrap_info:
                 raise RuntimeError("No bootstrap info received from prefill worker")
 
+            if self.enable_trace:
+                self._propagate_trace_context_to_sglang(
+                    context, bootstrap_info["bootstrap_room"]
+                )
+
             decode = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
@@ -161,6 +167,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
+                rid=trace_id,
             )
 
             if self.skip_tokenizer_init:
@@ -170,10 +177,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(decode, context):
                     yield out
         else:
+            if self.enable_trace:
+                self._propagate_trace_context_to_sglang(context)
+
             agg = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
+                rid=trace_id,
             )
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):
@@ -229,6 +240,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 next_total_toks = len(output_ids)
                 out["token_ids"] = output_ids[num_output_tokens_so_far:]
                 num_output_tokens_so_far = next_total_toks
+                if finish_reason:
+                    input_tokens = res["meta_info"]["prompt_tokens"]
+                    completion_tokens = res["meta_info"]["completion_tokens"]
+                    cached_tokens = res["meta_info"]["cached_tokens"]
+                    prefill_prompt_tokens_details = None
+                    if cached_tokens is not None and cached_tokens > 0:
+                        prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
+                    out["completion_usage"] = {
+                        "prompt_tokens": input_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": input_tokens + completion_tokens,
+                        "prompt_tokens_details": prefill_prompt_tokens_details,
+                    }
                 if not context.is_stopped():
                     yield out
 

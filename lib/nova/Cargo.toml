@@ -13,7 +13,7 @@ repository.workspace = true
 keywords.workspace = true
 
 [features]
-default = ["ucx", "http", "nats", "grpc"]
+default = ["http", "nats", "grpc"]
 ucx = ["dynamo-nova-backend/ucx"]
 http = ["dynamo-nova-backend/http"]
 grpc = ["dynamo-nova-backend/grpc"]

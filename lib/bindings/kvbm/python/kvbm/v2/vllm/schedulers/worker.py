@@ -13,7 +13,6 @@ peer information via get_handshake_metadata() for the leader to connect.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -21,12 +20,11 @@ import torch
 
 # Import KvbmRuntime and ConnectorWorker from Rust bindings
 from kvbm._core import v2 as _v2
+from kvbm.v2.vllm import KvbmVllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
 from vllm.model_executor.models.utils import extract_layer_index
-
-from ..config import extract_vllm_config_for_kvbm
 
 KvbmRuntime = _v2.KvbmRuntime
 ConnectorWorker = _v2.ConnectorWorker
@@ -66,10 +64,15 @@ class SchedulerConnectorWorker:
     """
 
     def __init__(
-        self, vllm_config: "VllmConfig", kv_cache_config: KVCacheConfig, **kwargs
+        self,
+        vllm_config: "VllmConfig",
+        kvbm_config: KvbmVllmConfig,
+        kv_cache_config: KVCacheConfig,
+        **kwargs,
     ):
         """Initialize the scheduler connector worker."""
         self.vllm_config = vllm_config
+        self.kvbm_config = kvbm_config
         self.vllm_kv_cache_config = kv_cache_config
         self.kvbm_override_config = kwargs.get("kvbm_override_config", None)
 
@@ -77,7 +80,7 @@ class SchedulerConnectorWorker:
         self.runtime = KvbmRuntime.build_worker(self.kvbm_override_config)
 
         # Create the Rust ConnectorWorker that handles NIXL registration
-        self.connector_worker = ConnectorWorker(self.runtime)
+        self.worker = ConnectorWorker(self.runtime)
 
         # Store peer info for handshake
         instance_id, worker_addr = self.runtime.peer_info()
@@ -88,6 +91,8 @@ class SchedulerConnectorWorker:
 
         # Will be set during register_kv_caches
         self._num_device_blocks: Optional[int] = None
+        self._num_layers: int = 0
+        self._last_layer_name: Optional[str] = None
 
         print(
             f"SchedulerConnectorWorker initialized with Nova instance: {instance_id.hex()[:8]}...",
@@ -101,10 +106,6 @@ class SchedulerConnectorWorker:
         This registers the KV cache tensors with NIXL via the UCX backend,
         enabling remote GPU-to-GPU transfers.
         """
-        # Extract vLLM config now that num_gpu_blocks is populated
-        if self.kvbm_config is None:
-            self.kvbm_config = extract_vllm_config_for_kvbm(self.vllm_config)
-
         if not kv_caches:
             print("Warning: register_kv_caches called with empty kv_caches")
             return
@@ -135,7 +136,7 @@ class SchedulerConnectorWorker:
         # For NHD layout: [2 (K/V), num_blocks, block_size, num_heads, head_size]
         # For HND layout: [2 (K/V), num_blocks, num_heads, block_size, head_size]
         num_device_blocks = max(shape[0], shape[1])
-        page_size = self.kvbm_config.block_size()
+        page_size = self.vllm_config.cache_config.block_size
         dtype_width_bytes = self.kvbm_config.cache_dtype_bytes()
 
         config_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks
@@ -150,15 +151,19 @@ class SchedulerConnectorWorker:
         # This caches tensor state for deferred NIXL registration
         # The actual NIXL registration happens when the leader triggers
         # initialization via bind_connector_metadata()
-        self.connector_worker.register_kv_caches(
+        self.worker.register_kv_caches(
             tensors,
             num_device_blocks,
             page_size,
             dtype_width_bytes,
         )
 
-        # Store device block count for later use
+        # Store device block count and last layer name for later use
         self._num_device_blocks = num_device_blocks
+        self._num_layers = len(tensors)
+        # Get the last layer name from the ordered list
+        self._last_layer_name = ordered_kv_caches[-1][0] if ordered_kv_caches else None
+        print(f"[DEBUG] register_kv_caches: _last_layer_name set to: {self._last_layer_name}")
 
         print("[KVBM] KV caches registered (deferred mode)")
         print(f"  - Num device blocks: {num_device_blocks}")
@@ -171,55 +176,14 @@ class SchedulerConnectorWorker:
     def bind_connector_metadata(self, data: bytes) -> None:
         """
         Bind connector metadata from the leader.
-
-        If the data contains layout configuration (init_required=True),
-        this triggers deferred NIXL initialization with the leader-provided
-        G2/G3 block counts.
         """
-        if not data:
-            return
-
-        try:
-            config = json.loads(data.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            # Not JSON - ignore (backwards compatibility)
-            return
-
-        # Check if this is an initialization message from the leader
-        if not config.get("init_required", False):
-            return
-
-        # Already initialized - skip
-        if self.connector_worker.is_initialized():
-            return
-
-        host_block_count = config.get("host_block_count", 0)
-        disk_block_count = config.get("disk_block_count")
-        enable_posix = config.get("enable_posix", False)
-        enable_gds = config.get("enable_gds", False)
-
-        print("[KVBM] Leader triggered initialization:")
-        print(f"  - host_block_count: {host_block_count}")
-        print(f"  - disk_block_count: {disk_block_count}")
-
-        # Complete initialization - creates TransferManager + G1/G2 layouts
-        metadata_bytes = self.connector_worker.complete_initialization(
-            host_block_count=host_block_count,
-            disk_block_count=disk_block_count,
-            enable_posix=enable_posix,
-            enable_gds=enable_gds,
-        )
-
-        print("[KVBM] Deferred initialization complete:")
-        print(f"  - G1 (device): {self._num_device_blocks} blocks")
-        print(f"  - G2 (pinned host): {host_block_count} blocks")
-        print(f"  - Metadata size: {len(metadata_bytes)} bytes")
+        self.worker.bind_connector_metadata(data)
 
     def clear_connector_metadata(self) -> None:
         """
         Clear connector metadata - no-op.
         """
-        pass
+        self.worker.clear_connector_metadata()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """
@@ -237,11 +201,27 @@ class SchedulerConnectorWorker:
         **kwargs,
     ) -> None:
         """
-        Save KV layer - no-op.
+        Save KV layer - triggers forward pass completion on last layer.
 
-        No KV saving needed for scheduler connector.
+        On the last layer, if there's a pending forward pass event,
+        we record a CUDA event on the current stream and spawn an async
+        task to wait for it before triggering the Nova forward pass event.
         """
-        pass
+        # Check if this is the last layer (fast string comparison)
+        if layer_name != self._last_layer_name:
+            return
+
+        # Check if Rust needs the stream for event synchronization
+        if not self.worker.needs_cuda_stream():
+            return
+
+        # Get the current CUDA stream handle
+        device = kv_layer.device
+        stream = torch.cuda.current_stream(device)
+        stream_handle = stream.cuda_stream
+
+        # Call Rust to record event and spawn completion task
+        self.worker.save_kv_layer(stream_handle)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """No-op - no async loading."""
@@ -264,19 +244,14 @@ class SchedulerConnectorWorker:
         Returns:
             (None, None): No finished sends/receives
         """
-        # Just acknowledge the finished requests
-        # Since our leader's request_finished() always returns False,
-        # these requests have already had their blocks freed
-        if len(finished_req_ids) > 0:
-            print(
-                f"SchedulerConnectorWorker.get_finished() acknowledging {len(finished_req_ids)} finished requests"
-            )
-
-        return (None, None)
+        # print(
+        #     f"SchedulerConnectorWorker.get_finished called with {len(finished_req_ids)} finished requests"
+        # )
+        return self.worker.get_finished()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Returns empty set - no load errors tracked."""
-        return set()
+        return self.worker.get_failed_onboarding()
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata:
         """

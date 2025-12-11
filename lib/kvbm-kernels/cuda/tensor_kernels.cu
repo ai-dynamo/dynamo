@@ -10,6 +10,23 @@
 #include <type_traits>
 #include <vector>
 
+// Compile-time CUDA version detection and diagnostics
+#if defined(CUDART_VERSION)
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+#if CUDART_VERSION >= 13000
+#pragma message("Building with CUDA 13.0+ (CUDART_VERSION=" TOSTRING( \
+        CUDART_VERSION) ") - cudaMemcpyBatchAsync available (8-param API, no failIdx)")
+#elif CUDART_VERSION >= 12090
+#pragma message("Building with CUDA 12.9 (CUDART_VERSION=" TOSTRING( \
+        CUDART_VERSION) ") - cudaMemcpyBatchAsync available (9-param API with failIdx)")
+#else
+#pragma message("Building with CUDA " TOSTRING(CUDART_VERSION) " - cudaMemcpyBatchAsync NOT available (requires 12.9+)")
+#endif
+#else
+#pragma message("Warning: CUDART_VERSION not defined - cannot detect CUDA version")
+#endif
+
 #ifndef CUDA_CALLABLE_MEMBER
 #define CUDA_CALLABLE_MEMBER __host__ __device__
 #endif
@@ -510,16 +527,61 @@ launch_operational_copy(
   };
 
   auto launch_memcpy_batch = [&]() -> cudaError_t {
-#if defined(CUDART_VERSION) && CUDART_VERSION >= 12090
+  // cudaMemcpyBatchAsync API changed between CUDA 12.9 and 13.0:
+  // - CUDA 12.9: Has failIdx parameter (9 params total)
+  // - CUDA 13.0: Removed failIdx, uses rich error reporting (8 params)
+  // - Earlier versions (< 12.9): Function doesn't exist
+#if defined(CUDART_VERSION)
+#if CUDART_VERSION >= 13000
+    // CUDA 13.0+: Use 8-parameter API (no failIdx)
+    // Signature: cudaError_t cudaMemcpyBatchAsync(void *const *dsts, const void *const *srcs,
+    //     const size_t *sizes, size_t count, cudaMemcpyAttributes *attrs,
+    //     size_t *attrsIdxs, size_t numAttrs, cudaStream_t stream)
+    std::vector<void*> src_mut(total_chunks);
+    for (size_t i = 0; i < total_chunks; ++i) {
+      src_mut[i] = const_cast<void*>(src_ptrs[i]);
+    }
+
+    cudaError_t result = cudaMemcpyBatchAsync(
+        const_cast<void**>(dst_ptrs.data()), const_cast<const void**>(src_mut.data()),
+        const_cast<size_t*>(sizes.data()), total_chunks,
+        nullptr,  // attrs - no attributes needed
+        nullptr,  // attrsIdxs - no attribute indices
+        0,        // numAttrs - zero attributes
+        stream);  // No failIdx parameter in CUDA 13.0
+
+    return result;
+
+#elif CUDART_VERSION >= 12090
+    // CUDA 12.9: Use 9-parameter API (with failIdx)
+    // Signature: cudaError_t cudaMemcpyBatchAsync(void *const *dsts, const void *const *srcs,
+    //     const size_t *sizes, size_t count, cudaMemcpyAttributes *attrs,
+    //     size_t *attrsIdxs, size_t numAttrs, size_t *failIdx, cudaStream_t stream)
     std::vector<void*> src_mut(total_chunks);
     for (size_t i = 0; i < total_chunks; ++i) {
       src_mut[i] = const_cast<void*>(src_ptrs[i]);
     }
     size_t fail_idx = 0;
-    return cudaMemcpyBatchAsync(
-        const_cast<void**>(dst_ptrs.data()), src_mut.data(), const_cast<size_t*>(sizes.data()), total_chunks, nullptr,
-        nullptr, 0, &fail_idx, stream);
+
+    cudaError_t result = cudaMemcpyBatchAsync(
+        const_cast<void**>(dst_ptrs.data()), const_cast<const void**>(src_mut.data()),
+        const_cast<size_t*>(sizes.data()), total_chunks,
+        nullptr,    // attrs
+        nullptr,    // attrsIdxs
+        0,          // numAttrs
+        &fail_idx,  // failIdx - included in CUDA 12.9
+        stream);
+
+    // Note: In CUDA 12.9, fail_idx will contain the index of the first failed operation
+    // if result != cudaSuccess
+    return result;
+
 #else
+    // CUDA version < 12.9 - cudaMemcpyBatchAsync not available
+    return cudaErrorNotSupported;
+#endif
+#else
+    // CUDART_VERSION not defined
     return cudaErrorNotSupported;
 #endif
   };

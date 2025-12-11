@@ -108,6 +108,13 @@ pub enum BlockManagerBuilderError {
     ValidationError(String),
 }
 
+/// Error types for BlockManager reset operations
+#[derive(Debug, thiserror::Error)]
+pub enum BlockManagerResetError {
+    #[error("Reset pool count mismatch: expected {expected}, got {actual}")]
+    BlockCountMismatch { expected: usize, actual: usize },
+}
+
 /// BlockManager v2 with pluggable inactive pool backends
 pub struct BlockManager<T: BlockMetadata> {
     reset_pool: ResetPool<T>,
@@ -151,6 +158,37 @@ impl<T: BlockMetadata> BlockManager<T> {
         }
     }
 
+    /// Reset the inactive pool by draining all blocks and returning them to the reset pool.
+    ///
+    /// This method:
+    /// 1. Acquires the inactive pool lock and allocates all blocks
+    /// 2. Releases the inactive pool lock
+    /// 3. Drops the allocated blocks, which returns them to the reset pool via RAII
+    /// 4. Verifies the reset pool contains the expected number of blocks
+    ///
+    /// # Returns
+    /// - `Ok(())` if all blocks were successfully returned to the reset pool
+    /// - `Err(BlockManagerResetError::BlockCountMismatch)` if the final count doesn't match
+    ///   (this can happen under contention when blocks are in active use)
+    pub fn reset_inactive_pool(&self) -> Result<(), BlockManagerResetError> {
+        // 1. Allocate all blocks from inactive pool (acquires lock internally)
+        let blocks = self.inactive_pool.allocate_all_blocks();
+
+        // 2. Drop blocks - RAII returns them to reset pool
+        drop(blocks);
+
+        // 3. Verify block count (may fail under contention - that's OK)
+        let reset_count = self.reset_pool.len();
+        if reset_count != self.total_blocks {
+            return Err(BlockManagerResetError::BlockCountMismatch {
+                expected: self.total_blocks,
+                actual: reset_count,
+            });
+        }
+
+        Ok(())
+    }
+
     pub fn register_blocks(&self, blocks: Vec<CompleteBlock<T>>) -> Vec<ImmutableBlock<T>> {
         let pool_return_fn = self.inactive_pool.return_fn();
         blocks
@@ -178,6 +216,32 @@ impl<T: BlockMetadata> BlockManager<T> {
             "Attempted to register block with handle from different registry"
         );
 
+        let registered_block = handle.register_mutable_block(
+            block,
+            self.duplication_policy,
+            self.inactive_pool.return_fn(),
+        );
+
+        ImmutableBlock::new(registered_block, self.upgrade_fn.clone())
+    }
+
+    /// Register a mutable block with an explicit sequence hash.
+    ///
+    /// This is used when the block content comes from a remote source (e.g., RDMA pull)
+    /// and we know the sequence hash but don't have an existing local block to copy from.
+    ///
+    /// # Arguments
+    /// * `block` - The mutable block to register
+    /// * `seq_hash` - The sequence hash for this block (from remote)
+    pub(crate) fn register_mutable_block_with_hash(
+        &self,
+        block: MutableBlock<T>,
+        seq_hash: SequenceHash,
+    ) -> ImmutableBlock<T> {
+        // Register the sequence hash to get a handle
+        let handle = self.block_registry.register_sequence_hash(seq_hash);
+
+        // Register the block using the handle
         let registered_block = handle.register_mutable_block(
             block,
             self.duplication_policy,

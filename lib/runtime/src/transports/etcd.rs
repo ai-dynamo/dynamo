@@ -25,12 +25,10 @@ use tokio_util::sync::CancellationToken;
 mod connector;
 mod lease;
 mod lock;
-mod path;
 
 use connector::Connector;
 use lease::*;
 pub use lock::*;
-pub use path::*;
 
 use super::utils::build_in_runtime;
 use crate::config::environment_names::etcd as env_etcd;
@@ -122,7 +120,17 @@ impl Client {
         self.primary_lease
     }
 
-    /// Returns Ok(None) if value was created, Ok(Some(revision)) if the value already exists.
+    /// Atomically create a key-value pair if it doesn't already exist.
+    ///
+    /// Returns:
+    /// - `Ok(None)` if the key was successfully created
+    /// - `Ok(Some(version))` if the key already exists (returns the existing version)
+    /// - `Err(...)` only on actual errors (connection failure, timeout, etc.)
+    ///
+    /// This idempotent behavior was introduced in PR #4212 (Nov 10, 2025) to align with
+    /// the StoreOutcome pattern used in KeyValueStore implementations, where both
+    /// Created and Exists are successful outcomes rather than errors. This design supports
+    /// distributed systems where multiple processes might attempt to create the same key.
     pub async fn kv_create(
         &self,
         key: &str,
@@ -764,16 +772,26 @@ mod tests {
         let key = "__integration_test_key";
         let value = b"test_value";
 
-        let client = drt.etcd_client().expect("etcd client should be available");
+        let client = Client::new(ClientOptions::default(), drt.runtime().clone())
+            .await
+            .expect("etcd client should be available");
         let lease_id = drt.connection_id();
 
         // Create the key
         let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;
         assert!(result.is_ok(), "");
 
-        // Try to create the key again - this should fail
+        // Try to create the key again - this should return Ok(Some(version)) indicating key already exists
+        // Note: Prior to PR #4212 (Nov 10, 2025), kv_create returned Err when key existed.
+        // PR #4212 changed the behavior to return Ok(Some(version)) for idempotency, matching
+        // the StoreOutcome::Exists pattern used in the KeyValueStore abstraction.
+        // The transaction now includes .or_else(TxnOp::get) to retrieve existing key info
+        // instead of failing, making the operation idempotent for distributed systems.
         let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;
-        assert!(result.is_err());
+        assert!(
+            result.is_ok() && result.unwrap().is_some(),
+            "Expected Ok(Some(version)) when key already exists"
+        );
 
         // Create or validate should succeed as the values match
         let result = client
@@ -804,8 +822,10 @@ mod tests {
     }
 
     async fn test_kv_cache_operations(drt: DistributedRuntime) -> Result<()> {
-        // Get the client and unwrap it
-        let client = drt.etcd_client().expect("etcd client should be available");
+        // Make the client and unwrap it
+        let client = Client::new(ClientOptions::default(), drt.runtime().clone())
+            .await
+            .expect("etcd client should be available");
 
         // Create a unique test prefix to avoid conflicts with other tests
         let test_id = uuid::Uuid::new_v4().to_string();

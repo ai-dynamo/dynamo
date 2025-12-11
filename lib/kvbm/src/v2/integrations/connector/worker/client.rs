@@ -8,12 +8,14 @@ use dynamo_nova::Nova;
 use std::sync::Arc;
 
 use crate::physical::layout::LayoutConfig;
+use crate::v2::BlockId;
 use crate::v2::InstanceId;
 use crate::v2::distributed::worker::{LeaderLayoutConfig, WorkerLayoutResponse};
 
 use super::{
-    GET_LAYOUT_CONFIG_HANDLER, INITIALIZE_HANDLER, OFFLOAD_COMPLETE_HANDLER,
-    ONBOARD_COMPLETE_HANDLER, OffloadCompleteMessage, OnboardCompleteMessage,
+    FAILED_ONBOARD_HANDLER, FailedOnboardMessage, GET_LAYOUT_CONFIG_HANDLER, INITIALIZE_HANDLER,
+    OFFLOAD_COMPLETE_HANDLER, ONBOARD_COMPLETE_HANDLER, OffloadCompleteMessage,
+    OnboardCompleteMessage,
 };
 
 /// Client for communicating with a remote ConnectorWorker via Nova.
@@ -23,6 +25,7 @@ use super::{
 /// This client provides methods for:
 /// - Triggering deferred initialization via `initialize()`
 /// - Marking onboarding/offloading operations as complete
+#[derive(Clone)]
 pub struct ConnectorWorkerClient {
     nova: Arc<Nova>,
     remote: InstanceId,
@@ -75,6 +78,33 @@ impl ConnectorWorkerClient {
 
         self.nova
             .unary(ONBOARD_COMPLETE_HANDLER)?
+            .payload(message)?
+            .instance(self.remote)
+            .send()
+            .await?;
+
+        Ok(())
+    }
+
+    /// Notify the remote worker that onboarding failed for specific blocks.
+    ///
+    /// This calls the `kvbm.connector.worker.failed_onboard` handler.
+    /// The worker will add the block_ids to its failed_onboarding set.
+    ///
+    /// # Arguments
+    /// * `request_id` - The request that failed onboarding
+    /// * `block_ids` - The block IDs that failed to load
+    pub async fn mark_failed_onboarding(
+        &self,
+        request_id: String,
+        block_ids: Vec<BlockId>,
+    ) -> Result<()> {
+        let message = FailedOnboardMessage {
+            request_id,
+            block_ids,
+        };
+        self.nova
+            .unary(FAILED_ONBOARD_HANDLER)?
             .payload(message)?
             .instance(self.remote)
             .send()

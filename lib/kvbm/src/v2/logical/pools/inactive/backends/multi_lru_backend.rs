@@ -173,6 +173,17 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for MultiLruBackend<T> {
             .iter()
             .any(|pool| pool.peek(&seq_hash).is_some())
     }
+
+    fn allocate_all(&mut self) -> Vec<Block<T, Registered>> {
+        let total_len: usize = self.priority_pools.iter().map(|p| p.len()).sum();
+        let mut allocated = Vec::with_capacity(total_len);
+        for pool in &mut self.priority_pools {
+            while let Some((_seq_hash, block)) = pool.pop_lru() {
+                allocated.push(block);
+            }
+        }
+        allocated
+    }
 }
 
 #[cfg(test)]

@@ -15,7 +15,6 @@ pub(crate) use local::LocalLayout;
 pub(crate) use metadata::LocalLayoutDescriptor;
 pub(crate) use remote::RemoteLayout;
 
-use crate::BlockId;
 use crate::physical::transfer::BounceBufferInternal;
 use crate::v2::logical::LogicalLayoutHandle;
 use crate::v2::physical::layout::PhysicalLayout;
@@ -23,6 +22,7 @@ use crate::v2::physical::transfer::TransferContext;
 use crate::v2::physical::transfer::context::TransferCompleteNotification;
 use crate::v2::physical::transfer::executor::TransferOptionsInternal;
 use crate::v2::physical::transfer::options::TransferOptions;
+use crate::{BlockId, SequenceHash};
 use anyhow::{Result, anyhow, bail};
 use dynamo_memory::StorageKind;
 use dynamo_memory::nixl::NixlAgent;
@@ -273,6 +273,14 @@ impl TransferManager {
 
         let options = internal_options.build()?;
 
+        tracing::debug!(
+            src_handle = src_handle.to_string(),
+            dst_handle = dst_handle.to_string(),
+            "Executing transfer; src_blocks = {:?}; dst_blocks = {:?}",
+            src_blocks,
+            dst_blocks,
+        );
+
         // Execute transfer with no lock held
         super::transfer::executor::execute_transfer(
             &src_layout,
@@ -282,6 +290,30 @@ impl TransferManager {
             options,
             &self.context,
         )
+    }
+
+    /// Execute a G4 offload.
+    ///
+    /// Takes a LayoutHandle and a vector of block IDs for the source blocks and
+    /// a list of SequenceHashes for the destination blocks.
+    ///
+    /// use an extension on TransferOptions to pass in the "rank/part" of the the object in a
+    /// multi-worker/multi-tp scenario.
+    pub fn execute_g4_offload(
+        _src_handle: LayoutHandle,
+        _src_blocks: &[BlockId],
+        _dst_object: &[SequenceHash],
+        _options: TransferOptions, // add rank/part to the options
+    ) -> Result<TransferCompleteNotification> {
+        // check registration cache for the remote object, if it's not found, register it with nixl
+        // register all non-registered blocks with nixl in parallel
+        // then extend super::transfer::executor to access the memory regions for the source
+        // and generate a nixl descriptor
+        todo!("implement remote offload")
+    }
+
+    pub fn execute_g4_onboard() {
+        todo!("implement remote onboard")
     }
 
     // ===== Query Methods =====

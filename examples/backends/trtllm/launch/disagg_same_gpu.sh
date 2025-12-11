@@ -48,12 +48,13 @@ trap cleanup EXIT INT TERM
 
 
 # run frontend
-python3 -m dynamo.frontend --http-port 8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python3 -m dynamo.frontend &
 DYNAMO_PID=$!
 
 # run prefill worker (shares GPU with decode)
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
-DYN_SYSTEM_PORT=8081 \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
@@ -65,7 +66,7 @@ PREFILL_PID=$!
 
 # run decode worker (shares GPU with prefill)
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
-DYN_SYSTEM_PORT=8082 \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \

@@ -3,11 +3,13 @@
 
 //! Python bindings for the v2 connector worker.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+use dynamo_kvbm::v2::integrations::connector::leader::scheduler::KvConnectorMetadata;
 use dynamo_kvbm::v2::integrations::connector::worker::{ConnectorWorker, ConnectorWorkerInterface};
 use dynamo_memory::TensorDescriptor;
 
@@ -36,8 +38,8 @@ impl PyConnectorWorker {
     ///     ConnectorWorker: The worker instance ready for KV cache registration.
     #[new]
     pub fn new(runtime: &crate::v2::runtime::PyKvbmRuntime) -> PyResult<Self> {
-        let nova = runtime.nova().map_err(to_pyerr)?;
-        let inner = ConnectorWorker::new(nova);
+        let runtime = runtime.inner();
+        let inner = ConnectorWorker::new(runtime);
         Ok(Self { inner })
     }
 
@@ -110,6 +112,48 @@ impl PyConnectorWorker {
         self.inner.shutdown().map_err(to_pyerr)
     }
 
+    /// Bind connector metadata from the leader.
+    ///
+    /// Args:
+    ///     data: The connector metadata bytes
+    pub fn bind_connector_metadata(&self, data: Vec<u8>) -> PyResult<()> {
+        let metadata: KvConnectorMetadata = serde_json::from_slice(&data).map_err(to_pyerr)?;
+        self.inner
+            .bind_connector_metadata(metadata)
+            .map_err(to_pyerr)
+    }
+
+    /// Clear connector metadata.
+    ///
+    /// This function should be called by the model runner every time
+    /// after the model execution.
+    pub fn clear_connector_metadata(&self) -> PyResult<()> {
+        self.inner.clear_connector_metadata().map_err(to_pyerr)
+    }
+
+    /// Check if we need a CUDA stream for event synchronization.
+    ///
+    /// Returns True if there's a pending forward pass event that needs
+    /// to be synchronized via CUDA event before triggering.
+    /// Python should call this and only call save_kv_layer if True.
+    pub fn needs_cuda_stream(&self) -> bool {
+        self.inner.needs_cuda_stream()
+    }
+
+    /// Save KV layer and trigger forward pass completion.
+    ///
+    /// This should be called on the last layer's save_kv_layer when
+    /// needs_cuda_stream() returns True. It records a CUDA event on
+    /// the provided stream and spawns an async task that waits for
+    /// the event before triggering the Nova forward pass event.
+    ///
+    /// Args:
+    ///     stream_handle: Raw CUDA stream handle (u64) from Python's current stream
+    ///                   Obtained via: torch.cuda.current_stream().cuda_stream
+    pub fn save_kv_layer(&self, stream_handle: u64) -> PyResult<()> {
+        self.inner.save_kv_layer(stream_handle).map_err(to_pyerr)
+    }
+
     /// Get completed transfer request IDs (drains the sets).
     ///
     /// Called by the worker executor (vLLM) to check which requests have
@@ -119,13 +163,8 @@ impl PyConnectorWorker {
     /// Returns:
     ///     tuple: (Optional[set[str]], Optional[set[str]]) for (offload_ids, onboard_ids)
     ///            Returns None for each set if there are no completed requests of that type.
-    #[pyo3(name = "get_finished")]
-    pub fn py_get_finished(
-        &self,
-    ) -> PyResult<(
-        Option<std::collections::HashSet<String>>,
-        Option<std::collections::HashSet<String>>,
-    )> {
+    #[allow(clippy::type_complexity)]
+    pub fn get_finished(&self) -> PyResult<(Option<HashSet<String>>, Option<HashSet<String>>)> {
         let (offload_ids, onboard_ids) = self.inner.get_finished();
 
         let offload = if offload_ids.is_empty() {
@@ -140,5 +179,9 @@ impl PyConnectorWorker {
         };
 
         Ok((offload, onboard))
+    }
+
+    pub fn get_failed_onboarding(&self) -> PyResult<HashSet<usize>> {
+        Ok(self.inner.get_failed_onboarding())
     }
 }

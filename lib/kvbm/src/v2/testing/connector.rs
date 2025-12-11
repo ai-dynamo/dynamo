@@ -645,7 +645,7 @@ impl TestConnectorInstance {
     /// the leader's initialize_workers uses block_on internally.
     pub async fn initialize(&self) -> Result<()> {
         // Call the async version of initialize_workers
-        self.leader.initialize_async().await
+        self.leader.clone().initialize_async().await
     }
 
     /// Access the InstanceLeader (available after initialize()).
@@ -1186,6 +1186,7 @@ impl TestConnectorInstanceBuilder {
         // 3. Build WORKER runtimes FIRST (so they can respond to leader RPCs)
         let worker_config = self.test_config.build_worker_config()?;
         let mut workers = Vec::with_capacity(self.num_workers);
+        let block_size = self.layout_config.page_size;
 
         for (rank, worker_nova) in worker_novas.into_iter().enumerate() {
             let worker_runtime = {
@@ -1213,7 +1214,7 @@ impl TestConnectorInstanceBuilder {
                     .build()?,
             );
 
-            let connector_worker = ConnectorWorker::new(worker_runtime);
+            let connector_worker = ConnectorWorker::new(Arc::new(worker_runtime));
 
             // Create mock tensors that hold references to the layout to keep memory alive
             let element_size = self.layout_config.dtype_width_bytes;
@@ -1262,7 +1263,7 @@ impl TestConnectorInstanceBuilder {
             builder.build_leader().await?
         };
 
-        let leader = Arc::new(ConnectorLeader::new(leader_runtime));
+        let leader = Arc::new(ConnectorLeader::new(Arc::new(leader_runtime), block_size));
 
         Ok(TestConnectorInstance {
             leader,

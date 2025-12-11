@@ -18,7 +18,7 @@ mod integration {
     pub const DEFAULT_NAMESPACE: &str = "dynamo";
 
     use dynamo_runtime::{
-        DistributedRuntime, ErrorContext, Result, Runtime, Worker,
+        DistributedRuntime, Runtime, Worker,
         config::environment_names::testing as env_testing,
         logging,
         pipeline::{
@@ -120,8 +120,7 @@ mod integration {
 
         // // make the ingress discoverable via a component service
         // // we must first create a service, then we can attach one more more endpoints
-        let mut component = runtime.namespace(DEFAULT_NAMESPACE)?.component("backend")?;
-        component.add_stats_service().await?;
+        let component = runtime.namespace(DEFAULT_NAMESPACE)?.component("backend")?;
         component
             .endpoint("generate")
             .endpoint_builder()

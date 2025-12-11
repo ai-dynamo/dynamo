@@ -38,6 +38,20 @@ pub fn determine_kv_layout(
     builder.page_size(page_size);
     builder.dtype_width_bytes(dtype_width_bytes);
 
+    // Validate shape dimension count
+    if shape.len() < 3 {
+        bail!(
+            "Tensor must have at least 3 dimensions (blocks, heads, head_dim), got {:?}",
+            shape
+        );
+    }
+
+    // Log strides for debugging (matching V1 behavior)
+    for tensor in kv_tensors {
+        let stride = tensor.stride();
+        tracing::debug!("stride: {:?}", stride);
+    }
+
     let block_dim = if shape[0] >= num_device_blocks {
         builder.outer_dim(shape[1]);
         BlockDimension::BlockIsFirstDim
@@ -51,17 +65,13 @@ pub fn determine_kv_layout(
         );
     };
 
-    if shape[2] != page_size && shape[3] != page_size {
-        bail!(
-            "Unexpected tensor shape: {:?}; expected page_size: {page_size} to be present in the second or third dimension",
-            shape
-        );
-    }
-
+    // Calculate inner dimension (relaxed validation compared to strict page_size check)
     let inner_dim = shape[2..].iter().product::<usize>() / page_size;
     builder.inner_dim(inner_dim);
 
     let layout_config = builder.build()?;
+
+    tracing::debug!(?layout_config, "Determined KV layout");
 
     Ok((layout_config, block_dim))
 }

@@ -12,11 +12,11 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use dynamo_kvbm::v2::ModelExecutorBackend;
 use dynamo_kvbm::v2::integrations::config::{AttentionConfig, ParallelConfig};
 use dynamo_kvbm::v2::integrations::vllm::{
     KvbmVllmConfig, VllmAttentionConfig, VllmParallelConfig,
 };
-use dynamo_kvbm::v2::ModelExecutorBackend;
 
 /// Python-facing parallel configuration.
 ///

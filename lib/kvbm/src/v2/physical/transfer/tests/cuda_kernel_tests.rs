@@ -7,7 +7,7 @@ use super::{NixlAgent, create_test_agent};
 use crate::v2::physical::layout::{BlockDimension, LayoutConfig, PhysicalLayout};
 use crate::v2::physical::transfer::executor::cuda::try_execute_operational_kernel;
 use crate::v2::physical::transfer::{StorageKind, TransferContext};
-use kvbm_kernels::tensor_kernels::OperationalCopyBackend;
+use dynamo_kvbm_kernels::tensor_kernels::OperationalCopyBackend;
 
 /// Create a fully contiguous layout for testing
 fn create_fc_layout(agent: NixlAgent, storage: StorageKind) -> PhysicalLayout {

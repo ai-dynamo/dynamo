@@ -11,7 +11,7 @@ use crate::{
     logical::{blocks::ImmutableBlock, manager::BlockManager},
     physical::transfer::TransferOptions,
     v2::{
-        BlockId, G2, G3, InstanceId, SequenceHash, distributed::worker::Worker,
+        BlockId, G2, G3, InstanceId, SequenceHash, distributed::parallelism::ParallelWorker,
         logical::LogicalLayoutHandle, physical::manager::LayoutHandle,
     },
 };
@@ -35,7 +35,7 @@ pub struct InitiatorSession {
     mode: StagingMode,
     g2_manager: Arc<BlockManager<G2>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
-    worker: Option<Arc<dyn Worker>>,
+    parallel_worker: Option<Arc<dyn ParallelWorker>>,
     transport: Arc<MessageTransport>,
     status_tx: watch::Sender<OnboardingStatus>,
 
@@ -45,8 +45,9 @@ pub struct InitiatorSession {
 
     // Track remote blocks by tier
     remote_g2_blocks: HashMap<InstanceId, Vec<BlockId>>, // G2: track block IDs
+    remote_g2_hashes: HashMap<InstanceId, Vec<SequenceHash>>, // G2: track sequence hashes (parallel to block_ids)
     remote_g3_blocks: HashMap<InstanceId, Vec<SequenceHash>>, // G3: track sequence hashes
-    remote_g2_layouts: HashMap<InstanceId, LayoutHandle>, // G2 layouts for RDMA
+    remote_g2_layouts: HashMap<InstanceId, LayoutHandle>,     // G2 layouts for RDMA
 
     // Shared with FindMatchesResult for block access
     all_g2_blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
@@ -64,7 +65,7 @@ impl InitiatorSession {
         mode: StagingMode,
         g2_manager: Arc<BlockManager<G2>>,
         g3_manager: Option<Arc<BlockManager<G3>>>,
-        worker: Option<Arc<dyn Worker>>,
+        parallel_worker: Option<Arc<dyn ParallelWorker>>,
         transport: Arc<MessageTransport>,
         status_tx: watch::Sender<OnboardingStatus>,
         all_g2_blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
@@ -76,12 +77,13 @@ impl InitiatorSession {
             mode,
             g2_manager,
             g3_manager,
-            worker,
+            parallel_worker,
             transport,
             status_tx,
             local_g2_blocks: BlockHolder::empty(),
             local_g3_blocks: BlockHolder::empty(),
             remote_g2_blocks: HashMap::new(),
+            remote_g2_hashes: HashMap::new(),
             remote_g3_blocks: HashMap::new(),
             remote_g2_layouts: HashMap::new(),
             all_g2_blocks,
@@ -107,6 +109,10 @@ impl InitiatorSession {
         // Phase 1: Search (local G2 and G3, then remote if needed)
         self.search_phase(&mut rx, &remote_leaders, &sequence_hashes)
             .await?;
+
+        // Phase 1.5: Apply find policy (first-hole detection)
+        // Trims results to first contiguous sequence from start
+        self.apply_find_policy(&sequence_hashes).await?;
 
         eprintln!(
             "[INITIATOR {}] search_phase complete, entering mode handler",
@@ -248,6 +254,11 @@ impl InitiatorSession {
                                 .entry(responder)
                                 .or_default()
                                 .push(*block_id);
+                            // Track sequence hash in parallel for block registration after RDMA pull
+                            self.remote_g2_hashes
+                                .entry(responder)
+                                .or_default()
+                                .push(*seq_hash);
                         } else {
                             drop_hashes.push(*seq_hash);
                         }
@@ -331,6 +342,160 @@ impl InitiatorSession {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Apply "first hole" policy: trim results to first contiguous sequence.
+    ///
+    /// This implements the policy where we only return blocks from position 0
+    /// up to (but not including) the first missing block. Any blocks after the
+    /// first hole are released.
+    ///
+    /// # Arguments
+    /// * `sequence_hashes` - The original query hashes in order (position 0 to N)
+    async fn apply_find_policy(&mut self, sequence_hashes: &[SequenceHash]) -> Result<()> {
+        // Build set of all matched hashes (local + remote)
+        let mut matched_hashes: HashSet<SequenceHash> = HashSet::new();
+
+        // Local G2 blocks
+        for hash in self.local_g2_blocks.sequence_hashes() {
+            matched_hashes.insert(hash);
+        }
+
+        // Local G3 blocks
+        for hash in self.local_g3_blocks.sequence_hashes() {
+            matched_hashes.insert(hash);
+        }
+
+        // Remote G2 hashes
+        for hashes in self.remote_g2_hashes.values() {
+            for hash in hashes {
+                matched_hashes.insert(*hash);
+            }
+        }
+
+        // Remote G3 hashes
+        for hashes in self.remote_g3_blocks.values() {
+            for hash in hashes {
+                matched_hashes.insert(*hash);
+            }
+        }
+
+        // Find the first hole: count contiguous matches from start
+        let mut keep_count = 0;
+        for hash in sequence_hashes {
+            if matched_hashes.contains(hash) {
+                keep_count += 1;
+            } else {
+                // First hole found - stop here
+                break;
+            }
+        }
+
+        // If all hashes matched or first hole is at position 0, nothing to trim
+        if keep_count == sequence_hashes.len() || keep_count == matched_hashes.len() {
+            eprintln!(
+                "[INITIATOR {}] apply_find_policy: no trimming needed ({} matched, {} total)",
+                self.session_id,
+                keep_count,
+                sequence_hashes.len()
+            );
+            return Ok(());
+        }
+
+        // Get the hashes to keep
+        let keep_hashes: Vec<SequenceHash> = sequence_hashes[..keep_count].to_vec();
+        let keep_set: HashSet<&SequenceHash> = keep_hashes.iter().collect();
+
+        eprintln!(
+            "[INITIATOR {}] apply_find_policy: trimming from {} to {} blocks (first hole at position {})",
+            self.session_id,
+            matched_hashes.len(),
+            keep_count,
+            keep_count
+        );
+
+        // Filter local blocks
+        self.local_g2_blocks.retain(&keep_hashes);
+        self.local_g3_blocks.retain(&keep_hashes);
+
+        // Filter remote G2 block tracking and send ReleaseBlocks messages
+        for (remote_instance, block_ids) in &mut self.remote_g2_blocks {
+            let hashes = self.remote_g2_hashes.get_mut(remote_instance);
+            if let Some(hashes) = hashes {
+                // Find indices of blocks to release
+                let mut release_indices = Vec::new();
+                for (i, hash) in hashes.iter().enumerate() {
+                    if !keep_set.contains(hash) {
+                        release_indices.push(i);
+                    }
+                }
+
+                // Collect hashes to release for ReleaseBlocks message
+                let release_hashes: Vec<SequenceHash> =
+                    release_indices.iter().map(|&i| hashes[i]).collect();
+
+                // Remove from tracking (reverse order to preserve indices)
+                for i in release_indices.into_iter().rev() {
+                    hashes.remove(i);
+                    block_ids.remove(i);
+                }
+
+                // Send ReleaseBlocks message if any blocks need releasing
+                if !release_hashes.is_empty() {
+                    eprintln!(
+                        "[INITIATOR {}] Releasing {} G2 blocks from instance {} (beyond first hole)",
+                        self.session_id,
+                        release_hashes.len(),
+                        remote_instance
+                    );
+                    self.transport
+                        .send(
+                            *remote_instance,
+                            OnboardMessage::ReleaseBlocks {
+                                requester: self.instance_id,
+                                session_id: self.session_id,
+                                release_hashes,
+                            },
+                        )
+                        .await?;
+                }
+            }
+        }
+
+        // Filter remote G3 block tracking and send ReleaseBlocks messages
+        for (remote_instance, hashes) in &mut self.remote_g3_blocks {
+            // Find hashes to release
+            let release_hashes: Vec<SequenceHash> = hashes
+                .iter()
+                .filter(|h| !keep_set.contains(h))
+                .copied()
+                .collect();
+
+            // Remove from tracking
+            hashes.retain(|h| keep_set.contains(h));
+
+            // Send ReleaseBlocks message if any blocks need releasing
+            if !release_hashes.is_empty() {
+                eprintln!(
+                    "[INITIATOR {}] Releasing {} G3 blocks from instance {} (beyond first hole)",
+                    self.session_id,
+                    release_hashes.len(),
+                    remote_instance
+                );
+                self.transport
+                    .send(
+                        *remote_instance,
+                        OnboardMessage::ReleaseBlocks {
+                            requester: self.instance_id,
+                            session_id: self.session_id,
+                            release_hashes,
+                        },
+                    )
+                    .await?;
             }
         }
 
@@ -461,10 +626,10 @@ impl InitiatorSession {
             return Ok(());
         }
 
-        let worker = self
-            .worker
+        let parallel_worker = self
+            .parallel_worker
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Worker required for G3→G2 staging"))?;
+            .ok_or_else(|| anyhow::anyhow!("ParallelWorker required for G3→G2 staging"))?;
 
         let src_ids: Vec<BlockId> = self
             .local_g3_blocks
@@ -482,7 +647,7 @@ impl InitiatorSession {
         let dst_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
 
         // Execute transfer
-        let notification = worker.execute_local_transfer(
+        let notification = parallel_worker.execute_local_transfer(
             LogicalLayoutHandle::G3,
             LogicalLayoutHandle::G2,
             Arc::from(src_ids),
@@ -510,62 +675,117 @@ impl InitiatorSession {
     }
 
     /// Pull remote G2→local G2 via RDMA.
+    ///
+    /// This method:
+    /// 1. Imports remote metadata for each instance (if not already imported)
+    /// 2. Allocates local G2 blocks as destinations
+    /// 3. Executes RDMA transfer via worker
+    /// 4. Registers pulled blocks with their sequence hashes
     async fn pull_remote_blocks(&mut self) -> Result<()> {
-        // TODO: Implement RDMA get for pulling remote G2 blocks to local G2
-        //
-        // Implementation steps:
-        // 1. For each remote instance with held blocks (self.remote_block_refs):
-        //    a. Wait for BlocksReady message containing NIXL metadata
-        //    b. Extract block IDs and NIXL layout handle from message
-        //
-        // 2. For each remote:
-        //    a. Allocate local G2 blocks:
-        //       let dst_blocks = self.g2_manager.allocate_blocks(count)?;
-        //       let dst_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
-        //
-        //    b. Create RemoteDescriptor for the remote blocks:
-        //       let remote_descriptor = RemoteDescriptor::Layout {
-        //           handle: LayoutHandle {
-        //               instance_id: remote_instance,
-        //               layout_id: remote_layout_id,  // From BlocksReady message
-        //           },
-        //           block_ids: remote_block_ids,      // From BlocksReady message
-        //       };
-        //
-        //    c. Execute RDMA transfer using Worker:
-        //       let notification = worker.execute_remote_onboard(
-        //           remote_descriptor,
-        //           LogicalLayoutHandle::G2,
-        //           dst_ids.clone(),
-        //           TransferOptions::default(),
-        //       )?;
-        //       notification.await?;
-        //
-        //    d. Register transferred blocks with metadata from remote
-        //       (metadata should come from BlocksReady or subsequent metadata exchange)
-        //
-        //    e. Add new G2 blocks to self.local_g2_blocks
-        //
-        // 3. Update status to track pulling progress:
-        //    self.status_tx.send(OnboardingStatus::Staging {
-        //        matched,
-        //        staging_local: 0,
-        //        staging_remote: 0,
-        //        pulling: pending_pulls,
-        //    }).ok();
+        let parallel_worker = self
+            .parallel_worker
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("ParallelWorker required for RDMA pull"))?;
 
-        todo!("Implement RDMA get - needs NIXL metadata from BlocksReady messages")
+        // Process each remote instance that has G2 blocks to pull
+        for (remote_instance, block_ids) in self.remote_g2_blocks.clone() {
+            // Skip if no blocks to pull
+            if block_ids.is_empty() {
+                continue;
+            }
+
+            // Get the parallel sequence hashes for registration
+            let seq_hashes = self
+                .remote_g2_hashes
+                .get(&remote_instance)
+                .cloned()
+                .unwrap_or_default();
+            if seq_hashes.len() != block_ids.len() {
+                anyhow::bail!(
+                    "Mismatch between block_ids ({}) and seq_hashes ({}) for instance {}",
+                    block_ids.len(),
+                    seq_hashes.len(),
+                    remote_instance
+                );
+            }
+
+            // Step 1: Import remote metadata if not already done
+            if !parallel_worker.has_remote_metadata(remote_instance) {
+                eprintln!(
+                    "[INITIATOR {}] Requesting metadata from instance {}",
+                    self.session_id, remote_instance
+                );
+                let metadata = self.transport.request_metadata(remote_instance).await?;
+                parallel_worker
+                    .connect_remote(remote_instance, metadata)?
+                    .await?;
+                eprintln!(
+                    "[INITIATOR {}] Metadata imported for instance {}",
+                    self.session_id, remote_instance
+                );
+            }
+
+            // Step 2: Allocate local G2 blocks as destinations
+            let dst_blocks = self
+                .g2_manager
+                .allocate_blocks(block_ids.len())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Failed to allocate {} G2 blocks", block_ids.len())
+                })?;
+            let dst_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
+
+            eprintln!(
+                "[INITIATOR {}] Pulling {} blocks from instance {} via RDMA",
+                self.session_id,
+                block_ids.len(),
+                remote_instance
+            );
+
+            // Step 3: Execute RDMA transfer
+            // Uses execute_remote_onboard_for_instance which looks up the stored handle mapping
+            let notification = parallel_worker.execute_remote_onboard_for_instance(
+                remote_instance,
+                LogicalLayoutHandle::G2, // source is remote G2
+                block_ids,
+                LogicalLayoutHandle::G2, // destination is local G2
+                Arc::from(dst_ids),
+                TransferOptions::default(),
+            )?;
+            notification.await?;
+
+            eprintln!(
+                "[INITIATOR {}] RDMA transfer complete from instance {}",
+                self.session_id, remote_instance
+            );
+
+            // Step 4: Register pulled blocks with their sequence hashes
+            // Note: We use register_mutable_block_with_hash to set the sequence hash
+            // since we don't have the original block reference from the remote.
+            let new_g2_blocks: Vec<ImmutableBlock<G2>> = dst_blocks
+                .into_iter()
+                .zip(seq_hashes.iter())
+                .map(|(dst, seq_hash)| {
+                    self.g2_manager
+                        .register_mutable_block_with_hash(dst, *seq_hash)
+                })
+                .collect();
+
+            // Add to local G2 blocks
+            self.local_g2_blocks.extend(new_g2_blocks);
+        }
+
+        Ok(())
     }
 
     /// Consolidate all G2 blocks into shared storage.
     async fn consolidate_blocks(&mut self) {
         let all_blocks = self.local_g2_blocks.take_all();
-        let matched = all_blocks.len();
+        let matched_blocks = all_blocks.len();
 
         *self.all_g2_blocks.lock().await = Some(all_blocks);
 
         self.status_tx
-            .send(OnboardingStatus::Complete { matched })
+            .send(OnboardingStatus::Complete { matched_blocks })
             .ok();
     }
 

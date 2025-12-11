@@ -11,7 +11,7 @@ repository.workspace = true
 build = "build.rs"
 
 [lib]
-name = "kvbm_kernels"
+name = "dynamo_kvbm_kernels"
 crate-type = ["rlib", "cdylib"]
 
 [features]

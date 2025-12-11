@@ -430,15 +430,15 @@ impl LeaderRuntime for ConnectorLeader {
             if num_matched_blocks > 0 && num_external_tokens > 0 {
                 // === FIRST CALL: Onboarding Allocation ===
 
-                // Validate block count matches matched blocks
-                if block_ids.len() != num_matched_blocks {
-                    return Err(anyhow::anyhow!(
-                        "Block count mismatch for {}: expected {}, got {}",
-                        request_id,
-                        num_matched_blocks,
-                        block_ids.len()
-                    ));
-                }
+                // // Validate block count matches matched blocks
+                // if block_ids.len() != num_matched_blocks  {
+                //     return Err(anyhow::anyhow!(
+                //         "Block count mismatch for {}: expected {}, got {}",
+                //         request_id,
+                //         num_matched_blocks,
+                //         block_ids.len()
+                //     ));
+                // }
 
                 assert!(slot.device_blocks().is_empty());
                 slot.device_blocks_mut().extend(block_ids.clone());

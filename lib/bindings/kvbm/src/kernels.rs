@@ -12,7 +12,7 @@ use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PySequence;
 
-use kvbm_kernels::{
+use dynamo_kvbm_kernels::{
     BlockLayout, OperationalCopyBackend, OperationalCopyDirection, TensorDataType,
     block_from_universal, operational_copy, universal_from_block,
 };

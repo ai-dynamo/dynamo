@@ -17,5 +17,6 @@ pub mod distributed;
 pub mod e2e;
 pub mod managers;
 pub mod nova;
+pub mod offloading;
 pub mod physical;
 pub mod token_blocks;

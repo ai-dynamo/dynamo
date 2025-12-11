@@ -8,6 +8,7 @@ mod backend_tests {
     use rstest::rstest;
 
     use crate::{
+        BlockId,
         logical::pools::tests::{TestData, fixtures::*},
         utils::tinylfu::TinyLFUTracker,
     };
@@ -143,5 +144,47 @@ mod backend_tests {
         let allocated = backend.allocate(5);
         assert_eq!(allocated.len(), 2);
         assert_eq!(backend.len(), 0);
+    }
+
+    #[rstest]
+    #[case::hashmap(BackendType::HashMap)]
+    #[case::lru(BackendType::Lru)]
+    #[case::multi_lru(BackendType::MultiLru)]
+    fn test_allocate_all(#[case] backend_type: BackendType) {
+        let mut backend = create_backend(backend_type);
+
+        // Insert several blocks
+        let block_ids: Vec<u64> = vec![1, 2, 3, 4, 5];
+        for &i in &block_ids {
+            let (block, _) = create_registered_block(i as BlockId, &tokens_for_id(i));
+            backend.insert(block);
+            // For HashMap backend with FIFO, we need a sleep to ensure different timestamps
+            if matches!(backend_type, BackendType::HashMap) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+
+        assert_eq!(backend.len(), 5);
+
+        // Allocate all blocks
+        let allocated = backend.allocate_all();
+        assert_eq!(allocated.len(), 5);
+        assert_eq!(backend.len(), 0);
+        assert!(backend.is_empty());
+    }
+
+    #[rstest]
+    #[case::hashmap(BackendType::HashMap)]
+    #[case::lru(BackendType::Lru)]
+    #[case::multi_lru(BackendType::MultiLru)]
+    fn test_allocate_all_empty_pool(#[case] backend_type: BackendType) {
+        let mut backend = create_backend(backend_type);
+
+        assert_eq!(backend.len(), 0);
+
+        // Allocate all from empty pool
+        let allocated = backend.allocate_all();
+        assert_eq!(allocated.len(), 0);
+        assert!(backend.is_empty());
     }
 }

@@ -9,15 +9,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-# Keeping this import is important because it runs the code in nixl’s __init__.py
-# to set up the Nixl plugin path when there is no pre-defined NIXL_PLUGIN_DIR
-import nixl  # noqa: F401
 import torch
 from kvbm.utils import is_dyn_runtime_enabled
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata

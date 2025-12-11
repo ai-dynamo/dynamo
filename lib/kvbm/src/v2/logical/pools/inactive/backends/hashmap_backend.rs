@@ -90,4 +90,11 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for HashMapBackend<T> {
     fn has_block(&self, seq_hash: SequenceHash) -> bool {
         self.blocks.contains_key(&seq_hash)
     }
+
+    fn allocate_all(&mut self) -> Vec<Block<T, Registered>> {
+        // Drain reuse policy by consuming all entries
+        while self.reuse_policy.next_free().is_some() {}
+        // Drain and return all blocks
+        self.blocks.drain().map(|(_, block)| block).collect()
+    }
 }

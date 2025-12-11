@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use parking_lot::RwLock;
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 #[derive(Clone)]
@@ -11,6 +13,8 @@ pub struct NovaWorkerClient {
     g1_handle: Arc<OnceLock<LayoutHandle>>,
     g2_handle: Arc<OnceLock<LayoutHandle>>,
     g3_handle: Arc<OnceLock<LayoutHandle>>,
+    /// Track which remote instances we've connected to for has_remote_metadata()
+    connected_instances: Arc<RwLock<HashSet<InstanceId>>>,
 }
 
 impl WorkerTransfers for NovaWorkerClient {
@@ -24,8 +28,7 @@ impl WorkerTransfers for NovaWorkerClient {
     ) -> Result<TransferCompleteNotification> {
         // Create a single local event for this operation
         let event = self.nova.events().new_event()?;
-        let handle = event.handle();
-        let awaiter = self.nova.events().awaiter(handle)?;
+        let awaiter = self.nova.events().awaiter(event.handle())?;
 
         // Convert to serializable options
         // TODO: Extract bounce buffer handle if present in options.bounce_buffer
@@ -49,13 +52,13 @@ impl WorkerTransfers for NovaWorkerClient {
 
         // Spawn a task for the remote instance
         let nova = self.nova.clone();
-        let bytes = bytes.clone();
         let remote_instance = self.remote;
 
+        // Use unary (not am_sync) to wait for transfer completion
         self.nova.tracker().spawn_on(
             async move {
                 let result = nova
-                    .am_sync("kvbm.worker.local_transfer")?
+                    .unary("kvbm.worker.local_transfer")?
                     .raw_payload(bytes)
                     .instance(remote_instance)
                     .send()
@@ -125,8 +128,8 @@ impl WorkerTransfers for NovaWorkerClient {
     fn execute_remote_offload(
         &self,
         src: LogicalLayoutHandle,
-        dst: RemoteDescriptor,
         src_block_ids: Arc<[BlockId]>,
+        dst: RemoteDescriptor,
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
         let event = self.nova.events().new_event()?;
@@ -174,38 +177,101 @@ impl WorkerTransfers for NovaWorkerClient {
 
     fn connect_remote(
         &self,
-        _instance_id: InstanceId,
-        _metadata: Vec<SerializedLayout>,
+        instance_id: InstanceId,
+        metadata: Vec<SerializedLayout>,
     ) -> Result<ConnectRemoteResponse> {
-        // NovaWorkerClient is a remote proxy - it doesn't store handle mappings locally.
-        // The containing ReplicatedWorker handles mapping storage and calls import_metadata
-        // on this worker directly for the actual metadata exchange.
-        anyhow::bail!(
-            "connect_remote not supported on NovaWorkerClient - use ReplicatedWorker instead"
-        )
+        // Serialize metadata to bytes (SerializedLayout uses bincode internally)
+        let serialized_metadata: Vec<Vec<u8>> =
+            metadata.iter().map(|m| m.as_bytes().to_vec()).collect();
+
+        let message = ConnectRemoteMessage {
+            instance_id,
+            metadata: serialized_metadata,
+        };
+        let bytes = Bytes::from(serde_json::to_vec(&message)?);
+
+        // Create event for completion tracking
+        let event = self.nova.events().new_event()?;
+        let awaiter = self.nova.events().awaiter(event.handle())?;
+
+        let nova = self.nova.clone();
+        let remote_instance = self.remote;
+        let connected = self.connected_instances.clone();
+        let target_instance = instance_id;
+
+        self.nova.tracker().spawn_on(
+            async move {
+                let result = nova
+                    .unary("kvbm.worker.connect_remote")?
+                    .raw_payload(bytes)
+                    .instance(remote_instance)
+                    .send()
+                    .await;
+
+                match result {
+                    Ok(_) => {
+                        // Track that we've connected to this instance
+                        connected.write().insert(target_instance);
+                        event.trigger()
+                    }
+                    Err(e) => event.poison(e.to_string()),
+                }
+            },
+            self.nova.runtime(),
+        );
+
+        Ok(ConnectRemoteResponse::from_awaiter(awaiter))
     }
 
-    fn has_remote_metadata(&self, _instance_id: InstanceId) -> bool {
-        // NovaWorkerClient doesn't track remote metadata locally.
-        // The containing ReplicatedWorker tracks this.
-        false
+    fn has_remote_metadata(&self, instance_id: InstanceId) -> bool {
+        // Check if we've successfully connected to this instance
+        self.connected_instances.read().contains(&instance_id)
     }
 
     fn execute_remote_onboard_for_instance(
         &self,
-        _instance_id: InstanceId,
-        _remote_logical_type: LogicalLayoutHandle,
-        _src_block_ids: Vec<BlockId>,
-        _dst: LogicalLayoutHandle,
-        _dst_block_ids: Arc<[BlockId]>,
-        _options: TransferOptions,
+        instance_id: InstanceId,
+        remote_logical_type: LogicalLayoutHandle,
+        src_block_ids: Vec<BlockId>,
+        dst: LogicalLayoutHandle,
+        dst_block_ids: Arc<[BlockId]>,
+        options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
-        // NovaWorkerClient doesn't store handle mappings locally.
-        // The containing ReplicatedWorker handles mapping lookup and calls
-        // execute_remote_onboard with concrete handles.
-        anyhow::bail!(
-            "execute_remote_onboard_for_instance not supported on NovaWorkerClient - use ReplicatedWorker instead"
-        )
+        let message = ExecuteRemoteOnboardForInstanceMessage {
+            instance_id,
+            remote_logical_type,
+            src_block_ids,
+            dst,
+            dst_block_ids: dst_block_ids.to_vec(),
+            options: SerializableTransferOptions::from(options),
+        };
+        let bytes = Bytes::from(serde_json::to_vec(&message)?);
+
+        // Create event for completion tracking
+        let event = self.nova.events().new_event()?;
+        let awaiter = self.nova.events().awaiter(event.handle())?;
+
+        let nova = self.nova.clone();
+        let remote_instance = self.remote;
+
+        self.nova.tracker().spawn_on(
+            async move {
+                let result = nova
+                    .unary("kvbm.worker.remote_onboard_for_instance")?
+                    .raw_payload(bytes)
+                    .instance(remote_instance)
+                    .send()
+                    .await;
+
+                match result {
+                    Ok(_) => event.trigger(),
+                    Err(e) => event.poison(e.to_string()),
+                }
+            },
+            self.nova.runtime(),
+        );
+
+        Ok(TransferCompleteNotification::from_awaiter(awaiter))
     }
 }
 
@@ -269,6 +335,7 @@ impl NovaWorkerClient {
             g1_handle: Arc::new(OnceLock::new()),
             g2_handle: Arc::new(OnceLock::new()),
             g3_handle: Arc::new(OnceLock::new()),
+            connected_instances: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 

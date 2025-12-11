@@ -277,8 +277,8 @@ impl InstanceLeaderBuilder {
 #[allow(dead_code)] // Used for RAII block lifetime management
 struct SessionState {
     session_id: SessionId,
-    g2_blocks: Vec<ImmutableBlock<G2>>,
-    g3_blocks: Vec<ImmutableBlock<G3>>,
+    matched_g2_blocks: Vec<ImmutableBlock<G2>>,
+    matched_g3_blocks: Vec<ImmutableBlock<G3>>,
     status_tx: watch::Sender<OnboardingStatus>,
 }
 
@@ -307,6 +307,35 @@ impl InstanceLeader {
     /// Get a reference to the optional G3 BlockManager.
     pub fn g3_manager(&self) -> Option<&Arc<BlockManager<G3>>> {
         self.g3_manager.as_ref()
+    }
+
+    /// Get the block registry.
+    pub fn registry(&self) -> &BlockRegistry {
+        &self.registry
+    }
+
+    /// Get a reference to the Nova instance.
+    ///
+    /// This provides access to the Nova distributed system for features
+    /// like event coordination and cross-instance communication.
+    pub fn nova(&self) -> &Arc<Nova> {
+        &self.nova
+    }
+
+    /// Get the tokio runtime handle from Nova.
+    ///
+    /// This handle should be used for spawning background tasks that need to
+    /// run on the KVBM runtime's executor (e.g., offload engine pipelines).
+    pub fn runtime(&self) -> tokio::runtime::Handle {
+        self.nova.runtime().clone()
+    }
+
+    /// Check if a parallel_worker is configured.
+    ///
+    /// The parallel_worker is required for local transfer operations
+    /// (e.g., offloading blocks between tiers).
+    pub fn has_parallel_worker(&self) -> bool {
+        self.parallel_worker.is_some()
     }
 
     /// Add a remote leader to the search list.
@@ -473,8 +502,7 @@ impl InstanceLeader {
         let instance_id = self.nova.instance_id();
         let g2_manager = self.g2_manager.clone();
         let g3_manager = self.g3_manager.clone();
-        // TODO: Pass all workers to session or use aggregated transfer methods
-        let worker = self.workers.first().cloned();
+        let parallel_worker = self.parallel_worker.clone();
         let transport = self.transport.clone();
         let sessions = self.sessions.clone();
 
@@ -494,7 +522,7 @@ impl InstanceLeader {
                     requester,
                     g2_manager.clone(),
                     g3_manager.clone(),
-                    worker.clone(),
+                    parallel_worker.clone(),
                     transport.clone(),
                 );
 
@@ -605,43 +633,46 @@ impl InstanceLeader {
         let session_id = SessionId::from(Uuid::new_v4());
 
         // Local search only
-        let g2_matches = self.g2_manager.match_blocks(sequence_hashes);
+        let matched_g2_blocks = self.g2_manager.match_blocks(sequence_hashes);
 
         // Find remaining hashes not in G2
         let remaining_hashes: Vec<_> = sequence_hashes
             .iter()
-            .filter(|h| !g2_matches.iter().any(|b| b.sequence_hash() == **h))
+            .filter(|h| !matched_g2_blocks.iter().any(|b| b.sequence_hash() == **h))
             .copied()
             .collect();
 
         // Search G3 for remaining hashes
-        let g3_matches = if let Some(ref g3_manager) = self.g3_manager {
+        let matched_g3_blocks = if let Some(ref g3_manager) = self.g3_manager {
             g3_manager.match_blocks(&remaining_hashes)
         } else {
             Vec::new()
         };
 
-        let local_g2_count = g2_matches.len();
-        let local_g3_count = g3_matches.len();
+        let local_g2_count = matched_g2_blocks.len();
+        let local_g3_count = matched_g3_blocks.len();
 
         // Create session channel
         let (tx, rx) = mpsc::channel(100);
         self.controllable_sessions.insert(session_id, tx);
 
         // Collect G2 layout handles from workers for round-robin block allocation
-        let worker_g2_handles: Vec<LayoutHandle> =
-            self.workers.iter().filter_map(|w| w.g2_handle()).collect();
+        let worker_g2_handles: Vec<LayoutHandle> = self
+            .parallel_worker
+            .as_ref()
+            .map(|pw| pw.workers().iter().filter_map(|w| w.g2_handle()).collect())
+            .unwrap_or_default();
 
         // Create controllable session
         let session = ControllableSession::new(
             session_id,
             self.nova.instance_id(),
-            g2_matches,
-            g3_matches,
+            matched_g2_blocks,
+            matched_g3_blocks,
             worker_g2_handles,
             self.g2_manager.clone(),
             self.g3_manager.clone(),
-            self.workers.first().cloned(),
+            self.parallel_worker.clone(),
             self.transport.clone(),
             rx,
             options,
@@ -860,13 +891,16 @@ impl InstanceLeader {
         let session_id = SessionId::from(uuid::Uuid::new_v4());
 
         // Local search
-        let g2_matches = self.g2_manager.match_blocks(sequence_hashes);
+        let matched_g2_blocks = self.g2_manager.match_blocks(sequence_hashes);
 
         // Collect layout handles from workers
         // Note: For single-worker setups, all blocks use the same handle
         // For multi-worker (SPMD), each block gets the handle from its assigned worker
-        let worker_g2_handles: Vec<LayoutHandle> =
-            self.workers.iter().filter_map(|w| w.g2_handle()).collect();
+        let worker_g2_handles: Vec<LayoutHandle> = self
+            .parallel_worker
+            .as_ref()
+            .map(|pw| pw.workers().iter().filter_map(|w| w.g2_handle()).collect())
+            .unwrap_or_default();
 
         // Assign layout handle to each matched block
         // For now, use the first worker's handle for all blocks (single-worker assumption)
@@ -875,18 +909,20 @@ impl InstanceLeader {
             .first()
             .copied()
             .ok_or_else(|| anyhow::anyhow!("No G2 layout handle available from workers"))?;
-        let layout_handles: Vec<LayoutHandle> = vec![layout_handle; g2_matches.len()];
+        let layout_handles: Vec<LayoutHandle> = vec![layout_handle; matched_g2_blocks.len()];
 
         // Get sequence hashes from matched blocks
-        let matched_hashes: Vec<SequenceHash> =
-            g2_matches.iter().map(|b| b.sequence_hash()).collect();
+        let matched_hashes: Vec<SequenceHash> = matched_g2_blocks
+            .iter()
+            .map(|b| b.sequence_hash())
+            .collect();
 
         // Create the session channel
         let (msg_tx, msg_rx) = session_message_channel(100);
         self.session_sessions.insert(session_id, msg_tx);
 
         // Create BlockHolder from matched blocks
-        let block_holder = BlockHolder::new(g2_matches);
+        let block_holder = BlockHolder::new(matched_g2_blocks);
 
         // Create the session and handle
         let (session, handle) = create_endpoint_session(
@@ -1102,11 +1138,10 @@ impl InstanceLeader {
 
     /// Execute local transfer across all workers, returning aggregated notification.
     ///
-    /// TODO: Implement proper notification aggregation using LocalEventSystem::merge_events
-    /// or create a composite notification that triggers when all workers complete.
-    /// Current implementation uses first worker only.
-    #[allow(dead_code, unused_variables)]
-    fn execute_local_transfer(
+    /// Delegates to the parallel_worker which fans out to all workers and
+    /// aggregates their notifications into a single composite notification.
+    #[allow(dead_code)]
+    pub(crate) fn execute_local_transfer(
         &self,
         src: LogicalLayoutHandle,
         dst: LogicalLayoutHandle,
@@ -1114,44 +1149,58 @@ impl InstanceLeader {
         dst_block_ids: Vec<BlockId>,
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
-        // TODO: Fan out to all workers and aggregate notifications
-        // For now, use first worker
-        // self.workers[0].execute_local_transfer(src, dst, src_block_ids, dst_block_ids, options)
-        todo!("implement local transfer")
+        let parallel_worker = self
+            .parallel_worker
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No parallel worker configured"))?;
+
+        parallel_worker.execute_local_transfer(
+            src,
+            dst,
+            Arc::from(src_block_ids),
+            Arc::from(dst_block_ids),
+            options,
+        )
     }
 
     /// Execute remote onboard across all workers, returning aggregated notification.
     ///
-    /// TODO: Implement proper notification aggregation.
-    /// Current implementation uses first worker only.
-    #[allow(dead_code, unused_variables)]
-    fn execute_remote_onboard(
+    /// Delegates to the parallel_worker which fans out to all workers and
+    /// aggregates their notifications into a single composite notification.
+    #[allow(dead_code)]
+    pub(crate) fn execute_remote_onboard(
         &self,
         src: RemoteDescriptor,
         dst: LogicalLayoutHandle,
         dst_block_ids: Vec<BlockId>,
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
-        // TODO: Fan out to all workers and aggregate notifications
-        // self.workers[0].execute_remote_onboard(src, dst, dst_block_ids, options)
-        todo!("implement remote onboard")
+        let parallel_worker = self
+            .parallel_worker
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No parallel worker configured"))?;
+
+        parallel_worker.execute_remote_onboard(src, dst, Arc::from(dst_block_ids), options)
     }
 
     /// Execute remote offload across all workers, returning aggregated notification.
     ///
-    /// TODO: Implement proper notification aggregation.
-    /// Current implementation uses first worker only.
-    #[allow(dead_code, unused_variables)]
-    fn execute_remote_offload(
+    /// Delegates to the parallel_worker which fans out to all workers and
+    /// aggregates their notifications into a single composite notification.
+    #[allow(dead_code)]
+    pub(crate) fn execute_remote_offload(
         &self,
         src: LogicalLayoutHandle,
         dst: RemoteDescriptor,
         src_block_ids: Vec<BlockId>,
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
-        // TODO: Fan out to all workers and aggregate notifications
-        // self.workers[0].execute_remote_offload(src, dst, src_block_ids, options)
-        todo!("implement remote offload")
+        let parallel_worker = self
+            .parallel_worker
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No parallel worker configured"))?;
+
+        parallel_worker.execute_remote_offload(src, Arc::from(src_block_ids), dst, options)
     }
 }
 
@@ -1162,40 +1211,54 @@ impl Leader for InstanceLeader {
         options: FindMatchesOptions,
     ) -> Result<FindMatchesResult> {
         // Search G2 (host memory) for matches
-        // Use scan_matches instead of match_blocks to find all matching blocks
-        // without stopping on first miss (supports partial sequence matching)
-        let g2_matches_map = self.g2_manager.scan_matches(sequence_hashes, true);
-        let g2_matches: Vec<_> = g2_matches_map.into_values().collect();
+        // Uses match_blocks which stops at first miss (implements "first hole" policy).
+        // This ensures we only find contiguous blocks from the start of the sequence.
+        // For distributed search, remote instances use scan_matches for broad coverage,
+        // then first-hole filtering is applied in InitiatorSession after aggregation.
+        let matched_g2_blocks = self.g2_manager.match_blocks(sequence_hashes);
 
         // Search G3 (disk) for remaining hashes if G3 is available
         let remaining_hashes: Vec<_> = sequence_hashes
             .iter()
-            .filter(|h| !g2_matches.iter().any(|b| b.sequence_hash() == **h))
+            .filter(|h| !matched_g2_blocks.iter().any(|b| b.sequence_hash() == **h))
             .copied()
             .collect();
 
-        let g3_matches = if let Some(ref g3_manager) = self.g3_manager {
-            // Use scan_matches instead of match_blocks to find all matching blocks
-            // without stopping on first miss (supports partial sequence matching)
-            let g3_matches_map = g3_manager.scan_matches(&remaining_hashes, true);
-            g3_matches_map.into_values().collect()
+        let matched_g3_blocks = if let Some(ref g3_manager) = self.g3_manager {
+            // Uses match_blocks on remaining hashes (those not found in G2).
+            // Since G2 already applied first-hole policy, G3 search continues from where G2 stopped.
+            g3_manager.match_blocks(&remaining_hashes)
         } else {
             Vec::new()
         };
 
         // Determine if we can return immediately (Ready) or need async session
-        // Ready: no remote search AND no G3 blocks (nothing to stage)
-        let is_ready = !options.search_remote && g3_matches.is_empty();
+        // Ready if:
+        //   - g3 blocks is empty
+        //   - there are no remote leaders
+        //   - OR there are remote leaders, but search_remote is false
+        //
+        // is_ready is false if:
+        //   - g3 is not empty, or
+        //   - remote_search is true and there are remote leaders
+        let has_remote_leaders = !self.remote_leaders.read().unwrap().is_empty();
+        let is_ready = matched_g3_blocks.is_empty()
+            && (
+                !has_remote_leaders
+                || (has_remote_leaders && !options.search_remote)
+            );
 
         if is_ready {
             // No session needed - blocks owned directly by ReadyResult (RAII)
-            return Ok(FindMatchesResult::Ready(ReadyResult::new(g2_matches)));
+            return Ok(FindMatchesResult::Ready(ReadyResult::new(
+                matched_g2_blocks,
+            )));
         }
 
         // AsyncSession path: G3 blocks found or remote search enabled
         let session_id = SessionId::from(Uuid::new_v4());
-        let local_g2_count = g2_matches.len();
-        let local_g3_count = g3_matches.len();
+        let local_g2_count = matched_g2_blocks.len();
+        let local_g3_count = matched_g3_blocks.len();
 
         // AsyncSession: staging locally and/or remote searching
         let (status_tx, status_rx) = watch::channel(OnboardingStatus::Searching);
@@ -1204,8 +1267,8 @@ impl Leader for InstanceLeader {
         // Store session state to keep blocks alive
         let state = SessionState {
             session_id,
-            g2_blocks: g2_matches,
-            g3_blocks: g3_matches,
+            matched_g2_blocks,
+            matched_g3_blocks,
             status_tx: status_tx.clone(),
         };
         self.store_session_state(state);
@@ -1217,7 +1280,7 @@ impl Leader for InstanceLeader {
             let total_matched = local_g2_count + local_g3_count;
             status_tx
                 .send(OnboardingStatus::Complete {
-                    matched: total_matched,
+                    matched_blocks: total_matched,
                 })
                 .ok();
 
@@ -1245,16 +1308,13 @@ impl Leader for InstanceLeader {
             (None, None)
         };
 
-        // TODO: Pass all workers or use aggregated transfer methods
-        let worker = self.workers.first().cloned();
-
         let session = InitiatorSession::new(
             session_id,
             self.nova.instance_id(),
             options.staging_mode,
             self.g2_manager.clone(),
             self.g3_manager.clone(),
-            worker,
+            self.parallel_worker.clone(),
             self.transport.clone(),
             status_tx.clone(),
             all_g2_blocks.clone(),
@@ -1267,12 +1327,14 @@ impl Leader for InstanceLeader {
         let remote_leaders = self.remote_leaders.read().unwrap().clone();
         let sequence_hashes = sequence_hashes.to_vec();
 
-        tokio::spawn(async move {
+        let handle = self.nova.runtime();
+
+        handle.spawn(async move {
             if let Err(e) = session.run(rx, remote_leaders, sequence_hashes).await {
                 eprintln!("InitiatorSession error: {e}");
                 // Try to update status to indicate error
                 status_tx
-                    .send(OnboardingStatus::Complete { matched: 0 })
+                    .send(OnboardingStatus::Complete { matched_blocks: 0 })
                     .ok();
             }
         });

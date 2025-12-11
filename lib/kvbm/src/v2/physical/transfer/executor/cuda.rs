@@ -9,7 +9,7 @@ use crate::BlockId;
 use crate::v2::physical::transfer::context::TransferCompleteNotification;
 use anyhow::{Result, anyhow};
 use cudarc::driver::result as cuda_result;
-use kvbm_kernels::{OperationalCopyBackend, OperationalCopyDirection, TensorDataType};
+use dynamo_kvbm_kernels::{OperationalCopyBackend, OperationalCopyDirection, TensorDataType};
 use std::ops::Range;
 
 // #[cfg(test)]
@@ -62,8 +62,10 @@ pub fn execute_cuda_transfer(
 
     // Get appropriate CUDA stream based on transfer direction
     let stream = match strategy {
-        TransferStrategy::CudaAsyncD2H | TransferStrategy::CudaBlockingD2H => ctx.d2h_stream(),
-        _ => ctx.h2d_stream(), // H2D and D2D use h2d_stream
+        TransferStrategy::CudaAsyncD2H | TransferStrategy::CudaBlockingD2H => {
+            ctx.next_d2h_streams()
+        }
+        _ => ctx.next_h2d_streams(), // H2D and D2D use h2d_stream
     };
 
     // Perform CUDA transfers based on strategy
@@ -431,7 +433,7 @@ pub(crate) fn try_execute_operational_kernel(
 
     // Launch kernel
     let status = unsafe {
-        kvbm_kernels::operational_copy(
+        dynamo_kvbm_kernels::operational_copy(
             block_ptrs_host.as_ptr() as *const *const std::ffi::c_void,
             block_ptrs_device_raw as usize as *const *const std::ffi::c_void,
             operational_ptrs_host.as_ptr() as *const *mut std::ffi::c_void,
