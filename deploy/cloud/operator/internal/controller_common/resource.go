@@ -306,7 +306,10 @@ func IsSpecChanged(current client.Object, desired client.Object) (*SpecChangeRes
 	lastAppliedGenStr := getAnnotation(current, NvidiaAnnotationGenerationKey)
 	currentGen := current.GetGeneration()
 
-	// Case 1: Hash annotation missing (first time or external create)
+	// Case 1: Hash annotation missing (external create or pre-upgrade resource)
+	// Note: This is not first-time CREATE (handled separately in SyncResource with generation=1).
+	// This handles existing resources without our annotations - we're about to update them,
+	// so NewGeneration = currentGen + 1 is correct.
 	if lastAppliedHash == "" {
 		return &SpecChangeResult{
 			NewHash:       &desiredHash,

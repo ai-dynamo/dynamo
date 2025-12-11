@@ -510,12 +510,15 @@ func TestIsSpecChanged_GenerationTracking(t *testing.T) {
 			expectNewGeneration:        8,
 		},
 		{
+			// Generation=0 can occur with CRDs that don't have generation tracking enabled,
+			// or as a safety net for edge cases. When gen=0, we skip generation-based
+			// manual change detection and rely solely on hash comparison.
 			name:                  "generation zero - skip generation check",
 			currentGeneration:     0,
 			lastAppliedGeneration: "0",
 			lastAppliedHash:       "match",
 			desiredReplicas:       2,
-			expectNeedsUpdate:     false, // gen check skipped when gen=0
+			expectNeedsUpdate:     false, // gen check skipped when gen=0, hash matches
 		},
 	}
 
