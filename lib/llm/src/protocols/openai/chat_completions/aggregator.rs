@@ -284,7 +284,12 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
             message: dynamo_async_openai::types::ChatCompletionResponseMessage {
                 role: delta.role.expect("delta should have a Role"),
                 content: if delta.text.is_empty() {
-                    None
+                    // If we have reasoning content, provide an empty string instead of None.
+                    if delta.reasoning_content.is_some() {
+                        Some(String::new())
+                    } else {
+                        None
+                    }
                 } else {
                     Some(delta.text)
                 },
