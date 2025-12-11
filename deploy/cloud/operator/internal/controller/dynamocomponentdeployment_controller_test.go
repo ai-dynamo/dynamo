@@ -1260,3 +1260,97 @@ func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_R
 	g.Expect(reconciledDeployment.Spec.Replicas).NotTo(gomega.BeNil())
 	g.Expect(*reconciledDeployment.Spec.Replicas).To(gomega.Equal(int32(1)), "Deployment should have been reconciled back to 1 replica")
 }
+
+func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	ctx := context.Background()
+
+	// Set up scheme
+	s := scheme.Scheme
+	err := v1alpha1.AddToScheme(s)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	err = appsv1.AddToScheme(s)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	err = corev1.AddToScheme(s)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	name := "test-component"
+	namespace := "default"
+
+	// Create DynamoComponentDeployment
+	replicaCount := int32(3)
+	dcd := &v1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:     "test-service",
+				DynamoNamespace: ptr.To("default"),
+				ComponentType:   string(commonconsts.ComponentTypeDecode),
+				Replicas:        &replicaCount,
+			},
+		},
+	}
+
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dcd).
+		Build()
+
+	recorder := record.NewFakeRecorder(100)
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:      fakeKubeClient,
+		Recorder:    recorder,
+		Config:      controller_common.Config{},
+		EtcdStorage: nil,
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return []string{}, nil
+			},
+		},
+	}
+
+	opt := generateResourceOption{
+		dynamoComponentDeployment: dcd,
+	}
+
+	t.Log("=== Step 1: Create deployment (operator's first apply) ===")
+
+	modified1, deployment1, err := reconciler.createOrUpdateOrDeleteDeployments(ctx, opt)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(modified1).To(gomega.BeTrue(), "First create should report as modified")
+	g.Expect(deployment1).NotTo(gomega.BeNil())
+	g.Expect(deployment1.Spec.RevisionHistoryLimit).To(gomega.BeNil())
+
+	operatorCreatedDeployment := &appsv1.Deployment{}
+	err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, operatorCreatedDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(*operatorCreatedDeployment.Spec.Replicas).To(gomega.Equal(replicaCount))
+
+	annotations := operatorCreatedDeployment.GetAnnotations()
+	g.Expect(annotations).NotTo(gomega.BeNil())
+	originalHash, hasHash := annotations[controller_common.NvidiaAnnotationHashKey]
+	g.Expect(hasHash).To(gomega.BeTrue(), "Hash annotation should be set")
+	t.Logf("Hash annotation after create: %s", originalHash)
+
+	t.Log("\n=== Step 2: Simulate K8s adding defaults ===")
+
+	// Operator does not set RevisionHistoryLimit but the k8s API defaults to 10
+	operatorCreatedDeployment.Spec.RevisionHistoryLimit = ptr.To(int32(10))
+	err = fakeKubeClient.Update(ctx, operatorCreatedDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// The deployment should not be modified because the spec is the same
+	modified2, deployment2, err := reconciler.createOrUpdateOrDeleteDeployments(ctx, opt)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(modified2).To(gomega.BeFalse(), "Second create should report as not modified")
+	g.Expect(deployment2).NotTo(gomega.BeNil())
+
+	modified3, deployment3, err := reconciler.createOrUpdateOrDeleteDeployments(ctx, opt)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(modified3).To(gomega.BeFalse(), "Third create should report as not modified")
+	g.Expect(deployment3).NotTo(gomega.BeNil())
+}
