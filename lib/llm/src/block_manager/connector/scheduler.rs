@@ -407,7 +407,7 @@ impl Scheduler {
         debug_assert!(self.slots.contains_key(&request_id), "slot not found");
 
         // Cancel the cancel token for this request - this signals any waiting tasks to abort
-        if let Some((_, token)) = self.cancel_tokens.remove(&request_id) {
+        if let Some(token) = self.cancel_tokens.remove(&request_id) {
             token.cancel();
         }
 
