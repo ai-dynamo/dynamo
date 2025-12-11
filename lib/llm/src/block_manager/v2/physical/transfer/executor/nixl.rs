@@ -7,32 +7,11 @@
 //! all required parameters are set before execution.
 
 use super::{PhysicalLayout, TransferContext, TransferStrategy};
-use crate::block_manager::v2::physical::transfer::DescriptorHint;
-use std::ops::Range;
-
-/// Parameters for building NIXL descriptors.
-///
-/// Groups the common parameters needed by all descriptor building functions,
-/// reducing function argument count and improving readability.
-pub(crate) struct DescriptorParams<'a> {
-    pub src: &'a PhysicalLayout,
-    pub dst: &'a PhysicalLayout,
-    pub src_block_ids: &'a [usize],
-    pub dst_block_ids: &'a [usize],
-    pub layers: &'a Range<usize>,
-    pub hint: DescriptorHint,
-}
-use crate::block_manager::v2::physical::transfer::executor::contiguous_transfer::{
-    build_batched_contiguous_transfer, build_multi_descriptor_transfer,
-    build_per_block_offset_transfer, build_per_block_unique_target_transfer,
-    build_single_descriptor_transfer,
-};
-use crate::block_manager::v2::physical::transfer::executor::object_transfer::get_object_device_id;
-use crate::block_manager::v2::memory::StorageKind;
 use crate::block_manager::v2::physical::transfer::context::TransferCompleteNotification;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use nixl_sys::{XferDescList, XferOp};
 use std::marker::PhantomData;
+use std::ops::Range;
 
 /// Marker type for unset builder fields.
 pub struct Unset;
@@ -57,7 +36,6 @@ pub struct NixlTransferBuilder<'a, TSrc, TDst, TSrcBlocks, TDstBlocks, TStrategy
     strategy: Option<TransferStrategy>,
     layer_range: Option<Range<usize>>,
     write_notif: Option<uuid::Uuid>,
-    descriptor_hint: DescriptorHint,
     _phantom: PhantomData<(TSrc, TDst, TSrcBlocks, TDstBlocks, TStrategy)>,
 }
 
@@ -72,7 +50,6 @@ impl<'a> NixlTransferBuilder<'a, Unset, Unset, Unset, Unset, Unset> {
             strategy: None,
             layer_range: None,
             write_notif: None,
-            descriptor_hint: DescriptorHint::Auto,
             _phantom: PhantomData,
         }
     }
@@ -102,7 +79,6 @@ impl<'a, TDst, TSrcBlocks, TDstBlocks, TStrategy>
             strategy: self.strategy,
             layer_range: self.layer_range,
             write_notif: self.write_notif,
-            descriptor_hint: self.descriptor_hint,
             _phantom: PhantomData,
         }
     }
@@ -124,7 +100,6 @@ impl<'a, TSrc, TSrcBlocks, TDstBlocks, TStrategy>
             strategy: self.strategy,
             layer_range: self.layer_range,
             write_notif: self.write_notif,
-            descriptor_hint: self.descriptor_hint,
             _phantom: PhantomData,
         }
     }
@@ -146,7 +121,6 @@ impl<'a, TSrc, TDst, TDstBlocks, TStrategy>
             strategy: self.strategy,
             layer_range: self.layer_range,
             write_notif: self.write_notif,
-            descriptor_hint: self.descriptor_hint,
             _phantom: PhantomData,
         }
     }
@@ -168,7 +142,6 @@ impl<'a, TSrc, TDst, TSrcBlocks, TStrategy>
             strategy: self.strategy,
             layer_range: self.layer_range,
             write_notif: self.write_notif,
-            descriptor_hint: self.descriptor_hint,
             _phantom: PhantomData,
         }
     }
@@ -190,7 +163,6 @@ impl<'a, TSrc, TDst, TSrcBlocks, TDstBlocks>
             strategy: Some(strategy),
             layer_range: self.layer_range,
             write_notif: self.write_notif,
-            descriptor_hint: self.descriptor_hint,
             _phantom: PhantomData,
         }
     }
@@ -213,15 +185,6 @@ impl<'a, TSrc, TDst, TSrcBlocks, TDstBlocks, TStrategy>
         self.write_notif = Some(write_notif);
         self
     }
-
-    /// Sets a descriptor hint to optimize how blocks are mapped to descriptors.
-    ///
-    /// When `Auto` (default), the executor analyzes layout characteristics.
-    /// Explicit hints skip detection and ensure correct descriptor pattern.
-    pub fn descriptor_hint(mut self, hint: DescriptorHint) -> Self {
-        self.descriptor_hint = hint;
-        self
-    }
 }
 
 // Execute method - only available when all required fields are Set
@@ -240,7 +203,6 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
         let strategy = self.strategy.unwrap();
         let layer_range = self.layer_range;
         let _write_notif = self.write_notif;
-        let descriptor_hint = self.descriptor_hint;
 
         // Validate layouts
         let src_layout = src.layout();
@@ -277,70 +239,56 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
             }
         };
 
-        // For flipped operations, the actual NIXL local side will be swapped later
-        // For normal operations, source must be local
-        let is_flipped = matches!(
-            strategy,
-            TransferStrategy::NixlReadFlipped | TransferStrategy::NixlWriteFlipped
+        assert!(
+            nixl_agent.name() == src.nixl_metadata().agent_name(),
+            "the source must be local"
         );
-
-        if !is_flipped {
-            if nixl_agent.name() != src.nixl_metadata().agent_name() {
-                return Err(anyhow!(
-                    "Source must be local for non-flipped NIXL operations. \
-                     Expected agent '{}', but source uses agent '{}'",
-                    nixl_agent.name(),
-                    src.nixl_metadata().agent_name()
-                ));
-            }
-        } else {
-            // For flipped ops, destination is actually the local side (gets swapped)
-            if nixl_agent.name() != dst.nixl_metadata().agent_name() {
-                return Err(anyhow!(
-                    "Destination must be local for flipped NIXL operations. \
-                     Expected agent '{}', but destination uses agent '{}'",
-                    nixl_agent.name(),
-                    dst.nixl_metadata().agent_name()
-                ));
-            }
-        }
 
         // Capture NIXL metadata for both layouts
         let src_metadata = src.nixl_metadata();
         let dst_metadata = dst.nixl_metadata();
 
+        let src_mem_type = src_metadata.mem_type();
+        let dst_mem_type = dst_metadata.mem_type();
+
+        let src_device_id = src_metadata.device_id();
+        let dst_device_id = dst_metadata.device_id();
+
         // Build XferDescLists for source and destination
-        let mut src_dl = XferDescList::new(src_metadata.mem_type())?;
-        let mut dst_dl = XferDescList::new(dst_metadata.mem_type())?;
+        let mut src_dl = XferDescList::new(src_mem_type)?;
+        let mut dst_dl = XferDescList::new(dst_mem_type)?;
 
-        tracing::trace!(
-            "Building NIXL transfer: blocks={}, layers={}, op={:?}, src={:?}, dst={:?}, hint={:?}",
-            src_block_ids.len(),
-            layers.len(),
-            xfer_op,
-            src.location(),
-            dst.location(),
-            descriptor_hint
-        );
+        // Add memory regions to descriptor lists
+        for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
+            for layer_id in layers.clone() {
+                for outer_id in 0..src_layout.outer_dim() {
+                    let src_region = src.memory_region(src_block_id, layer_id, outer_id)?;
+                    let dst_region = dst.memory_region(dst_block_id, layer_id, outer_id)?;
 
-        // Build descriptors based on transfer type (using hint or auto-detection)
-        let params = DescriptorParams {
-            src,
-            dst,
-            src_block_ids,
-            dst_block_ids,
-            layers: &layers,
-            hint: descriptor_hint,
-        };
-        build_descriptors(&params, &mut src_dl, &mut dst_dl)?;
+                    if src_region.size() != dst_region.size() {
+                        return Err(anyhow!(
+                            "Size mismatch at block=({},{}), layer={}, outer={}: src={}, dst={}",
+                            src_block_id,
+                            dst_block_id,
+                            layer_id,
+                            outer_id,
+                            src_region.size(),
+                            dst_region.size()
+                        ));
+                    }
 
-        tracing::trace!(
-            "Built descriptors: src={:?}, dst={:?}",
-            src_dl,
-            dst_dl,
-        );
+                    // Add to source descriptor list
+                    src_dl.add_desc(src_region.addr(), src_region.size(), src_device_id);
 
-        // Swap descriptors for flipped operations
+                    // Add to destination descriptor list
+                    dst_dl.add_desc(dst_region.addr(), dst_region.size(), dst_device_id);
+                }
+            }
+        }
+
+        // Note: Overlap detection was removed from nixl-sys 0.6.1
+        // The NIXL library now handles overlap detection internally
+
         if matches!(
             strategy,
             TransferStrategy::NixlReadFlipped | TransferStrategy::NixlWriteFlipped
@@ -349,22 +297,16 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
         }
 
         // Create transfer request
-        // remote_agent should be the agent name of the REMOTE layout (not local)
-        // For Read: remote is source, For Write: remote is destination
-        let remote_agent_name = match xfer_op {
-            XferOp::Read => src_metadata.agent_name(),  // Reading FROM source (remote)
-            XferOp::Write => dst_metadata.agent_name(), // Writing TO destination (remote)
-        };
-
         let xfer_req = nixl_agent.create_xfer_req(
             xfer_op,
             &src_dl,
             &dst_dl,
-            remote_agent_name,
+            dst_metadata.agent_name(),
             None, // opt_args
         )?;
 
         // Post transfer request
+        // Note: Notification handling via OptArgs can be added later if needed
         let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
 
         if still_pending {
@@ -374,121 +316,5 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
             // Transfer completed synchronously
             Ok(TransferCompleteNotification::completed())
         }
-    }
-
-}
-
-/// Build NIXL descriptors based on descriptor hint (or auto-detection).
-///
-/// Uses explicit hints when provided, otherwise auto-detects from layout characteristics.
-pub(crate) fn build_descriptors(
-    params: &DescriptorParams,
-    src_dl: &mut XferDescList,
-    dst_dl: &mut XferDescList,
-) -> Result<()> {
-    let DescriptorParams {
-        src,
-        dst,
-        src_block_ids,
-        dst_block_ids,
-        layers,
-        hint,
-    } = params;
-
-    // Derive device IDs from layouts
-    let src_device_id = src.nixl_metadata().device_id();
-    let dst_device_id = dst.nixl_metadata().device_id();
-
-    // Resolve hint to concrete strategy
-    let resolved_hint = match hint {
-        DescriptorHint::Auto => auto_detect_hint(src, dst),
-        explicit => *explicit,
-    };
-
-    tracing::debug!("Descriptor strategy: {:?} (requested: {:?})", resolved_hint, hint);
-
-    // Check if either side involves object storage (needs per-block device IDs)
-    let src_is_object = matches!(src.location(), StorageKind::Object(_));
-    let dst_is_object = matches!(dst.location(), StorageKind::Object(_));
-    let involves_object = src_is_object || dst_is_object;
-
-    // Device ID closure for object storage (per-block keys) or None for others
-    let get_device_id_fn: Option<&dyn Fn(&PhysicalLayout, usize, u64) -> u64> = if involves_object {
-        Some(&|layout, block_id, default_id| get_object_device_id(layout, block_id, default_id))
-    } else {
-        None
-    };
-
-    match resolved_hint {
-        DescriptorHint::Coalesced => {
-            // Single descriptor covering all blocks
-            build_single_descriptor_transfer(
-                src, dst, src_block_ids, dst_block_ids, layers,
-                src_device_id, dst_device_id, src_dl, dst_dl,
-            )
-        }
-        DescriptorHint::PerBlockWithOffset => {
-            // One descriptor per block, each at its own offset (reads)
-            build_per_block_offset_transfer(
-                src, dst, src_block_ids, dst_block_ids, layers,
-                src_device_id, dst_device_id, src_dl, dst_dl,
-                get_device_id_fn,
-            )
-        }
-        DescriptorHint::PerBlockUniqueTarget => {
-            // One descriptor per block, each to unique target (writes)
-            // Object storage requires zero offset (doesn't support partial writes)
-            build_per_block_unique_target_transfer(
-                src, dst, src_block_ids, dst_block_ids, layers,
-                src_device_id, dst_device_id, src_dl, dst_dl,
-                get_device_id_fn,
-                dst_is_object, // force_zero_offset for object storage writes
-            )
-        }
-        DescriptorHint::BatchedRanges => {
-            // Batched contiguous ranges
-            tracing::debug!(
-                "Batching optimization: {} blocks, src={:?}, dst={:?}",
-                src_block_ids.len(), src.location(), dst.location()
-            );
-            build_batched_contiguous_transfer(
-                src, dst, src_block_ids, dst_block_ids, layers,
-                src_device_id, dst_device_id, src_dl, dst_dl,
-            )
-        }
-        DescriptorHint::Auto => {
-            // Fallback: multi-descriptor mode (shouldn't reach here after auto_detect)
-            tracing::debug!(
-                "Multi-descriptor mode: {} blocks",
-                src_block_ids.len()
-            );
-            build_multi_descriptor_transfer(
-                src, dst, src_block_ids, dst_block_ids, layers,
-                &|layout, block_id, default_id| get_object_device_id(layout, block_id, default_id),
-                src_device_id, dst_device_id, src_dl, dst_dl,
-            )
-        }
-    }
-}
-
-/// Auto-detect descriptor hint from layout characteristics.
-fn auto_detect_hint(src: &PhysicalLayout, dst: &PhysicalLayout) -> DescriptorHint {
-    let src_is_object = matches!(src.location(), StorageKind::Object(_));
-    let dst_is_object = matches!(dst.location(), StorageKind::Object(_));
-    let src_is_contiguous = src.layout().is_fully_contiguous();
-    let dst_is_contiguous = dst.layout().is_fully_contiguous();
-
-    if src_is_object && dst_is_contiguous {
-        // Reading from object storage (supports byte-range offsets)
-        DescriptorHint::PerBlockWithOffset
-    } else if dst_is_object && src_is_contiguous {
-        // Writing to object storage (one-to-one mapping required)
-        DescriptorHint::PerBlockUniqueTarget
-    } else if src_is_contiguous && dst_is_contiguous {
-        // Both contiguous: use batched optimization
-        DescriptorHint::BatchedRanges
-    } else {
-        // Fall back to multi-descriptor
-        DescriptorHint::Auto
     }
 }
