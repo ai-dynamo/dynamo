@@ -44,8 +44,10 @@
 use super::{RouteDoc, service_v2};
 use axum::{
     Json, Router,
+    extract::Request,
     http::{Method, StatusCode},
-    response::IntoResponse,
+    middleware::Next,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -89,6 +91,29 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Middleware to convert 422 Unprocessable Entity responses (from JSON deserialization errors)
+/// to JSON format instead of text/plain.
+async fn json_error_middleware(request: Request, next: Next) -> Response {
+    let response = next.run(request).await;
+
+    if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
+        let (_parts, body) = response.into_parts();
+        let body_bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .unwrap_or_default();
+        let error_message = String::from_utf8_lossy(&body_bytes).to_string();
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!(ErrorResponse {
+                error: error_message,
+            })),
+        )
+            .into_response()
+    } else {
+        response
+    }
+}
+
 pub fn busy_threshold_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
@@ -103,6 +128,7 @@ pub fn busy_threshold_router(
     let router = Router::new()
         .route(&base_path, post(busy_threshold_handler))
         .route(&base_path, get(list_busy_thresholds_handler))
+        .layer(axum::middleware::from_fn(json_error_middleware))
         .with_state(state);
 
     (docs, router)
