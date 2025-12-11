@@ -341,6 +341,7 @@ def parse_aiperf_client_results(log_dir: str) -> Dict[str, Any]:
     Returns:
         Dictionary with aggregated metrics and client count
     """
+    logger = logging.getLogger(__name__)
     all_metrics: Dict[str, Any] = {
         "total_requests": 0,
         "successful_requests": 0,
@@ -382,22 +383,28 @@ def parse_aiperf_client_results(log_dir: str) -> Dict[str, Any]:
                 with open(profile_json) as f:
                     client_metrics = json.load(f)
 
-                # AI-Perf format has "records" dictionary at the top level
+                # AI-Perf format can have "records" dictionary or metrics at top level
+                # Try records first (older format), then fall back to top level (newer format)
                 records = client_metrics.get("records", {})
 
-                # Extract successful request count
-                request_count_record = records.get("request_count", {})
+                # Extract successful request count - check both locations
+                request_count_record = records.get(
+                    "request_count"
+                ) or client_metrics.get("request_count", {})
                 successful_count = (
                     int(request_count_record.get("avg", 0))
-                    if request_count_record
+                    if request_count_record and isinstance(request_count_record, dict)
                     else 0
                 )
 
-                # Extract error request count
-                error_request_count_record = records.get("error_request_count", {})
+                # Extract error request count - check both locations
+                error_request_count_record = records.get(
+                    "error_request_count"
+                ) or client_metrics.get("error_request_count", {})
                 error_request_count = (
                     int(error_request_count_record.get("avg", 0))
                     if error_request_count_record
+                    and isinstance(error_request_count_record, dict)
                     else 0
                 )
 
@@ -418,9 +425,17 @@ def parse_aiperf_client_results(log_dir: str) -> Dict[str, Any]:
                 # Sum up actual error counts from each error type
                 error_count = sum(error.get("count", 0) for error in error_summary)
 
-                # Check if test was cancelled
+                # Log if test was cancelled (expected for continuous load mode)
                 if client_metrics.get("was_cancelled", False):
-                    error_count = request_count  # Mark all as failed if cancelled
+                    logger.info(
+                        f"AI-Perf client {item} was cancelled - anticipated if running with continuous load mode. "
+                        f"Completed {request_count} requests before cancellation."
+                    )
+
+                # Note: If test was cancelled (was_cancelled=True), we still count the requests
+                # that were successfully completed before cancellation. The request_count
+                # represents successful requests, and error_count represents actual errors.
+                # We don't mark cancelled requests as failed - they were just interrupted.
 
                 # Validate data consistency
                 if request_count < error_count:

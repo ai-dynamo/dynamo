@@ -58,12 +58,12 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 ### Build Dependency
 
-| **Build Dependency** | **Version as of Dynamo v0.7.0**                                                   |
-| :------------------- | :------------------------------------------------------------------------------- |
-| **SGLang**           | 0.5.3.post4                                                                      |
-| **TensorRT-LLM**     | 1.2.0rc2                                                                         |
-| **vLLM**             | 0.11.0                                                                           |
-| **NIXL**             | 0.7.1                                                                            |
+| **Build Dependency** | **Version as of Dynamo v0.7.0** |
+| :------------------- | :------------------------------ |
+| **SGLang**           | 0.5.3.post4                     |
+| **TensorRT-LLM**     | 1.2.0rc5                        |
+| **vLLM**             | 0.11.0                          |
+| **NIXL**             | 0.7.1                           |
 
 
 > [!Important]
@@ -101,9 +101,6 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 - **Dynamo Kubernetes Operator Images**: We distribute multi-arch images (x86 & ARM64 compatible) of the Dynamo Operator on [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo):
   - [kubernetes-operator](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator) to simplify deployments of Dynamo Graphs.
-
-- **Dynamo Frontend Images**: We distribute multi-arch images (x86 & ARM64 compatible) of the Dynamo Frontend on [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo):
-  -  **New as of Dynamo v0.7.0:** [dynamo-frontend](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend) as a standalone implementation.
 
 - **Helm Charts**: [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo) hosts the helm charts supporting Kubernetes deployments of Dynamo:
   - [Dynamo CRDs](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-crds)

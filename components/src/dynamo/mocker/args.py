@@ -9,12 +9,82 @@ import tempfile
 from pathlib import Path
 
 from . import __version__
+from .utils.planner_profiler_perf_data_converter import (
+    convert_profile_results_to_npz,
+    is_mocker_format_npz,
+    is_profile_results_dir,
+)
 
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
 DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 
 logger = logging.getLogger(__name__)
+
+
+class ProfileDataResult:
+    """Result of processing --planner-profile-data argument. Cleans up tmpdir on deletion."""
+
+    def __init__(
+        self, npz_path: Path | None, tmpdir: tempfile.TemporaryDirectory | None
+    ):
+        self.npz_path = npz_path
+        self._tmpdir = tmpdir
+
+    def __del__(self):
+        if self._tmpdir is not None:
+            try:
+                self._tmpdir.cleanup()
+                logger.debug("Cleaned up profile data temporary directory")
+            except Exception:
+                pass  # Best effort cleanup
+
+
+def resolve_planner_profile_data(
+    planner_profile_data: Path | None,
+) -> ProfileDataResult:
+    """
+    Resolve --planner-profile-data to an NPZ file path.
+
+    Handles backward compatibility by accepting either:
+    1. A mocker-format NPZ file (returned as-is)
+    2. A profiler-style results directory (converted to mocker-format NPZ)
+
+    Args:
+        planner_profile_data: Path from --planner-profile-data argument.
+
+    Returns:
+        ProfileDataResult with npz_path and optional tmpdir for cleanup.
+
+    Raises:
+        FileNotFoundError: If path doesn't contain valid profile data in any supported format.
+    """
+    if planner_profile_data is None:
+        return ProfileDataResult(npz_path=None, tmpdir=None)
+
+    # Case 1: Already a mocker-format NPZ file
+    if is_mocker_format_npz(planner_profile_data):
+        logger.info(f"Using mocker-format NPZ file: {planner_profile_data}")
+        return ProfileDataResult(npz_path=planner_profile_data, tmpdir=None)
+
+    # Case 2: Profiler-style results directory - needs conversion
+    if is_profile_results_dir(planner_profile_data):
+        logger.info(
+            f"Detected profiler-style results directory at {planner_profile_data}, converting to NPZ..."
+        )
+        tmpdir = tempfile.TemporaryDirectory(prefix="mocker_perf_data_")
+        npz_path = Path(tmpdir.name) / "perf_data.npz"
+        convert_profile_results_to_npz(planner_profile_data, npz_path)
+        return ProfileDataResult(npz_path=npz_path, tmpdir=tmpdir)
+
+    # Case 3: Invalid path - neither mocker-format NPZ nor profiler-style directory
+    raise FileNotFoundError(
+        f"Path '{planner_profile_data}' is neither a mocker-format NPZ file nor a valid profiler results directory.\n"
+        f"Expected either:\n"
+        f"  - A .npz file with keys: prefill_isl, prefill_ttft_ms, decode_active_kv_tokens, decode_context_length, decode_itl\n"
+        f"  - A directory containing selected_prefill_interpolation/raw_data.npz and selected_decode_interpolation/raw_data.npz\n"
+        f"  - A directory containing prefill_raw_data.json and decode_raw_data.json"
+    )
 
 
 def create_temp_engine_args_file(args) -> Path:
@@ -182,7 +252,8 @@ def parse_args():
         "--planner-profile-data",
         type=Path,
         default=None,
-        help="Path to JSON configmap or NPZ file containing performance profiling data from planner_profiler_perf_data_converter.py (default: None, uses hardcoded polynomials)",
+        help="Path to profile results directory containing selected_prefill_interpolation/ and "
+        "selected_decode_interpolation/ subdirectories (default: None, uses hardcoded polynomials)",
     )
     parser.add_argument(
         "--num-workers",

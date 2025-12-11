@@ -130,7 +130,7 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.trtllm_marker
+@pytest.mark.trtllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -202,7 +202,7 @@ def test_etcd_ha_failover_trtllm_aggregated(request, predownload_models):
                         etcd_cluster.restart_replica(i)
 
 
-@pytest.mark.trtllm_marker
+@pytest.mark.trtllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -281,7 +281,7 @@ def test_etcd_ha_failover_trtllm_disaggregated(
                             etcd_cluster.restart_replica(i)
 
 
-@pytest.mark.trtllm_marker
+@pytest.mark.trtllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -340,7 +340,7 @@ def test_etcd_non_ha_shutdown_trtllm_aggregated(request, predownload_models):
                     )
 
 
-@pytest.mark.trtllm_marker
+@pytest.mark.trtllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)

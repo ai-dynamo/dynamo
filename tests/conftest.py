@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -28,9 +29,43 @@ from tests.utils.managed_process import ManagedProcess
 
 
 def pytest_configure(config):
-    # Defining model morker to avoid `'model' not found in `markers` configuration option`
-    # error when pyproject.toml is not available in the container
-    config.addinivalue_line("markers", "model: model id used by a test or parameter")
+    # Defining markers to avoid `<marker> not found in 'markers' configuration option`
+    # errors when pyproject.toml is not available in the container (e.g. some CI jobs).
+    # IMPORTANT: Keep this marker list in sync with [tool.pytest.ini_options].markers
+    # in pyproject.toml. If you add or remove markers there, mirror the change here.
+    markers = [
+        "pre_merge: marks tests to run before merging",
+        "post_merge: marks tests to run after merge",
+        "parallel: marks tests that can run in parallel with pytest-xdist",
+        "nightly: marks tests to run nightly",
+        "weekly: marks tests to run weekly",
+        "gpu_0: marks tests that don't require GPU",
+        "gpu_1: marks tests to run on GPU",
+        "gpu_2: marks tests to run on 2GPUs",
+        "gpu_4: marks tests to run on 4GPUs",
+        "gpu_8: marks tests to run on 8GPUs",
+        "e2e: marks tests as end-to-end tests",
+        "integration: marks tests as integration tests",
+        "unit: marks tests as unit tests",
+        "stress: marks tests as stress tests",
+        "performance: marks tests as performance tests",
+        "vllm: marks tests as requiring vllm",
+        "trtllm: marks tests as requiring trtllm",
+        "sglang: marks tests as requiring sglang",
+        "multimodal: marks tests as multimodal (image/video) tests",
+        "slow: marks tests as known to be slow",
+        "h100: marks tests to run on H100",
+        "router: marks tests for router component",
+        "planner: marks tests for planner component",
+        "kvbm: marks tests for KV behavior and model determinism",
+        "kvbm_v2: marks tests using KVBM V2",
+        "model: model id used by a test or parameter",
+        "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
+        "k8s: marks tests as requiring Kubernetes",
+        "fault_tolerance: marks tests as fault tolerance tests",
+    ]
+    for marker in markers:
+        config.addinivalue_line("markers", marker)
 
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -190,6 +225,26 @@ def pytest_collection_modifyitems(config, items):
     # Store models to download in pytest config for fixtures to access
     if models_to_download:
         config.models_to_download = models_to_download
+
+
+def pytest_runtestloop(session):
+    """Download models after collection but before any tests run.
+
+    This hook runs after pytest_collection_modifyitems (so models are collected)
+    but before any test execution, ensuring model downloads don't count against test timeouts.
+    """
+    models = getattr(session.config, "models_to_download", None)
+
+    if models:
+        logging.info(
+            f"Downloading {len(models)} models before test execution\nModels: {models}"
+        )
+        start_time = time.time()
+
+        download_models(model_list=list(models))
+
+        download_duration = time.time() - start_time
+        logging.info(f"Model download completed in {download_duration:.1f}s")
 
 
 class EtcdServer(ManagedProcess):
@@ -357,11 +412,52 @@ class SharedNatsServer(SharedManagedProcess):
         return server
 
 
+@pytest.fixture
+def store_kv(request):
+    """
+    KV store for runtime. Defaults to "etcd".
+
+    To iterate over multiple stores in a test:
+        @pytest.mark.parametrize("store_kv", ["file", "etcd"], indirect=True)
+        def test_example(runtime_services):
+            ...
+    """
+    return getattr(request, "param", "etcd")
+
+
+@pytest.fixture
+def request_plane(request):
+    """
+    Request plane for runtime. Defaults to "nats".
+
+    To iterate over multiple transports in a test:
+        @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+        def test_example(runtime_services):
+            ...
+    """
+    return getattr(request, "param", "nats")
+
+
 @pytest.fixture()
-def runtime_services(request):
-    with NatsServer(request) as nats_process:
+def runtime_services(request, store_kv, request_plane):
+    """
+    Start runtime services (NATS and/or etcd) based on store_kv and request_plane.
+
+    - If store_kv != "etcd", etcd is not started (returns None)
+    - If request_plane != "nats", NATS is not started (returns None)
+    """
+    if request_plane == "nats" and store_kv == "etcd":
+        with NatsServer(request) as nats_process:
+            with EtcdServer(request) as etcd_process:
+                yield nats_process, etcd_process
+    elif request_plane == "nats":
+        with NatsServer(request) as nats_process:
+            yield nats_process, None
+    elif store_kv == "etcd":
         with EtcdServer(request) as etcd_process:
-            yield nats_process, etcd_process
+            yield None, etcd_process
+    else:
+        yield None, None
 
 
 @pytest.fixture(scope="session")

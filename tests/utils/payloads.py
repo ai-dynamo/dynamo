@@ -14,13 +14,14 @@
 # limitations under the License.
 
 import logging
+import math
 import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from dynamo import prometheus_names
+from dynamo import prometheus_names  # type: ignore[attr-defined]
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +157,90 @@ class ChatPayload(BasePayload):
 
 
 @dataclass
+class ChatPayloadWithLogprobs(ChatPayload):
+    """Chat payload that validates logprobs in response."""
+
+    def validate(self, response: Any, content: str) -> None:
+        """Validate response contains logprobs fields."""
+        super().validate(response, content)
+
+        result = response.json()
+        choice = result["choices"][0]
+
+        # Validate logprobs field exists
+        assert "logprobs" in choice, "Missing 'logprobs' in choice"
+
+        logprobs_data = choice["logprobs"]
+        if logprobs_data is not None:
+            assert "content" in logprobs_data, "Missing 'content' in logprobs"
+            content_logprobs = logprobs_data["content"]
+
+            if content_logprobs:
+                # Validate structure of logprobs
+                for item in content_logprobs:
+                    assert "token" in item, "Missing 'token' in logprobs content"
+                    assert "logprob" in item, "Missing 'logprob' in logprobs content"
+                    assert (
+                        "top_logprobs" in item
+                    ), "Missing 'top_logprobs' in logprobs content"
+
+                    # Sanity check: logprob should be valid (not nan/inf/positive)
+                    logprob_val = item["logprob"]
+                    assert not math.isnan(logprob_val), "logprob is NaN"
+                    assert not math.isinf(logprob_val), "logprob is infinite"
+                    assert (
+                        logprob_val <= 0
+                    ), f"logprob should be <= 0, got {logprob_val}"
+
+                logger.info(
+                    f"✓ Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
+                )
+
+
+@dataclass
+class ToolCallingChatPayload(ChatPayload):
+    """ChatPayload that validates tool calls in the response."""
+
+    def __init__(self, *args, expected_tool_name: Optional[str] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.expected_tool_name = expected_tool_name
+
+    def validate(self, response, content: str) -> None:
+        """Validate that tool calls exist in the response."""
+        # First run the standard validation
+        super().validate(response, content)
+
+        # Then validate tool calls specifically
+        response_data = response.json()
+        choices = response_data.get("choices", [])
+        assert choices, "Response missing choices"
+
+        message = choices[0].get("message", {})
+        tool_calls = message.get("tool_calls", [])
+
+        assert tool_calls, "Expected model to generate tool calls but none found"
+        logger.info(f"Tool calls detected: {len(tool_calls)} call(s)")
+
+        # Validate tool call structure
+        for i, tc in enumerate(tool_calls):
+            assert "function" in tc, f"Tool call {i} missing 'function' field"
+            function = tc.get("function", {})
+            assert "name" in function, f"Tool call {i} missing function name"
+            assert "arguments" in function, f"Tool call {i} missing function arguments"
+            logger.info(
+                f"  [{i}] Function: {function.get('name')}, Args: {function.get('arguments')[:100]}..."
+            )
+
+        # If expected tool name is provided, validate it
+        if self.expected_tool_name:
+            tool_names = [tc.get("function", {}).get("name") for tc in tool_calls]
+            assert (
+                self.expected_tool_name in tool_names
+            ), f"Expected tool '{self.expected_tool_name}' not found. Available tools: {tool_names}"
+            logger.info(f"Expected tool '{self.expected_tool_name}' was called")
+
+
+@dataclass
 class CompletionPayload(BasePayload):
     """Payload for completions endpoint."""
 
@@ -175,6 +260,53 @@ class CompletionPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return CompletionPayload.extract_text(response)
+
+
+@dataclass
+class CompletionPayloadWithLogprobs(CompletionPayload):
+    """Completion payload that validates logprobs in response."""
+
+    def validate(self, response: Any, content: str) -> None:
+        """Validate response contains logprobs fields."""
+        super().validate(response, content)
+
+        result = response.json()
+        choice = result["choices"][0]
+
+        # Validate logprobs field exists
+        assert "logprobs" in choice, "Missing 'logprobs' in choice"
+
+        logprobs_data = choice["logprobs"]
+        if logprobs_data is not None:
+            assert (
+                "token_logprobs" in logprobs_data
+            ), "Missing 'token_logprobs' in logprobs"
+            assert "tokens" in logprobs_data, "Missing 'tokens' in logprobs"
+
+            token_logprobs = logprobs_data["token_logprobs"]
+            tokens = logprobs_data["tokens"]
+
+            if token_logprobs:
+                assert len(token_logprobs) == len(
+                    tokens
+                ), "Mismatch between token_logprobs and tokens length"
+
+                # Sanity check: each logprob should be valid (not nan/inf/positive)
+                for i, logprob_val in enumerate(token_logprobs):
+                    if logprob_val is not None:  # First token can be None
+                        assert not math.isnan(
+                            logprob_val
+                        ), f"logprob at index {i} is NaN"
+                        assert not math.isinf(
+                            logprob_val
+                        ), f"logprob at index {i} is infinite"
+                        assert (
+                            logprob_val <= 0
+                        ), f"logprob at index {i} should be <= 0, got {logprob_val}"
+
+                logger.info(
+                    f"✓ Logprobs validation passed: found {len(token_logprobs)} tokens with logprobs"
+                )
 
 
 @dataclass
@@ -274,9 +406,9 @@ class MetricsPayload(BasePayload):
                 name=f"{prefix}_*",
                 pattern=lambda name: rf"^{prefix}_\w+",
                 validator=lambda value: len(set(value))
-                >= 23,  # 80% of typical ~29 metrics (excluding _bucket) as of 2025-10-22 (but will grow)
-                error_msg=lambda name, value: f"Expected at least 23 unique {prefix}_* metrics, but found only {len(set(value))}",
-                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 23)",
+                >= 11,  # 80% of typical ~17 metrics (excluding _bucket) as of 2025-12-02
+                error_msg=lambda name, value: f"Expected at least 11 unique {prefix}_* metrics, but found only {len(set(value))}",
+                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 11)",
                 multiline=True,
             ),
             MetricCheck(

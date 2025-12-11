@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from enum import Enum
 
 from benchmarks.profiler.utils.defaults import PREFILL_MAX_NUM_TOKENS, EngineType
-from benchmarks.profiler.utils.model_info import ModelInfo
+from benchmarks.profiler.utils.model_info import (
+    MOE_ADDITIONAL_TP_ARCHITECTURES,
+    ModelInfo,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -82,6 +85,23 @@ class ParallelizationMapping:
             The attention data parallelism size
         """
         return self.dep if self.dep is not None else 1  # TP and TEP → 1
+
+    def get_num_gpus(self) -> int:
+        """
+        Get the total number of GPUs for this parallelization mapping.
+
+        Returns:
+            The total number of GPUs used
+        """
+        if self.tp is not None:
+            return self.tp
+        if self.tep is not None:
+            return self.tep
+        if self.dep is not None:
+            return self.dep
+        raise ValueError(
+            "Invalid ParallelizationMapping: no parallelization strategy set"
+        )
 
 
 def _check_divisibility(
@@ -166,16 +186,12 @@ def get_candidate_parallel_mappings(
 
     candidates: list[ParallelizationMapping] = []
     if is_moe:
-        if phase == EngineType.PREFILL:
-            candidates = [
-                ParallelizationMapping(tep=num_gpus),
-                ParallelizationMapping(dep=num_gpus),
-            ]
-        elif phase == EngineType.DECODE:
-            candidates = [
-                ParallelizationMapping(dep=num_gpus),
-                ParallelizationMapping(tep=num_gpus),
-            ]
+        candidates = [
+            ParallelizationMapping(tep=num_gpus),
+            ParallelizationMapping(dep=num_gpus),
+        ]
+        if model_info.architecture in MOE_ADDITIONAL_TP_ARCHITECTURES:
+            candidates.append(ParallelizationMapping(tp=num_gpus))
     else:
         candidates = [ParallelizationMapping(tp=num_gpus)]
 

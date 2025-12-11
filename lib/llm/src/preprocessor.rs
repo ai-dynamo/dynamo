@@ -27,6 +27,7 @@ use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
+#[cfg(feature = "media-nixl")]
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
@@ -114,6 +115,7 @@ pub struct OpenAIPreprocessor {
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
     tool_call_parser: Option<String>,
+    #[cfg(feature = "media-nixl")]
     media_loader: Option<MediaLoader>,
 }
 
@@ -143,7 +145,13 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
-        let media_loader = None; // TODO: enable with decoder config from MDC
+
+        #[cfg(feature = "media-nixl")]
+        let media_loader = match mdc.media_decoder {
+            Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
+            None => None,
+        };
+
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
@@ -151,6 +159,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             runtime_config,
             tool_call_parser,
+            #[cfg(feature = "media-nixl")]
             media_loader,
         }))
     }
@@ -280,7 +289,9 @@ impl OpenAIPreprocessor {
         let messages = request.messages();
         let message_count = messages.len().unwrap_or(0);
         let mut media_map: MultimodalDataMap = HashMap::new();
-        let mut fetch_tasks = Vec::new();
+        #[cfg(feature = "media-nixl")]
+        let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
+            Vec::new();
 
         for idx in 0..message_count {
             let msg = messages
@@ -313,29 +324,39 @@ impl OpenAIPreprocessor {
                     _ => continue,
                 };
 
+                #[cfg(feature = "media-nixl")]
                 if self.media_loader.is_some() {
                     fetch_tasks.push((type_str, content_part.clone()));
-                } else {
-                    // No loader, just pass the URL through
-                    media_map
-                        .entry(type_str)
-                        .or_default()
-                        .push(MultimodalData::Url(url));
+                    continue;
                 }
+
+                //Fallback: ust pass the URL through
+                media_map
+                    .entry(type_str)
+                    .or_default()
+                    .push(MultimodalData::Url(url));
             }
         }
 
         // Execute all fetch tasks
+        #[cfg(feature = "media-nixl")]
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
-            let _results = futures::future::join_all(
+            let results = futures::future::join_all(
                 fetch_tasks
                     .iter()
                     .map(|(_, content_part)| loader.fetch_and_decode_media_part(content_part)),
             )
             .await;
 
-            // TODO: decode and pass NIXL descriptors to the media map
+            for ((type_str, _), result) in fetch_tasks.into_iter().zip(results.into_iter()) {
+                // if one item fails, errors the whole request, other items will be cleaned up by Drop
+                let rdma_descriptor = result?;
+                media_map
+                    .entry(type_str)
+                    .or_default()
+                    .push(MultimodalData::Decoded(rdma_descriptor));
+            }
         }
 
         if !media_map.is_empty() {
@@ -731,22 +752,14 @@ impl OpenAIPreprocessor {
         has_tools: bool,
     ) -> std::result::Result<bool, Error> {
         match (tool_call_parser, tool_choice, has_tools) {
-            // No parser but tools requested - error cases
-            (None, Some(ChatCompletionToolChoiceOption::Required), true) => {
-                tracing::warn!(
-                    "Tool choice 'required' specified but no tool parser configured; proceeding without jailing"
-                );
-                Ok(false)
-            }
+            // tool_choice=required/named work without parser (use Immediate jail mode)
+            (None, Some(ChatCompletionToolChoiceOption::Required), true) => Ok(true),
+            (None, Some(ChatCompletionToolChoiceOption::Named(_)), true) => Ok(true),
+
+            // tool_choice=auto requires a parser
             (None, Some(ChatCompletionToolChoiceOption::Auto), true) => {
                 tracing::warn!(
                     "Tool choice 'auto' specified but no tool parser configured; proceeding without jailing"
-                );
-                Ok(false)
-            }
-            (None, Some(ChatCompletionToolChoiceOption::Named(_)), _) => {
-                tracing::warn!(
-                    "Named tool choice specified but no tool parser configured; proceeding without jailing"
                 );
                 Ok(false)
             }
@@ -765,15 +778,38 @@ impl OpenAIPreprocessor {
 
     /// Apply tool calling jail to the stream if needed
     pub fn apply_tool_calling_jail<S>(
-        tool_call_parser: String,
+        tool_call_parser: Option<String>,
+        tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        let jail = JailedStream::builder()
-            .tool_call_parser(tool_call_parser)
-            .build();
+        use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
+
+        let mut builder = JailedStream::builder();
+
+        // Configure jail based on tool_choice
+        match tool_choice {
+            Some(ChatCompletionToolChoiceOption::Named(named)) => {
+                // Immediate jail mode for named tool choice
+                builder = builder.tool_choice_named(named.function.name.clone());
+            }
+            Some(ChatCompletionToolChoiceOption::Required) => {
+                // Immediate jail mode for required tool choice
+                builder = builder.tool_choice_required();
+            }
+            Some(ChatCompletionToolChoiceOption::Auto)
+            | Some(ChatCompletionToolChoiceOption::None)
+            | None => {
+                // Traditional marker-based jail for auto/none/unspecified
+                if let Some(parser) = tool_call_parser {
+                    builder = builder.tool_call_parser(parser);
+                }
+            }
+        }
+
+        let jail = builder.build();
         jail.apply_with_finish_reason(stream)
     }
 
@@ -936,11 +972,11 @@ impl
 
         // Apply jail conditionally
         let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
-            if let Some(parser) = self.tool_call_parser.clone() {
-                Box::pin(Self::apply_tool_calling_jail(parser, stream))
-            } else {
-                Box::pin(stream) // Should not happen due to should_jail check
-            }
+            Box::pin(Self::apply_tool_calling_jail(
+                self.tool_call_parser.clone(),
+                request.inner.tool_choice.clone(),
+                stream,
+            ))
         } else {
             Box::pin(stream)
         };

@@ -5,6 +5,7 @@ from typing import (
     Any,
     AsyncGenerator,
     AsyncIterator,
+    Awaitable,
     Callable,
     Dict,
     List,
@@ -54,6 +55,32 @@ class DistributedRuntime:
     def child_token(self) -> CancellationToken:
         """
         Get a child cancellation token that can be passed to async tasks
+        """
+        ...
+
+    def register_engine_route(
+        self,
+        route_name: str,
+        callback: Callable[[dict], Awaitable[dict]],
+    ) -> None:
+        """
+        Register an async callback for /engine/{route_name} on the system status server.
+
+        Args:
+            route_name: The route path (e.g., "start_profile" creates /engine/start_profile)
+            callback: Async function with signature: async def(body: dict) -> dict
+
+        Example:
+            async def start_profile(body: dict) -> dict:
+                await engine.start_profile(**body)
+                return {"status": "ok", "message": "Profiling started"}
+
+            runtime.register_engine_route("start_profile", start_profile)
+
+        The callback receives the JSON request body as a dict and should return
+        a dict that will be serialized as the JSON response.
+
+        For GET requests or empty bodies, an empty dict {} is passed.
         """
         ...
 
@@ -1102,8 +1129,36 @@ async def register_llm(
     runtime_config: Optional[ModelRuntimeConfig] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
+    lora_name: Optional[str] = None,
+    base_model_path: Optional[str] = None,
 ) -> None:
-    """Attach the model at path to the given endpoint, and advertise it as model_type"""
+    """
+    Attach the model at path to the given endpoint, and advertise it as model_type.
+    LoRA Registration:
+        The `lora_name` and `base_model_path` parameters must be provided together or not at all.
+        Providing only one of these parameters will raise a ValueError.
+        - `lora_name`: The served model name for the LoRA model
+        - `base_model_path`: Path to the base model that the LoRA extends
+
+    For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
+    and a minimal model card is registered directly. Use model_path as the display name
+    for these models.
+    """
+    ...
+
+async def unregister_llm(
+    endpoint: Endpoint,
+    lora_name: Optional[str] = None,
+) -> None:
+    """
+    Unregister a model from the discovery system.
+
+    If lora_name is provided, unregisters a LoRA adapter instead of a base model.
+    """
+    ...
+
+def lora_name_to_id(lora_name: str) -> int:
+    """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
 
 async def fetch_llm(remote_name: str) -> str:
