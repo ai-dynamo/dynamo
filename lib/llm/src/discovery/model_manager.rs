@@ -332,6 +332,11 @@ impl ModelManager {
         let instance_id = discovery.instance_id();
         let request_plane_mode = endpoint.drt().request_plane();
 
+        // Ensure request plane server is initialized before building transport.
+        // For TCP mode, this sets the actual port (which may be OS-assigned).
+        // This must happen before build_transport_type() which reads the port.
+        let _ = endpoint.drt().request_plane_server().await?;
+
         // Build transport for router endpoint based on request plane mode
         // Use KV_ROUTER_COMPONENT as the component name to distinguish from the generate endpoint's component
         let router_endpoint_id = router_endpoint_id(endpoint.id().namespace);
