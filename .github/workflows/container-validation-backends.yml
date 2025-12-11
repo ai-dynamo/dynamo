@@ -186,10 +186,10 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: debuggin
-        shell: bash
-        run: |
-          sleep 3600 
+      # - name: debuggin
+      #   shell: bash
+      #   run: |
+      #     sleep 3600 
       - name: Linter
         shell: bash
         env:
