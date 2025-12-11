@@ -149,7 +149,7 @@ class DynamoWorkerProcess(ManagedProcess):
     indirect=True,
 )
 def test_request_migration_trtllm_worker_failure(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
     """
     End-to-end test for worker fault tolerance with migration support using TRT-LLM.
@@ -213,7 +213,7 @@ def test_request_migration_trtllm_worker_failure(
     indirect=True,
 )
 def test_request_migration_trtllm_graceful_shutdown(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration support using TRT-LLM.
@@ -281,7 +281,7 @@ def test_request_migration_trtllm_graceful_shutdown(
     indirect=True,
 )
 def test_no_request_migration_trtllm_worker_failure(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
     """
     End-to-end test for worker fault tolerance with migration disabled using TRT-LLM.
@@ -369,7 +369,7 @@ def test_no_request_migration_trtllm_worker_failure(
     indirect=True,
 )
 def test_no_request_migration_trtllm_graceful_shutdown(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration disabled using TRT-LLM.
