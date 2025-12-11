@@ -86,8 +86,8 @@ def minio_lora_service():
         local_path = service.download_lora()
         service.upload_lora(local_path)
 
-        # Clean up downloaded files (keep MinIO running)
-        service.cleanup_temp()
+        # Clean up downloaded files (keep MinIO data intact)
+        service.cleanup_download()
 
         yield config
 
