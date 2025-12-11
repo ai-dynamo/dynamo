@@ -34,6 +34,7 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
     pytest.mark.post_merge,  # post_merge to pinpoint failure commit
+    pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
 ]
 
 
@@ -169,7 +170,6 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.timeout(110)  # 3x average
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_request_cancellation_vllm_aggregated(request, runtime_services_dynamic_ports):
     """
     End-to-end test for request cancellation functionality in aggregated mode.
@@ -249,11 +249,6 @@ def test_request_cancellation_vllm_aggregated(request, runtime_services_dynamic_
 
 
 @pytest.mark.timeout(150)  # 3x average
-@pytest.mark.parametrize(
-    "request_plane",
-    ["nats", "tcp"],
-    indirect=True,
-)
 def test_request_cancellation_vllm_decode_cancel(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
 ):
@@ -335,11 +330,6 @@ def test_request_cancellation_vllm_decode_cancel(
 
 
 @pytest.mark.timeout(150)  # 3x average
-@pytest.mark.parametrize(
-    "request_plane",
-    ["nats", "tcp"],
-    indirect=True,
-)
 def test_request_cancellation_vllm_prefill_cancel(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
 ):
