@@ -22,18 +22,17 @@ limitations under the License.
 In disaggregated serving architectures, KV cache must be transferred between prefill and decode workers. TensorRT-LLM supports two methods for this transfer:
 
 ## Default Method: NIXL
+By default, TensorRT-LLM uses **NIXL** (NVIDIA Inference Xfer Library) with UCX (Unified Communication X) as backend for KV cache transfer between prefill and decode workers. [NIXL](https://github.com/ai-dynamo/nixl) is NVIDIA's high-performance communication library designed for efficient data transfer in distributed GPU environments.
 
-### Configuring the NIXL Backend
+### Specify Backends for NIXL
 
-You can select the backend for NIXL-based KV cache transfer by setting the `TRTLLM_NIXL_KVCACHE_BACKEND` environment variable. For example, to use the `LIBFABRIC` backend:
+TODO: Add instructions for how to specify different backends for NIXL.
 
-```bash
-export TRTLLM_NIXL_KVCACHE_BACKEND=LIBFABRIC
-```
+## Alternative Method: UCX
 
-Supported values include `UCX` and `LIBFABRIC`, depending on your cluster's hardware and software environment. Choose the backend that best matches your system for optimal performance and compatibility.
+TensorRT-LLM can also leverage **UCX** (Unified Communication X) directly for KV cache transfer between prefill and decode workers. There are two ways to enable UCX as the KV cache transfer backend:
 
-## Alternative Method: Direct UCX
+1. **Recommended:** Set `cache_transceiver_config.backend: UCX` in your engine configuration YAML file.
+2. Alternatively, set the environment variable `TRTLLM_USE_UCX_KV_CACHE=1` and configure `cache_transceiver_config.backend: DEFAULT` in the engine configuration YAML.
 
-
-
+This flexibility allows users to choose the most suitable method for their deployment and compatibility requirements.
