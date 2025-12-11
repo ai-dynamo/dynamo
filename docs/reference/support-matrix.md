@@ -61,7 +61,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Build Dependency** | **Version as of Dynamo v0.7.0** |
 | :------------------- | :------------------------------ |
 | **SGLang**           | 0.5.3.post4                     |
-| **TensorRT-LLM**     | 1.2.0rc2                        |
+| **TensorRT-LLM**     | 1.2.0rc5                        |
 | **vLLM**             | 0.11.0                          |
 | **NIXL**             | 0.7.1                           |
 
