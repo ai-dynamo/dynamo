@@ -1230,8 +1230,13 @@ func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_R
 	g.Expect(*createdDeployment.Spec.Replicas).To(gomega.Equal(int32(1)), "Initial deployment should have 1 replica")
 
 	// Step 2: Manually update the deployment to 2 replicas (simulating manual edit)
+	// Note: Real Kubernetes API server increments generation on spec changes,
+	// but the fake client doesn't, so we simulate it here.
+	// The operator sets last-applied-generation=1 on create, so we need generation > 1
+	// to trigger manual change detection.
 	manualReplicaCount := int32(2)
 	createdDeployment.Spec.Replicas = &manualReplicaCount
+	createdDeployment.Generation = 2 // Simulate K8s incrementing generation on spec change
 	err = fakeKubeClient.Update(ctx, createdDeployment)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
