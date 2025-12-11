@@ -1,0 +1,45 @@
+name: 'Define Buildkit Builders'
+description: 'Create Kubernetes-based Docker Buildx builders for multiple platforms'
+
+inputs:
+  builder_name:
+    description: 'Builder name'
+    required: true
+  replicas:
+    description: 'Number of replicas per platform'
+    required: false
+    default: '4'
+  linux_amd64:
+    description: 'Enable linux/amd64 builder'
+    required: false
+    default: 'true'
+  linux_arm64:
+    description: 'Enable linux/arm64 builder'
+    required: false
+    default: 'true'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Define amd64 builder
+      if: inputs.linux_amd64 == 'true'
+      uses: ./.github/actions/buildkit-builder
+      with:
+        builder_name: ${{ inputs.builder_name }}
+        mode: create
+        platform: linux/amd64
+        replicas: ${{ inputs.replicas }}
+        nodeselector: 'eks.amazonaws.com/nodegroup=cpu-amd-m5-2xlarge,kubernetes.io/arch=amd64'
+        tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
+
+    - name: Define arm64 builder
+      if: inputs.linux_arm64 == 'true'
+      uses: ./.github/actions/buildkit-builder
+      with:
+        builder_name: ${{ inputs.builder_name }}
+        mode: ${{ inputs.linux_amd64 == 'true' && 'append' || 'create' }}
+        platform: linux/arm64
+        replicas: ${{ inputs.replicas }}
+        nodeselector: 'eks.amazonaws.com/nodegroup=cpu-arm-r8g-4xlarge,kubernetes.io/arch=arm64'
+        tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
+
