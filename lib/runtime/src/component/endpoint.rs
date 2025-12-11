@@ -256,10 +256,10 @@ pub fn build_transport_type(
         }
         RequestPlaneMode::Tcp => {
             let tcp_host = crate::utils::get_tcp_rpc_host_from_env();
-            let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
-                .ok()
-                .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(9999);
+            // Get the actual TCP port from the global reference (set by TCP server after binding).
+            // If user explicitly set DYN_TCP_RPC_PORT, that value is used during binding.
+            // If port was OS-assigned (0), this returns the actual assigned port.
+            let tcp_port = crate::pipeline::network::manager::get_actual_tcp_rpc_port();
 
             // Include endpoint name for proper TCP routing
             // TCP client parses this format and adds x-endpoint-path header for server-side routing
