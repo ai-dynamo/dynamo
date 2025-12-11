@@ -313,16 +313,6 @@ impl KvRouter {
                 card.runtime_config
             });
 
-        // Watch for local indexer states via discovery interface (separate stream needed
-        // because streams are consumed by watch_and_extract_field)
-        let discovery_stream_local_indexer = discovery
-            .list_and_watch(discovery_key, Some(cancellation_token.clone()))
-            .await?;
-        let local_indexer_rx = watch_and_extract_field(
-            discovery_stream_local_indexer,
-            |card: ModelDeploymentCard| card.runtime_config.enable_local_indexer,
-        );
-
         let indexer = if kv_router_config.overlap_score_weight == 0.0 {
             // When overlap_score_weight is zero, we don't need to track prefixes
             Indexer::None
@@ -353,7 +343,7 @@ impl KvRouter {
             component.clone(),
             block_size,
             instance_ids_rx,
-            runtime_configs_rx,
+            runtime_configs_rx.clone(),
             selector,
             kv_router_config.router_replica_sync,
             consumer_id.clone(),
@@ -363,7 +353,7 @@ impl KvRouter {
         // Initialize worker query client using namespace abstraction
         // (created before background task so we can use it for startup recovery)
         let worker_query_client =
-            worker_query::WorkerQueryClient::new(component.clone(), local_indexer_rx);
+            worker_query::WorkerQueryClient::new(component.clone(), runtime_configs_rx.clone());
         tracing::info!("Worker query client initialized");
 
         // Start KV event subscriber background process (only when use_kv_events is enabled)

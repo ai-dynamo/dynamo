@@ -207,8 +207,10 @@ def parse_args() -> Config:
     )
     parser.add_argument(
         "--enable-local-indexer",
-        action="store_true",
-        help="Enable worker-local KV indexer for tracking this worker's own KV cache state.",
+        type=str,
+        choices=["true", "false"],
+        default=os.environ.get("DYN_LOCAL_INDEXER", "false"),
+        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     )
     parser.add_argument(
         "--use-vllm-tokenizer",
@@ -220,6 +222,7 @@ def parse_args() -> Config:
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
+    args.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
     # Workaround for vLLM GIL contention bug with NIXL connector when using UniProcExecutor.

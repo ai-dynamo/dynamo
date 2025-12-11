@@ -12,6 +12,7 @@ use tokio::sync::watch;
 use crate::kv_router::WORKER_KV_INDEXER_QUERY_SUBJECT;
 use crate::kv_router::indexer::{WorkerKvQueryRequest, WorkerKvQueryResponse};
 use crate::kv_router::protocols::WorkerId;
+use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 /// Router-side client for querying worker local KV indexers
 ///
@@ -21,27 +22,27 @@ use crate::kv_router::protocols::WorkerId;
 pub struct WorkerQueryClient {
     component: Component,
     /// Watch receiver for enable_local_indexer state per worker
-    local_indexer_rx: watch::Receiver<HashMap<WorkerId, bool>>,
+    model_runtime_config_rx: watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>,
 }
 
 impl WorkerQueryClient {
     /// Create a new WorkerQueryClient with a watch receiver for local indexer states
     pub fn new(
         component: Component,
-        local_indexer_rx: watch::Receiver<HashMap<WorkerId, bool>>,
+        model_runtime_config_rx: watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>,
     ) -> Self {
         Self {
             component,
-            local_indexer_rx,
+            model_runtime_config_rx,
         }
     }
 
     /// Check if a worker has local indexer enabled
     pub fn has_local_indexer(&self, worker_id: WorkerId) -> bool {
-        self.local_indexer_rx
+        self.model_runtime_config_rx
             .borrow()
             .get(&worker_id)
-            .copied()
+            .map(|config| config.enable_local_indexer)
             .unwrap_or(false)
     }
 

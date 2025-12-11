@@ -2133,7 +2133,7 @@ mod test_integration_publisher_with_kvindexer {
     use dynamo_runtime::protocols::annotated::Annotated;
 
     /// Integration test: KvPushRouter end-to-end routing with mock engines.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore] // Requires NATS/etcd. Run with: cargo test --package dynamo-llm --lib --features integration test_distributed_kvindexer_e2e -- --ignored --nocapture
     async fn test_distributed_kvindexer_e2e() -> anyhow::Result<()> {
         const BLOCK_SIZE: u32 = 4;
@@ -2339,7 +2339,7 @@ mod test_integration_publisher_with_kvindexer {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore]
     async fn test_distributed_kvindexer_e2e_startup() -> anyhow::Result<()> {
         const BLOCK_SIZE: u32 = 4;
