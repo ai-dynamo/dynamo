@@ -17,9 +17,9 @@
 //! **Set thresholds:**
 //! ```json
 //! // Request
-//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1.5}
+//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}
 //! // Response
-//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1.5}
+//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}
 //! ```
 //!
 //! **Get thresholds (omit thresholds):**
@@ -27,7 +27,7 @@
 //! // Request
 //! {"model": "llama-3-70b"}
 //! // Response (if configured)
-//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1.5}
+//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}
 //! // Response (if not configured)
 //! {"model": "llama-3-70b", "active_decode_blocks_threshold": null, "active_prefill_tokens_threshold": null}
 //! ```
@@ -38,7 +38,7 @@
 //!
 //! ```json
 //! // Response
-//! {"thresholds": [{"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1.5}]}
+//! {"thresholds": [{"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}]}
 //! ```
 
 use super::{RouteDoc, service_v2};
@@ -61,8 +61,8 @@ pub struct BusyThresholdRequest {
     pub model: String,
     /// The active decode blocks threshold value (0.0 to 1.0), or null to just get the current value
     pub active_decode_blocks_threshold: Option<f64>,
-    /// The active prefill tokens threshold value (can exceed 1.0), or null to just get the current value
-    pub active_prefill_tokens_threshold: Option<f64>,
+    /// The active prefill tokens threshold value (literal token count), or null to just get the current value
+    pub active_prefill_tokens_threshold: Option<u64>,
 }
 
 /// Response for a threshold operation
@@ -73,7 +73,7 @@ pub struct BusyThresholdResponse {
     /// The active decode blocks threshold value (null if no threshold is configured)
     pub active_decode_blocks_threshold: Option<f64>,
     /// The active prefill tokens threshold value (null if no threshold is configured)
-    pub active_prefill_tokens_threshold: Option<f64>,
+    pub active_prefill_tokens_threshold: Option<u64>,
 }
 
 /// Response for listing all thresholds
@@ -121,21 +121,6 @@ async fn busy_threshold_handler(
             Json(serde_json::json!(ErrorResponse {
                 error: format!(
                     "active_decode_blocks_threshold must be between 0.0 and 1.0, got {}",
-                    threshold
-                ),
-            })),
-        );
-    }
-
-    // active_prefill_tokens_threshold can exceed 1.0 (no upper bound validation)
-    if let Some(threshold) = request.active_prefill_tokens_threshold
-        && threshold < 0.0
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!(ErrorResponse {
-                error: format!(
-                    "active_prefill_tokens_threshold must be >= 0.0, got {}",
                     threshold
                 ),
             })),

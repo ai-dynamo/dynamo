@@ -520,7 +520,7 @@ impl ModelManager {
 
     /// Get or set the active prefill tokens threshold for a model's worker monitor.
     ///
-    /// The threshold can exceed 1.0 since active prefill tokens include queued tokens.
+    /// The threshold is a literal token count (not a percentage).
     ///
     /// # Arguments
     ///
@@ -529,12 +529,12 @@ impl ModelManager {
     ///
     /// # Returns
     ///
-    /// The threshold value as f64, or `None` if no monitor exists for this model.
+    /// The threshold value as u64, or `None` if no monitor exists for this model.
     pub fn active_prefill_tokens_threshold(
         &self,
         model: &str,
-        threshold: Option<f64>,
-    ) -> Option<f64> {
+        threshold: Option<u64>,
+    ) -> Option<u64> {
         let monitors = self.worker_monitors.read();
         let monitor = monitors.get(model)?;
 
@@ -557,7 +557,7 @@ impl ModelManager {
     /// * `model` - The model name
     /// * `client` - The client for subscribing to KV metrics (only used if creating new)
     /// * `active_decode_blocks_threshold` - The initial/updated active decode blocks threshold value (0.0-1.0)
-    /// * `active_prefill_tokens_threshold` - The initial/updated active prefill tokens threshold value (can exceed 1.0)
+    /// * `active_prefill_tokens_threshold` - The initial/updated active prefill tokens threshold value (literal token count)
     ///
     /// # Returns
     ///
@@ -567,7 +567,7 @@ impl ModelManager {
         model: &str,
         client: Client,
         active_decode_blocks_threshold: f64,
-        active_prefill_tokens_threshold: f64,
+        active_prefill_tokens_threshold: u64,
     ) -> KvWorkerMonitor {
         let mut monitors = self.worker_monitors.write();
 
@@ -594,7 +594,7 @@ impl ModelManager {
     /// Lists all models that have worker monitors (and thus busy thresholds) configured.
     ///
     /// Returns a vector of (model_name, active_decode_blocks_threshold, active_prefill_tokens_threshold) tuples.
-    pub fn list_busy_thresholds(&self) -> Vec<(String, f64, f64)> {
+    pub fn list_busy_thresholds(&self) -> Vec<(String, f64, u64)> {
         self.worker_monitors
             .read()
             .iter()

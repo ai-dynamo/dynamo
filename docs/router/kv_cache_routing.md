@@ -33,7 +33,7 @@ The main KV-aware routing arguments:
 
 - `--active-decode-blocks-threshold`: Initial threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache block utilization. When a worker's KV cache active blocks exceed this percentage of total blocks, it will be marked as busy and excluded from routing. If not set, blocks-based busy detection is disabled. This feature works with all routing modes (`--router-mode kv|round-robin|random`) as long as backend engines emit `ForwardPassMetrics`. The threshold can be dynamically updated at runtime via the `/busy_threshold` HTTP endpoint (see [Dynamic Threshold Configuration](#dynamic-threshold-configuration)).
 
-- `--active-prefill-tokens-threshold`: Threshold for determining when a worker is considered busy based on prefill token utilization. Can exceed 1.0 since active prefill tokens include queued tokens (pending prefill work). If not set, tokens-based busy detection is disabled. When set, the router checks if active prefill tokens exceed `threshold * max_num_batch_tokens`. Generally, set this higher than 1.0 to account for queued requests.
+- `--active-prefill-tokens-threshold`: Literal token count threshold for determining when a worker is considered busy based on prefill token utilization. When active prefill tokens exceed this threshold, the worker is marked as busy. If not set, tokens-based busy detection is disabled.
 
 - `--router-ttl`: Time-to-live in seconds for blocks in the router's local cache predictions. Blocks older than this duration will be automatically expired and removed from the router's radix tree. Defaults to 120.0 seconds when `--no-kv-events` is used. This helps manage memory usage by removing stale cache predictions that are unlikely to be accurate.
 
@@ -594,8 +594,8 @@ The busy thresholds can be updated at runtime without restarting the frontend. T
 # Set both thresholds for a model
 curl -X POST http://localhost:8000/busy_threshold \
   -H "Content-Type: application/json" \
-  -d '{"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1.5}'
-# Response: {"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1.5}
+  -d '{"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}'
+# Response: {"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}
 
 # Set only active decode blocks threshold
 curl -X POST http://localhost:8000/busy_threshold \
@@ -607,12 +607,12 @@ curl -X POST http://localhost:8000/busy_threshold \
 curl -X POST http://localhost:8000/busy_threshold \
   -H "Content-Type: application/json" \
   -d '{"model": "meta-llama/Llama-2-7b-hf"}'
-# Response: {"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1.5}
+# Response: {"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}
 # Or if not configured: {"model": "...", "active_decode_blocks_threshold": null, "active_prefill_tokens_threshold": null}
 ```
 
 **List all configured thresholds (GET):**
 ```bash
 curl http://localhost:8000/busy_threshold
-# Response: {"thresholds": [{"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1.5}]}
+# Response: {"thresholds": [{"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000}]}
 ```

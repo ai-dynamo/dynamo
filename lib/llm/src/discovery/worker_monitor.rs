@@ -17,24 +17,20 @@ use tokio_stream::StreamExt;
 /// Scale factor for storing f64 thresholds as u32 (10000 = 4 decimal places)
 const THRESHOLD_SCALE: u32 = 10000;
 
-/// Scale factor for storing f64 tokens threshold as u64 (values can exceed 1.0)
-const TOKENS_THRESHOLD_SCALE: u64 = 10000;
-
 /// Worker load monitoring state per dp_rank
 #[derive(Clone, Debug, Default)]
 pub struct WorkerLoadState {
     pub active_decode_blocks: HashMap<u32, u64>,
     pub kv_total_blocks: HashMap<u32, u64>,
     pub active_prefill_tokens: HashMap<u32, u64>,
-    pub max_num_batch_tokens: HashMap<u32, u64>,
 }
 
 impl WorkerLoadState {
     /// Returns true if ALL dp_ranks are considered busy based on the dual-threshold logic:
     ///
     /// For each dp_rank:
-    /// 1. If `active_prefill_tokens` and `max_num_batch_tokens` are both available,
-    ///    check if tokens exceed threshold. If so, that dp_rank is busy.
+    /// 1. If `active_prefill_tokens` is available, check if tokens exceed the literal threshold.
+    ///    If so, that dp_rank is busy.
     /// 2. If not, check if `active_decode_blocks` and `kv_total_blocks` are both available,
     ///    and if blocks exceed threshold. If so, that dp_rank is busy.
     /// 3. If neither check can be performed (missing data), that dp_rank is considered free.
@@ -43,7 +39,7 @@ impl WorkerLoadState {
     pub fn is_busy(
         &self,
         active_decode_blocks_threshold: f64,
-        active_prefill_tokens_threshold: f64,
+        active_prefill_tokens_threshold: u64,
     ) -> bool {
         // Get all dp_ranks we know about
         let all_dp_ranks: std::collections::HashSet<_> = self
@@ -60,13 +56,9 @@ impl WorkerLoadState {
 
         // Check if ALL dp_ranks are busy
         all_dp_ranks.iter().all(|&dp_rank| {
-            // First check: prefill tokens threshold
-            // Skip if max_tokens is 0 (no capacity means threshold check is meaningless)
-            if let (Some(&active_tokens), Some(&max_tokens)) = (
-                self.active_prefill_tokens.get(&dp_rank),
-                self.max_num_batch_tokens.get(&dp_rank),
-            ) && max_tokens > 0
-                && (active_tokens as f64) > (active_prefill_tokens_threshold * max_tokens as f64)
+            // First check: prefill tokens threshold (literal token count)
+            if let Some(&active_tokens) = self.active_prefill_tokens.get(&dp_rank)
+                && active_tokens > active_prefill_tokens_threshold
             {
                 return true; // This dp_rank is busy due to tokens
             }
@@ -98,7 +90,7 @@ pub struct KvWorkerMonitor {
     worker_load_states: Arc<RwLock<HashMap<u64, WorkerLoadState>>>,
     /// Active decode blocks threshold stored as parts-per-10000 (e.g., 8500 = 0.85)
     active_decode_blocks_threshold: Arc<AtomicU32>,
-    /// Active prefill tokens threshold stored as parts-per-10000 (can exceed 10000 for values > 1.0)
+    /// Active prefill tokens threshold stored as literal token count (u64)
     active_prefill_tokens_threshold: Arc<AtomicU64>,
     /// Guard to ensure start_monitoring() only runs once across clones
     started: Arc<AtomicBool>,
@@ -107,15 +99,15 @@ pub struct KvWorkerMonitor {
 impl KvWorkerMonitor {
     /// Create a new worker monitor with the given thresholds.
     ///
-    /// - `active_decode_blocks_threshold` (0.0-1.0): Threshold for KV cache block utilization
-    /// - `active_prefill_tokens_threshold` (can exceed 1.0): Threshold for prefill token utilization
+    /// - `active_decode_blocks_threshold` (0.0-1.0): Threshold percentage for KV cache block utilization
+    /// - `active_prefill_tokens_threshold`: Literal token count threshold for prefill token utilization
     ///
     /// Both thresholds can be dynamically updated via `set_active_decode_blocks_threshold()` and
     /// `set_active_prefill_tokens_threshold()`.
     pub fn new(
         client: Client,
         active_decode_blocks_threshold: f64,
-        active_prefill_tokens_threshold: f64,
+        active_prefill_tokens_threshold: u64,
     ) -> Self {
         Self {
             client,
@@ -124,7 +116,7 @@ impl KvWorkerMonitor {
                 Self::active_decode_blocks_threshold_to_scaled(active_decode_blocks_threshold),
             )),
             active_prefill_tokens_threshold: Arc::new(AtomicU64::new(
-                Self::active_prefill_tokens_threshold_to_scaled(active_prefill_tokens_threshold),
+                active_prefill_tokens_threshold,
             )),
             started: Arc::new(AtomicBool::new(false)),
         }
@@ -142,18 +134,6 @@ impl KvWorkerMonitor {
         scaled as f64 / THRESHOLD_SCALE as f64
     }
 
-    /// Convert a f64 active prefill tokens threshold (can exceed 1.0) to scaled u64 for atomic storage.
-    #[inline]
-    fn active_prefill_tokens_threshold_to_scaled(threshold: f64) -> u64 {
-        (threshold * TOKENS_THRESHOLD_SCALE as f64) as u64
-    }
-
-    /// Convert a scaled u64 back to f64 active prefill tokens threshold.
-    #[inline]
-    fn scaled_to_active_prefill_tokens_threshold(scaled: u64) -> f64 {
-        scaled as f64 / TOKENS_THRESHOLD_SCALE as f64
-    }
-
     /// Get the current active decode blocks threshold value as f64.
     pub fn active_decode_blocks_threshold(&self) -> f64 {
         Self::scaled_to_active_decode_blocks_threshold(
@@ -169,19 +149,15 @@ impl KvWorkerMonitor {
         );
     }
 
-    /// Get the current active prefill tokens threshold value as f64.
-    pub fn active_prefill_tokens_threshold(&self) -> f64 {
-        Self::scaled_to_active_prefill_tokens_threshold(
-            self.active_prefill_tokens_threshold.load(Ordering::Relaxed),
-        )
+    /// Get the current active prefill tokens threshold value as u64.
+    pub fn active_prefill_tokens_threshold(&self) -> u64 {
+        self.active_prefill_tokens_threshold.load(Ordering::Relaxed)
     }
 
-    /// Set the active prefill tokens threshold value from f64.
-    pub fn set_active_prefill_tokens_threshold(&self, threshold: f64) {
-        self.active_prefill_tokens_threshold.store(
-            Self::active_prefill_tokens_threshold_to_scaled(threshold),
-            Ordering::Relaxed,
-        );
+    /// Set the active prefill tokens threshold value from u64.
+    pub fn set_active_prefill_tokens_threshold(&self, threshold: u64) {
+        self.active_prefill_tokens_threshold
+            .store(threshold, Ordering::Relaxed);
     }
 
     /// Get the worker load states for external access
@@ -244,7 +220,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         let mut states = worker_load_states.write().unwrap();
                         states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
 
-                        // Update worker load states with total blocks and max batch tokens for all dp_ranks
+                        // Update worker load states with total blocks for all dp_ranks
                         for (lease_id, runtime_config) in runtime_configs.iter() {
                             let state = states.entry(*lease_id).or_default();
 
@@ -252,13 +228,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             if let Some(total_blocks) = runtime_config.total_kv_blocks {
                                 for dp_rank in 0..runtime_config.data_parallel_size {
                                     state.kv_total_blocks.insert(dp_rank, total_blocks);
-                                }
-                            }
-
-                            // Populate max_num_batch_tokens for all dp_ranks
-                            if let Some(max_tokens) = runtime_config.max_num_batched_tokens {
-                                for dp_rank in 0..runtime_config.data_parallel_size {
-                                    state.max_num_batch_tokens.insert(dp_rank, max_tokens);
                                 }
                             }
                         }
@@ -294,9 +263,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         let current_active_decode_blocks_threshold = Self::scaled_to_active_decode_blocks_threshold(
                             active_decode_blocks_threshold.load(Ordering::Relaxed),
                         );
-                        let current_active_prefill_tokens_threshold = Self::scaled_to_active_prefill_tokens_threshold(
-                            active_prefill_tokens_threshold.load(Ordering::Relaxed),
-                        );
+                        let current_active_prefill_tokens_threshold = active_prefill_tokens_threshold.load(Ordering::Relaxed);
 
                         // Recalculate all busy instances and update
                         let states = worker_load_states.read().unwrap();

@@ -23,8 +23,8 @@ pub struct RouterConfig {
     pub kv_router_config: KvRouterConfig,
     /// Threshold for active decode blocks utilization (0.0-1.0)
     pub active_decode_blocks_threshold: Option<f64>,
-    /// Threshold for active prefill tokens utilization (can exceed 1.0)
-    pub active_prefill_tokens_threshold: Option<f64>,
+    /// Threshold for active prefill tokens utilization (literal token count)
+    pub active_prefill_tokens_threshold: Option<u64>,
     pub enforce_disagg: bool,
 }
 
@@ -44,7 +44,7 @@ impl RouterConfig {
         self
     }
 
-    pub fn with_active_prefill_tokens_threshold(mut self, threshold: Option<f64>) -> Self {
+    pub fn with_active_prefill_tokens_threshold(mut self, threshold: Option<u64>) -> Self {
         self.active_prefill_tokens_threshold = threshold;
         self
     }

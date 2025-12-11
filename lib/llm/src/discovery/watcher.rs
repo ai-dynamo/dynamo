@@ -408,7 +408,7 @@ impl ModelWatcher {
             let worker_monitor = if self.router_config.active_decode_blocks_threshold.is_some()
                 || self.router_config.active_prefill_tokens_threshold.is_some()
             {
-                // Default thresholds: active_decode_blocks=1.0 (disabled), active_prefill_tokens=1000.0 (effectively disabled)
+                // Default thresholds: active_decode_blocks=1.0 (disabled), active_prefill_tokens=1000000 (effectively disabled)
                 let active_decode_blocks = self
                     .router_config
                     .active_decode_blocks_threshold
@@ -416,7 +416,7 @@ impl ModelWatcher {
                 let active_prefill_tokens = self
                     .router_config
                     .active_prefill_tokens_threshold
-                    .unwrap_or(1000.0);
+                    .unwrap_or(1000000);
                 Some(self.manager.get_or_create_worker_monitor(
                     card.name(),
                     client.clone(),

@@ -2015,7 +2015,7 @@ def _test_busy_threshold_endpoint(
     """
     # Initial thresholds - we need to start with these so the monitor is created
     initial_active_decode_blocks_threshold = 0.9
-    initial_active_prefill_tokens_threshold = 1.5
+    initial_active_prefill_tokens_threshold = 1000  # Literal token count threshold
 
     try:
         # Start KV router frontend with initial thresholds to create monitor
@@ -2111,7 +2111,9 @@ def _test_busy_threshold_endpoint(
                     logger.info(f"POST /busy_threshold (set blocks) response: {data}")
 
                 # Test 4: POST /busy_threshold to set active_prefill_tokens_threshold only
-                test_active_prefill_tokens_threshold = 2.0
+                test_active_prefill_tokens_threshold = (
+                    2000  # Literal token count threshold
+                )
                 logger.info(
                     f"Testing POST /busy_threshold to set active_prefill_tokens_threshold={test_active_prefill_tokens_threshold}"
                 )
@@ -2134,7 +2136,9 @@ def _test_busy_threshold_endpoint(
 
                 # Test 5: POST /busy_threshold to set both thresholds
                 new_active_decode_blocks_threshold = 0.5
-                new_active_prefill_tokens_threshold = 1.2
+                new_active_prefill_tokens_threshold = (
+                    1200  # Literal token count threshold
+                )
                 logger.info(
                     f"Testing POST /busy_threshold to set both thresholds: "
                     f"active_decode_blocks={new_active_decode_blocks_threshold}, active_prefill_tokens={new_active_prefill_tokens_threshold}"
@@ -2201,22 +2205,24 @@ def _test_busy_threshold_endpoint(
                         f"POST /busy_threshold (invalid blocks) response: {data}"
                     )
 
-                # Test 8: active_prefill_tokens_threshold can exceed 1.0 (should be valid)
+                # Test 8: active_prefill_tokens_threshold accepts large values (should be valid)
                 logger.info(
-                    "Testing POST /busy_threshold with active_prefill_tokens_threshold > 1.0 (valid)"
+                    "Testing POST /busy_threshold with large active_prefill_tokens_threshold (valid)"
                 )
                 async with session.post(
                     busy_threshold_url,
-                    json={"model": model_name, "active_prefill_tokens_threshold": 3.0},
+                    json={"model": model_name, "active_prefill_tokens_threshold": 5000},
                 ) as response:
                     assert (
                         response.status == 200
-                    ), f"Expected 200 for active_prefill_tokens_threshold > 1.0, got {response.status}"
+                    ), f"Expected 200 for large active_prefill_tokens_threshold, got {response.status}"
                     data = await response.json()
                     assert (
-                        data.get("active_prefill_tokens_threshold") == 3.0
-                    ), f"Expected active_prefill_tokens_threshold=3.0: {data}"
-                    logger.info(f"POST /busy_threshold (tokens > 1.0) response: {data}")
+                        data.get("active_prefill_tokens_threshold") == 5000
+                    ), f"Expected active_prefill_tokens_threshold=5000: {data}"
+                    logger.info(
+                        f"POST /busy_threshold (large tokens threshold) response: {data}"
+                    )
 
                 # Test 9: Invalid active_prefill_tokens_threshold value (should fail validation for < 0)
                 logger.info(
