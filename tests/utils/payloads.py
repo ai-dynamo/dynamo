@@ -21,6 +21,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
+import requests
+
 from dynamo import prometheus_names  # type: ignore[attr-defined]
 
 logger = logging.getLogger(__name__)
@@ -275,8 +277,6 @@ class LoraTestChatPayload(ChatPayload):
     def _ensure_lora_loaded(self) -> None:
         """Ensure the LoRA adapter is loaded before making inference requests"""
         if not self._lora_loaded:
-            import requests
-
             # Import the load_lora_adapter function
             # Note: This import is done here to avoid circular dependencies
             from tests.serve.lora_utils import load_lora_adapter
