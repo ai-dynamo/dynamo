@@ -176,6 +176,7 @@ jobs:
           linux_amd64: 'true'
           linux_arm64: 'true'
           linux_amd64_gpu: 'false'
+
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -185,6 +186,10 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: debuggin
+        shell: bash
+        run: |
+          sleep 3600 
       - name: Linter
         shell: bash
         env:
