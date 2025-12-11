@@ -19,7 +19,6 @@ import httpx
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
-from PIL import Image
 from pydantic import BaseModel
 from router import RouterAPI, RouterRequest, RouterResponse
 from tensorrt_llm.inputs.multimodal import apply_mm_hashes
@@ -35,6 +34,10 @@ logger = logging.getLogger(__name__)
 # Debug flag: set DYNAMO_DEBUG=1 to enable debug file dumps
 DEBUG_ENABLED = os.environ.get("DYNAMO_DEBUG", "0") == "1"
 DEBUG_API_FILE = "/tmp/debug_api_hashes.txt"
+
+# Qwen2-VL specific token IDs
+QWEN2_VL_IMAGE_TOKEN_ID = 151655
+QWEN2_VL_REPLACEMENT_ID = 151937
 
 
 def dump_api_debug(
@@ -63,7 +66,13 @@ def dump_api_debug(
         f.write(f"local_hashes ({len(local_hashes)}): {local_hashes}\n")
         f.write(f"{'='*60}\n")
 
-# Multimodal content types (OpenAI format)
+
+def make_error(message: str, error_type: str, code: int) -> dict:
+    """Create a standardized error response dict."""
+    return {"message": message, "type": error_type, "code": code}
+
+
+# Pydantic models for OpenAI-compatible API
 class ImageUrl(BaseModel):
     url: str
 
@@ -76,7 +85,7 @@ class ContentPart(BaseModel):
 
 class Message(BaseModel):
     role: str
-    content: str | list[ContentPart]  # str for text-only, list for multimodal
+    content: str | list[ContentPart]
 
 
 class ChatCompletionRequest(BaseModel):
@@ -95,6 +104,7 @@ class ErrorResponse(BaseModel):
 
 @dataclass(frozen=True)
 class ServingParams:
+    """Configuration parameters for the serving API."""
     model: str
     model_type: str  # e.g., "qwen2_vl", "llava"
     block_size: int
@@ -105,353 +115,360 @@ class ServingParams:
     http_port: int
 
 
+@dataclass
+class ParsedRequest:
+    """Parsed and preprocessed request data."""
+    messages_dict: list[dict]
+    image_urls: list[str]
+    max_tokens: int
+    temperature: float
+    top_p: float
+    model: str
+
+
+@dataclass
+class ProcessedInput:
+    """Processed input ready for routing and generation."""
+    tokens: list[int]
+    mm_input: dict | None  # For multimodal requests
+    mm_hash: int | None
+    image_offsets: list[int] | None  # [start, end]
+
+
 class ServiceAPI:
+    """Main API service handling chat completion requests with KV cache routing."""
+
     def __init__(self, init_params: ServingParams):
         self.init_params = init_params
         self.app = FastAPI(title="TensorRT-LLM Router API", version="0.0.1")
 
         self.workers: Optional[TrtllmWorkers] = None
         self.tokenizer = None
-        self.processor = None  # HuggingFace processor for token expansion
+        self.processor = None
         self.http_client: Optional[httpx.AsyncClient] = None
 
-        self.setup_routes()
+        self._setup_routes()
 
-    def setup_routes(self):
-        @self.app.post("/v1/chat/completions")
-        async def chat_completions(request: ChatCompletionRequest):
-            if (
-                self.workers is None
-                or self.tokenizer is None
-                or self.http_client is None
-            ):
-                return ErrorResponse(
-                    error={
-                        "message": "Service not ready",
-                        "type": "service_unavailable",
-                        "code": 503,
-                    }
+    # -------------------------------------------------------------------------
+    # Request Parsing Helpers
+    # -------------------------------------------------------------------------
+
+    def _parse_request(self, request: ChatCompletionRequest) -> ParsedRequest | ErrorResponse:
+        """Parse and validate the incoming request."""
+        max_tokens = request.max_completion_tokens or request.max_tokens
+        if max_tokens is None:
+            return ErrorResponse(
+                error=make_error(
+                    "Either max_tokens or max_completion_tokens must be specified",
+                    "invalid_request_error", 400
                 )
+            )
 
-            try:
-                max_tokens_value = None
-                if request.max_completion_tokens is not None:
-                    max_tokens_value = request.max_completion_tokens
-                elif request.max_tokens is not None:
-                    max_tokens_value = request.max_tokens
-                else:
-                    return ErrorResponse(
-                        error={
-                            "message": "Either max_tokens or max_completion_tokens must be specified",
-                            "type": "invalid_request_error",
-                            "code": 400,
-                        }
-                    )
+        messages_dict, image_urls = self._extract_messages(request.messages)
 
-                # Extract text and multimodal content from messages
-                messages_dict = []
-                image_urls = []
+        return ParsedRequest(
+            messages_dict=messages_dict,
+            image_urls=image_urls,
+            max_tokens=max_tokens,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            model=request.model,
+        )
 
-                for msg in request.messages:
-                    if isinstance(msg.content, str):
-                        # Text-only message
-                        messages_dict.append({"role": msg.role, "content": msg.content})
-                    else:
-                        # Multimodal message
-                        text_parts = []
-                        for part in msg.content:
-                            if part.type == "text" and part.text:
-                                text_parts.append(part.text)
-                            elif part.type == "image_url" and part.image_url:
-                                image_urls.append(part.image_url.url)
-                        messages_dict.append({"role": msg.role, "content": " ".join(text_parts)})
+    def _extract_messages(self, messages: list[Message]) -> tuple[list[dict], list[str]]:
+        """Extract text messages and image URLs from request messages."""
+        messages_dict = []
+        image_urls = []
 
-                # Build prompt text
-                try:
-                    prompt = self.tokenizer.apply_chat_template(
-                        messages_dict, tokenize=False, add_generation_prompt=True
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to apply chat template: {e}, falling back to simple formatting"
-                    )
-                    prompt = self._format_messages_simple(messages_dict)
+        for msg in messages:
+            if isinstance(msg.content, str):
+                messages_dict.append({"role": msg.role, "content": msg.content})
+            else:
+                text_parts = []
+                for part in msg.content:
+                    if part.type == "text" and part.text:
+                        text_parts.append(part.text)
+                    elif part.type == "image_url" and part.image_url:
+                        image_urls.append(part.image_url.url)
+                messages_dict.append({"role": msg.role, "content": " ".join(text_parts)})
 
-                # Process multimodal or text-only
-                block_mm_infos = None
-                mm_hash = None
-                mm_input = None  # The input to pass to TRTLLM generate_async
-                image_offsets = None  # [start, end] of image tokens in the sequence
+        return messages_dict, image_urls
 
-                if image_urls:
-                    # Use default_multimodal_input_loader for multimodal requests
-                    try:
-                        # 1. Get processed input for TRTLLM generation
-                        inputs = default_multimodal_input_loader(
-                            tokenizer=self.tokenizer,
-                            model_dir=self.init_params.model,
-                            model_type=self.init_params.model_type,
-                            modality="image",
-                            prompts=[prompt],
-                            media=[image_urls],
-                            image_data_format="pt",
-                            device="cuda",
-                        )
-                        mm_input = inputs[0]  # Dict to pass to generate_async
-                        processed_prompt = mm_input.get("prompt", prompt)
-                        multi_modal_data = mm_input.get("multi_modal_data")
-
-                        logger.info(f"API: Processed MM input for TRTLLM, prompt length: {len(processed_prompt)}")
-
-                        # 2. Use HF processor to get expanded tokens for routing hash
-                        if self.processor is not None:
-                            pil_images = [load_image(url, format="pil") for url in image_urls]
-
-                            processor_output = self.processor(
-                                text=[processed_prompt],
-                                images=pil_images,
-                                return_tensors="pt",
-                                padding=True,
-                            )
-                            tokens = processor_output["input_ids"][0].tolist()
-                            logger.info(f"API: Processor returned {len(tokens)} tokens (with visual token expansion)")
-
-                            # 3. Replace image_token with vocab_size + 1 (TRTLLM convention)
-                            #    and find the image token positions (offsets)
-                            image_token_id = getattr(self.processor, "image_token_id", None)
-                            if image_token_id is None:
-                                # Fallback for Qwen2-VL: image_token_id = 151655
-                                image_token_id = 151655
-                            replacement_id = 151937
-
-                            # Find image token positions and replace
-                            image_start = None
-                            image_end = None
-                            num_replaced = 0
-                            for i, t in enumerate(tokens):
-                                if t == image_token_id:
-                                    if image_start is None:
-                                        image_start = i
-                                    image_end = i + 1  # exclusive end
-                                    tokens[i] = replacement_id
-                                    num_replaced += 1
-
-                            # Store image offsets for mm_hash routing
-                            image_offsets = None
-                            if image_start is not None and image_end is not None:
-                                image_offsets = [image_start, image_end]
-                                logger.info(
-                                    f"API: Image tokens at positions [{image_start}, {image_end}), "
-                                    f"replaced {num_replaced} tokens"
-                                )
-                            else:
-                                logger.info(f"API: Replaced {num_replaced} image tokens")
-                        else:
-                            tokens = self.tokenizer.encode(processed_prompt)
-                            logger.warning(f"API: No processor, using tokenizer only: {len(tokens)} tokens")
-
-                        # 4. Compute mm_hash from multi_modal_data
-                        if multi_modal_data:
-                            mm_hashes_dict = apply_mm_hashes(multi_modal_data)
-                            if "image" in mm_hashes_dict and mm_hashes_dict["image"]:
-                                first_hex = mm_hashes_dict["image"][0][:16]
-                                mm_hash = int(first_hex, 16)
-                                logger.info(f"API: Computed mm_hash={mm_hash}")
-
-                    except Exception as e:
-                        logger.warning(f"Failed to process MM input: {e}, falling back to text-only")
-                        tokens = self.tokenizer.encode(prompt)
-                        mm_input = None
-                else:
-                    # Text-only request
-                    tokens = self.tokenizer.encode(prompt)
-
-                num_tokens = len(tokens)
-
-                if num_tokens == 0:
-                    return ErrorResponse(
-                        error={
-                            "message": "Input prompt is empty",
-                            "type": "invalid_request_error",
-                            "code": 400,
-                        }
-                    )
-
-                # Build block_mm_infos if we have mm_hash
-                # Use actual image token positions (image_offsets) not [0, num_tokens]
-                if mm_hash is not None and image_offsets is not None:
-                    num_blocks = (num_tokens + self.init_params.block_size - 1) // self.init_params.block_size
-                    block_mm_infos = [
-                        {
-                            "mm_objects": [{
-                                "mm_hash": mm_hash,
-                                "offsets": [image_offsets]  # [[start, end]] - request level mask
-                            }]
-                        }
-                        for _ in range(num_blocks)
-                    ]
-                    logger.info(f"API: block_mm_infos with offsets {image_offsets}")
-
-                # Compute block hashes (with MM info if available)
-                local_hashes = compute_block_hash_for_seq_py(
-                    tokens, self.init_params.block_size, block_mm_infos
-                )
-                logger.info(f"API: Computed {len(local_hashes)} local_hashes: {local_hashes}")
-
-                # Dump debug info to file
-                dump_api_debug(
-                    tokens=tokens,
-                    block_size=self.init_params.block_size,
-                    local_hashes=local_hashes,
-                    mm_hash=mm_hash,
-                    block_mm_infos=block_mm_infos,
-                    image_urls=image_urls,
-                )
-
-                try:
-                    router_request = RouterRequest(
-                        local_hashes=local_hashes, num_tokens=num_tokens
-                    )
-                    router_response = await self.http_client.post(
-                        f"http://localhost:{self.init_params.router_port}/find_best_worker",
-                        json=router_request.model_dump(),
-                        timeout=1,
-                    )
-
-                    router_response.raise_for_status()
-                    router_data = RouterResponse.model_validate(router_response.json())
-                    best_worker_id = router_data.worker_id
-
-                except (httpx.RequestError, httpx.HTTPStatusError) as e:
-                    logger.error(f"Router request failed: {e}")
-                    return ErrorResponse(
-                        error={
-                            "message": "Router service unavailable",
-                            "type": "service_unavailable",
-                            "code": 503,
-                        }
-                    )
-
-                logger.info(f"Selected worker {best_worker_id} for request")
-
-                request_id = f"chatcmpl-{uuid.uuid4()}"
-
-                sampling_params = {
-                    "max_tokens": max_tokens_value,
-                    "temperature": request.temperature,
-                    "top_p": request.top_p,
-                }
-
-                # For MM requests, pass mm_input dict; for text, pass tokens
-                prompt_input = mm_input if mm_input else tokens
-                result_generator = self.workers.direct(
-                    prompt_input, best_worker_id, sampling_params
-                )
-
-                return StreamingResponse(
-                    self._chat_completion_stream_generator(
-                        request, result_generator, request_id
-                    ),
-                    media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-                )
-
-            except Exception as e:
-                logger.error(f"Error processing request: {e}")
-                return ErrorResponse(
-                    error={"message": str(e), "type": "internal_error", "code": 500}
-                )
+    def _build_prompt(self, messages_dict: list[dict]) -> str:
+        """Build prompt text from messages using chat template."""
+        try:
+            return self.tokenizer.apply_chat_template(
+                messages_dict, tokenize=False, add_generation_prompt=True
+            )
+        except Exception as e:
+            logger.warning(f"Chat template failed: {e}, using simple format")
+            return self._format_messages_simple(messages_dict)
 
     def _format_messages_simple(self, messages: list[dict]) -> str:
-        """Simple fallback formatting when chat template is not available."""
-        formatted = ""
+        """Simple fallback formatting when chat template is unavailable."""
+        parts = []
+        role_map = {"system": "System", "user": "User", "assistant": "Assistant"}
         for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
-            if role == "system":
-                formatted += f"System: {content}\n\n"
-            elif role == "user":
-                formatted += f"User: {content}\n\n"
-            elif role == "assistant":
-                formatted += f"Assistant: {content}\n\n"
-        formatted += "Assistant: "
-        return formatted
+            prefix = role_map.get(msg["role"], msg["role"].capitalize())
+            parts.append(f"{prefix}: {msg['content']}\n")
+        parts.append("Assistant: ")
+        return "\n".join(parts)
 
-    async def _chat_completion_stream_generator(
+    # -------------------------------------------------------------------------
+    # Multimodal Processing Helpers
+    # -------------------------------------------------------------------------
+
+    def _process_multimodal(self, prompt: str, image_urls: list[str]) -> ProcessedInput:
+        """Process multimodal request: load images, compute tokens and mm_hash."""
+        try:
+            inputs = default_multimodal_input_loader(
+                tokenizer=self.tokenizer,
+                model_dir=self.init_params.model,
+                model_type=self.init_params.model_type,
+                modality="image",
+                prompts=[prompt],
+                media=[image_urls],
+                image_data_format="pt",
+                device="cuda",
+            )
+            mm_input = inputs[0]
+            processed_prompt = mm_input.get("prompt", prompt)
+            multi_modal_data = mm_input.get("multi_modal_data")
+
+            tokens, image_offsets = self._get_mm_tokens(processed_prompt, image_urls)
+            mm_hash = self._compute_mm_hash(multi_modal_data)
+
+            return ProcessedInput(
+                tokens=tokens,
+                mm_input=mm_input,
+                mm_hash=mm_hash,
+                image_offsets=image_offsets,
+            )
+        except Exception as e:
+            logger.warning(f"MM processing failed: {e}, falling back to text-only")
+            return ProcessedInput(
+                tokens=self.tokenizer.encode(prompt),
+                mm_input=None,
+                mm_hash=None,
+                image_offsets=None,
+            )
+
+    def _get_mm_tokens(self, prompt: str, image_urls: list[str]) -> tuple[list[int], list[int] | None]:
+        """Get tokens with visual expansion and find image token positions."""
+        if self.processor is None:
+            return self.tokenizer.encode(prompt), None
+
+        pil_images = [load_image(url, format="pil") for url in image_urls]
+        processor_output = self.processor(
+            text=[prompt], images=pil_images, return_tensors="pt", padding=True
+        )
+        tokens = processor_output["input_ids"][0].tolist()
+
+        image_token_id = getattr(self.processor, "image_token_id", QWEN2_VL_IMAGE_TOKEN_ID)
+        return self._replace_image_tokens(tokens, image_token_id, QWEN2_VL_REPLACEMENT_ID)
+
+    def _replace_image_tokens(
+        self, tokens: list[int], image_token_id: int, replacement_id: int
+    ) -> tuple[list[int], list[int] | None]:
+        """Replace image tokens and return their positions."""
+        image_start, image_end = None, None
+
+        for i, t in enumerate(tokens):
+            if t == image_token_id:
+                if image_start is None:
+                    image_start = i
+                image_end = i + 1
+                tokens[i] = replacement_id
+
+        if image_start is not None:
+            logger.debug(f"Image tokens: [{image_start}, {image_end})")
+            return tokens, [image_start, image_end]
+        return tokens, None
+
+    def _compute_mm_hash(self, multi_modal_data: dict | None) -> int | None:
+        """Compute mm_hash from multimodal data."""
+        if not multi_modal_data:
+            return None
+
+        mm_hashes_dict = apply_mm_hashes(multi_modal_data)
+        if "image" in mm_hashes_dict and mm_hashes_dict["image"]:
+            return int(mm_hashes_dict["image"][0][:16], 16)
+        return None
+
+    # -------------------------------------------------------------------------
+    # Routing Helpers
+    # -------------------------------------------------------------------------
+
+    def _build_block_mm_infos(
+        self, num_tokens: int, mm_hash: int | None, image_offsets: list[int] | None
+    ) -> list[dict] | None:
+        """Build block_mm_infos for routing hash computation."""
+        if mm_hash is None or image_offsets is None:
+            return None
+
+        num_blocks = (num_tokens + self.init_params.block_size - 1) // self.init_params.block_size
+        return [
+            {"mm_objects": [{"mm_hash": mm_hash, "offsets": [image_offsets]}]}
+            for _ in range(num_blocks)
+        ]
+
+    async def _route_request(self, local_hashes: list[int], num_tokens: int) -> int | ErrorResponse:
+        """Query router for best worker ID."""
+        try:
+            router_request = RouterRequest(local_hashes=local_hashes, num_tokens=num_tokens)
+            response = await self.http_client.post(
+                f"http://localhost:{self.init_params.router_port}/find_best_worker",
+                json=router_request.model_dump(),
+                timeout=1,
+            )
+            response.raise_for_status()
+            return RouterResponse.model_validate(response.json()).worker_id
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            logger.error(f"Router request failed: {e}")
+            return ErrorResponse(
+                error=make_error("Router service unavailable", "service_unavailable", 503)
+            )
+
+    # -------------------------------------------------------------------------
+    # Response Streaming
+    # -------------------------------------------------------------------------
+
+    async def _stream_response(
         self, request: ChatCompletionRequest, result_generator, request_id: str
     ):
         """Generate SSE formatted streaming responses."""
         created = int(time.time())
         first_chunk = True
-
         try:
             async for output in result_generator:
-                if hasattr(output, "text_diff"):
-                    text = output.text_diff
-                elif hasattr(output, "text"):
-                    text = output.text
+                # Handle both dict (from worker) and object responses
+                if isinstance(output, dict):
+                    text = output.get("text_diff") or output.get("text", "")
                 else:
-                    text = str(output)
+                    text = getattr(output, "text_diff", None) or getattr(output, "text", "")
 
                 if not text and not first_chunk:
                     continue
 
-                chunk = {
-                    "id": request_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": request.model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": text} if not first_chunk else {"role": "assistant", "content": text},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-
-                yield f"data: {json.dumps(chunk)}\n\n"
+                delta = {"role": "assistant", "content": text} if first_chunk else {"content": text}
+                yield self._format_chunk(request_id, created, request.model, delta, None)
                 first_chunk = False
 
-            final_chunk = {
-                "id": request_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": request.model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "stop",
-                    }
-                ],
-            }
-            yield f"data: {json.dumps(final_chunk)}\n\n"
+            # Final chunk
+            yield self._format_chunk(request_id, created, request.model, {}, "stop")
             yield "data: [DONE]\n\n"
 
         except Exception as e:
-            logger.error(f"Error in streaming response: {e}")
-            error_chunk = {
-                "error": {
-                    "message": str(e),
-                    "type": "internal_error",
-                    "code": 500,
+            logger.error(f"Streaming error: {e}")
+            yield f"data: {json.dumps({'error': make_error(str(e), 'internal_error', 500)})}\n\n"
+
+    def _format_chunk(
+        self, request_id: str, created: int, model: str, delta: dict, finish_reason: str | None
+    ) -> str:
+        """Format a single SSE chunk."""
+        chunk = {
+            "id": request_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }
+        return f"data: {json.dumps(chunk)}\n\n"
+
+    # -------------------------------------------------------------------------
+    # Main Request Handler
+    # -------------------------------------------------------------------------
+
+    def _setup_routes(self):
+        @self.app.post("/v1/chat/completions")
+        async def chat_completions(request: ChatCompletionRequest):
+            # Check service readiness
+            if self.workers is None or self.tokenizer is None or self.http_client is None:
+                return ErrorResponse(
+                    error=make_error("Service not ready", "service_unavailable", 503)
+                )
+
+            try:
+                # Parse request
+                parsed = self._parse_request(request)
+                if isinstance(parsed, ErrorResponse):
+                    return parsed
+
+                # Build prompt
+                prompt = self._build_prompt(parsed.messages_dict)
+
+                # Process input (multimodal or text-only)
+                if parsed.image_urls:
+                    processed = self._process_multimodal(prompt, parsed.image_urls)
+                else:
+                    processed = ProcessedInput(
+                        tokens=self.tokenizer.encode(prompt),
+                        mm_input=None,
+                        mm_hash=None,
+                        image_offsets=None,
+                    )
+
+                # Validate tokens
+                if not processed.tokens:
+                    return ErrorResponse(
+                        error=make_error("Input prompt is empty", "invalid_request_error", 400)
+                    )
+
+                # Compute block hashes for routing
+                block_mm_infos = self._build_block_mm_infos(
+                    len(processed.tokens), processed.mm_hash, processed.image_offsets
+                )
+                local_hashes = compute_block_hash_for_seq_py(
+                    processed.tokens, self.init_params.block_size, block_mm_infos
+                )
+
+                # Debug dump
+                dump_api_debug(
+                    tokens=processed.tokens,
+                    block_size=self.init_params.block_size,
+                    local_hashes=local_hashes,
+                    mm_hash=processed.mm_hash,
+                    block_mm_infos=block_mm_infos,
+                    image_urls=parsed.image_urls,
+                )
+
+                # Route to best worker
+                worker_id = await self._route_request(local_hashes, len(processed.tokens))
+                if isinstance(worker_id, ErrorResponse):
+                    return worker_id
+
+                # Generate response
+                request_id = f"chatcmpl-{uuid.uuid4()}"
+                sampling_params = {
+                    "max_tokens": parsed.max_tokens,
+                    "temperature": parsed.temperature,
+                    "top_p": parsed.top_p,
                 }
-            }
-            yield f"data: {json.dumps(error_chunk)}\n\n"
+                prompt_input = processed.mm_input or processed.tokens
+                logger.debug(f"Sending to worker {worker_id}")
+                result_generator = self.workers.direct(prompt_input, worker_id, sampling_params)
+
+                return StreamingResponse(
+                    self._stream_response(request, result_generator, request_id),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+                )
+
+            except Exception as e:
+                logger.error(f"Request processing error: {e}")
+                return ErrorResponse(error=make_error(str(e), "internal_error", 500))
+
+    # -------------------------------------------------------------------------
+    # Lifecycle Management
+    # -------------------------------------------------------------------------
 
     async def initialize_services(self):
         """Initialize workers, HTTP client, and tokenizer."""
-        logger.info("=" * 60)
-        logger.info("STARTING INITIALIZATION - This may take 5-15 minutes on first run")
-        logger.info("=" * 60)
-        
-        logger.info("Step 1/4: Initializing TrtllmWorkers...")
-        logger.info(f"  Model: {self.init_params.model}")
-        logger.info(f"  Workers: {self.init_params.num_workers}")
-        logger.info(f"  Block size: {self.init_params.block_size}")
-        logger.info("  (TensorRT-LLM will compile the model - please be patient)")
-        
+        logger.info(
+            f"Initializing services: model={self.init_params.model}, "
+            f"workers={self.init_params.num_workers}, block_size={self.init_params.block_size}"
+        )
+
         self.workers = TrtllmWorkers(
             model=self.init_params.model,
             block_size=self.init_params.block_size,
@@ -459,32 +476,21 @@ class ServiceAPI:
             base_metrics_port=self.init_params.base_metrics_port,
             num_workers=self.init_params.num_workers,
         )
-
-        logger.info("Step 2/4: Starting worker background tasks...")
         await self.workers.start_all()
 
-        logger.info("Step 3/4: Initializing HTTP client...")
         self.http_client = httpx.AsyncClient()
-
-        logger.info("Step 4/5: Initializing tokenizer...")
         self.tokenizer = tokenizer_factory(self.init_params.model)
 
-        logger.info("Step 5/5: Initializing HuggingFace processor for MM token expansion...")
         try:
             self.processor = AutoProcessor.from_pretrained(
                 self.init_params.model, trust_remote_code=True
             )
-            logger.info("Processor initialized successfully")
         except Exception as e:
-            logger.warning(f"Failed to initialize processor: {e}")
+            logger.warning(f"Failed to initialize HF processor: {e}")
             self.processor = None
 
-        logger.info("Waiting 2 seconds for services to stabilize...")
         await asyncio.sleep(2)
-        
-        logger.info("=" * 60)
-        logger.info("ALL SERVICES INITIALIZED SUCCESSFULLY!")
-        logger.info("=" * 60)
+        logger.info("All services initialized")
 
     async def start(self):
         """Start the API server."""
@@ -514,19 +520,16 @@ def main():
     parser = argparse.ArgumentParser(description="TensorRT-LLM Router API Server")
 
     parser.add_argument(
-        "--model",
-        type=str,
-        default="Qwen/Qwen2-VL-2B-Instruct",
+        "--model", type=str, default="Qwen/Qwen2-VL-2B-Instruct",
         help="Model name to use (VLM for multimodal support)",
     )
     parser.add_argument(
-        "--model-type",
-        type=str,
-        default="qwen2_vl",
+        "--model-type", type=str, default="qwen2_vl",
         help="Model type for TRTLLM (e.g., qwen2_vl, llava, phi3_v)",
     )
     parser.add_argument(
-        "--block-size", type=int, default=32, help="Block size for caching (TensorRT-LLM uses 32)"
+        "--block-size", type=int, default=32,
+        help="Block size for caching (TensorRT-LLM uses 32)",
     )
     parser.add_argument(
         "--num-workers", type=int, default=2, help="Number of worker processes"
@@ -538,17 +541,13 @@ def main():
         "--base-metrics-port", type=int, default=5657, help="Base port for metrics"
     )
     parser.add_argument(
-        "--router-port",
-        type=int,
-        default=7000,
-        help="Port for router service",
+        "--router-port", type=int, default=7000, help="Port for router service"
     )
     parser.add_argument(
         "--http-port", type=int, default=8000, help="Port to serve the API on"
     )
 
     args = parser.parse_args()
-
     logging.basicConfig(level=logging.INFO)
 
     init_params = ServingParams(
@@ -573,16 +572,12 @@ def main():
 
     async def run_with_shutdown():
         try:
-            # Router is lightweight, start it first
             router_task = asyncio.create_task(router_api.start())
-            await asyncio.sleep(0.5)  # Let router bind ports
-
-            # API initialization is heavy (TensorRT-LLM), start after router
+            await asyncio.sleep(0.5)
             api_task = asyncio.create_task(api.start())
-
             await asyncio.gather(router_task, api_task)
         except KeyboardInterrupt:
-            logger.info("Received KeyboardInterrupt, shutting down services...")
+            logger.info("Shutting down services...")
         except Exception as e:
             logger.exception(f"Unhandled exception: {e}")
         finally:
@@ -591,10 +586,8 @@ def main():
     try:
         asyncio.run(run_with_shutdown())
     except KeyboardInterrupt:
-        # Just in case KeyboardInterrupt happens outside of the event loop
         logger.info("Force shutdown via KeyboardInterrupt.")
 
 
 if __name__ == "__main__":
     main()
-

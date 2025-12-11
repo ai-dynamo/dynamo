@@ -24,9 +24,12 @@ DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 DEBUG_ENABLED = os.environ.get("DYNAMO_DEBUG", "0") == "1"
 DEBUG_WORKER_KV_FILE = "/tmp/debug_worker_kv.txt"
 
+# Qwen2-VL specific token ID for image placeholders
+IMAGE_TOKEN_ID = 151937
+
 
 def dump_worker_kv_event(worker_id: int, event: dict, token_ids: list[int]):
-    """Dump worker-side KV event with token_ids to file for debugging."""
+    """Dump worker-side KV event to file for debugging."""
     if not DEBUG_ENABLED:
         return
     import datetime
@@ -35,24 +38,22 @@ def dump_worker_kv_event(worker_id: int, event: dict, token_ids: list[int]):
         f.write(f"\n{'='*60}\n")
         f.write(f"Timestamp: {datetime.datetime.now()}\n")
         f.write(f"Worker ID: {worker_id}\n")
-        f.write(f"Event type: {event.get('type')}\n")
-        f.write(f"num_tokens: {len(token_ids)}\n")
-        f.write(f"token_ids (first 50): {token_ids[:50]}\n")
-        f.write(f"token_ids (last 50): {token_ids[-50:]}\n")
-        f.write(f"block_hashes: {event.get('block_hashes', [])}\n")
-        f.write(f"parent_hash: {event.get('parent_hash')}\n")
+        f.write(f"Event: {event}\n")
+        f.write(f"Tokens ({len(token_ids)}): {token_ids[:50]}...\n")
         f.write(f"{'='*60}\n")
 
 
-def _to_signed_i64(value: int | None) -> int | None:
-    """Convert a Python int to signed 64-bit range by two's complement."""
+def to_unsigned_u64(value: int | None) -> int | None:
+    """Ensure value is in unsigned 64-bit range for Rust/msgpack."""
     if value is None:
         return None
-    if value >= 2**63:
-        return value - 2**64
-    if value < -(2**63):
-        return ((value + 2**63) % 2**64) - 2**63
-    return value
+    # Handle negative values (two's complement)
+    return (1 << 64) + value if value < 0 else value
+
+
+# -----------------------------------------------------------------------------
+# ZMQ Publishers
+# -----------------------------------------------------------------------------
 
 
 class MetricsPublisher:
@@ -62,14 +63,12 @@ class MetricsPublisher:
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.PUB)
         self.socket.bind(f"tcp://*:{port}")
-        logger.info(f"Metrics publisher initialized on port {port}")
 
     def publish(self, num_waiting_reqs: int, kv_cache_usage: float):
-        metrics_data = {
+        self.socket.send_json({
             "num_waiting_reqs": num_waiting_reqs,
             "kv_cache_usage": kv_cache_usage,
-        }
-        self.socket.send_json(metrics_data)
+        })
 
     def close(self):
         self.socket.close()
@@ -77,118 +76,146 @@ class MetricsPublisher:
 
 
 class KvEventsPublisher:
-    """Publishes KV cache events over ZMQ in ZmqKvEventListener format."""
+    """Publishes KV cache events over ZMQ."""
 
     def __init__(self, port: int, block_size: int):
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.PUB)
         self.socket.bind(f"tcp://*:{port}")
         self.block_size = block_size
-        self.partial_block_hashes = set()
+        self.partial_block_hashes: set[int] = set()
         self.sequence_number = 0
-        logger.info(f"KV events publisher initialized on port {port}")
 
-    def publish_event(self, event: dict):
-        """Publish KV event in ZmqKvEventListener format.
-        
-        Format: 3 ZMQ frames
-        1. Topic (empty bytes)
-        2. Sequence number (8 bytes, big-endian u64)
-        3. MessagePack payload: [timestamp, [events], data_parallel_rank]
-        """
-        # Convert to Router expected format
-        event_type = event.get("type")
-        converted_events = []
-        
-        if event_type == "stored":
-            # Extract all block_hashes and token_ids
-            # Convert negative hashes to unsigned (u64) and ensure token_ids are i32
-            block_hashes = []
-            for b in event.get("blocks", []):
-                hash_val = b["block_hash"]
-                # Convert signed to unsigned u64
-                if hash_val < 0:
-                    hash_val = (1 << 64) + hash_val
-                block_hashes.append(hash_val)
-            
-            token_ids = []
-            for b in event.get("blocks", []):
-                # Ensure token_ids are integers (not dicts)
-                token_ids.extend([int(tid) for tid in b["token_ids"]])
-            
-            # Handle parent_block_hash (could be None or negative)
-            parent_hash = event.get("parent_hash")
-            if parent_hash is not None and parent_hash < 0:
-                parent_hash = (1 << 64) + parent_hash
-            
-            # Build event dict
-            # Don't include optional fields if they are None
-            stored_event = {
-                "type": "BlockStored",
-                "block_hashes": block_hashes,
-                "token_ids": token_ids,
-                "block_size": int(self.block_size),
-            }
-            
-            # Only add these if they have actual values
-            if parent_hash is not None:
-                stored_event["parent_block_hash"] = int(parent_hash)
+    def publish_stored(
+        self,
+        block_hashes: list[int],
+        token_ids: list[int],
+        parent_hash: int | None,
+        mm_extra_info: dict | None,
+    ):
+        """Publish a BlockStored event."""
+        event = {
+            "type": "BlockStored",
+            "block_hashes": [to_unsigned_u64(h) for h in block_hashes],
+            "token_ids": token_ids,
+            "block_size": self.block_size,
+        }
 
-            # Inject block_mm_infos if present in the event
-            # Rust expects: block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>
-            # where BlockExtraInfo has mm_objects: Vec<MmObject>
-            mm_extra_info = event.get("mm_extra_info")
-            if mm_extra_info is not None:
-                # Create per-block mm_infos array (one entry per block)
-                num_blocks = len(block_hashes)
-                block_mm_infos = [mm_extra_info for _ in range(num_blocks)]
-                stored_event["block_mm_infos"] = block_mm_infos
-            
-            converted_events.append(stored_event)
-        elif event_type == "removed":
-            # Convert negative hashes to unsigned u64
-            block_hashes = []
-            for hash_val in event.get("block_hashes", []):
-                if hash_val < 0:
-                    hash_val = (1 << 64) + hash_val
-                block_hashes.append(hash_val)
-            
-            converted_events.append({
-                "type": "BlockRemoved",
-                "block_hashes": block_hashes,
-            })
-        
-        if not converted_events:
-            return
-        
-        # Create batch: [timestamp, events_list, data_parallel_rank]
-        # data_parallel_rank can be None (not 0)
-        batch = [
-            time.time(),
-            converted_events,
-            0  # data_parallel_rank as 0 (was None, but Rust expects u32)
-        ]
-        
-        # Encode with MessagePack
+        if parent_hash is not None:
+            event["parent_block_hash"] = to_unsigned_u64(parent_hash)
+
+        if mm_extra_info is not None:
+            event["block_mm_infos"] = [mm_extra_info] * len(block_hashes)
+
+        self._send([event])
+
+    def publish_removed(self, block_hashes: list[int]):
+        """Publish a BlockRemoved event."""
+        # Filter out partial blocks
+        filtered = []
+        for h in block_hashes:
+            if h in self.partial_block_hashes:
+                self.partial_block_hashes.remove(h)
+            else:
+                filtered.append(to_unsigned_u64(h))
+
+        if filtered:
+            self._send([{"type": "BlockRemoved", "block_hashes": filtered}])
+
+    def _send(self, events: list[dict]):
+        """Send events via ZMQ multipart message."""
+        batch = [time.time(), events, 0]
         try:
             payload = msgpack.packb(batch, use_bin_type=True)
         except Exception as e:
-            logger.error(f"Failed to pack batch with msgpack: {e}")
+            logger.error(f"msgpack error: {e}")
             return
-        
-        # Frame 1: Topic (empty)
-        topic = b""
-        
-        # Frame 2: Sequence number (8 bytes, big-endian)
-        seq_bytes = self.sequence_number.to_bytes(8, byteorder='big')
+
+        seq_bytes = self.sequence_number.to_bytes(8, byteorder="big")
         self.sequence_number += 1
-        
-        # Frame 3: Payload
-        self.socket.send_multipart([topic, seq_bytes, payload])
+        self.socket.send_multipart([b"", seq_bytes, payload])
 
     def close(self):
         self.socket.close()
         self.context.term()
+
+
+# -----------------------------------------------------------------------------
+# KV Event Processing Helpers
+# -----------------------------------------------------------------------------
+
+
+def extract_mm_info(blocks_data: list[dict], all_token_ids: list[int]) -> dict | None:
+    """Extract multimodal hash info from TRTLLM block data."""
+    for block in blocks_data:
+        mm_keys = block.get("mm_keys", [])
+        for mm_key in mm_keys:
+            if mm_key.get("type") != "mm_key":
+                continue
+
+            hash_hex = mm_key.get("hash", "")
+            if not hash_hex:
+                continue
+
+            mm_hash = int(hash_hex[:16], 16)
+            offsets = find_image_token_range(all_token_ids)
+
+            if offsets:
+                return {"mm_objects": [{"mm_hash": mm_hash, "offsets": [offsets]}]}
+
+    return None
+
+
+def find_image_token_range(token_ids: list[int]) -> list[int] | None:
+    """Find [start, end) range of image tokens."""
+    start, end = None, None
+    for i, tid in enumerate(token_ids):
+        if tid == IMAGE_TOKEN_ID:
+            if start is None:
+                start = i
+            end = i + 1
+
+    return [start, end] if start is not None else None
+
+
+def parse_stored_blocks(
+    blocks_data: list[dict], block_size: int, partial_hashes: set[int]
+) -> tuple[list[dict], list[int]]:
+    """Parse stored blocks from TRTLLM event data.
+    
+    Returns:
+        Tuple of (blocks list, all token_ids)
+    """
+    blocks = []
+    all_token_ids = []
+
+    for block in blocks_data:
+        tokens = block["tokens"]
+        num_tokens = len(tokens)
+        block_hash = block["block_hash"]
+
+        if num_tokens == block_size:
+            token_ids = [int(t["token_id"]) for t in tokens]
+            blocks.append({
+                "block_hash": block_hash,
+                "token_ids": token_ids,
+                "num_tokens": num_tokens,
+            })
+            all_token_ids.extend(token_ids)
+        elif num_tokens < block_size:
+            # Partial block - track but don't publish
+            partial_hashes.add(block_hash)
+            break
+        else:
+            logger.error(f"Block too large: {num_tokens} > {block_size}")
+            break
+
+    return blocks, all_token_ids
+
+
+# -----------------------------------------------------------------------------
+# TRT-LLM Worker
+# -----------------------------------------------------------------------------
 
 
 class TrtllmWorker:
@@ -205,353 +232,240 @@ class TrtllmWorker:
         self.worker_id = worker_id
         self.model = model
         self.block_size = block_size
-        self.kv_events_port = kv_events_port
-        self.metrics_port = metrics_port
 
         self.llm: Optional[LLM] = None
         self.metrics_publisher: Optional[MetricsPublisher] = None
         self.kv_events_publisher: Optional[KvEventsPublisher] = None
-        self.background_tasks = []
-        self.max_window_size = None
-        self.processing_initial_created_events = True
+
+        self.background_tasks: list[asyncio.Task] = []
+        self.max_window_size: int | None = None
+        self.processing_initial_events = True
         self.kv_events_started = False
-        self.first_request_processed = False
 
-        self._initialize()
+        self._initialize(kv_events_port, metrics_port)
 
-    def _initialize(self):
-        """Initialize the TensorRT-LLM engine and publishers."""
+    def _initialize(self, kv_events_port: int, metrics_port: int):
+        """Initialize TensorRT-LLM engine and publishers."""
         os.environ["CUDA_VISIBLE_DEVICES"] = str(self.worker_id)
 
-        logger.info(
-            f"Initializing worker {self.worker_id} with model {self.model} on GPU {self.worker_id}"
-        )
+        logger.info(f"Worker {self.worker_id}: Initializing on GPU {self.worker_id}")
 
-        logger.info(f"Worker {self.worker_id}: Creating KV cache config...")
-        kv_cache_config = KvCacheConfig(
-            enable_block_reuse=True,
-            event_buffer_max_size=DEFAULT_KV_EVENT_BUFFER_MAX_SIZE,
-        )
-
-        logger.info(f"Worker {self.worker_id}: Initializing TensorRT-LLM engine (this may take 5-15 minutes on first run)...")
         self.llm = LLM(
             model=self.model,
-            kv_cache_config=kv_cache_config,
+            kv_cache_config=KvCacheConfig(
+                enable_block_reuse=True,
+                event_buffer_max_size=DEFAULT_KV_EVENT_BUFFER_MAX_SIZE,
+            ),
         )
-        logger.info(f"Worker {self.worker_id}: TensorRT-LLM engine initialized!")
 
-        self.metrics_publisher = MetricsPublisher(self.metrics_port)
-        self.kv_events_publisher = KvEventsPublisher(self.kv_events_port, self.block_size)
+        self.metrics_publisher = MetricsPublisher(metrics_port)
+        self.kv_events_publisher = KvEventsPublisher(kv_events_port, self.block_size)
 
-        logger.info(f"Worker {self.worker_id} initialized successfully")
+        logger.info(f"Worker {self.worker_id}: Initialized")
+
+    # -------------------------------------------------------------------------
+    # Background Tasks
+    # -------------------------------------------------------------------------
 
     async def start_background_tasks(self):
-        """Start background tasks for publishing metrics and KV events."""
-        logger.info(f"Starting background tasks for worker {self.worker_id}")
-        self.background_tasks.append(asyncio.create_task(self._publish_metrics_loop()))
-        # KV events will be started lazily after first request
-        logger.info(f"Worker {self.worker_id}: KV events will start after first request")
+        """Start metrics publishing task."""
+        self.background_tasks.append(asyncio.create_task(self._metrics_loop()))
 
-    async def _publish_metrics_loop(self):
-        """Continuously publish metrics."""
-        # Wait for engine to warm up
+    def _start_kv_events_task(self):
+        """Lazily start KV events task on first request."""
+        if self.kv_events_started:
+            return
+        self.kv_events_started = True
+        logger.info(f"Worker {self.worker_id}: Starting KV events monitoring")
+        self.background_tasks.append(asyncio.create_task(self._kv_events_loop()))
+
+    async def _metrics_loop(self):
+        """Continuously publish worker metrics."""
         await asyncio.sleep(1)
-        
+
         try:
-            stats = self.llm.get_stats_async(timeout=5)
-            async for stat in stats:
+            async for stat in self.llm.get_stats_async(timeout=5):
                 if not isinstance(stat, dict):
-                    logger.debug(f"Worker {self.worker_id} skipping non-dict stat: {type(stat)}")
                     continue
-                num_waiting_reqs = stat["numQueuedRequests"] + stat[
-                    "inflightBatchingStats"
-                ]["numPausedRequests"]
-                alloc_total_blocks = stat["kvCacheStats"]["allocTotalBlocks"]
-                max_num_blocks = stat["kvCacheStats"]["maxNumBlocks"]
-                kv_cache_usage = (
-                    alloc_total_blocks / max_num_blocks if max_num_blocks > 0 else 0.0
+
+                num_waiting = (
+                    stat["numQueuedRequests"]
+                    + stat["inflightBatchingStats"]["numPausedRequests"]
+                )
+                kv_stats = stat["kvCacheStats"]
+                usage = (
+                    kv_stats["allocTotalBlocks"] / kv_stats["maxNumBlocks"]
+                    if kv_stats["maxNumBlocks"] > 0
+                    else 0.0
                 )
 
-                self.metrics_publisher.publish(num_waiting_reqs, kv_cache_usage)
-                logger.debug(
-                    f"Worker {self.worker_id} metrics: waiting={num_waiting_reqs}, usage={kv_cache_usage:.2%}"
-                )
+                self.metrics_publisher.publish(num_waiting, usage)
+
         except asyncio.CancelledError:
-            logger.info(f"Worker {self.worker_id} metrics loop cancelled")
+            pass
         except Exception as e:
-            logger.error(f"Worker {self.worker_id} metrics loop error: {e}")
+            logger.error(f"Worker {self.worker_id} metrics error: {e}")
 
-    def _should_drop_event(self, event: dict) -> bool:
-        """Determine if we should drop this event (non-global attention layer)."""
-        if "window_size" not in event or self.processing_initial_created_events:
-            return False
-        if event["window_size"] != self.max_window_size:
-            return True
-        return False
-
-    def _update_max_window_size(self, event: dict):
-        """Update max window size from created events."""
-        if "window_size" in event:
-            window_size = event["window_size"]
-            if self.max_window_size is None or window_size > self.max_window_size:
-                self.max_window_size = window_size
-                logger.debug(
-                    f"Worker {self.worker_id} max_window_size updated to {self.max_window_size}"
-                )
-
-    async def _publish_kv_events_loop(self):
-        """Continuously publish KV cache events."""
-        # Wait for engine to warm up
+    async def _kv_events_loop(self):
+        """Continuously process and publish KV cache events."""
         await asyncio.sleep(2)
-        
+
         try:
-            # Use longer timeout or None for infinite wait
             events = self.llm.get_kv_cache_events_async(timeout=None)
             logger.info(f"Worker {self.worker_id}: KV events iterator obtained")
 
-            event_count = 0
             async for event in events:
-                event_count += 1
-                logger.debug(f"Worker {self.worker_id}: KV event #{event_count}: {event}")
-                
-                try:
-                    # Validate event structure
-                    if not isinstance(event, dict):
-                        logger.warning(f"Worker {self.worker_id}: Event is not dict, type={type(event)}")
-                        continue
-                    
-                    if "event_id" not in event or "data" not in event:
-                        logger.warning(f"Worker {self.worker_id}: Missing event_id or data")
-                        continue
-                    
-                    if self._should_drop_event(event):
-                        logger.info(f"Worker {self.worker_id}: Dropped event (non-global attention)")
-                        continue
-
-                    event_id = event["event_id"]
-                    data = event["data"]
-                    event_type = data.get("type")
-                    
-                    logger.debug(f"Worker {self.worker_id}: Processing event_type={event_type}")
-                    
-                    if not event_type:
-                        logger.warning(f"Worker {self.worker_id}: No event_type in data")
-                        continue
-                    
-                    # Process different event types
-                    if event_type == "stored":
-                        num_blocks = len(data.get('blocks', []))
-                        logger.debug(f"Worker {self.worker_id}: STORED event with {num_blocks} blocks")
-                        self.processing_initial_created_events = False
-                        parent_hash = _to_signed_i64(data.get("parent_hash"))
-
-                        blocks = []
-                        for block in data["blocks"]:
-                            token_num_in_block = len(block["tokens"])
-                            block_hash = _to_signed_i64(block["block_hash"])
-
-                            if token_num_in_block == self.block_size:
-                                token_ids = [int(token["token_id"]) for token in block["tokens"]]
-                                blocks.append({
-                                    "block_hash": block_hash,
-                                    "token_ids": token_ids,
-                                    "num_tokens": token_num_in_block,
-                                })
-                            elif token_num_in_block < self.block_size:
-                                self.kv_events_publisher.partial_block_hashes.add(block_hash)
-                                break
-                            else:
-                                logger.error(f"Worker {self.worker_id}: Block too large: {token_num_in_block}")
-                                break
-
-                        if blocks:
-                            # Collect all token_ids from blocks for debugging
-                            all_token_ids = []
-                            for b in blocks:
-                                all_token_ids.extend(b["token_ids"])
-
-                            # Extract mm_extra_info from TRTLLM's mm_keys in blocks
-                            # TRTLLM format: 'mm_keys': [{'type': 'mm_key', 'hash': 'hex_string', 'start_offset': 0}]
-                            mm_extra_info = None
-                            for block in data["blocks"]:
-                                mm_keys = block.get("mm_keys")
-                                if mm_keys:
-                                    for mm_key in mm_keys:
-                                        if mm_key.get("type") == "mm_key":
-                                            hash_hex = mm_key.get("hash", "")
-                                            # Convert hex hash to int (take first 16 chars)
-                                            mm_hash = int(hash_hex[:16], 16) if hash_hex else 0
-                                            # Find image token range for offsets
-                                            IMAGE_TOKEN_ID = 151937
-                                            image_start = None
-                                            image_end = None
-                                            for i, tid in enumerate(all_token_ids):
-                                                if tid == IMAGE_TOKEN_ID:
-                                                    if image_start is None:
-                                                        image_start = i
-                                                    image_end = i + 1
-                                            if image_start is not None:
-                                                mm_extra_info = {
-                                                    "mm_objects": [{
-                                                        "mm_hash": mm_hash,
-                                                        "offsets": [[image_start, image_end]]
-                                                    }]
-                                                }
-                                                logger.debug(
-                                                    f"Worker {self.worker_id}: mm_hash={mm_hash}, "
-                                                    f"offsets=[{image_start}, {image_end}]"
-                                                )
-                                            break
-                                    break  # Only need first mm_key
-
-                            kv_event = {
-                                "event_id": event_id,
-                                "type": "stored",
-                                "parent_hash": parent_hash,
-                                "blocks": blocks,
-                            }
-                            if mm_extra_info is not None:
-                                kv_event["mm_extra_info"] = mm_extra_info
-
-                            dump_worker_kv_event(self.worker_id, kv_event, all_token_ids)
-
-                            self.kv_events_publisher.publish_event(kv_event)
-                            logger.info(
-                                f"Worker {self.worker_id} published stored event: {len(blocks)} blocks, "
-                                f"block_hashes={[b['block_hash'] for b in blocks]}"
-                            )
-
-                    elif event_type == "removed":
-                        self.processing_initial_created_events = False
-                        block_hashes = []
-                        for block_hash in data["block_hashes"]:
-                            block_hash = _to_signed_i64(block_hash)
-                            if block_hash in self.kv_events_publisher.partial_block_hashes:
-                                logger.debug(
-                                    f"Skipping partial block hash {block_hash} from removal"
-                                )
-                                self.kv_events_publisher.partial_block_hashes.remove(block_hash)
-                                continue
-                            block_hashes.append(block_hash)
-
-                        if block_hashes:
-                            kv_event = {
-                                "event_id": event_id,
-                                "type": "removed",
-                                "block_hashes": block_hashes,
-                            }
-                            self.kv_events_publisher.publish_event(kv_event)
-                            logger.debug(
-                                f"Worker {self.worker_id} published removed event: {len(block_hashes)} blocks"
-                            )
-
-                    elif event_type == "created" and self.processing_initial_created_events:
-                        self._update_max_window_size(event)
-                
-                except (KeyError, TypeError, AttributeError) as e:
-                    logger.debug(f"Worker {self.worker_id}: Error processing event: {e}")
-                    continue
+                self._process_kv_event(event)
 
         except asyncio.CancelledError:
-            logger.info(f"Worker {self.worker_id} KV events loop cancelled")
+            pass
         except RuntimeError as e:
-            # KV events might not be properly initialized in some TensorRT-LLM versions
             if "IterationResult is not properly instantiated" in str(e):
-                logger.warning(
-                    f"Worker {self.worker_id}: KV cache events not available. "
-                    f"Router will work with reduced functionality (no cache overlap tracking). "
-                    f"This may happen if the TensorRT-LLM version doesn't fully support KV events."
-                )
+                logger.warning(f"Worker {self.worker_id}: KV events not available")
             else:
-                logger.error(f"Worker {self.worker_id} KV events loop error: {e}")
+                logger.error(f"Worker {self.worker_id} KV events error: {e}")
         except Exception as e:
-            logger.error(f"Worker {self.worker_id} KV events loop error: {e}")
+            logger.error(f"Worker {self.worker_id} KV events error: {e}")
 
-        logger.warning(f"Worker {self.worker_id}: KV events loop exited unexpectedly")
+        logger.warning(f"Worker {self.worker_id}: KV events loop exited")
+
+    def _process_kv_event(self, event: dict):
+        """Process a single KV cache event."""
+        if not isinstance(event, dict):
+            return
+        if "event_id" not in event or "data" not in event:
+            return
+
+        data = event["data"]
+        event_type = data.get("type")
+
+        if self._should_drop_event(event):
+            return
+
+        if event_type == "stored":
+            self._handle_stored_event(data)
+        elif event_type == "removed":
+            self._handle_removed_event(data)
+        elif event_type == "created" and self.processing_initial_events:
+            self._update_window_size(event)
+
+    def _should_drop_event(self, event: dict) -> bool:
+        """Check if event should be dropped (non-global attention)."""
+        if self.processing_initial_events:
+            return False
+        window_size = event.get("window_size")
+        if window_size is None:
+            return False
+        return window_size != self.max_window_size
+
+    def _update_window_size(self, event: dict):
+        """Update max window size from created events."""
+        window_size = event.get("window_size")
+        if window_size and (self.max_window_size is None or window_size > self.max_window_size):
+            self.max_window_size = window_size
+
+    def _handle_stored_event(self, data: dict):
+        """Handle a stored block event."""
+        self.processing_initial_events = False
+
+        blocks, all_token_ids = parse_stored_blocks(
+            data["blocks"],
+            self.block_size,
+            self.kv_events_publisher.partial_block_hashes,
+        )
+
+        if not blocks:
+            return
+
+        parent_hash = data.get("parent_hash")
+        mm_info = extract_mm_info(data["blocks"], all_token_ids)
+
+        block_hashes = [b["block_hash"] for b in blocks]
+
+        # Debug dump
+        dump_worker_kv_event(
+            self.worker_id,
+            {"type": "stored", "blocks": len(blocks), "mm_info": mm_info is not None},
+            all_token_ids,
+        )
+
+        self.kv_events_publisher.publish_stored(
+            block_hashes, all_token_ids, parent_hash, mm_info
+        )
+
+    def _handle_removed_event(self, data: dict):
+        """Handle a removed block event."""
+        self.processing_initial_events = False
+
+        block_hashes = data.get("block_hashes", [])
+        self.kv_events_publisher.publish_removed(block_hashes)
+
+    # -------------------------------------------------------------------------
+    # Generation
+    # -------------------------------------------------------------------------
 
     async def generate(
         self,
-        prompt_input,  # Can be list[int] (tokens) or dict (MM input from default_multimodal_input_loader)
+        prompt_input,  # list[int] (tokens) or dict (MM input)
         sampling_params: dict,
     ) -> AsyncGenerator[dict, None]:
         """Generate tokens for a request."""
         from tensorrt_llm.llmapi.llm import SamplingParams
 
-        # Start KV events monitoring after first request (lazy initialization)
-        if not self.first_request_processed:
-            self.first_request_processed = True
-            if not self.kv_events_started:
-                logger.info(f"Worker {self.worker_id}: Starting KV events monitoring after first request")
-                self.background_tasks.append(asyncio.create_task(self._publish_kv_events_loop()))
-                self.kv_events_started = True
+        # Start KV events on first request
+        self._start_kv_events_task()
 
-        # TensorRT-LLM requires top_k >= 0, use 0 to disable top_k sampling
-        top_k = sampling_params.get("top_k", 0)
-        if top_k < 0:
-            top_k = 0
-
-        trtllm_sampling_params = SamplingParams(
+        trtllm_params = SamplingParams(
             max_tokens=sampling_params.get("max_tokens", 100),
             temperature=sampling_params.get("temperature", 1.0),
             top_p=sampling_params.get("top_p", 1.0),
-            top_k=top_k,
+            top_k=max(0, sampling_params.get("top_k", 0)),
         )
 
-        # Log input type
-        if isinstance(prompt_input, dict):
-            logger.debug(f"Worker {self.worker_id}: MM request with keys: {prompt_input.keys()}")
-        else:
-            logger.debug(f"Worker {self.worker_id}: Text request with {len(prompt_input)} tokens")
-
-        # Pass prompt_input directly to generate_async
-        # TRTLLM accepts both token list and dict (from default_multimodal_input_loader)
         outputs = self.llm.generate_async(
-            prompt_input,
-            sampling_params=trtllm_sampling_params,
-            streaming=True,  # Must be True for KV events and incremental output
+            prompt_input, sampling_params=trtllm_params, streaming=True
         )
 
-        # Extract text from TensorRT-LLM RequestOutput objects
-        async for request_output in outputs:
-            # TensorRT-LLM returns RequestOutput objects with outputs list
-            if hasattr(request_output, 'outputs') and request_output.outputs:
-                completion_output = request_output.outputs[0]
-                
-                # Extract text_diff for streaming (incremental text)
-                if hasattr(completion_output, 'text_diff'):
-                    text = completion_output.text_diff
-                elif hasattr(completion_output, 'text'):
-                    text = completion_output.text
-                else:
-                    text = ""
-                
-                # Create a response dict similar to vLLM format
-                response = {
-                    'text': text,
-                    'text_diff': getattr(completion_output, 'text_diff', text),
-                    'token_ids': getattr(completion_output, 'token_ids', []),
-                    'finish_reason': getattr(completion_output, 'finish_reason', None),
-                }
-                yield response
-            else:
-                # Fallback: yield as-is if structure is unexpected
-                yield request_output
+        async for output in outputs:
+            yield self._format_output(output)
+
+    def _format_output(self, request_output) -> dict:
+        """Format TRTLLM output to standard response dict."""
+        if not hasattr(request_output, "outputs") or not request_output.outputs:
+            return {"text": "", "text_diff": "", "token_ids": [], "finish_reason": None}
+
+        completion = request_output.outputs[0]
+        text = getattr(completion, "text_diff", None) or getattr(completion, "text", "")
+
+        return {
+            "text": text,
+            "text_diff": getattr(completion, "text_diff", text),
+            "token_ids": getattr(completion, "token_ids", []),
+            "finish_reason": getattr(completion, "finish_reason", None),
+        }
+
+    # -------------------------------------------------------------------------
+    # Lifecycle
+    # -------------------------------------------------------------------------
 
     def shutdown(self):
-        """Shutdown the worker and cleanup resources."""
-        logger.info(f"Shutting down worker {self.worker_id}")
+        """Shutdown worker and cleanup resources."""
+        logger.info(f"Worker {self.worker_id}: Shutting down")
 
         for task in self.background_tasks:
             task.cancel()
 
         if self.llm:
             self.llm.shutdown()
-
         if self.metrics_publisher:
             self.metrics_publisher.close()
-
         if self.kv_events_publisher:
             self.kv_events_publisher.close()
+
+
+# -----------------------------------------------------------------------------
+# Worker Manager
+# -----------------------------------------------------------------------------
 
 
 class TrtllmWorkers:
@@ -565,27 +479,22 @@ class TrtllmWorkers:
         base_metrics_port: int = 5657,
         num_workers: int = 1,
     ):
-        self.model = model
-        self.block_size = block_size
-        self.num_workers = num_workers
         self.workers = []
 
-        logger.info(f"Initializing {num_workers} TensorRT-LLM workers for model {model}")
-        logger.info("NOTE: First-time initialization compiles the model and takes 5-15 minutes")
+        logger.info(f"Initializing {num_workers} workers for {model}")
 
-        for worker_id in range(num_workers):
-            logger.info(f"Creating worker {worker_id}/{num_workers}...")
-            worker = TrtllmWorker(
-                worker_id=worker_id,
-                model=model,
-                block_size=block_size,
-                kv_events_port=base_kv_events_port + worker_id,
-                metrics_port=base_metrics_port + worker_id,
+        for i in range(num_workers):
+            self.workers.append(
+                TrtllmWorker(
+                    worker_id=i,
+                    model=model,
+                    block_size=block_size,
+                    kv_events_port=base_kv_events_port + i,
+                    metrics_port=base_metrics_port + i,
+                )
             )
-            self.workers.append(worker)
-            logger.info(f"Worker {worker_id} created successfully")
 
-        logger.info("All workers initialized successfully!")
+        logger.info(f"All {num_workers} workers initialized")
 
     async def start_all(self):
         """Start background tasks for all workers."""
@@ -593,14 +502,10 @@ class TrtllmWorkers:
             await worker.start_background_tasks()
 
     async def direct(
-        self,
-        prompt_input,  # Can be list[int] (tokens) or dict (MM input)
-        worker_id: int,
-        sampling_params: dict,
+        self, prompt_input, worker_id: int, sampling_params: dict
     ) -> AsyncGenerator[dict, None]:
-        """Send request directly to a specific worker."""
-        worker = self.workers[worker_id]
-        async for output in worker.generate(prompt_input, sampling_params):
+        """Send request to a specific worker."""
+        async for output in self.workers[worker_id].generate(prompt_input, sampling_params):
             yield output
 
     def shutdown_all(self):
@@ -608,4 +513,3 @@ class TrtllmWorkers:
         logger.info("Shutting down all workers")
         for worker in self.workers:
             worker.shutdown()
-

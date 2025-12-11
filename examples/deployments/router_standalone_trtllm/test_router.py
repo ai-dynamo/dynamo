@@ -82,22 +82,6 @@ def send_request(client: httpx.Client, url: str, payload: dict) -> bool:
         return False
 
 
-def query_router(
-    client: httpx.Client, url: str, local_hashes: list[int], num_tokens: int
-) -> dict | None:
-    """Query the router directly to get routing decision with overlap info."""
-    try:
-        resp = client.post(
-            f"{url}/find_best_worker",
-            json={"local_hashes": local_hashes, "num_tokens": num_tokens},
-        )
-        if resp.status_code == 200:
-            return resp.json()
-        return None
-    except Exception:
-        return None
-
-
 def get_tree_info(client: httpx.Client, url: str) -> dict:
     """Get radix tree debug info."""
     try:
@@ -105,14 +89,6 @@ def get_tree_info(client: httpx.Client, url: str) -> dict:
         return resp.json()
     except Exception:
         return {"num_blocks": -1, "events": []}
-
-
-def extract_overlap_from_logs(verbose: bool) -> float:
-    """
-    In a real implementation, we'd parse server logs or add an API endpoint.
-    For now, we rely on the debug endpoint and visual inspection.
-    """
-    return 0.0
 
 
 class KvRouterTests:
