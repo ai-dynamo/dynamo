@@ -32,6 +32,7 @@ use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
+    json_path::JsonPath,
     metrics::{
         Endpoint, EventConverter, process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
@@ -284,7 +285,7 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
 async fn handler_completions(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateCompletionRequest>,
+    JsonPath(request): JsonPath<NvCreateCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
