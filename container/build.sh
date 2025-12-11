@@ -89,7 +89,7 @@ DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="31116825b39f4e6a6a1e127001f5204b73d1dc32" # 1.2.0rc2
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="e4c707845ff58fcc0b1d87afb4dd0e64885c780a" # 1.2.0rc5
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
@@ -98,7 +98,7 @@ TRTLLM_GIT_URL=""
 DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc3"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc5"
 TENSORRTLLM_PIP_WHEEL=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
@@ -201,7 +201,6 @@ get_options() {
             fi
             ;;
         --base-image)
-            # Note: --base-image cannot be used with --dev-image
             if [ "$2" ]; then
                 BASE_IMAGE=$2
                 shift
@@ -220,14 +219,6 @@ get_options() {
         --target)
             if [ "$2" ]; then
                 TARGET=$2
-                shift
-            else
-                missing_requirement "$1"
-            fi
-            ;;
-        --dev-image)
-            if [ "$2" ]; then
-                DEV_IMAGE_INPUT=$2
                 shift
             else
                 missing_requirement "$1"
@@ -361,20 +352,10 @@ get_options() {
         shift
     done
 
-    # Validate argument combinations
-    if [[ -n "${DEV_IMAGE_INPUT:-}" && -n "${BASE_IMAGE:-}" ]]; then
-        error "ERROR: --dev-image cannot be used with --base-image. Use --dev-image to build from existing images or --base-image to build new images."
-    fi
-
-    # Validate that --target and --dev-image cannot be used together
-    if [[ -n "${DEV_IMAGE_INPUT:-}" && -n "${TARGET:-}" ]]; then
-        error "ERROR: --target cannot be used with --dev-image. Use --target to build from scratch or --dev-image to build from existing images."
-    fi
-
-    # Validate that --uid and --gid are only used with local-dev related options
+    # Validate that --uid and --gid are only used with local-dev target
     if [[ -n "${CUSTOM_UID:-}" || -n "${CUSTOM_GID:-}" ]]; then
-        if [[ -z "${DEV_IMAGE_INPUT:-}" && "${TARGET:-}" != "local-dev" ]]; then
-            error "ERROR: --uid and --gid can only be used with --dev-image or --target local-dev"
+        if [[ "${TARGET:-}" != "local-dev" ]]; then
+            error "ERROR: --uid and --gid can only be used with --target local-dev"
         fi
     fi
 
@@ -493,9 +474,8 @@ show_help() {
     echo "  [--cache-from cache location to start from]"
     echo "  [--cache-to location where to cache the build output]"
     echo "  [--tag tag for image]"
-    echo "  [--dev-image dev image to build local-dev from]"
-    echo "  [--uid user ID for local-dev images (only with --dev-image or --target local-dev)]"
-    echo "  [--gid group ID for local-dev images (only with --dev-image or --target local-dev)]"
+    echo "  [--uid user ID for local-dev images (only with --target local-dev)]"
+    echo "  [--gid group ID for local-dev images (only with --target local-dev)]"
     echo "  [--no-cache disable docker build cache]"
     echo "  [--dry-run print docker commands without running]"
     echo "  [--build-context name=path to add build context]"
@@ -577,16 +557,12 @@ fi
 # Add NIXL_REF as a build argument
 BUILD_ARGS+=" --build-arg NIXL_REF=${NIXL_REF} "
 
-# Function to build local-dev image with header
+# Function to build local-dev image
 build_local_dev_with_header() {
     local dev_base_image="$1"
     local tags="$2"
     local success_msg="$3"
     local header_title="$4"
-
-    echo "======================================"
-    echo "$header_title"
-    echo "======================================"
 
     # Get user info right before using it
     USER_UID=${CUSTOM_UID:-$(id -u)}
@@ -600,7 +576,8 @@ build_local_dev_with_header() {
         exit 1
     fi
 
-    echo "Building new local-dev image from: $dev_base_image"
+    echo ""
+    echo "Now building new local-dev image from: $dev_base_image"
     echo "User 'dynamo' will have UID: $USER_UID, GID: $USER_GID"
 
     # Show the docker command being executed if not in dry-run mode
@@ -627,8 +604,8 @@ build_local_dev_with_header() {
     # Show usage instructions
     echo ""
     echo "To run the local-dev image as the local user ($USER_UID/$USER_GID):"
-    # Extract the last tag from the tags string
-    last_tag=$(echo "$tags" | grep -o -- '--tag [^ ]*' | tail -1 | cut -d' ' -f2)
+    # Extract the first tag from the tags string (the full version tag, not the latest tag)
+    last_tag=$(echo "$tags" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
     # Calculate relative path to run.sh from current working directory
     # Get the directory where build.sh is located
     build_dir="$(dirname "${BASH_SOURCE[0]}")"
@@ -904,62 +881,35 @@ fi
 
 show_image_options
 
-if [ -z "$RUN_PREFIX" ]; then
-    set -x
+# Always build the main image first
+# Create build log directory for BuildKit reports
+BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
+mkdir -p "${BUILD_LOG_DIR}"
+SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
+
+# Determine output mode: --push for registry, --load for local (single-platform only)
+OUTPUT_MODE=""
+if [ -n "$PUSH" ]; then
+    OUTPUT_MODE="$PUSH"
+elif [ -n "$LOAD" ]; then
+    OUTPUT_MODE="$LOAD"
 fi
 
-
-# Skip Build 1 and Build 2 if DEV_IMAGE_INPUT is set (we'll handle it at the bottom)
-if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
-    # Create build log directory for BuildKit reports
-    BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
-    mkdir -p "${BUILD_LOG_DIR}"
-    SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
-
-    # Use BuildKit for enhanced metadata
-    # Determine output mode: --push for registry, --load for local (single-platform only)
-    OUTPUT_MODE=""
-    if [ -n "$PUSH" ]; then
-        OUTPUT_MODE="$PUSH"
-    elif [ -n "$LOAD" ]; then
-        OUTPUT_MODE="$LOAD"
-    fi
-
-    if [ -z "$RUN_PREFIX" ]; then
-        if docker buildx version &>/dev/null; then
-            docker buildx build --progress=plain $OUTPUT_MODE -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
-            BUILD_EXIT_CODE=${PIPESTATUS[0]}
-        else
-            DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
-            BUILD_EXIT_CODE=${PIPESTATUS[0]}
-        fi
-
-        if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
-            exit ${BUILD_EXIT_CODE}
-        fi
-    else
-        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-    fi
+# Use BuildKit for enhanced metadata
+if docker buildx version &>/dev/null; then
+    $RUN_PREFIX docker buildx build --progress=plain $OUTPUT_MODE -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+    BUILD_EXIT_CODE=${PIPESTATUS[0]}
+else
+    $RUN_PREFIX DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+    BUILD_EXIT_CODE=${PIPESTATUS[0]}
 fi
 
-# Handle --dev-image option (build local-dev from existing dev image)
-if [[ -n "${DEV_IMAGE_INPUT:-}" ]]; then
-    # Validate that the dev image is not already a local-dev image
-    if [[ "$DEV_IMAGE_INPUT" == *"-local-dev" ]]; then
-        echo "ERROR: Cannot use local-dev image as dev image input: '$DEV_IMAGE_INPUT'"
-        exit 1
-    fi
+if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+    exit ${BUILD_EXIT_CODE}
+fi
 
-    # Build tag arguments - always add -local-dev suffix for --dev-image
-    # Generate local-dev tag from input image
-    if [[ "$DEV_IMAGE_INPUT" == *:* ]]; then
-        LOCAL_DEV_TAG="--tag ${DEV_IMAGE_INPUT}-local-dev"
-    else
-        LOCAL_DEV_TAG="--tag ${DEV_IMAGE_INPUT}:latest-local-dev"
-    fi
-
-    build_local_dev_with_header "$DEV_IMAGE_INPUT" "$LOCAL_DEV_TAG" "Successfully built local-dev image: ${LOCAL_DEV_TAG#--tag }" "Building Local-Dev Image"
-elif [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
+# Handle local-dev target
+if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
     # Use the first tag name (TAG) if available, otherwise use latest
     if [[ -n "$TAG" ]]; then
         DEV_IMAGE=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
@@ -981,7 +931,9 @@ elif [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
         LOCAL_DEV_TAGS+=" --tag ${LATEST_TAG_NAME}-local-dev"
     fi
 
-    build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built local-dev images" "Starting Build 3: Local-Dev Image"
+    # Extract first tag for success message
+    FIRST_TAG=$(echo "$LOCAL_DEV_TAGS" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
+    build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built $FIRST_TAG" "Building Local-Dev Image"
 fi
 
 

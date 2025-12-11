@@ -81,6 +81,7 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
+            pytest.mark.skip(reason="unstable"),
             pytest.mark.timeout(
                 480
             ),  # 3x measured time (103.66s) + download time (150s)

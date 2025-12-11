@@ -143,9 +143,7 @@ runs:
           --vllm-max-jobs 10 \
           --framework ${{ inputs.framework }} \
           --platform ${{ inputs.platform }} \
-          --use-sccache \
-          --sccache-bucket "$SCCACHE_S3_BUCKET" \
-          --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
+          $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 

@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import string
 import time
@@ -38,6 +39,7 @@ class KVRouterProcess(ManagedProcess):
         store_backend: str = "etcd",
         enforce_disagg: bool = False,
         busy_threshold: float | None = None,
+        request_plane: str = "nats",
     ):
         command = [
             "python3",
@@ -61,8 +63,12 @@ class KVRouterProcess(ManagedProcess):
         if busy_threshold is not None:
             command.extend(["--busy-threshold", str(busy_threshold)])
 
+        env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = request_plane
+
         super().__init__(
             command=command,
+            env=env,
             timeout=60,
             display_output=True,
             health_check_ports=[frontend_port],
@@ -125,6 +131,23 @@ def verify_response_worker_ids(
     )
     logger.info(
         f"✓ Verified all {len(response_worker_ids)} responses have {key}={actual_worker_id}"
+    )
+
+
+def verify_response_timing(timing_info: dict[str, Any]) -> None:
+    """Verify timing info has valid values (ttft_ms > 0, total_time_ms > 0)."""
+    ttft_ms = timing_info.get("ttft_ms")
+    total_time_ms = timing_info.get("total_time_ms")
+
+    assert ttft_ms is not None and ttft_ms > 0, f"Expected ttft_ms > 0, got: {ttft_ms}"
+    assert (
+        total_time_ms is not None and total_time_ms > 0
+    ), f"Expected total_time_ms > 0, got: {total_time_ms}"
+    assert (
+        total_time_ms >= ttft_ms
+    ), f"Expected total_time_ms >= ttft_ms, got {total_time_ms} < {ttft_ms}"
+    logger.info(
+        f"✓ Verified timing: ttft_ms={ttft_ms:.2f}, total_time_ms={total_time_ms:.2f}"
     )
 
 
@@ -593,7 +616,7 @@ def _test_router_basic(
     Always waits for workers to be properly registered before sending requests to avoid flakiness.
 
     Args:
-        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
+        engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
         block_size: Block size for KV cache
         request: Pytest request fixture for managing resources
         frontend_port: Port to start the frontend HTTP server on
@@ -975,7 +998,6 @@ def _test_router_query_instance_id(
     Raises:
         AssertionError: If annotation response structure is incorrect or contains generation content
     """
-    import aiohttp
 
     try:
         # Start KV router (frontend)
@@ -1152,9 +1174,6 @@ def _test_router_overload_503(
     Raises:
         AssertionError: If 503 response is not received when expected
     """
-    import aiohttp
-
-    from tests.utils.managed_process import ManagedProcess
 
     try:
         logger.info(
@@ -1311,7 +1330,7 @@ def _test_router_indexers_sync(
     This validates that the snapshot mechanism works and routers can sync state from NATS.
 
     Args:
-        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
+        engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
         block_size: Block size for KV cache
         model_name: Model name to use for requests
         num_workers: Expected number of workers
@@ -1320,7 +1339,6 @@ def _test_router_indexers_sync(
     Raises:
         AssertionError: If router states don't synchronize correctly or snapshot is missing
     """
-    import nats
 
     # Use async to manage the test flow
     async def test_sync():
@@ -1645,7 +1663,7 @@ def _test_router_decisions_disagg(
                     # Each iteration adds more content to extend the prefix
                     progressive_content = " ".join([base_content] * (i + 1))
 
-                    # Create payload with worker_id in extra_fields to get prefill/decode worker IDs
+                    # Create payload with worker_id and timing in extra_fields
                     payload = {
                         **test_payload,
                         "messages": [
@@ -1654,7 +1672,7 @@ def _test_router_decisions_disagg(
                                 "content": progressive_content,
                             }
                         ],
-                        "nvext": {"extra_fields": ["worker_id"]},
+                        "nvext": {"extra_fields": ["worker_id", "timing"]},
                         "stream": True,
                     }
 
@@ -1668,9 +1686,10 @@ def _test_router_decisions_disagg(
                             response.status == 200
                         ), f"Request {i + 1} failed with status {response.status}"
 
-                        # Collect all chunks and look for nvext with worker_id
+                        # Collect all chunks and look for nvext with worker_id and timing
                         prefill_wid = None
                         decode_wid = None
+                        timing_info = None
 
                         async for line in response.content:
                             if not line:
@@ -1686,30 +1705,41 @@ def _test_router_decisions_disagg(
 
                             try:
                                 data = json.loads(data_str)
-                                # Check for nvext.worker_id in the response
+                                # Check for nvext in the response
                                 nvext = data.get("nvext", {})
-                                worker_id_info = nvext.get("worker_id", {})
-
-                                if worker_id_info:
-                                    if "prefill_worker_id" in worker_id_info:
-                                        prefill_wid = worker_id_info[
-                                            "prefill_worker_id"
-                                        ]
-                                    if "decode_worker_id" in worker_id_info:
-                                        decode_wid = worker_id_info["decode_worker_id"]
+                                if nvext:
+                                    worker_id_info = nvext.get("worker_id", {})
+                                    if worker_id_info:
+                                        if "prefill_worker_id" in worker_id_info:
+                                            prefill_wid = worker_id_info[
+                                                "prefill_worker_id"
+                                            ]
+                                        if "decode_worker_id" in worker_id_info:
+                                            decode_wid = worker_id_info[
+                                                "decode_worker_id"
+                                            ]
+                                    # Timing info appears in final chunk
+                                    if "timing" in nvext:
+                                        timing_info = nvext["timing"]
 
                             except json.JSONDecodeError:
                                 continue
 
                         logger.info(
                             f"Request {i + 1}: prefill_worker_id={prefill_wid}, "
-                            f"decode_worker_id={decode_wid}"
+                            f"decode_worker_id={decode_wid}, timing={timing_info}"
                         )
 
                         if prefill_wid is not None:
                             prefill_worker_ids.append(prefill_wid)
                         if decode_wid is not None:
                             decode_worker_ids.append(decode_wid)
+
+                        # Verify timing info is present and valid
+                        assert (
+                            timing_info is not None
+                        ), f"Request {i + 1}: Expected timing info in final chunk, got None"
+                        verify_response_timing(timing_info)
 
                     # Small delay between requests
                     await asyncio.sleep(0.5)
@@ -1762,15 +1792,16 @@ def _test_router_decisions(
     model_name: str,
     request,
     test_dp_rank: bool = False,
+    block_size: int = BLOCK_SIZE,
 ):
     """Validate KV cache prefix reuse and worker routing by sending progressive requests with overlapping prefixes.
 
     Assumes engine workers are already initialized. Sends 4 progressive requests where each extends
-    the previous tokens by BLOCK_SIZE. The first request is forced to a specific worker (and optionally
+    the previous tokens by `block_size`. The first request is forced to a specific worker (and optionally
     dp_rank), and subsequent requests should naturally route to the same worker due to prefix reuse.
 
     Args:
-        engine_workers: MockerProcess or VLLMProcess instance (already initialized with __enter__())
+        engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
         endpoint: Endpoint of the engine workers
         model_name: Name of the model
         request: Pytest request fixture
@@ -1783,7 +1814,7 @@ def _test_router_decisions(
     kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
     kv_push_router = KvPushRouter(
         endpoint=endpoint,
-        block_size=BLOCK_SIZE,
+        block_size=block_size,
         kv_router_config=kv_router_config,
     )
 
@@ -1814,8 +1845,8 @@ def _test_router_decisions(
         response_worker_ids: list[dict[str, Optional[int]]] = []
 
         for i in range(4):
-            # Add BLOCK_SIZE new random tokens
-            new_tokens = [random.randint(1, 10000) for _ in range(BLOCK_SIZE)]
+            # Add `block_size` new random tokens
+            new_tokens = [random.randint(1, 10000) for _ in range(block_size)]
             cumulative_tokens.extend(new_tokens)
 
             # Force first request to specific worker_id (and dp_rank if testing DP), let subsequent requests follow naturally
@@ -1984,6 +2015,7 @@ def _test_busy_threshold_endpoint(
     frontend_port: int,
     test_payload: dict,
     store_backend: str = "etcd",
+    request_plane: str = "nats",
 ):
     """Test that the /busy_threshold endpoint can be hit and responds correctly.
 
@@ -1995,12 +2027,13 @@ def _test_busy_threshold_endpoint(
     For now, this test only verifies the endpoint is accessible and returns valid responses.
 
     Args:
-        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
+        engine_workers: MockerProcess instance (already initialized with __enter__())
         block_size: Block size for KV cache
         request: Pytest request fixture for managing resources
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload (used to extract model name)
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        request_plane: Request plane to use ("nats" or "tcp"). Defaults to "nats".
 
     Raises:
         AssertionError: If endpoint responses are incorrect
@@ -2018,6 +2051,7 @@ def _test_busy_threshold_endpoint(
             engine_workers.namespace,
             store_backend,
             busy_threshold=initial_threshold,
+            request_plane=request_plane,
         )
         kv_router.__enter__()
 

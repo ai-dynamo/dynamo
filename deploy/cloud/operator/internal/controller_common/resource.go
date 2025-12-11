@@ -496,6 +496,24 @@ func getGPUResourceName(resourceItem *v1alpha1.ResourceItem) corev1.ResourceName
 	return corev1.ResourceName(consts.KubeResourceGPUNvidia)
 }
 
+// AppendUniqueImagePullSecrets appends secrets to existing, skipping any that already exist by name.
+func AppendUniqueImagePullSecrets(existing, additional []corev1.LocalObjectReference) []corev1.LocalObjectReference {
+	if len(additional) == 0 {
+		return existing
+	}
+	seen := make(map[string]bool, len(existing))
+	for _, s := range existing {
+		seen[s.Name] = true
+	}
+	for _, s := range additional {
+		if !seen[s.Name] {
+			existing = append(existing, s)
+			seen[s.Name] = true
+		}
+	}
+	return existing
+}
+
 type Resource struct {
 	client.Object
 	isReady func() (bool, string)
