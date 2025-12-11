@@ -160,6 +160,10 @@ impl ConnectorLeader {
 
         let mut slot = shared_slot.lock();
 
+        if slot.match_requires_reset() {
+            todo!("reset the slot");
+        }
+
         // Determine the match outcome
         let outcome = self.process_match(&mut slot, num_computed_tokens);
 
@@ -182,6 +186,14 @@ impl ConnectorLeader {
         }
     }
 
+    /// If this is called with `num_external_tokens` > 0, it will be called with all the blocks upto the block(s)
+    /// that need to be onboarded, this included any matched G1 blocks.
+    ///
+    /// In this case, we compute the start block to onboard by scanning back from the end of the block lists by
+    /// the `num_external_tokens/block_size`.
+    ///
+    /// If this is called with `num_external_tokens` == 0, we will be given the remainder of the blocks destined
+    /// for prefill.
     #[tracing::instrument(level = "debug", skip(self), fields(?request_id))]
     pub fn update_state_after_alloc(
         self: &Arc<Self>,
@@ -190,6 +202,9 @@ impl ConnectorLeader {
         num_external_tokens: usize,
     ) -> Result<()> {
         let block_size = self.block_size;
+        self.get_slot(request_id)?
+            .lock()
+            .set_match_requires_reset(true);
 
         if num_external_tokens == 0 {
             return Ok(());
@@ -203,17 +218,7 @@ impl ConnectorLeader {
             );
         }
 
-        let expected_blocks = num_external_tokens / block_size;
-        if expected_blocks != block_ids.len() {
-            bail!(
-                "Block count mismatch for {}: expected {}, got {}",
-                request_id,
-                expected_blocks,
-                block_ids.len()
-            );
-        }
-
-        let result = self.start_onboarding(request_id, block_ids);
+        let result = self.start_onboarding(request_id, block_ids, num_external_tokens);
 
         match result {
             Ok(()) => Ok(()),
@@ -224,10 +229,10 @@ impl ConnectorLeader {
         }
     }
 
-    #[tracing::instrument(level = "debug", skip(self), fields(iteration = output.iteration))]
+    #[tracing::instrument(level = "debug", skip_all, fields(iteration = output.iteration))]
     pub fn build_connector_meta(
         &self,
-        output: &scheduler::SchedulerOutput,
+        output: scheduler::SchedulerOutput,
     ) -> Result<scheduler::KvConnectorMetadata> {
         self.process_scheduler_output(output)
     }

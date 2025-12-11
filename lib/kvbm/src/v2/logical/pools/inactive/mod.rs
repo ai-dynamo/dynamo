@@ -86,8 +86,13 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
             let mut inner = inner_clone.write();
             match Arc::try_unwrap(block) {
                 Ok(block) => {
+                    let block_id = block.block_id();
                     inner.backend.insert(block);
-                    tracing::debug!(?seq_hash, "Block returned to inactive pool");
+                    tracing::trace!(
+                        ?seq_hash,
+                        block_id,
+                        "Block returned to inactive pool"
+                    );
                 }
                 Err(_block) => {
                     tracing::warn!(

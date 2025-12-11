@@ -33,7 +33,14 @@ impl ConnectorLeader {
             // Remove the already computed tokens from the search list
             assert!(num_computed_tokens.is_multiple_of(block_size));
             let num_device_blocks = num_computed_tokens / block_size;
-            let search_sequence_hashes = &sequence_hashes[num_device_blocks..];
+
+            let last_block_index = if slot.sequence.total_tokens().is_multiple_of(block_size) {
+                sequence_hashes.len()
+            } else {
+                sequence_hashes.len() - 1
+            };
+
+            let search_sequence_hashes = &sequence_hashes[num_device_blocks..last_block_index];
 
             let options = FindMatchesOptions {
                 search_remote: true,

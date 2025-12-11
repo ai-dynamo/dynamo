@@ -11,7 +11,7 @@ use dynamo_llm::block_manager::kv_consolidator::{
 };
 use dynamo_llm::block_manager::offload::filter::FrequencyFilter;
 use dynamo_llm::block_manager::{BasicMetadata, BlockParallelismStrategy};
-use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::{DistributedRuntime, traits::DistributedRuntimeProvider};
 use dynamo_runtime::config::environment_names::kvbm as env_kvbm;
 use pyo3::PyResult;
 use std::time::Duration;

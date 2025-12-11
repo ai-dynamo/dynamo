@@ -3,7 +3,7 @@
 
 use super::ConnectorLeader;
 use crate::{
-    G1, InstanceId, SequenceHash, distributed::offload::ExternalBlock,
+    G1, InstanceId, distributed::offload::ExternalBlock,
     integrations::connector::leader::slot::RequestSlot, v2::BlockId,
 };
 
@@ -174,9 +174,9 @@ impl ConnectorLeader {
     /// to wait for the IterationSession to be completed.
     pub fn process_scheduler_output(
         &self,
-        scheduler_output: &SchedulerOutput,
+        scheduler_output: SchedulerOutput,
     ) -> Result<KvConnectorMetadata> {
-        tracing::debug!(
+        tracing::trace!(
             "processing scheduler output for iteration: {}; active slots: {}",
             scheduler_output.iteration,
             self.slots.len()
@@ -193,22 +193,38 @@ impl ConnectorLeader {
         // Create precondition event for offload (single or merged)
         let precondition = self.create_offload_precondition(&worker_events)?;
 
-        // create a forward pass builder, this will be used to apply actions to the forward pass
-        // - we will generate from this object a session and a metadata object
-        // - the session we will register with the leader so the worker can interact with it via nova
-        // - the metadata object will be serialized and sent to the workers so they know what actions to perform
-        let _builder = ForwardPassBuilder::new(scheduler_output.iteration);
-
-        for req in &scheduler_output.scheduled_new_reqs {
+        // Process new requests
+        for req in scheduler_output.scheduled_new_reqs {
             match self.get_slot(&req.req_id) {
                 Ok(shared_slot) => {
                     let mut slot = shared_slot.lock();
+                    slot.advance_evaluated_tokens(req.num_computed_tokens);
+
+                    // We are given all the block_ids for the request, but we need to filter out all those that may
+                    // have been applied to the slot already.
+                    let filtered_block_ids = slot.filter_block_ids(req.block_ids);
+                    slot.apply_new_blocks(filtered_block_ids);
+
+                    // assert!(
+                    //     req.num_computed_tokens.is_multiple_of(self.block_size()),
+                    //     "num_computed_tokens must be a multiple of block_size; num_computed_tokens: {}; block_size: {}",
+                    //     req.num_computed_tokens,
+                    //     self.block_size()
+                    // );
+
+                    // when we start a new request, we are always starting at the beginning of a block
+                    // is might not be the first block, but it always aligned with a block boundary
+                    let num_scheduled_tokens = scheduler_output
+                        .num_scheduled_tokens
+                        .get(&req.req_id)
+                        .copied()
+                        .unwrap_or(0);
+
                     if let Err(e) = self.process_request_offload(
                         &req.req_id,
-                        &req.block_ids,
                         &mut slot,
+                        num_scheduled_tokens,
                         precondition,
-                        0, // New requests start at offset 0
                     ) {
                         tracing::error!(
                             "failed to process offload for new req_id {}: {}",
@@ -226,7 +242,7 @@ impl ConnectorLeader {
             }
         }
 
-        for req in &scheduler_output.scheduled_cached_reqs {
+        for req in scheduler_output.scheduled_cached_reqs {
             match self.get_slot(&req.req_id) {
                 Ok(shared_slot) => {
                     let mut slot = shared_slot.lock();
@@ -282,16 +298,20 @@ impl ConnectorLeader {
                         continue;
                     }
 
-                    // Get the current count of mapped blocks - this is our offset
-                    let already_mapped = slot.mapped_block_count();
+                    slot.apply_new_blocks(req.new_block_ids);
+
+                    let num_scheduled_tokens = scheduler_output
+                        .num_scheduled_tokens
+                        .get(&req.req_id)
+                        .copied()
+                        .unwrap_or(0);
 
                     // Process offload with offset for cached requests
                     if let Err(e) = self.process_request_offload(
                         &req.req_id,
-                        &req.new_block_ids,
                         &mut slot,
+                        num_scheduled_tokens,
                         precondition,
-                        already_mapped,
                     ) {
                         tracing::error!(
                             "failed to process offload for cached req_id {}: {}",
@@ -377,50 +397,25 @@ impl ConnectorLeader {
     fn process_request_offload(
         &self,
         req_id: &str,
-        block_ids: &[BlockId],
         slot: &mut RequestSlot,
+        num_scheduled_tokens: usize,
         precondition: Option<EventHandle>,
-        offset: usize,
     ) -> Result<()> {
         // Skip if slot is marked for deletion or finished evaluating
         if slot.is_marked_for_deletion() || slot.is_finished_evaluating() {
             return Ok(());
         }
 
-        let block_count = block_ids.len();
-        let token_block_count = slot.sequence.blocks().len();
-        let available_slots = token_block_count.saturating_sub(offset);
+        // ask the slot for the next set of assigned_block_ids to offload
+        let block_mappings = slot.get_next_block_mappings(num_scheduled_tokens);
+        slot.advance_evaluated_tokens(num_scheduled_tokens);
 
-        // Validate block counts (allow 1 extra block for partial/decoding block)
-        if block_count > available_slots + 1 {
-            tracing::warn!(
-                "block_ids ({}) exceed available token_blocks ({} available, {} offset) by >1, marking finished for {}",
-                block_count,
-                available_slots,
-                offset,
-                req_id
-            );
-            slot.mark_finished_evaluating();
-        }
-
-        let mappable_count = block_count.min(available_slots);
-        if mappable_count == 0 {
-            return Ok(());
-        }
-
-        // Generate source blocks from token blocks at offset
-        let token_blocks = slot
-            .sequence
-            .blocks()
-            .get(offset..offset + mappable_count)
-            .expect("mappable range within bounds");
-
-        let block_mappings: Vec<(BlockId, SequenceHash)> = block_ids
-            .iter()
-            .take(mappable_count)
-            .zip(token_blocks.iter())
-            .map(|(block_id, token_block)| (*block_id, token_block.positional_sequence_hash()))
-            .collect();
+        tracing::debug!(
+            req_id,
+            "num_scheduled_tokens: {}; num_blocks_to_offload: {}",
+            num_scheduled_tokens,
+            block_mappings.len(),
+        );
 
         let source_blocks: Vec<_> = block_mappings
             .iter()

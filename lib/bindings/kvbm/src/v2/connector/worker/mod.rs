@@ -131,6 +131,29 @@ impl PyConnectorWorker {
         self.inner.clear_connector_metadata().map_err(to_pyerr)
     }
 
+    /// Check if we need a CUDA stream for event synchronization.
+    ///
+    /// Returns True if there's a pending forward pass event that needs
+    /// to be synchronized via CUDA event before triggering.
+    /// Python should call this and only call save_kv_layer if True.
+    pub fn needs_cuda_stream(&self) -> bool {
+        self.inner.needs_cuda_stream()
+    }
+
+    /// Save KV layer and trigger forward pass completion.
+    ///
+    /// This should be called on the last layer's save_kv_layer when
+    /// needs_cuda_stream() returns True. It records a CUDA event on
+    /// the provided stream and spawns an async task that waits for
+    /// the event before triggering the Nova forward pass event.
+    ///
+    /// Args:
+    ///     stream_handle: Raw CUDA stream handle (u64) from Python's current stream
+    ///                   Obtained via: torch.cuda.current_stream().cuda_stream
+    pub fn save_kv_layer(&self, stream_handle: u64) -> PyResult<()> {
+        self.inner.save_kv_layer(stream_handle).map_err(to_pyerr)
+    }
+
     /// Get completed transfer request IDs (drains the sets).
     ///
     /// Called by the worker executor (vLLM) to check which requests have

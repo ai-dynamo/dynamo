@@ -20,7 +20,7 @@ name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
+default = ["block-manager"]
 block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc", "dep:dynamo_kvbm_kernels"]
 
 [dependencies]

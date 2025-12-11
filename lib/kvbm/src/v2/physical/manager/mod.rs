@@ -273,6 +273,14 @@ impl TransferManager {
 
         let options = internal_options.build()?;
 
+        tracing::debug!(
+            src_handle = src_handle.to_string(),
+            dst_handle = dst_handle.to_string(),
+            "Executing transfer; src_blocks = {:?}; dst_blocks = {:?}",
+            src_blocks,
+            dst_blocks,
+        );
+
         // Execute transfer with no lock held
         super::transfer::executor::execute_transfer(
             &src_layout,

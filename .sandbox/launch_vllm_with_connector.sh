@@ -50,25 +50,29 @@ export VLLM_SERVER_DEV_MODE=1
 # =============================================================================
 # Set RUST_LOG if not already set - enables tracing from Rust components
 # export RUST_LOG="${RUST_LOG:-dynamo_kvbm=debug,dynamo_nova=info,warn}"
-export RUST_LOG="${RUST_LOG:-debug}"
-export DYN_LOG="${DYN_LOG:-debug}"
+#export RUST_LOG="${RUST_LOG:-debug,dynamo_nova=error,dynamo_kvbm::v2::integrations::connector::worker=info}"
+#export DYN_LOG="${DYN_LOG:-debug,dynamo_nova=error,dynamo_kvbm::v2::integrations::connector::worker=info}"
+export RUST_LOG="${RUST_LOG:-info}"
+export DYN_LOG="${DYN_LOG:-info}"
 
 # =============================================================================
 # vLLM Configuration
 # =============================================================================
 
 # Default model - use gpt2 for quick testing
-MODEL="${MODEL:-gpt2}"
+#MODEL="${MODEL:-gpt2}"
+MODEL="${MODEL:-deepseek-ai/DeepSeek-R1-Distill-Llama-8B}"
 
 # Configure KV transfer for DynamoConnector
-# The connector is at: kvbm.v2.vllm.schedulers.connector.DynamoConnector
+# The connector v1 is at: kvbm.vllm_integration.connector.dynamo_connector.DynamoConnector
+# The connector v2 is at: kvbm.v2.vllm.schedulers.connector.DynamoConnector
 kv_transfer_config='{
   "kv_connector": "DynamoConnector",
   "kv_role": "kv_both",
   "kv_connector_module_path": "kvbm.v2.vllm.schedulers.connector",
   "kv_connector_extra_config": {
     "leader": {
-      "cache": { "host": { "cache_size_gb": 4.0 } },
+      "cache": { "host": { "cache_size_gb": 100.0 } },
       "tokio": { "worker_threads": 2 }
     },
     "worker": {

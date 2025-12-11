@@ -9,11 +9,16 @@ pub use client::ConnectorWorkerClient;
 pub use pending::PendingWorkerState;
 
 use anyhow::{Result, bail};
+use cudarc::driver::sys::{
+    CUevent, CUevent_flags, CUresult, CUstream, cuEventCreate, cuEventQuery, cuEventRecord,
+    cudaError_enum,
+};
 use dynamo_memory::TensorDescriptor;
 use dynamo_nova::Nova;
 use dynamo_nova::am::NovaHandler;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::KvbmRuntime;
@@ -46,8 +51,22 @@ pub trait ConnectorWorkerInterface: Send + Sync {
     /// Clear connector metadata.
     fn clear_connector_metadata(&self) -> Result<()>;
 
-    // /// Complete NIXL initialization with leader-provided config.
-    // fn complete_initialization(&self, config: LeaderLayoutConfig) -> Result<WorkerLayoutResponse>;
+    /// Check if we need a CUDA stream for event synchronization.
+    ///
+    /// Returns `true` if there's a pending forward pass event that needs
+    /// to be synchronized via CUDA event before triggering.
+    fn needs_cuda_stream(&self) -> bool;
+
+    /// Save KV layer and trigger forward pass completion on last layer.
+    ///
+    /// This should be called on the last layer's save_kv_layer.
+    /// It records the pre-created CUDA event on the provided stream,
+    /// then spawns an async task that waits for the event and triggers
+    /// the Nova forward pass event.
+    ///
+    /// # Arguments
+    /// * `stream_handle` - Raw CUDA stream handle (u64) from Python's current stream
+    fn save_kv_layer(&self, stream_handle: u64) -> Result<()>;
 
     /// Check if initialization has been completed.
     fn is_initialized(&self) -> bool;
@@ -136,6 +155,17 @@ impl GpuInfo {
     }
 }
 
+/// Paired forward pass events: Nova event handle + CUDA event for synchronization.
+///
+/// These are created together in `bind_connector_metadata` when a forward pass
+/// event is present. The CUDA event is recorded on the stream in `save_kv_layer`,
+/// then an async task waits for the CUDA event before triggering the Nova event.
+struct ForwardPassEvents {
+    nova_event: dynamo_nova::events::EventHandle,
+    /// Raw CUDA event handle stored as u64 for Send/Sync safety
+    cuda_event: u64,
+}
+
 /// Shared state for the connector worker, wrapped in Arc for handler sharing.
 struct SharedWorkerState {
     runtime: Arc<KvbmRuntime>,
@@ -143,9 +173,9 @@ struct SharedWorkerState {
     service: OnceLock<NovaWorkerService>,
     gpu_info: OnceLock<GpuInfo>,
     finished_state: FinishedState,
-    /// Current iteration's forward pass event handle (if any).
-    /// Loaded from KvConnectorMetadata, triggered in clear_connector_metadata.
-    forward_pass_event: Mutex<Option<dynamo_nova::events::EventHandle>>,
+    /// Current iteration's forward pass events (Nova + CUDA pair).
+    /// Created in `bind_connector_metadata`, consumed in `save_kv_layer`.
+    forward_pass_events: Mutex<Option<ForwardPassEvents>>,
 }
 
 /// Connector worker implementation that uses Nova for communication and
@@ -170,7 +200,7 @@ impl ConnectorWorker {
             service: OnceLock::new(),
             gpu_info: OnceLock::new(),
             finished_state: FinishedState::new(),
-            forward_pass_event: Mutex::new(None),
+            forward_pass_events: Mutex::new(None),
         });
 
         let nova = state.runtime.nova.clone();
@@ -368,13 +398,32 @@ impl ConnectorWorkerInterface for ConnectorWorker {
     fn bind_connector_metadata(&self, metadata: KvConnectorMetadata) -> Result<()> {
         tracing::debug!(iteration = metadata.iteration, "Binding connector metadata");
 
-        // Load forward pass event if present
+        // Load forward pass event if present and create paired CUDA event
         if let Some(event_map) = metadata.forward_pass_events {
             let my_instance_id = self.state.runtime.nova().instance_id();
 
-            if let Some(&event_handle) = event_map.get(&my_instance_id) {
-                tracing::debug!(?event_handle, "Loaded forward pass event");
-                *self.state.forward_pass_event.lock().unwrap() = Some(event_handle);
+            if let Some(&nova_event) = event_map.get(&my_instance_id) {
+                // Create a CUDA event for synchronization (disabled timing for performance)
+                let cuda_event: u64 = unsafe {
+                    let mut event: CUevent = ptr::null_mut();
+                    let status =
+                        cuEventCreate(&mut event, CUevent_flags::CU_EVENT_DISABLE_TIMING as u32);
+                    if status != cudaError_enum::CUDA_SUCCESS {
+                        bail!("cuEventCreate failed with status: {:?}", status);
+                    }
+                    event as u64
+                };
+
+                tracing::debug!(
+                    ?nova_event,
+                    cuda_event,
+                    "Created paired forward pass events"
+                );
+
+                *self.state.forward_pass_events.lock().unwrap() = Some(ForwardPassEvents {
+                    nova_event,
+                    cuda_event,
+                });
             }
         }
 
@@ -384,22 +433,88 @@ impl ConnectorWorkerInterface for ConnectorWorker {
     fn clear_connector_metadata(&self) -> Result<()> {
         tracing::debug!("Clearing connector metadata");
 
-        // Trigger forward pass completion event if present
-        if let Some(event_handle) = self.state.forward_pass_event.lock().unwrap().take() {
-            tracing::debug!(?event_handle, "Triggering forward pass event");
-
-            // Fire-and-forget: spawn task to trigger event
-            // If this fails, the instance is likely crashing anyway
-            let nova = self.state.runtime.nova().clone();
-            self.state.runtime.nova().tracker().spawn_on(
-                async move {
-                    if let Err(e) = nova.events().trigger(event_handle).await {
-                        tracing::error!("Failed to trigger forward pass event: {}", e);
-                    }
-                },
-                &self.state.runtime.tokio(),
+        // Verify that forward pass events have been consumed by save_kv_layer
+        let events = self.state.forward_pass_events.lock().unwrap();
+        if events.is_some() {
+            tracing::warn!(
+                "Forward pass events not consumed - save_kv_layer may not have been called on last layer"
             );
+            // Don't bail here - this could happen if there was an error during forward pass
+            // The events will be cleaned up on next bind_connector_metadata
         }
+
+        Ok(())
+    }
+
+    fn needs_cuda_stream(&self) -> bool {
+        self.state.forward_pass_events.lock().unwrap().is_some()
+    }
+
+    fn save_kv_layer(&self, stream_handle: u64) -> Result<()> {
+        // Take the paired events
+        let events = self
+            .state
+            .forward_pass_events
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No forward pass events - needs_cuda_stream() should have returned false"
+                )
+            })?;
+
+        tracing::debug!(
+            ?events.nova_event,
+            cuda_event = events.cuda_event,
+            stream_handle,
+            "Recording CUDA event on stream and spawning completion task"
+        );
+
+        // Record the CUDA event on the provided stream
+        unsafe {
+            let status = cuEventRecord(events.cuda_event as CUevent, stream_handle as CUstream);
+            if status != cudaError_enum::CUDA_SUCCESS {
+                bail!("cuEventRecord failed with status: {:?}", status);
+            }
+        }
+
+        // Spawn async task to wait for CUDA event then trigger Nova event
+        let nova = self.state.runtime.nova().clone();
+        let nova_event = events.nova_event;
+        let cuda_event = events.cuda_event;
+
+        self.state.runtime.nova().tracker().spawn_on(
+            async move {
+                // Poll the CUDA event until complete
+                loop {
+                    let status = unsafe { cuEventQuery(cuda_event as CUevent) };
+                    match status {
+                        CUresult::CUDA_SUCCESS => break,
+                        CUresult::CUDA_ERROR_NOT_READY => {
+                            // Yield to other tasks
+                            tokio::task::yield_now().await;
+                        }
+                        _ => {
+                            tracing::error!("CUDA event query failed: {:?}", status);
+                            break;
+                        }
+                    }
+                }
+
+                // Trigger the Nova forward pass event
+                tracing::debug!(?nova_event, "CUDA event complete, triggering Nova event");
+                if let Err(e) = nova.events().trigger(nova_event).await {
+                    tracing::error!("Failed to trigger forward pass event: {}", e);
+                }
+
+                // Note: We don't call cuEventDestroy here because it will be handled
+                // when the task completes. The event was created in bind_connector_metadata
+                // and ownership was transferred to this task.
+                // TODO: Consider explicit cleanup with cuEventDestroy
+            },
+            &self.state.runtime.tokio(),
+        );
 
         Ok(())
     }

@@ -103,7 +103,7 @@ impl PySchedulerOutput {
 
 impl PySchedulerOutput {
     /// Get a reference to the inner Rust SchedulerOutput.
-    pub fn inner(&self) -> &RustSchedulerOutput {
-        &self.inner
+    pub fn inner(&self) -> RustSchedulerOutput {
+        self.inner.clone()
     }
 }

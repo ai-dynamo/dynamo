@@ -91,6 +91,8 @@ class SchedulerConnectorWorker:
 
         # Will be set during register_kv_caches
         self._num_device_blocks: Optional[int] = None
+        self._num_layers: int = 0
+        self._last_layer_name: Optional[str] = None
 
         print(
             f"SchedulerConnectorWorker initialized with Nova instance: {instance_id.hex()[:8]}...",
@@ -156,8 +158,12 @@ class SchedulerConnectorWorker:
             dtype_width_bytes,
         )
 
-        # Store device block count for later use
+        # Store device block count and last layer name for later use
         self._num_device_blocks = num_device_blocks
+        self._num_layers = len(tensors)
+        # Get the last layer name from the ordered list
+        self._last_layer_name = ordered_kv_caches[-1][0] if ordered_kv_caches else None
+        print(f"[DEBUG] register_kv_caches: _last_layer_name set to: {self._last_layer_name}")
 
         print("[KVBM] KV caches registered (deferred mode)")
         print(f"  - Num device blocks: {num_device_blocks}")
@@ -195,11 +201,27 @@ class SchedulerConnectorWorker:
         **kwargs,
     ) -> None:
         """
-        Save KV layer - no-op.
+        Save KV layer - triggers forward pass completion on last layer.
 
-        No KV saving needed for scheduler connector.
+        On the last layer, if there's a pending forward pass event,
+        we record a CUDA event on the current stream and spawn an async
+        task to wait for it before triggering the Nova forward pass event.
         """
-        pass
+        # Check if this is the last layer (fast string comparison)
+        if layer_name != self._last_layer_name:
+            return
+
+        # Check if Rust needs the stream for event synchronization
+        if not self.worker.needs_cuda_stream():
+            return
+
+        # Get the current CUDA stream handle
+        device = kv_layer.device
+        stream = torch.cuda.current_stream(device)
+        stream_handle = stream.cuda_stream
+
+        # Call Rust to record event and spawn completion task
+        self.worker.save_kv_layer(stream_handle)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """No-op - no async loading."""
@@ -222,9 +244,9 @@ class SchedulerConnectorWorker:
         Returns:
             (None, None): No finished sends/receives
         """
-        print(
-            f"SchedulerConnectorWorker.get_finished called with {len(finished_req_ids)} finished requests"
-        )
+        # print(
+        #     f"SchedulerConnectorWorker.get_finished called with {len(finished_req_ids)} finished requests"
+        # )
         return self.worker.get_finished()
 
     def get_block_ids_with_load_errors(self) -> set[int]:

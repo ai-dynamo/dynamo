@@ -72,7 +72,7 @@ ARG RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
 ARG CUDA_VERSION="12.9"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="v0.12.0"
+ARG VLLM_REF="v0.11.1"
 # FlashInfer Ref used to install flashinfer-cubin and flashinfer-jit-cache
 ARG FLASHINF_REF="v0.5.3"
 
@@ -232,6 +232,8 @@ COPY container/use-sccache.sh /tmp/use-sccache.sh
 RUN if [ "$USE_SCCACHE" = "true" ]; then \
         /tmp/use-sccache.sh install; \
     fi
+
+RUN /tmp/use-sccache.sh install
 
 # Set SCCACHE environment variables
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
@@ -422,6 +424,8 @@ ENV ARCH_ALT=${ARCH_ALT}
 RUN if [ "$USE_SCCACHE" = "true" ]; then \
         /tmp/use-sccache.sh install; \
     fi
+
+RUN /tmp/use-sccache.sh install
 
 # Set environment variables - they'll be empty strings if USE_SCCACHE=false
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
@@ -653,10 +657,10 @@ ARG WORKSPACE_DIR=/workspace
 USER root
 
 # Copy additional CUDA tools needed for building kernels from source (cargo build)
-COPY --from=base /usr/local/cuda/bin/nvlink /usr/local/cuda/bin/nvlink
-COPY --from=base /usr/local/cuda/bin/crt /usr/local/cuda/bin/crt
-COPY --from=base /usr/local/cuda/lib64/libcudart_static.a /usr/local/cuda/lib64/
-COPY --from=base /usr/local/cuda/lib64/libculibos.a /usr/local/cuda/lib64/
+COPY --from=dynamo_base /usr/local/cuda/bin/nvlink /usr/local/cuda/bin/nvlink
+COPY --from=dynamo_base /usr/local/cuda/bin/crt /usr/local/cuda/bin/crt
+COPY --from=dynamo_base /usr/local/cuda/lib64/libcudart_static.a /usr/local/cuda/lib64/
+COPY --from=dynamo_base /usr/local/cuda/lib64/libculibos.a /usr/local/cuda/lib64/
 
 # Install utilities as root
 RUN apt-get update -y && \

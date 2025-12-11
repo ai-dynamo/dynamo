@@ -13,12 +13,21 @@ impl ConnectorLeader {
         self: &Arc<Self>,
         request_id: &str,
         block_ids: Vec<BlockId>,
+        num_external_tokens: usize,
     ) -> Result<()> {
         let shared_slot = self.get_slot(request_id)?;
 
         // Extract session_id and transition to Onboarding state
-        let staging_fut = {
+        let (staging_fut, onboard_blocks_ids) = {
             let mut slot = shared_slot.lock();
+
+            let num_external_blocks = num_external_tokens / self.block_size();
+            let onboard_start_block_idx = block_ids.len().saturating_sub(num_external_blocks);
+            let onboard_blocks_ids = block_ids[onboard_start_block_idx..].to_vec();
+
+            // record the block_ids
+            // this will assign the block_ids to the token_block sequence hashes
+            slot.apply_new_blocks(block_ids);
 
             let staging_fut = match slot.onboarding_state() {
                 Some(onboarding_state) => onboarding_state.find_session.wait_for_completion(),
@@ -30,7 +39,7 @@ impl ConnectorLeader {
                 bail!("Failed to start onboarding: {}", e);
             }
 
-            staging_fut
+            (staging_fut, onboard_blocks_ids)
         };
 
         let leader = self.clone();
@@ -41,7 +50,7 @@ impl ConnectorLeader {
             match execute_onboarding(
                 leader.clone(),
                 shared_slot.clone(),
-                block_ids.clone(),
+                onboard_blocks_ids.clone(),
                 staging_fut,
             )
             .await
@@ -57,7 +66,7 @@ impl ConnectorLeader {
                         .workers
                         .get()
                         .unwrap()
-                        .mark_failed_onboarding(request_id, block_ids)
+                        .mark_failed_onboarding(request_id, onboard_blocks_ids)
                         .await
                         .expect("Failed to mark failed onboarding");
                     todo!("clean up session and free resources")
@@ -113,6 +122,8 @@ async fn execute_onboarding(
         .ok_or_else(|| anyhow::anyhow!("No G2 blocks found"))?;
 
     let g2_block_ids: Vec<BlockId> = g2_blocks.iter().map(|b| b.block_id()).collect();
+
+    assert_eq!(g2_block_ids.len(), g1_block_ids.len());
 
     // All blocks are now in G2
     let instance_leader = leader.instance_leader().expect("InstanceLeader not set");
