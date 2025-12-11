@@ -4,7 +4,7 @@
 //! KVBM cache statistics tracking and periodic logging.
 //!
 //! This module provides cache statistics tracking with a sliding window
-//! approach for tracking host, disk, and object storage cache hit rates.
+//! approach for tracking host and disk cache hit rates.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -19,17 +19,15 @@ const DEFAULT_LOG_INTERVAL_SECS: u64 = 5;
 struct CacheStatsEntry {
     host_blocks: u64,      // Blocks found in host cache
     disk_blocks: u64,      // Blocks found in disk cache
-    object_blocks: u64,    // Blocks found in object storage
-    total_blocks: u64,     // Total blocks queried
+    total_blocks: u64,     // Total blocks queried from host/disk
 }
 
 /// Aggregated cache statistics for the current sliding window
 #[derive(Default)]
 struct AggregatedStats {
-    total_blocks_queried: u64,   // Total blocks queried
+    total_blocks_queried: u64,  // Total blocks queried from host/disk (same for both tiers)
     host_blocks_hit: u64,        // Blocks found in host cache
     disk_blocks_hit: u64,        // Blocks found in disk cache
-    object_blocks_hit: u64,      // Blocks found in object storage
 }
 
 /// Cache statistics tracker with sliding window
@@ -49,8 +47,8 @@ pub struct CacheStatsTracker {
     /// Used in log messages to distinguish between multiple KVBM instances
     identifier: Option<String>,
     /// Last logged values to avoid duplicate logs when values haven't changed
-    /// Format: (total_blocks_queried, host_blocks_hit, disk_blocks_hit, object_blocks_hit)
-    last_logged_values: Mutex<Option<(u64, u64, u64, u64)>>,
+    /// Format: (total_blocks_queried, host_blocks_hit, disk_blocks_hit)
+    last_logged_values: Mutex<Option<(u64, u64, u64)>>,
 }
 
 impl CacheStatsTracker {
@@ -89,13 +87,7 @@ impl CacheStatsTracker {
 
     /// Record cache statistics for a completed request
     /// Uses sliding window: when max_recent_requests is exceeded, oldest entries are removed
-    pub fn record(
-        &self,
-        host_blocks: usize,
-        disk_blocks: usize,
-        object_blocks: usize,
-        total_blocks: usize,
-    ) {
+    pub fn record(&self, host_blocks: usize, disk_blocks: usize, total_blocks: usize) {
         if total_blocks == 0 {
             // Skip empty requests
             return;
@@ -104,7 +96,6 @@ impl CacheStatsTracker {
         let entry = CacheStatsEntry {
             host_blocks: host_blocks as u64,
             disk_blocks: disk_blocks as u64,
-            object_blocks: object_blocks as u64,
             total_blocks: total_blocks as u64,
         };
 
@@ -117,7 +108,6 @@ impl CacheStatsTracker {
         aggregated.total_blocks_queried += entry.total_blocks;
         aggregated.host_blocks_hit += entry.host_blocks;
         aggregated.disk_blocks_hit += entry.disk_blocks;
-        aggregated.object_blocks_hit += entry.object_blocks;
 
         // Remove oldest entries if we exceed the limit
         // Keep at least one entry (the latest)
@@ -126,7 +116,6 @@ impl CacheStatsTracker {
                 aggregated.total_blocks_queried -= old_entry.total_blocks;
                 aggregated.host_blocks_hit -= old_entry.host_blocks;
                 aggregated.disk_blocks_hit -= old_entry.disk_blocks;
-                aggregated.object_blocks_hit -= old_entry.object_blocks;
             }
         }
     }
@@ -148,13 +137,12 @@ impl CacheStatsTracker {
 
         if should_log {
             // Read aggregated stats with minimal lock time
-            let (total_blocks_queried, host_blocks_hit, disk_blocks_hit, object_blocks_hit) = {
+            let (total_blocks_queried, host_blocks_hit, disk_blocks_hit) = {
                 let aggregated = self.aggregated.lock().unwrap();
                 (
                     aggregated.total_blocks_queried,
                     aggregated.host_blocks_hit,
                     aggregated.disk_blocks_hit,
-                    aggregated.object_blocks_hit,
                 )
             };
 
@@ -163,12 +151,7 @@ impl CacheStatsTracker {
                 // Check if values have changed since last log
                 let should_log_values = {
                     let mut last_logged = self.last_logged_values.lock().unwrap();
-                    let current_values = (
-                        total_blocks_queried,
-                        host_blocks_hit,
-                        disk_blocks_hit,
-                        object_blocks_hit,
-                    );
+                    let current_values = (total_blocks_queried, host_blocks_hit, disk_blocks_hit);
                     match *last_logged {
                         Some(prev) if prev == current_values => {
                             // Values haven't changed, skip logging
@@ -195,12 +178,6 @@ impl CacheStatsTracker {
                         (disk_blocks_hit as f32 / total_blocks_queried as f32) * 100.0
                     };
 
-                    let object_rate = if total_blocks_queried == 0 {
-                        0.0
-                    } else {
-                        (object_blocks_hit as f32 / total_blocks_queried as f32) * 100.0
-                    };
-
                     // Include identifier in log message if available
                     let prefix = if let Some(ref id) = self.identifier {
                         format!("KVBM [{}] Cache Hit Rates", id)
@@ -209,16 +186,13 @@ impl CacheStatsTracker {
                     };
 
                     tracing::info!(
-                        "{} - Host: {:.1}% ({}/{}), Disk: {:.1}% ({}/{}), Object: {:.1}% ({}/{})",
+                        "{} - Host: {:.1}% ({}/{}), Disk: {:.1}% ({}/{})",
                         prefix,
                         host_rate,
                         host_blocks_hit,
                         total_blocks_queried,
                         disk_rate,
                         disk_blocks_hit,
-                        total_blocks_queried,
-                        object_rate,
-                        object_blocks_hit,
                         total_blocks_queried,
                     );
                     return true;
@@ -245,16 +219,6 @@ impl CacheStatsTracker {
             0.0
         } else {
             aggregated.disk_blocks_hit as f32 / aggregated.total_blocks_queried as f32
-        }
-    }
-
-    /// Get current object storage hit rate (0.0-1.0) from the sliding window
-    pub fn object_hit_rate(&self) -> f32 {
-        let aggregated = self.aggregated.lock().unwrap();
-        if aggregated.total_blocks_queried == 0 {
-            0.0
-        } else {
-            aggregated.object_blocks_hit as f32 / aggregated.total_blocks_queried as f32
         }
     }
 
@@ -293,18 +257,16 @@ mod tests {
             std::env::remove_var("DYN_KVBM_CACHE_STATS_MAX_REQUESTS");
         }
 
-        // Record some cache hits (host, disk, object, total)
-        tracker.record(5, 3, 1, 10); // 50% host, 30% disk, 10% object
-        tracker.record(8, 2, 0, 10); // 80% host, 20% disk, 0% object
+        // Record some cache hits
+        tracker.record(5, 3, 10); // 50% host, 30% disk
+        tracker.record(8, 2, 10); // 80% host, 20% disk
 
-        // Overall: 13/20 = 65% host, 5/20 = 25% disk, 1/20 = 5% object
+        // Overall: 13/20 = 65% host, 5/20 = 25% disk
         let host_rate = tracker.host_hit_rate();
         let disk_rate = tracker.disk_hit_rate();
-        let object_rate = tracker.object_hit_rate();
 
         assert!((host_rate - 0.65).abs() < 0.01);
         assert!((disk_rate - 0.25).abs() < 0.01);
-        assert!((object_rate - 0.05).abs() < 0.01);
     }
 
     #[test]
@@ -318,22 +280,21 @@ mod tests {
             std::env::remove_var("DYN_KVBM_CACHE_STATS_MAX_REQUESTS");
         }
 
-        // Add 5 entries, but max is 3 (host, disk, object, total)
-        tracker.record(10, 5, 2, 10); // Entry 1: 100% host, 50% disk, 20% object
-        tracker.record(0, 0, 0, 10); // Entry 2: 0% all
-        tracker.record(5, 5, 5, 10); // Entry 3: 50% all
-        tracker.record(10, 10, 10, 10); // Entry 4: 100% all (should remove entry 1)
-        tracker.record(0, 0, 0, 10); // Entry 5: 0% all (should remove entry 2)
+        // Add 5 entries, but max is 3
+        tracker.record(10, 5, 10); // Entry 1: 100% host, 50% disk
+        tracker.record(0, 0, 10); // Entry 2: 0% host, 0% disk
+        tracker.record(5, 5, 10); // Entry 3: 50% host, 50% disk
+        tracker.record(10, 10, 10); // Entry 4: 100% host, 100% disk (should remove entry 1)
+        tracker.record(0, 0, 10); // Entry 5: 0% host, 0% disk (should remove entry 2)
 
         // Window should contain entries 3, 4, 5
-        // Entry 3: 5/10 host, 5/10 disk, 5/10 object
-        // Entry 4: 10/10 host, 10/10 disk, 10/10 object
-        // Entry 5: 0/10 host, 0/10 disk, 0/10 object
-        // Total: 15/30 = 50% for all
+        // Entry 3: 5/10 host, 5/10 disk
+        // Entry 4: 10/10 host, 10/10 disk
+        // Entry 5: 0/10 host, 0/10 disk
+        // Total: 15/30 host = 50%, 15/30 disk = 50%
 
         let host_rate = tracker.host_hit_rate();
         let disk_rate = tracker.disk_hit_rate();
-        let object_rate = tracker.object_hit_rate();
 
         assert!(
             (host_rate - 0.5).abs() < 0.01,
@@ -344,11 +305,6 @@ mod tests {
             (disk_rate - 0.5).abs() < 0.01,
             "disk_rate={}, expected=0.5",
             disk_rate
-        );
-        assert!(
-            (object_rate - 0.5).abs() < 0.01,
-            "object_rate={}, expected=0.5",
-            object_rate
         );
 
         // Verify window size

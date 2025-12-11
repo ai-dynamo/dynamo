@@ -5,12 +5,11 @@ use std::{any::Any, cmp::max, sync::Arc};
 
 use dynamo_llm::{
     block_manager::{
-        BlockPool, NixlRegisterableStorage, PinnedStorage, Storage,
-        block::{BasicMetadata, BlockMetadata, MutableBlock, locality::LocalityProvider},
+        BlockPool, NixlRegisterableStorage, Storage,
+        block::{BlockMetadata, locality::LocalityProvider},
         config::should_bypass_cpu_cache,
         connector::protocol::{LeaderTransferRequest, RequestType, TransferType},
-        distributed::{BlockTransferPool, BlockTransferRequest, KvbmLeader, ObjectStorageConfig},
-        v2::logical::ObjectRegistry,
+        distributed::{BlockTransferPool, BlockTransferRequest, KvbmLeader},
     },
     tokens::TokenBlock,
 };
@@ -91,35 +90,6 @@ pub enum SlotState {
     Preempted,
 }
 
-/// Staging info for object storage blocks, including pre-allocated host bounce buffers.
-/// This mirrors how disk staging works - we reserve resources at match time.
-pub struct StagedObjectBlocks {
-    /// Object keys: (sequence_hash, object_key) for S3 lookup
-    pub object_keys: Vec<(u64, u64)>,
-    /// Pre-allocated host blocks for bounce buffers (Object → Host → GPU)
-    /// These are held until transfer completes, preventing resource contention.
-    pub bounce_blocks: Vec<MutableBlock<PinnedStorage, VllmLocality, BasicMetadata>>,
-}
-
-impl StagedObjectBlocks {
-    pub fn new(object_keys: Vec<(u64, u64)>, bounce_blocks: Vec<MutableBlock<PinnedStorage, VllmLocality, BasicMetadata>>) -> Self {
-        Self { object_keys, bounce_blocks }
-    }
-
-    pub fn len(&self) -> usize {
-        self.object_keys.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.object_keys.is_empty()
-    }
-
-    /// Get bounce block IDs for transfer
-    pub fn bounce_block_ids(&self) -> Vec<usize> {
-        self.bounce_blocks.iter().map(|b| b.block_id()).collect()
-    }
-}
-
 #[allow(dead_code)]
 pub trait Slot: std::fmt::Debug {
     fn request_id(&self) -> &str;
@@ -185,9 +155,6 @@ pub trait Slot: std::fmt::Debug {
     /// Record the number of tokens that were cached on the disk.
     fn record_cached_disk_tokens(&mut self, num_tokens: usize);
 
-    /// Record the number of tokens that were cached in object storage.
-    fn record_cached_object_tokens(&mut self, num_tokens: usize);
-
     /// Reset the slot after preemption.
     fn reset_after_preemption(&mut self);
 
@@ -219,8 +186,8 @@ pub struct ConnectorSlotManager<R: RequestKey> {
     cache_stats: Arc<CacheStatsTracker>,
     /// KVBM metrics for exposing cache hit rates
     kvbm_metrics: KvbmMetrics,
-    /// Object storage registry (sequence hash → object key mapping)
-    object_registry: Arc<ObjectRegistry>,
+    /// Reference to the leader for G4 operations
+    leader: Arc<KvbmLeader>,
 }
 
 impl std::fmt::Debug for ConnectorSlotManager<String> {
@@ -249,8 +216,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
                 // Update Prometheus metrics
                 let host_rate = cache_stats_clone.host_hit_rate();
                 let disk_rate = cache_stats_clone.disk_hit_rate();
-                let object_rate = cache_stats_clone.object_hit_rate();
-                kvbm_metrics_clone.update_cache_hit_rates(host_rate, disk_rate, object_rate);
+                kvbm_metrics_clone.update_cache_hit_rates(host_rate, disk_rate, 0.0);
                 // Also log cache hit rates periodically
                 cache_stats_clone.maybe_log();
             }
@@ -260,17 +226,10 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             block_manager.block_size()
         );
 
-        // Create object registry early so it can be shared with transfer engine
-        let object_registry = Arc::new(ObjectRegistry::new());
-
         let (xfer_tx, xfer_rx) = mpsc::unbounded_channel();
 
-        let mut xfer_engine = LocalTransferEngine::new(
-            block_manager.clone(),
-            leader,
-            xfer_rx,
-            object_registry.clone(),
-        );
+        let leader_for_engine = leader.clone();
+        let mut xfer_engine = LocalTransferEngine::new(block_manager.clone(), leader_for_engine, xfer_rx);
         let primary_token = get_current_cancel_token();
         let primary_token_clone = primary_token.clone();
         let runtime_primary = get_current_tokio_handle();
@@ -301,10 +260,9 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             _transfer_engine_handle: Some(xfer_engine_task),
             cache_stats,
             kvbm_metrics: kvbm_metrics.clone(),
-            object_registry,
+            leader,
         }
     }
-
 }
 
 impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
@@ -332,7 +290,7 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
             self.block_manager.clone(),
             self.xfer_tx.clone(),
             self.cache_stats.clone(),
-            self.object_registry.clone(),
+            self.leader.clone(),
         );
         self.slots
             .lock()
@@ -387,9 +345,10 @@ pub struct VllmConnectorSlot {
     /// We must hold these blocks in the slot state until the scheduler trigger the onboarding.
     staging_from_disk: Option<Vec<ImmutableBlock<DiskStorage, VllmLocality, BasicMetadata>>>,
 
-    /// Object storage blocks with pre-allocated host bounce buffers.
-    /// Like disk, we reserve resources at match time to prevent contention.
-    staging_from_object: Option<StagedObjectBlocks>,
+    /// Sequence hashes to be onboarded from G4 object storage.
+    /// Unlike host/disk, we only store hashes since the actual blocks
+    /// will be fetched from object storage during onboarding.
+    staging_from_g4: Option<Vec<u64>>,
 
     /// The number of blocks cached from the device
     tokens_cached_from_device: usize,
@@ -400,8 +359,8 @@ pub struct VllmConnectorSlot {
     /// The number of blocks cached from the disk
     tokens_cached_from_disk: usize,
 
-    /// The number of tokens cached from object storage
-    tokens_cached_from_object: usize,
+    /// The number of blocks cached from G4 object storage
+    tokens_cached_from_g4: usize,
 
     /// Phantom data to ensure the storage type is correct.
     block_manager: VllmBlockManager,
@@ -411,11 +370,6 @@ pub struct VllmConnectorSlot {
     iteration_first_scheduled: Option<u64>,
 
     pending_operations: Option<Vec<WorkerTransferRequest>>,
-
-    /// Tracks whether operations have been sent to the worker.
-    /// Used to ensure we return `true` from `mark_as_finished()` even after
-    /// `pending_operations` is emptied by `take_pending_operations()`.
-    has_sent_operations: bool,
 
     /// use this to issue [`LocalTransferRequest`]s to the transfer engine
     xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
@@ -438,8 +392,8 @@ pub struct VllmConnectorSlot {
     /// Cache statistics tracker for this KVBM instance
     cache_stats: Arc<CacheStatsTracker>,
 
-    /// Object storage registry for S3/GCS block tracking
-    object_registry: Arc<ObjectRegistry>,
+    /// Reference to the leader for G4 operations
+    leader: Arc<KvbmLeader>,
 }
 
 impl VllmConnectorSlot {
@@ -450,7 +404,7 @@ impl VllmConnectorSlot {
         block_manager: VllmBlockManager,
         xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
         cache_stats: Arc<CacheStatsTracker>,
-        object_registry: Arc<ObjectRegistry>,
+        leader: Arc<KvbmLeader>,
     ) -> Self {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
         let block_size = block_manager.block_size();
@@ -471,17 +425,16 @@ impl VllmConnectorSlot {
             device_blocks: Vec::new(),
             staging_from_host: None,
             staging_from_disk: None,
-            staging_from_object: None,
+            staging_from_g4: None,
             pending_operations: None,
-            has_sent_operations: false,
             tokens_cached_from_device: 0,
             tokens_cached_from_host: 0,
             tokens_cached_from_disk: 0,
-            tokens_cached_from_object: 0,
+            tokens_cached_from_g4: 0,
             performed_cache_lookup: false,
             total_blocks_queried: 0,
             cache_stats,
-            object_registry,
+            leader,
         }
     }
 
@@ -547,7 +500,7 @@ impl Slot for VllmConnectorSlot {
     fn reset_after_preemption(&mut self) {
         assert!(self.staging_from_disk.is_none());
         assert!(self.staging_from_host.is_none());
-        assert!(self.staging_from_object.is_none());
+        assert!(self.staging_from_g4.is_none());
         assert!(self.pending_operations.is_none());
 
         self.state = SlotState::Preempted;
@@ -558,7 +511,7 @@ impl Slot for VllmConnectorSlot {
         self.tokens_cached_from_device = 0;
         self.tokens_cached_from_host = 0;
         self.tokens_cached_from_disk = 0;
-        self.tokens_cached_from_object = 0;
+        self.tokens_cached_from_g4 = 0;
         self.performed_cache_lookup = false;
         self.total_blocks_queried = 0;
     }
@@ -591,11 +544,6 @@ impl Slot for VllmConnectorSlot {
     fn record_cached_disk_tokens(&mut self, num_tokens: usize) {
         self.tokens_cached_from_disk = num_tokens;
         tracing::debug!("recording {} cached disk tokens", num_tokens);
-    }
-
-    fn record_cached_object_tokens(&mut self, num_tokens: usize) {
-        self.tokens_cached_from_object = num_tokens;
-        tracing::debug!("recording {} cached object storage tokens", num_tokens);
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(request_id = self.request_id.as_str()))]
@@ -836,58 +784,48 @@ impl Slot for VllmConnectorSlot {
             // Convert cached tokens to blocks (rounding up)
             let host_blocks = (self.tokens_cached_from_host + block_size - 1) / block_size;
             let disk_blocks = (self.tokens_cached_from_disk + block_size - 1) / block_size;
-            let object_blocks = (self.tokens_cached_from_object + block_size - 1) / block_size;
 
             tracing::debug!(
                 request_id = %self.request_id,
-                "Reporting cache stats: host_blocks={}, disk_blocks={}, object_blocks={}, total_blocks_queried={}, tokens_from_host={}, tokens_from_disk={}, tokens_from_object={}",
+                "Reporting cache stats: host_blocks={}, disk_blocks={}, total_blocks_queried={}, tokens_from_host={}, tokens_from_disk={}",
                 host_blocks,
                 disk_blocks,
-                object_blocks,
                 self.total_blocks_queried,
                 self.tokens_cached_from_host,
-                self.tokens_cached_from_disk,
-                self.tokens_cached_from_object
+                self.tokens_cached_from_disk
             );
 
             self.cache_stats
-                .record(host_blocks, disk_blocks, object_blocks, self.total_blocks_queried);
+                .record(host_blocks, disk_blocks, self.total_blocks_queried);
         }
 
-        // Check if there are any pending operations (unsent) OR if operations were sent to worker
+        // Check if there are any pending operations
         let has_pending_ops = self
             .pending_operations
             .as_ref()
             .map(|ops| !ops.is_empty())
             .unwrap_or(false);
 
-        // Operations are "in flight" if we have unsent operations OR we've already sent some to the worker.
-        // The worker is responsible for tracking completion of sent operations.
-        let has_inflight_operations = has_pending_ops || self.has_sent_operations;
-
-        if has_inflight_operations {
-            // There are in-flight operations - need to wait for worker to complete them
+        if has_pending_ops {
+            // There are pending operations - need to wait for them to complete
             self.state = SlotState::Finishing;
             tracing::debug!(
                 request_id = %self.request_id,
-                pending_operations = self.pending_operations.as_ref().map(|v| v.len()).unwrap_or(0),
-                has_sent_operations = self.has_sent_operations,
-                "request set to finish (with in-flight operations): cached_gpu_tokens: {}; cached_host_tokens: {}; cached_disk_tokens: {}; cached_object_tokens: {}",
+                pending_operations = self.pending_operations.as_ref().unwrap().len(),
+                "request set to finish (with pending operations): cached_gpu_tokens: {}; cached_host_tokens: {}; cached_disk_tokens: {}",
                 self.tokens_cached_from_device,
                 self.tokens_cached_from_host,
-                self.tokens_cached_from_disk,
-                self.tokens_cached_from_object
+                self.tokens_cached_from_disk
             );
         } else {
-            // No pending or in-flight operations - can immediately mark as finished
+            // No pending operations - can immediately mark as finished
             self.state = SlotState::Finished;
             tracing::debug!(
                 request_id = %self.request_id,
-                "request set to finished (no in-flight operations): cached_gpu_tokens: {}; cached_host_tokens: {}; cached_disk_tokens: {}; cached_object_tokens: {}",
+                "request set to finished (no pending operations): cached_gpu_tokens: {}; cached_host_tokens: {}; cached_disk_tokens: {}",
                 self.tokens_cached_from_device,
                 self.tokens_cached_from_host,
-                self.tokens_cached_from_disk,
-                self.tokens_cached_from_object
+                self.tokens_cached_from_disk
             );
         }
         Ok(())
@@ -906,14 +844,7 @@ impl Slot for VllmConnectorSlot {
     }
 
     fn take_pending_operations(&mut self) -> Option<Vec<WorkerTransferRequest>> {
-        let ops = self.pending_operations.take();
-        if ops.is_some() {
-            // Mark that we've sent operations to the worker.
-            // This ensures mark_as_finished() returns Finishing state
-            // so worker can properly track completion.
-            self.has_sent_operations = true;
-        }
-        ops
+        self.pending_operations.take()
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -976,42 +907,25 @@ impl Slot for VllmConnectorSlot {
             num_computed_blocks
         );
 
-        // Limit host pool matching to leave headroom for bounce buffers
-        // Reserve blocks = 2 * batch_size (enough for concurrent transfers)
-        let bounce_reserve = dynamo_llm::block_manager::offload::max_transfer_batch_size() * 2;
-        let host_available = self
-            .block_manager
-            .host()
-            .map(|h| h.available_blocks() as usize)
-            .unwrap_or(0);
+        // we should do this opportunistically after this operation is done
+        // ideally it was triggered by the match_sequence_hashes_blocking calls directly
 
-        // Only match blocks if we have more than the reserve
-        let max_host_match = host_available.saturating_sub(bounce_reserve);
-        let host_lookup_limit = blocks_to_lookup.len().min(max_host_match);
+        // if let Some(host) = self.block_manager.host() {
+        //     host.touch_blocks_blocking(&sequence_hashes)?;
+        // }
 
-        if host_lookup_limit < blocks_to_lookup.len() {
-            tracing::debug!(
-                request_id = %self.request_id,
-                requested = blocks_to_lookup.len(),
-                limit = host_lookup_limit,
-                available = host_available,
-                reserve = bounce_reserve,
-                "Limiting host pool matching to preserve bounce buffer headroom"
-            );
-        }
-
-        let host_lookup_slice = &blocks_to_lookup[..host_lookup_limit];
+        // if let Some(disk) = self.block_manager.disk() {
+        //     disk.touch_blocks_blocking(&sequence_hashes)?;
+        // }
 
         let mut host_blocks = self
             .block_manager
             .host()
-            .filter(|_| !host_lookup_slice.is_empty())
-            .map(|host| host.match_sequence_hashes_blocking(host_lookup_slice))
+            .map(|host| host.match_sequence_hashes_blocking(blocks_to_lookup))
             .transpose()?
             .unwrap_or_default();
 
         let num_matched_host_blocks = host_blocks.len();
-
         self.record_cached_host_tokens(num_matched_host_blocks * block_size);
 
         // advance the search offset by the number of matched host blocks
@@ -1028,49 +942,37 @@ impl Slot for VllmConnectorSlot {
         let num_matched_disk_blocks = disk_blocks.len();
         self.record_cached_disk_tokens(num_matched_disk_blocks * block_size);
 
-        // advance the search offset by the number of matched disk blocks
-        let search_offset = search_offset + num_matched_disk_blocks;
+        // G4 lookup: check object storage after host/disk
+        let search_offset_g4 = search_offset + num_matched_disk_blocks;
+        let mut g4_hashes = if self.leader.g4_enabled() {
+            let remaining_hashes = &sequence_hashes[search_offset_g4..];
+            if !remaining_hashes.is_empty() {
+                let matched = self.leader.g4_lookup(remaining_hashes);
+                if !matched.is_empty() {
+                    tracing::info!(
+                        "G4 matched {} of {} remaining hashes",
+                        matched.len(),
+                        remaining_hashes.len()
+                    );
+                }
+                matched
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
 
-        // Object storage onboarding is disabled - offload only mode.
-        // Blocks offloaded to S3 are persisted but not retrieved for cache hits.
+        let num_matched_g4_blocks = g4_hashes.len();
+        self.tokens_cached_from_g4 = num_matched_g4_blocks * block_size;
 
-        // Limit object matches to transfer batch size
-        // Object→GPU transfers use host pool blocks as bounce buffers
-        let blocks_per_batch = dynamo_llm::block_manager::offload::max_transfer_batch_size();
-
-        let object_lookup_slice = &sequence_hashes[search_offset..];
-        let object_lookup_limit = object_lookup_slice.len().min(blocks_per_batch);
-
-        if object_lookup_limit < object_lookup_slice.len() {
-            tracing::debug!(
-                request_id = %self.request_id,
-                requested = object_lookup_slice.len(),
-                limit = object_lookup_limit,
-                blocks_per_batch = blocks_per_batch,
-                "Limiting object storage matching to batch size"
-            );
-        }
-
-        // Check object storage for remaining blocks (limited to batch size)
-        let object_matches = self
-            .object_registry
-            .match_sequence_hashes(&object_lookup_slice[..object_lookup_limit]);
-
-        let num_matched_object_blocks = object_matches.len();
-        self.record_cached_object_tokens(num_matched_object_blocks * block_size);
-
-        // let object_matches: Vec<(u64, u64)> = Vec::new();
-        // let num_matched_object_blocks = 0;
-        // let _ = search_offset; // silence unused variable warning
-
-        let num_matched_blocks =
-            num_matched_host_blocks + num_matched_disk_blocks + num_matched_object_blocks;
+        let num_matched_blocks = num_matched_host_blocks + num_matched_disk_blocks + num_matched_g4_blocks;
 
         tracing::debug!(
-            "successfully matched {} host, {} disk, {} object blocks; {} total",
+            "successfully matched {} host, {} disk, {} g4 blocks; {} total blocks",
             num_matched_host_blocks,
             num_matched_disk_blocks,
-            num_matched_object_blocks,
+            num_matched_g4_blocks,
             num_matched_blocks
         );
 
@@ -1080,20 +982,17 @@ impl Slot for VllmConnectorSlot {
         }
 
         let mut num_new_matched_tokens = num_matched_blocks * block_size;
-        let mut object_matches = object_matches;
 
         // we are on a block boundary, so we need to throw away the last block
         if (num_computed_tokens + num_new_matched_tokens) == self.sequence().total_tokens() {
             tracing::debug!("on a block boundary, throwing away the last block");
 
             // we should have matched at least one block
-            assert!(
-                !host_blocks.is_empty() || !disk_blocks.is_empty() || !object_matches.is_empty()
-            );
+            assert!(!host_blocks.is_empty() || !disk_blocks.is_empty() || !g4_hashes.is_empty());
 
-            // pop from object first, then disk, then host
-            if !object_matches.is_empty() {
-                object_matches.pop();
+            // pop from g4 first, then disk, then host
+            if !g4_hashes.is_empty() {
+                g4_hashes.pop();
             } else if !disk_blocks.is_empty() {
                 disk_blocks.pop();
             } else {
@@ -1119,19 +1018,8 @@ impl Slot for VllmConnectorSlot {
         } else {
             None
         };
-
-        // Store object matches for later - actual host block allocation happens during transfer
-        // No blocking allocation here to avoid stalling the vLLM scheduler
-        self.staging_from_object = if !object_matches.is_empty() {
-            tracing::debug!(
-                request_id = %self.request_id,
-                num_object_matches = object_matches.len(),
-                "Staged {} object blocks for onboarding (host blocks will be allocated during transfer)",
-                object_matches.len()
-            );
-            // Store object matches without pre-allocated bounce blocks
-            // Bounce blocks will be allocated from host pool during the actual transfer
-            Some(StagedObjectBlocks::new(object_matches, Vec::new()))
+        self.staging_from_g4 = if !g4_hashes.is_empty() {
+            Some(g4_hashes)
         } else {
             None
         };
@@ -1205,48 +1093,26 @@ impl Slot for VllmConnectorSlot {
             self.evaluated_blocks += num_disk_blocks;
         }
 
-        if let Some(staged) = self.staging_from_object.take() {
-            let num_object_blocks = staged.len();
+        // Handle G4 staged blocks
+        if let Some(g4_hashes) = self.staging_from_g4.take() {
+            let num_g4_blocks = g4_hashes.len();
 
             // get device block ids
             let dst_block_ids = self
                 .device_blocks
                 .iter()
                 .skip(self.evaluated_blocks)
-                .take(num_object_blocks)
+                .take(num_g4_blocks)
                 .copied()
                 .collect::<Vec<_>>();
 
-            debug_assert_eq!(dst_block_ids.len(), num_object_blocks);
+            debug_assert_eq!(dst_block_ids.len(), num_g4_blocks);
 
-            // Get pre-allocated bounce block IDs (if any)
-            let bounce_block_ids = if !staged.bounce_blocks.is_empty() {
-                let ids = staged.bounce_block_ids();
-                tracing::debug!(
-                    request_id = %self.request_id,
-                    num_bounce = ids.len(),
-                    "Using pre-allocated bounce blocks for Object→GPU transfer"
-                );
-                Some(ids)
-            } else {
-                tracing::debug!(
-                    request_id = %self.request_id,
-                    "No pre-allocated bounce blocks, will use fallback allocator"
-                );
-                None
-            };
-
-            // Object storage onboarding uses (sequence_hash, object_key) pairs
-            let src_blocks = Box::new(ObjectStorageBlocks::new(staged.object_keys));
-
-            self.onboard_blocks_with_bounce(src_blocks, dst_block_ids, bounce_block_ids)?;
-
-            // Keep bounce blocks alive until transfer is submitted
-            // (they'll be dropped when staged goes out of scope after this block)
-            drop(staged.bounce_blocks);
+            // G4 onboard uses a different path - sends G4OnboardRequest to worker
+            self.onboard_from_g4(g4_hashes, dst_block_ids)?;
 
             // shift the evaluated blocks position to the end of the computed/cached blocks
-            self.evaluated_blocks += num_object_blocks;
+            self.evaluated_blocks += num_g4_blocks;
         }
 
         self.state = SlotState::Onboarding(num_external_tokens);
@@ -1397,26 +1263,25 @@ impl VllmConnectorSlot {
         Ok(())
     }
 
-    /// Onboard blocks with pre-allocated bounce buffers (for Object→GPU transfers)
-    fn onboard_blocks_with_bounce(
+    /// Onboard blocks from G4 object storage.
+    ///
+    /// Unlike host/disk onboarding, G4 onboarding sends a G4OnboardRequest
+    /// to the worker, which handles the G4→Host→Device transfer atomically.
+    fn onboard_from_g4(
         &mut self,
-        src_blocks: Box<dyn AnyBlocks>,
-        dst_block_ids: Vec<BlockId>,
-        bounce_block_ids: Option<Vec<BlockId>>,
+        sequence_hashes: Vec<u64>,
+        device_block_ids: Vec<BlockId>,
     ) -> Result<(), SlotError> {
-        debug_assert_eq!(src_blocks.len(), dst_block_ids.len());
+        debug_assert_eq!(sequence_hashes.len(), device_block_ids.len());
 
-        let num_blocks = src_blocks.len();
-        let src_storage_pool = src_blocks.storage_pool();
+        let num_blocks = sequence_hashes.len();
         let operation_id = uuid::Uuid::new_v4();
-        let has_bounce_blocks = bounce_block_ids.is_some();
 
-        let xfer_req = LocalTransferRequest::Onboard(LocalOnboardRequest::with_bounce_blocks(
+        let xfer_req = LocalTransferRequest::G4Onboard(LocalG4OnboardRequest::new(
             self.request_id.clone(),
-            src_blocks,
-            dst_block_ids,
+            sequence_hashes,
+            device_block_ids,
             operation_id,
-            bounce_block_ids,
         ));
 
         let worker_req = WorkerTransferRequest {
@@ -1427,22 +1292,20 @@ impl VllmConnectorSlot {
         };
 
         if let Err(e) = self.xfer_tx.send(xfer_req) {
-            tracing::error!("Failed to send transfer request: {:?}", e);
+            tracing::error!("Failed to send G4 onboard request: {:?}", e);
             return Err(SlotError::InvalidOperation(format!(
-                "Transfer engine unavailable: {}; aborting onboard",
+                "Transfer engine unavailable: {}; aborting G4 onboard",
                 e
             )));
         }
 
         self.append_pending_operation(worker_req);
 
-        tracing::debug!(
+        tracing::info!(
             request_id = self.request_id,
             operation_id = %operation_id,
-            has_bounce_blocks = has_bounce_blocks,
-            "start onboarding {} blocks from {:?} to device (with bounce)",
+            "start onboarding {} blocks from G4 to device",
             num_blocks,
-            src_storage_pool,
         );
 
         Ok(())
@@ -1460,6 +1323,7 @@ impl VllmConnectorSlot {
 enum LocalTransferRequest {
     Offload(LocalOffloadRequest),
     Onboard(LocalOnboardRequest),
+    G4Onboard(LocalG4OnboardRequest),
 }
 
 struct LocalOffloadRequest {
@@ -1467,6 +1331,8 @@ struct LocalOffloadRequest {
     block_ids: Vec<BlockId>,
     token_blocks: Vec<TokenBlock>,
     operation_id: uuid::Uuid,
+    /// Sequence hashes for G4 write-through (extracted from token_blocks).
+    sequence_hashes: Vec<u64>,
 }
 
 impl LocalOffloadRequest {
@@ -1477,11 +1343,17 @@ impl LocalOffloadRequest {
         operation_id: uuid::Uuid,
     ) -> Self {
         debug_assert!(block_ids.len() == token_blocks.len());
+        // Extract sequence hashes from token blocks for G4 write-through
+        let sequence_hashes = token_blocks
+            .iter()
+            .map(|tb| tb.sequence_hash())
+            .collect();
         Self {
             request_id,
             block_ids,
             token_blocks,
             operation_id,
+            sequence_hashes,
         }
     }
 }
@@ -1491,8 +1363,6 @@ struct LocalOnboardRequest {
     src_blocks: Box<dyn AnyBlocks>,
     dst_block_ids: Vec<BlockId>,
     operation_id: uuid::Uuid,
-    /// Pre-allocated bounce block IDs from host pool (for Object→GPU transfers)
-    bounce_block_ids: Option<Vec<BlockId>>,
 }
 
 impl LocalOnboardRequest {
@@ -1508,404 +1378,39 @@ impl LocalOnboardRequest {
             src_blocks,
             dst_block_ids,
             operation_id,
-            bounce_block_ids: None,
-        }
-    }
-
-    pub fn with_bounce_blocks(
-        request_id: String,
-        src_blocks: Box<dyn AnyBlocks>,
-        dst_block_ids: Vec<BlockId>,
-        operation_id: uuid::Uuid,
-        bounce_block_ids: Option<Vec<BlockId>>,
-    ) -> Self {
-        debug_assert!(src_blocks.len() == dst_block_ids.len());
-        Self {
-            request_id,
-            src_blocks,
-            dst_block_ids,
-            operation_id,
-            bounce_block_ids,
         }
     }
 }
 
-// ============================================================================
-// Timing and Filtering Helpers
-// ============================================================================
-
-/// Extension trait for Duration to simplify timing logs.
-trait DurationExt {
-    /// Convert duration to milliseconds as f64.
-    fn as_ms(&self) -> f64;
-}
-
-impl DurationExt for std::time::Duration {
-    fn as_ms(&self) -> f64 {
-        self.as_secs_f64() * 1000.0
-    }
-}
-
-/// Result of filtering blocks that are already in object storage.
-struct FilteredOffloadBlocks {
-    /// Block IDs that need to be offloaded (not already in object storage)
-    block_ids: Vec<BlockId>,
-    /// Token blocks corresponding to block_ids
-    token_blocks: Vec<TokenBlock>,
-    /// Sequence hashes for the filtered blocks (computed once, reused)
-    sequence_hashes: Vec<u64>,
-    /// Count of blocks that were already in object storage
-    already_offloaded_count: usize,
-}
-
-impl FilteredOffloadBlocks {
-    /// Returns true if there are no blocks to offload
-    fn is_empty(&self) -> bool {
-        self.block_ids.is_empty()
-    }
-
-    /// Number of blocks to offload
-    fn len(&self) -> usize {
-        self.block_ids.len()
-    }
-
-    /// Create block pairs for transfer: (device_block_id, object_key)
-    /// For object storage, the "destination block ID" is the sequence hash.
-    fn to_block_pairs(&self) -> Vec<(usize, usize)> {
-        self.block_ids
-            .iter()
-            .zip(self.sequence_hashes.iter())
-            .map(|(&src, &hash)| (src, hash as usize))
-            .collect()
-    }
-}
-
-/// Filter out blocks that are already in object storage.
-///
-/// Returns the filtered blocks along with pre-computed sequence hashes
-/// and count of already-offloaded blocks.
-fn filter_offload_blocks(
-    offload_req: &LocalOffloadRequest,
-    object_registry: &ObjectRegistry,
-    request_id: &str,
-    operation_id: &uuid::Uuid,
-) -> FilteredOffloadBlocks {
-    let capacity = offload_req.block_ids.len();
-    let mut block_ids = Vec::with_capacity(capacity);
-    let mut token_blocks = Vec::with_capacity(capacity);
-    let mut sequence_hashes = Vec::with_capacity(capacity);
-    let mut already_offloaded_count = 0usize;
-
-    for (block_id, token_block) in offload_req
-        .block_ids
-        .iter()
-        .zip(offload_req.token_blocks.iter())
-    {
-        let sequence_hash = token_block.sequence_hash();
-        if object_registry.contains(sequence_hash) {
-            already_offloaded_count += 1;
-            tracing::debug!(
-                target: "object_transfer_timing",
-                request_id = request_id,
-                operation_id = %operation_id,
-                sequence_hash = sequence_hash,
-                "Skipping block - already in object storage"
-            );
-        } else {
-            block_ids.push(*block_id);
-            token_blocks.push(token_block.clone());
-            sequence_hashes.push(sequence_hash);
-        }
-    }
-
-    FilteredOffloadBlocks {
-        block_ids,
-        token_blocks,
-        sequence_hashes,
-        already_offloaded_count,
-    }
-}
-
-// ============================================================================
-// Transfer Context and Helpers
-// ============================================================================
-
-/// Context for transfer operations, providing common state and helper methods.
-struct TransferContext<'a> {
+/// Request to onboard blocks from G4 object storage.
+struct LocalG4OnboardRequest {
     request_id: String,
+    sequence_hashes: Vec<u64>,
+    device_block_ids: Vec<BlockId>,
     operation_id: uuid::Uuid,
-    leader: &'a Arc<KvbmLeader>,
-    start_time: std::time::Instant,
 }
 
-impl<'a> TransferContext<'a> {
-    fn new(request_id: String, operation_id: uuid::Uuid, leader: &'a Arc<KvbmLeader>) -> Self {
+impl LocalG4OnboardRequest {
+    pub fn new(
+        request_id: String,
+        sequence_hashes: Vec<u64>,
+        device_block_ids: Vec<BlockId>,
+        operation_id: uuid::Uuid,
+    ) -> Self {
+        debug_assert!(sequence_hashes.len() == device_block_ids.len());
         Self {
             request_id,
+            sequence_hashes,
+            device_block_ids,
             operation_id,
-            leader,
-            start_time: std::time::Instant::now(),
         }
     }
-
-    /// Total elapsed time since context creation.
-    fn elapsed(&self) -> std::time::Duration {
-        self.start_time.elapsed()
-    }
-
-    /// Mark the operation as complete without performing any transfer.
-    /// Use this when the data is already present at the destination (e.g., already offloaded to object storage).
-    /// This ensures the scheduler's completion counter is incremented even when no actual transfer occurs.
-    async fn mark_already_complete(&self) -> anyhow::Result<()> {
-        // Create a minimal request just to trigger the scheduler notification
-        let request = BlockTransferRequest {
-            from_pool: BlockTransferPool::Device,
-            to_pool: BlockTransferPool::Device, // No-op: same pool
-            blocks: vec![], // Empty: no blocks to transfer
-            connector_req: Some(LeaderTransferRequest {
-                request_id: self.request_id.clone(),
-                uuid: self.operation_id,
-                requirement: None,
-                request_type: RequestType::Immediate, // Use Immediate for instant completion
-            }),
-            bounce_block_ids: None,
-        };
-
-        // Send the request which will immediately mark as complete
-        let notify = self.leader.transfer_blocks_request(request).await?;
-        notify.await.map_err(|_| {
-            anyhow::anyhow!("Failed to mark operation as already complete")
-        })?;
-
-        Ok(())
-    }
-
-    /// Create a BlockTransferRequest with standard connector metadata.
-    fn make_request(
-        &self,
-        from_pool: BlockTransferPool,
-        to_pool: BlockTransferPool,
-        blocks: Vec<(usize, usize)>,
-        request_type: RequestType,
-    ) -> BlockTransferRequest {
-        BlockTransferRequest {
-            from_pool,
-            to_pool,
-            blocks,
-            connector_req: Some(LeaderTransferRequest {
-                request_id: self.request_id.clone(),
-                uuid: self.operation_id,
-                requirement: None,
-                request_type,
-            }),
-            bounce_block_ids: None,
-        }
-    }
-
-    /// Create a BlockTransferRequest with external bounce block IDs.
-    /// Use this for Device↔Object transfers when bounce blocks are allocated from host pool.
-    fn make_request_with_bounce(
-        &self,
-        from_pool: BlockTransferPool,
-        to_pool: BlockTransferPool,
-        blocks: Vec<(usize, usize)>,
-        request_type: RequestType,
-        bounce_block_ids: Vec<usize>,
-    ) -> BlockTransferRequest {
-        BlockTransferRequest {
-            from_pool,
-            to_pool,
-            blocks,
-            connector_req: Some(LeaderTransferRequest {
-                request_id: self.request_id.clone(),
-                uuid: self.operation_id,
-                requirement: None,
-                request_type,
-            }),
-            bounce_block_ids: Some(bounce_block_ids),
-        }
-    }
-
-    /// Create a BlockTransferRequest WITHOUT connector metadata.
-    /// This is for internal intermediate transfers that shouldn't trigger scheduler completion.
-    fn make_internal_request(
-        &self,
-        from_pool: BlockTransferPool,
-        to_pool: BlockTransferPool,
-        blocks: Vec<(usize, usize)>,
-    ) -> BlockTransferRequest {
-        BlockTransferRequest {
-            from_pool,
-            to_pool,
-            blocks,
-            connector_req: None, // No scheduler notification
-            bounce_block_ids: None,
-        }
-    }
-
-    /// Execute an internal transfer request (no scheduler notification).
-    /// Used for intermediate transfers in multi-hop operations (e.g., Object→Host in write-through).
-    async fn execute_internal(
-        &self,
-        from_pool: BlockTransferPool,
-        to_pool: BlockTransferPool,
-        blocks: Vec<(usize, usize)>,
-    ) -> anyhow::Result<std::time::Duration> {
-        let start = std::time::Instant::now();
-        let request = self.make_internal_request(from_pool, to_pool, blocks);
-
-        let notify = self.leader.transfer_blocks_request(request).await?;
-
-        // Wait for worker ACK with timeout to prevent indefinite hangs
-        match tokio::time::timeout(std::time::Duration::from_secs(60), notify).await {
-            Ok(result) => result.map_err(|_| {
-                anyhow::anyhow!(
-                    "Internal transfer {:?}→{:?} notification failed (channel closed)",
-                    from_pool,
-                    to_pool
-                )
-            })?,
-            Err(_) => {
-                return Err(anyhow::anyhow!(
-                    "Internal transfer {:?}→{:?} timed out after 60s",
-                    from_pool,
-                    to_pool
-                ));
-            }
-        };
-
-        Ok(start.elapsed())
-    }
-
-    /// Execute a transfer request and wait for completion.
-    async fn execute_transfer(
-        &self,
-        from_pool: BlockTransferPool,
-        to_pool: BlockTransferPool,
-        blocks: Vec<(usize, usize)>,
-        request_type: RequestType,
-    ) -> anyhow::Result<std::time::Duration> {
-        let start = std::time::Instant::now();
-        let request = self.make_request(from_pool, to_pool, blocks, request_type);
-
-        let notify = self.leader.transfer_blocks_request(request).await?;
-        notify.await.map_err(|_| {
-            anyhow::anyhow!(
-                "Transfer {:?}→{:?} notification failed",
-                from_pool,
-                to_pool
-            )
-        })?;
-
-        Ok(start.elapsed())
-    }
-
-    /// Execute a scheduled transfer (waits for worker scheduling).
-    async fn execute_scheduled(
-        &self,
-        from_pool: BlockTransferPool,
-        to_pool: BlockTransferPool,
-        blocks: Vec<(usize, usize)>,
-    ) -> anyhow::Result<std::time::Duration> {
-        self.execute_transfer(from_pool, to_pool, blocks, RequestType::Scheduled)
-            .await
-    }
-
-    /// Execute an immediate transfer (no scheduling delay).
-    async fn execute_immediate(
-        &self,
-        from_pool: BlockTransferPool,
-        to_pool: BlockTransferPool,
-        blocks: Vec<(usize, usize)>,
-    ) -> anyhow::Result<std::time::Duration> {
-        self.execute_transfer(from_pool, to_pool, blocks, RequestType::Immediate)
-            .await
-    }
-
-    /// Execute an immediate transfer with external bounce block IDs.
-    /// Use this for Device↔Object transfers when bounce blocks are allocated from host pool.
-    async fn execute_immediate_with_bounce(
-        &self,
-        from_pool: BlockTransferPool,
-        to_pool: BlockTransferPool,
-        blocks: Vec<(usize, usize)>,
-        bounce_block_ids: Vec<usize>,
-    ) -> anyhow::Result<std::time::Duration> {
-        let start = std::time::Instant::now();
-        let request = self.make_request_with_bounce(
-            from_pool,
-            to_pool,
-            blocks,
-            RequestType::Immediate,
-            bounce_block_ids,
-        );
-
-        let notify = self.leader.transfer_blocks_request(request).await?;
-        notify.await.map_err(|_| {
-            anyhow::anyhow!(
-                "Transfer {:?}→{:?} notification failed",
-                from_pool,
-                to_pool
-            )
-        })?;
-
-        Ok(start.elapsed())
-    }
-}
-
-/// Destination tier for offload operations.
-#[derive(Debug, Clone, Copy)]
-enum OffloadDestination {
-    /// Offload to host memory (G2)
-    Host,
-    /// Offload directly to disk, bypassing host (G3)
-    Disk,
-    /// Offload to object storage (G4)
-    Object,
-    /// Offload to object storage with write-through to host cache
-    ObjectWriteThrough,
-}
-
-impl OffloadDestination {
-    /// Determine the offload destination based on configuration.
-    fn from_config() -> Self {
-        if ObjectStorageConfig::is_offload_enabled() {
-            if ObjectStorageConfig::is_write_through_enabled() {
-                Self::ObjectWriteThrough
-            } else {
-                Self::Object
-            }
-        } else if should_bypass_cpu_cache() {
-            Self::Disk
-        } else {
-            Self::Host
-        }
-    }
-
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Host => "host",
-            Self::Disk => "disk",
-            Self::Object => "object_storage",
-            Self::ObjectWriteThrough => "object_storage+host_cache",
-        }
-    }
-}
-
-/// Helper to create block pairs from parallel iterators.
-fn zip_to_pairs<T, U>(src: impl Iterator<Item = T>, dst: impl Iterator<Item = U>) -> Vec<(usize, usize)>
-where
-    T: Into<usize>,
-    U: Into<usize>,
-{
-    src.zip(dst).map(|(s, d)| (s.into(), d.into())).collect()
 }
 
 struct LocalTransferEngine {
     block_manager: VllmBlockManager,
     leader: Arc<KvbmLeader>,
     xfer_rx: mpsc::UnboundedReceiver<LocalTransferRequest>,
-    object_registry: Arc<ObjectRegistry>,
 }
 
 impl LocalTransferEngine {
@@ -1913,13 +1418,11 @@ impl LocalTransferEngine {
         block_manager: VllmBlockManager,
         leader: Arc<KvbmLeader>,
         xfer_rx: mpsc::UnboundedReceiver<LocalTransferRequest>,
-        object_registry: Arc<ObjectRegistry>,
     ) -> Self {
         Self {
             block_manager,
             leader,
             xfer_rx,
-            object_registry,
         }
     }
 
@@ -1945,94 +1448,32 @@ impl LocalTransferEngine {
     ) -> anyhow::Result<()> {
         let (onboard_tx, mut onboard_rx) = mpsc::unbounded_channel::<LocalOnboardRequest>();
         let (offload_tx, mut offload_rx) = mpsc::unbounded_channel::<LocalOffloadRequest>();
+        let (g4_onboard_tx, mut g4_onboard_rx) = mpsc::unbounded_channel::<LocalG4OnboardRequest>();
 
         // Clone resources needed for tasks
         let block_manager_offload = self.block_manager.clone();
-        let block_manager_onboard = self.block_manager.clone();
+        let block_manager_g4 = self.block_manager.clone();
         let leader_offload = Arc::clone(&self.leader);
         let leader_onboard = Arc::clone(&self.leader);
-        let object_registry_offload = Arc::clone(&self.object_registry);
-        let object_registry_onboard = Arc::clone(&self.object_registry);
+        let leader_g4_onboard = Arc::clone(&self.leader);
 
         let kvbm_metrics_onboard = kvbm_metrics.clone();
         let kvbm_metrics_offload = kvbm_metrics.clone();
 
         let onboard_task = CriticalTaskExecutionHandle::new_with_runtime(
-            move |cancellation_token_onboard| async move {
-                use futures::stream::{FuturesUnordered, StreamExt};
-
-                // Track in-flight onboard operations for parallel execution
-                let mut in_flight: FuturesUnordered<tokio::task::JoinHandle<()>> = FuturesUnordered::new();
-
-                tracing::info!("LocalOnboardTask: starting (unlimited concurrency)");
-
-                loop {
-                    tokio::select! {
-                        biased;
-
-                        _ = cancellation_token_onboard.cancelled() => {
+            |cancellation_token_onboard| async move {
+                while let Some(req) = onboard_rx.recv().await {
+                    if cancellation_token_onboard.is_cancelled() {
                         tracing::debug!("LocalOnboardTask: received cancellation signal");
                         break;
                     }
-
-                        // Drain completed futures first (non-blocking)
-                        Some(result) = in_flight.next(), if !in_flight.is_empty() => {
-                            if let Err(e) = result {
-                                tracing::error!("LocalOnboardTask: onboard task panicked: {:?}", e);
-                            }
-                            tracing::debug!(
-                                in_flight = in_flight.len(),
-                                "LocalOnboardTask: onboard completed, {} still in flight",
-                                in_flight.len()
-                            );
-                        }
-
-                        // Accept new requests (no concurrency limit)
-                        Some(req) = onboard_rx.recv() => {
-                            let leader = Arc::clone(&leader_onboard);
-                            let block_manager = block_manager_onboard.clone();
-                            let object_registry = Arc::clone(&object_registry_onboard);
-                            let metrics = kvbm_metrics_onboard.clone();
-
-                            tracing::debug!(
-                                in_flight = in_flight.len() + 1,
-                                "LocalOnboardTask: spawning onboard, {} will be in flight",
-                                in_flight.len() + 1
-                            );
-
-                            // Spawn onboard as concurrent task
-                            let handle = tokio::spawn(async move {
-                                if let Err(e) = process_onboard_request(
-                                    req,
-                                    &block_manager,
-                                    &leader,
-                                    &object_registry,
-                                    metrics,
-                                ).await {
+                    if let Err(e) =
+                        process_onboard_request(req, &leader_onboard, kvbm_metrics_onboard.clone())
+                            .await
+                    {
                         tracing::error!("LocalOnboardTask: error processing request: {:?}", e);
                     }
-                            });
-
-                            in_flight.push(handle);
-                        }
-
-                        else => {
-                            // Channel closed or at capacity - wait for in-flight to complete
-                            if in_flight.is_empty() {
-                                break;
-                            }
-                        }
-                    }
                 }
-
-                // Drain remaining in-flight operations
-                while let Some(result) = in_flight.next().await {
-                    if let Err(e) = result {
-                        tracing::error!("LocalOnboardTask: onboard task panicked during drain: {:?}", e);
-                    }
-                }
-
-                tracing::info!("LocalOnboardTask: shutdown complete");
                 Ok(())
             },
             task_token.clone(),
@@ -2041,117 +1482,84 @@ impl LocalTransferEngine {
         )
         .unwrap();
         let offload_task = CriticalTaskExecutionHandle::new_with_runtime(
-            move |cancellation_token_offload| async move {
-                use futures::stream::{FuturesUnordered, StreamExt};
-
-                // Track in-flight offload operations for parallel execution
-                let mut in_flight: FuturesUnordered<tokio::task::JoinHandle<()>> = FuturesUnordered::new();
-
-                tracing::info!("LocalOffloadTask: starting (unlimited concurrency)");
-
-                loop {
-                    tokio::select! {
-                        biased;
-
-                        _ = cancellation_token_offload.cancelled() => {
+            |cancellation_token_offload| async move {
+                while let Some(req) = offload_rx.recv().await {
+                    if cancellation_token_offload.is_cancelled() {
                         tracing::debug!("LocalOffloadTask: received cancellation signal");
                         break;
                     }
 
-                        // Drain completed futures first (non-blocking)
-                        Some(result) = in_flight.next(), if !in_flight.is_empty() => {
-                            if let Err(e) = result {
-                                tracing::error!("LocalOffloadTask: offload task panicked: {:?}", e);
-                            }
-                            tracing::debug!(
-                                in_flight = in_flight.len(),
-                                "LocalOffloadTask: offload completed, {} still in flight",
-                                in_flight.len()
-                            );
-                        }
-
-                        // Accept new requests (no concurrency limit)
-                        Some(req) = offload_rx.recv() => {
                     let request_id = req.request_id.clone();
                     let operation_id = req.operation_id;
-                            let block_manager = block_manager_offload.clone();
-                            let leader = Arc::clone(&leader_offload);
-                            let object_registry = Arc::clone(&object_registry_offload);
-                            let metrics = kvbm_metrics_offload.clone();
 
-                            tracing::debug!(
-                                request_id = %request_id,
-                                operation_id = %operation_id,
-                                in_flight = in_flight.len() + 1,
-                                "LocalOffloadTask: spawning offload, {} will be in flight",
-                                in_flight.len() + 1
-                            );
-
-                            // Spawn offload as concurrent task (fire-and-forget within the pool)
-                            let handle = tokio::spawn(async move {
                     if let Err(e) = process_offload_request(
                         req,
-                                    &block_manager,
-                                    &leader,
-                                    &object_registry,
-                                    metrics,
+                        &block_manager_offload,
+                        &leader_offload,
+                        kvbm_metrics_offload.clone(),
                     )
                     .await
                     {
-                                    tracing::error!(
-                                        request_id = %request_id,
-                                        operation_id = %operation_id,
-                                        "LocalOffloadTask: error processing request: {:?}", e
-                                    );
+                        tracing::error!("LocalOffloadTask: error processing request: {:?}", e);
 
                         // Create a fake/immediate transfer request that completes instantly.
                         // Otherwise, worker side might stuck and cause memory leak.
                         let fake_xfer = BlockTransferRequest {
-                                        from_pool: BlockTransferPool::Device,
-                                        to_pool: BlockTransferPool::Host,
-                                        blocks: vec![],
+                            from_pool: BlockTransferPool::Device, // Use valid Device->Host transfer type
+                            to_pool: BlockTransferPool::Host,     // (offload path, but no blocks)
+                            blocks: vec![],                       // Empty - nothing to transfer
                             connector_req: Some(LeaderTransferRequest {
                                 request_id: request_id.clone(),
                                 uuid: operation_id,
                                 requirement: None,
-                                            request_type: RequestType::Immediate,
+                                request_type: RequestType::Immediate, // Immediate = completes instantly
                             }),
-                            bounce_block_ids: None,
+                            sequence_hashes: None,
                         };
 
-                                    match leader.transfer_blocks_request(fake_xfer).await {
+                        match leader_offload.transfer_blocks_request(fake_xfer).await {
                             Ok(notify_receiver) => {
+                                // Wait for the fake transfer to "complete" (should be instant)
                                 let _ = notify_receiver.await;
                             }
-                                        Err(_xfer_err) => {}
-                                    }
-                                }
-                            });
-
-                            in_flight.push(handle);
-                        }
-
-                        else => {
-                            // Channel closed or at capacity - wait for in-flight to complete
-                            if in_flight.is_empty() {
-                                break;
+                            Err(_xfer_err) => {
+                                // Failed to create completion notification - error already logged above
                             }
                         }
                     }
                 }
+                Ok(())
+            },
+            task_token.clone(),
+            "LocalOffloadTask",
+            &task_handle,
+        )
+        .unwrap();
 
-                // Drain remaining in-flight operations
-                while let Some(result) = in_flight.next().await {
-                    if let Err(e) = result {
-                        tracing::error!("LocalOffloadTask: offload task panicked during drain: {:?}", e);
+        let kvbm_metrics_g4 = kvbm_metrics.clone();
+        let g4_onboard_task = CriticalTaskExecutionHandle::new_with_runtime(
+            |cancellation_token_g4| async move {
+                while let Some(req) = g4_onboard_rx.recv().await {
+                    if cancellation_token_g4.is_cancelled() {
+                        tracing::debug!("LocalG4OnboardTask: received cancellation signal");
+                        break;
+                    }
+                    if let Err(e) =
+                        process_g4_onboard_request(
+                            req,
+                            &block_manager_g4,
+                            &leader_g4_onboard,
+                            kvbm_metrics_g4.clone(),
+                        )
+                        .await
+                    {
+                        tracing::error!("LocalG4OnboardTask: error processing request: {:?}", e);
                     }
                 }
-
-                tracing::info!("LocalOffloadTask: shutdown complete");
                 Ok(())
             },
             task_token,
-            "LocalOffloadTask",
+            "LocalG4OnboardTask",
             &task_handle,
         )
         .unwrap();
@@ -2176,6 +1584,11 @@ impl LocalTransferEngine {
                                         tracing::error!("LocalTransferEngine: error sending onboard request: {:?}", e);
                                     }
                                 }
+                                LocalTransferRequest::G4Onboard(g4_req) => {
+                                    if let Err(e) = g4_onboard_tx.send(g4_req) {
+                                        tracing::error!("LocalTransferEngine: error sending G4 onboard request: {:?}", e);
+                                    }
+                                }
                             }
                         }
                         None => {
@@ -2192,15 +1605,20 @@ impl LocalTransferEngine {
         // drop all tx channels
         drop(onboard_tx);
         drop(offload_tx);
+        drop(g4_onboard_tx);
 
         onboard_task.cancel();
         offload_task.cancel();
+        g4_onboard_task.cancel();
 
         if let Err(e) = onboard_task.join().await {
             tracing::error!("LocalOnboardTask failed: {:?}", e);
         }
         if let Err(e) = offload_task.join().await {
             tracing::error!("LocalOffloadTask failed: {:?}", e);
+        }
+        if let Err(e) = g4_onboard_task.join().await {
+            tracing::error!("LocalG4OnboardTask failed: {:?}", e);
         }
 
         tracing::debug!("LocalTransferEngine: shutdown complete");
@@ -2212,82 +1630,58 @@ async fn process_offload_request(
     offload_req: LocalOffloadRequest,
     block_manager: &VllmBlockManager,
     leader: &Arc<KvbmLeader>,
-    object_registry: &Arc<ObjectRegistry>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    let ctx = TransferContext::new(
-        offload_req.request_id.clone(),
-        offload_req.operation_id,
-        leader,
-    );
-    let num_blocks = offload_req.block_ids.len();
-    let destination = OffloadDestination::from_config();
+    let request_id = offload_req.request_id.clone();
+    let operation_id = offload_req.operation_id;
 
     tracing::debug!(
-        target: "object_transfer_timing",
-        request_id = %ctx.request_id,
-        operation_id = %ctx.operation_id,
-        num_blocks = num_blocks,
-        destination = destination.as_str(),
-        "SLOT_OFFLOAD_START: {} blocks to {}",
-        num_blocks,
-        destination.as_str()
+        "Processing offload request for {} blocks",
+        offload_req.block_ids.len()
     );
 
-    // Update metrics based on destination
-    match destination {
-        OffloadDestination::Object | OffloadDestination::ObjectWriteThrough => {
-            kvbm_metrics.offload_blocks_d2o.inc_by(num_blocks as u64);
-            kvbm_metrics
-                .offload_bytes_object
-                .inc_by((num_blocks * leader.bytes_per_block()) as u64);
-        }
-        OffloadDestination::Disk => {
-            kvbm_metrics.offload_blocks_d2d.inc_by(num_blocks as u64);
-        }
-        OffloadDestination::Host => {
-            kvbm_metrics.offload_blocks_d2h.inc_by(num_blocks as u64);
-        }
-    }
+    // Determine if we should bypass CPU memory (G2) and offload directly from GPU (G1) to Disk (G3)
+    let bypass_cpu_mem = should_bypass_cpu_cache();
 
-    // Execute the appropriate offload path
-    match destination {
-        OffloadDestination::ObjectWriteThrough | OffloadDestination::Object => {
-            process_offload_to_object(offload_req, block_manager, &ctx, object_registry, destination)
-                .await?;
-        }
-        OffloadDestination::Disk => {
-            process_offload_to_storage(
-                offload_req,
-                block_manager.disk().unwrap(),
-                BlockTransferPool::Disk,
-                &ctx,
-            )
-            .await?;
-        }
-        OffloadDestination::Host => {
-            process_offload_to_storage(
-                offload_req,
-                block_manager.host().unwrap(),
-                BlockTransferPool::Host,
-                &ctx,
-            )
-            .await?;
-        }
-    }
+    if bypass_cpu_mem {
+        // Direct G1 -> G3 path (Device to Disk, bypassing Host)
+        kvbm_metrics
+            .offload_blocks_d2d
+            .inc_by(offload_req.block_ids.len() as u64);
 
-    tracing::debug!(
-        target: "object_transfer_timing",
-        request_id = %ctx.request_id,
-        operation_id = %ctx.operation_id,
-        num_blocks = num_blocks,
-        destination = destination.as_str(),
-        total_ms = ctx.elapsed().as_ms(),
-        "SLOT_OFFLOAD_DONE: {} blocks to {} in {:.2}ms",
-        num_blocks,
-        destination.as_str(),
-        ctx.elapsed().as_ms()
-    );
+        tracing::debug!(
+            request_id = %request_id,
+            operation_id = %operation_id,
+            "offloading directly to disk (bypassing host)"
+        );
+
+        process_offload_to_storage(
+            offload_req,
+            block_manager.disk().unwrap(),
+            BlockTransferPool::Disk,
+            leader,
+            &request_id,
+            &operation_id,
+            "disk",
+        )
+        .await?;
+    } else {
+        // Standard path: G1 -> G2 (Device to Host)
+        kvbm_metrics
+            .offload_blocks_d2h
+            .inc_by(offload_req.block_ids.len() as u64);
+
+        process_offload_to_storage(
+            offload_req,
+            block_manager.host().unwrap(),
+            BlockTransferPool::Host,
+            leader,
+            &request_id,
+            &operation_id,
+            "host",
+        )
+        .await?;
+    }
 
     Ok(())
 }
@@ -2296,605 +1690,256 @@ async fn process_offload_to_storage<S, L, M>(
     offload_req: LocalOffloadRequest,
     storage_pool: &dyn BlockPool<S, L, M>,
     transfer_pool: BlockTransferPool,
-    ctx: &TransferContext<'_>,
+    leader: &Arc<KvbmLeader>,
+    request_id: &str,
+    operation_id: &uuid::Uuid,
+    storage_name: &str,
 ) -> anyhow::Result<()>
 where
     S: Storage + NixlRegisterableStorage,
     L: LocalityProvider,
     M: BlockMetadata,
 {
-    let storage_name = format!("{:?}", transfer_pool).to_lowercase();
-    let num_blocks_requested = offload_req.block_ids.len();
-
+    // 1. Acquire mutable blocks
     let blocks = storage_pool
-        .allocate_blocks(num_blocks_requested)
+        .allocate_blocks(offload_req.block_ids.len())
         .await?;
+    let token_blocks = offload_req.token_blocks;
 
-    let allocated_ids: Vec<usize> = blocks.iter().map(|b| b.block_id()).collect();
-    let block_pairs = zip_to_pairs(
-        offload_req.block_ids.iter().copied(),
-        allocated_ids.iter().copied(),
+    let allocated_block_ids: Vec<usize> = blocks.iter().map(|b| b.block_id()).collect();
+    let block_pairs: Vec<(usize, usize)> = offload_req
+        .block_ids
+        .into_iter()
+        .zip(allocated_block_ids.into_iter())
+        .collect();
+
+    tracing::debug!(
+        request_id = request_id,
+        operation_id = %operation_id,
+        "offload to {} - stage 1 complete",
+        storage_name
     );
 
-    let mut blocks_to_register = Vec::with_capacity(blocks.len());
-    for (mut block, token_block) in blocks.into_iter().zip(offload_req.token_blocks.into_iter()) {
-        block
-            .apply_token_block(token_block)
+    // 2. Apply token blocks
+    let mut blocks_to_register = Vec::new();
+    let zipped_blocks = blocks.into_iter().zip(token_blocks.into_iter());
+
+    for (mut mutable_block, token_block) in zipped_blocks {
+        mutable_block
+            .apply_token_block(token_block.clone())
             .map_err(|e| anyhow::anyhow!("failed to apply token block: {:?}", e))?;
-        blocks_to_register.push(block);
+
+        blocks_to_register.push(mutable_block);
     }
-
-    // 2. Execute the transfer
-    ctx.execute_scheduled(BlockTransferPool::Device, transfer_pool, block_pairs)
-        .await?;
-
-    // 3. Register blocks in the pool
-    let registered = storage_pool.register_blocks(blocks_to_register).await?;
-
     tracing::debug!(
-        request_id = %ctx.request_id,
-        operation_id = %ctx.operation_id,
-        "offload to {}: registered {} blocks",
-        storage_name,
-        registered.len()
+        request_id = request_id,
+        operation_id = %operation_id,
+        "offload to {} - stage 2 complete",
+        storage_name
     );
 
-    Ok(())
-}
-
-/// Offload blocks to object storage (S3/GCS).
-///
-/// For `ObjectWriteThrough`: GPU → Host (cached) → Object Storage
-/// For `Object`: GPU → Object Storage (direct via bounce buffer)
-async fn process_offload_to_object(
-    offload_req: LocalOffloadRequest,
-    block_manager: &VllmBlockManager,
-    ctx: &TransferContext<'_>,
-    object_registry: &Arc<ObjectRegistry>,
-    destination: OffloadDestination,
-) -> anyhow::Result<()> {
-    let write_through = matches!(destination, OffloadDestination::ObjectWriteThrough);
-
-    // Filter out blocks already in object storage
-    let filtered = filter_offload_blocks(&offload_req, object_registry, &ctx.request_id, &ctx.operation_id);
-
-    if filtered.is_empty() {
-        tracing::debug!(
-            target: "object_transfer_timing",
-            request_id = %ctx.request_id,
-            operation_id = %ctx.operation_id,
-            already_offloaded = filtered.already_offloaded_count,
-            write_through = write_through,
-            "OBJ_OFFLOAD_SKIP: all {} blocks already in object storage",
-            filtered.already_offloaded_count
-        );
-        // Even though no transfer is needed, we must still mark the operation as complete
-        // so the scheduler increments the completion counter and the worker can proceed.
-        ctx.mark_already_complete().await?;
-        return Ok(());
-    }
-
-    let num_blocks = filtered.len();
-
-    tracing::debug!(
-        target: "object_transfer_timing",
-        request_id = %ctx.request_id,
-        operation_id = %ctx.operation_id,
-        num_blocks = num_blocks,
-        already_offloaded = filtered.already_offloaded_count,
-        write_through = write_through,
-        "OBJ_OFFLOAD: {} blocks, {} already present, write_through={}",
-        num_blocks,
-        filtered.already_offloaded_count,
-        write_through
-    );
-
-    if write_through {
-        // Write-through path: GPU → Host → Object
-        let host_pool = block_manager.host().ok_or_else(|| {
-            anyhow::anyhow!("Host pool required for write-through but not available")
-        })?;
-
-        // Check which blocks already exist in host cache to avoid duplicates
-        let existing_host_blocks = host_pool
-            .match_sequence_hashes(&filtered.sequence_hashes)
-            .await
-            .unwrap_or_default();
-
-        let existing_hashes: std::collections::HashSet<u64> = existing_host_blocks
-            .iter()
-            .map(|b| b.sequence_hash())
-            .collect();
-
-        // Partition into: already in host vs need to transfer
-        let mut need_transfer_gpu_ids = Vec::new();
-        let mut need_transfer_hashes = Vec::new();
-        let mut need_transfer_tokens = Vec::new();
-        let mut already_in_host_block_ids = Vec::new();
-        let mut already_in_host_hashes = Vec::new();
-
-        for i in 0..filtered.len() {
-            let hash = filtered.sequence_hashes[i];
-            if existing_hashes.contains(&hash) {
-                // Block already in host cache - just use it for Host → Object
-                if let Some(block) = existing_host_blocks.iter().find(|b| b.sequence_hash() == hash) {
-                    already_in_host_block_ids.push(block.block_id());
-                    already_in_host_hashes.push(hash);
-                }
-            } else {
-                // Block not in host cache - need GPU → Host transfer
-                need_transfer_gpu_ids.push(filtered.block_ids[i]);
-                need_transfer_hashes.push(hash);
-                need_transfer_tokens.push(filtered.token_blocks[i].clone());
-            }
-        }
-
-        let num_already_cached = already_in_host_block_ids.len();
-        let num_to_transfer = need_transfer_gpu_ids.len();
-
-        tracing::debug!(
-            request_id = %ctx.request_id,
-            operation_id = %ctx.operation_id,
-            already_in_host = num_already_cached,
-            need_transfer = num_to_transfer,
-            "Write-through offload: {} blocks already in host cache, {} need GPU→Host transfer",
-            num_already_cached,
-            num_to_transfer
-        );
-
-        // Allocate and transfer only blocks not already in host
-        let mut new_host_block_ids = Vec::new();
-        let mut new_host_hashes = Vec::new();
-
-        if !need_transfer_gpu_ids.is_empty() {
-
-            let host_blocks = host_pool
-                .allocate_blocks(num_to_transfer)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to allocate host blocks: {:?}", e))?;
-
-            new_host_block_ids = host_blocks.iter().map(|b| b.block_id()).collect();
-
-            // Apply token metadata to host blocks
-            let mut blocks_to_register = Vec::with_capacity(num_to_transfer);
-            for (mut block, token_block) in host_blocks.into_iter().zip(need_transfer_tokens.iter()) {
-                block
-                    .apply_token_block(token_block.clone())
-                    .map_err(|e| anyhow::anyhow!("Failed to apply token block: {:?}", e))?;
-                blocks_to_register.push(block);
-            }
-
-            // GPU → Host (only for blocks not already in host cache)
-            let gpu_to_host = zip_to_pairs(
-                need_transfer_gpu_ids.iter().copied(),
-                new_host_block_ids.iter().copied(),
-            );
-
-            // Use execute_internal for intermediate transfer to avoid double-completion signal
-            ctx.execute_internal(BlockTransferPool::Device, BlockTransferPool::Host, gpu_to_host)
-                .await?;
-
-            // Register new host blocks
-            host_pool.register_blocks(blocks_to_register).await?;
-
-            new_host_hashes = need_transfer_hashes;
-        }
-
-        // Host → Object: transfer ALL blocks (both already-cached and newly-transferred)
-        // Combine the block IDs and hashes
-        let all_host_block_ids: Vec<usize> = already_in_host_block_ids
-            .iter()
-            .chain(new_host_block_ids.iter())
-            .copied()
-            .collect();
-        let all_hashes: Vec<u64> = already_in_host_hashes
-            .iter()
-            .chain(new_host_hashes.iter())
-            .copied()
-            .collect();
-
-        if !all_host_block_ids.is_empty() {
-            let host_to_obj = zip_to_pairs(
-                all_host_block_ids.iter().copied(),
-                all_hashes.iter().map(|&h| h as usize),
-            );
-            ctx.execute_immediate(BlockTransferPool::Host, BlockTransferPool::Object, host_to_obj)
-                .await?;
-        }
+    // 3. Issue the offload request using `leader`
+    // Include sequence_hashes for G4 write-through if offloading to host
+    let sequence_hashes = if transfer_pool == BlockTransferPool::Host && leader.g4_enabled() {
+        Some(offload_req.sequence_hashes.clone())
     } else {
-        // Direct path: GPU → Object
-        ctx.execute_scheduled(
-            BlockTransferPool::Device,
-            BlockTransferPool::Object,
-            filtered.to_block_pairs(),
-        )
-        .await?;
-    }
+        None
+    };
 
-    // Register sequence hashes in object registry
-    for hash in &filtered.sequence_hashes {
-        object_registry.register_with_hash_as_key(*hash);
+    let block_xfer_req = BlockTransferRequest {
+        from_pool: BlockTransferPool::Device,
+        to_pool: transfer_pool,
+        blocks: block_pairs,
+        connector_req: Some(LeaderTransferRequest {
+            request_id: offload_req.request_id.clone(),
+            uuid: offload_req.operation_id,
+            requirement: None,
+            request_type: RequestType::Scheduled,
+        }),
+        sequence_hashes,
+    };
+    let notify_receiver = leader.transfer_blocks_request(block_xfer_req).await?;
+    tracing::debug!(
+        request_id = request_id,
+        operation_id = %operation_id,
+        "offload to {} - stage 3 complete",
+        storage_name
+    );
+
+    // 4. Wait for the offload request to complete
+    match notify_receiver.await {
+        Ok(_) => {
+            tracing::debug!(
+                "Offloading transfer to {} completed successfully",
+                storage_name
+            );
+        }
+        Err(_) => {
+            return Err(anyhow::anyhow!(
+                "Offloading transfer completion notification failed"
+            ));
+        }
     }
+    tracing::debug!(
+        request_id = request_id,
+        operation_id = %operation_id,
+        "offload to {} - stage 4 complete",
+        storage_name
+    );
+
+    // 5. Register the mutable blocks
+    let immutable_blocks = storage_pool.register_blocks(blocks_to_register).await?;
 
     tracing::debug!(
-        target: "object_transfer_timing",
-        request_id = %ctx.request_id,
-        operation_id = %ctx.operation_id,
-        num_blocks = num_blocks,
-        write_through = write_through,
-        total_ms = ctx.elapsed().as_ms(),
-        "OBJ_OFFLOAD: {} blocks in {:.2}ms (write_through={})",
-        num_blocks,
-        ctx.elapsed().as_ms(),
-        write_through
+        request_id = request_id,
+        operation_id = %operation_id,
+        "registered {} blocks to {}",
+        immutable_blocks.len(),
+        storage_name
     );
+
+    // 6. Update leader's G4 registry if we offloaded to host with G4 enabled
+    if transfer_pool == BlockTransferPool::Host && leader.g4_enabled() {
+        leader.g4_register_hashes(&offload_req.sequence_hashes);
+        tracing::debug!(
+            request_id = request_id,
+            operation_id = %operation_id,
+            "registered {} hashes in G4 registry",
+            offload_req.sequence_hashes.len()
+        );
+    }
 
     Ok(())
 }
 
 async fn process_onboard_request(
     onboard_req: LocalOnboardRequest,
-    block_manager: &VllmBlockManager,
     leader: &Arc<KvbmLeader>,
-    _object_registry: &Arc<ObjectRegistry>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    let ctx = TransferContext::new(
-        onboard_req.request_id.clone(),
-        onboard_req.operation_id,
-        leader,
-    );
-    let num_blocks = onboard_req.src_blocks.len();
-    let source_pool = onboard_req.src_blocks.storage_pool();
-
-    // Update metrics based on source
-    match source_pool {
-        BlockTransferPool::Host => {
-            kvbm_metrics.onboard_blocks_h2d.inc_by(num_blocks as u64);
-        }
-        BlockTransferPool::Disk => {
-            kvbm_metrics.onboard_blocks_d2d.inc_by(num_blocks as u64);
-        }
-        BlockTransferPool::Object => {
-            kvbm_metrics.onboard_blocks_o2d.inc_by(num_blocks as u64);
-            kvbm_metrics
-                .onboard_bytes_object
-                .inc_by((num_blocks * leader.bytes_per_block()) as u64);
-        }
-        _ => {}
+    if onboard_req.src_blocks.storage_pool() == BlockTransferPool::Host {
+        kvbm_metrics
+            .onboard_blocks_h2d
+            .inc_by(onboard_req.src_blocks.len() as u64);
+    } else if onboard_req.src_blocks.storage_pool() == BlockTransferPool::Disk {
+        kvbm_metrics
+            .onboard_blocks_d2d
+            .inc_by(onboard_req.src_blocks.len() as u64);
     }
 
-    tracing::debug!(
-        target: "object_transfer_timing",
-        request_id = %ctx.request_id,
-        operation_id = %ctx.operation_id,
-        num_blocks = num_blocks,
-        source = ?source_pool,
-        "SLOT_ONBOARD_START: {} blocks from {:?}",
-        num_blocks,
-        source_pool
-    );
+    let request_id = &onboard_req.request_id;
+    let operation_id = &onboard_req.operation_id;
 
-    // Use dedicated object storage handler
-    if source_pool == BlockTransferPool::Object {
-        return process_onboard_from_object(onboard_req, block_manager, &ctx).await;
+    // extract source block ids
+    let src_block_ids = onboard_req.src_blocks.block_ids();
+
+    // create block pairs
+    let block_pairs = src_block_ids
+        .iter()
+        .zip(onboard_req.dst_block_ids.iter())
+        .map(|(src, dst)| (*src, *dst))
+        .collect::<Vec<_>>();
+
+    // create transfer request
+    let block_xfer_req = BlockTransferRequest {
+        from_pool: onboard_req.src_blocks.storage_pool(),
+        to_pool: BlockTransferPool::Device,
+        blocks: block_pairs,
+        connector_req: Some(LeaderTransferRequest {
+            request_id: request_id.clone(),
+            uuid: *operation_id,
+            requirement: None,
+            request_type: RequestType::Immediate,
+        }),
+        sequence_hashes: None, // Onboard doesn't need G4 write-through
+    };
+
+    let notify_receiver = leader.transfer_blocks_request(block_xfer_req).await?;
+
+    match notify_receiver.await {
+        Ok(_) => {
+            tracing::debug!("Onboarding transfer completed successfully");
+        }
+        Err(_) => {
+            return Err(anyhow::anyhow!(
+                "Onboarding transfer completion notification failed"
+            ));
+        }
     }
-
-    // Standard onboard: Source → Device (immediate transfer)
-    let block_pairs = zip_to_pairs(
-        onboard_req.src_blocks.block_ids().iter().copied(),
-        onboard_req.dst_block_ids.iter().copied(),
-    );
-
-    let transfer_elapsed = ctx
-        .execute_immediate(source_pool, BlockTransferPool::Device, block_pairs)
-        .await?;
-
-    tracing::debug!(
-        target: "object_transfer_timing",
-        request_id = %ctx.request_id,
-        operation_id = %ctx.operation_id,
-        num_blocks = num_blocks,
-        source = ?source_pool,
-        transfer_ms = transfer_elapsed.as_ms(),
-        total_ms = ctx.elapsed().as_ms(),
-        "SLOT_ONBOARD_DONE: {} blocks from {:?} in {:.2}ms",
-        num_blocks,
-        source_pool,
-        ctx.elapsed().as_ms()
-    );
 
     Ok(())
 }
 
-/// Onboard blocks from object storage.
-///
-/// When read-through caching is enabled (via write-through config):
-///   - Checks host cache for hits first
-///   - For misses: Object → Host (cached) → Device
-///   - For hits: Host → Device (fast path)
-/// When direct mode:
-///   - Simple Object → Device transfer
-async fn process_onboard_from_object(
-    onboard_req: LocalOnboardRequest,
+/// Process a G4 onboard request by sending it to the worker.
+async fn process_g4_onboard_request(
+    g4_req: LocalG4OnboardRequest,
     block_manager: &VllmBlockManager,
-    ctx: &TransferContext<'_>,
+    leader: &Arc<KvbmLeader>,
+    kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    let num_blocks = onboard_req.src_blocks.len();
-    let src_block_ids = onboard_req.src_blocks.block_ids();
-    let sequence_hashes: Vec<u64> = src_block_ids.iter().map(|&id| id as u64).collect();
+    kvbm_metrics
+        .onboard_blocks_o2d
+        .inc_by(g4_req.sequence_hashes.len() as u64);
 
-    let read_through = ObjectStorageConfig::is_write_through_enabled();
+    let request_id = &g4_req.request_id;
+    let operation_id = &g4_req.operation_id;
+    let num_blocks = g4_req.sequence_hashes.len();
 
-    // Direct path: Object → Device (requires bounce buffer from host pool)
-    if !read_through {
-        let host_pool = block_manager.host().ok_or_else(|| {
-            anyhow::anyhow!("Host pool required for Object→GPU transfers (for bounce buffers)")
-        })?;
+    tracing::debug!(
+        request_id = %request_id,
+        operation_id = %operation_id,
+        "Processing G4 onboard request for {} blocks",
+        num_blocks
+    );
 
-        // Try to allocate bounce blocks from host pool
-        match host_pool.allocate_blocks(num_blocks).await {
-            Ok(bounce_blocks) => {
-                let bounce_ids: Vec<usize> = bounce_blocks.iter().map(|b| b.block_id()).collect();
-                let pairs = zip_to_pairs(
-                    sequence_hashes.iter().map(|&h| h as usize),
-                    onboard_req.dst_block_ids.iter().copied(),
-                );
+    // Allocate host blocks for bounce buffers
+    let host_pool = block_manager
+        .host()
+        .ok_or_else(|| anyhow::anyhow!("Host pool not available for G4 bounce buffers"))?;
 
-                tracing::debug!(
-                    request_id = %ctx.request_id,
-                    num_bounce = bounce_ids.len(),
-                    "Allocated bounce blocks from host pool for direct Object→GPU"
-                );
+    let host_blocks = host_pool.allocate_blocks(num_blocks).await?;
+    let host_block_ids: Vec<usize> = host_blocks.iter().map(|b| b.block_id()).collect();
 
-                ctx.execute_immediate_with_bounce(
-                    BlockTransferPool::Object,
-                    BlockTransferPool::Device,
-                    pairs,
-                    bounce_ids,
-                ).await?;
+    tracing::debug!(
+        request_id = %request_id,
+        operation_id = %operation_id,
+        "Allocated {} host blocks for G4 bounce buffers",
+        host_block_ids.len()
+    );
 
-                tracing::debug!(
-                    target: "object_transfer_timing",
-                    request_id = %ctx.request_id,
-                    operation_id = %ctx.operation_id,
-                    num_blocks = num_blocks,
-                    total_ms = ctx.elapsed().as_ms(),
-                    "OBJ_ONBOARD: {} blocks in {:.2}ms (direct)",
-                    num_blocks,
-                    ctx.elapsed().as_ms()
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    request_id = %ctx.request_id,
-                    error = %e,
-                    num_blocks = num_blocks,
-                    "Host pool exhausted, cannot onboard from object storage - skipping {} blocks",
-                    num_blocks
-                );
-                // Skip the object transfer - vLLM will recompute these blocks
-                // Still mark operation as complete so worker doesn't get stuck
-                ctx.mark_already_complete().await?;
-            }
+    // Create G4 onboard request for the worker (with host_block_ids)
+    let g4_onboard_req = dynamo_llm::block_manager::distributed::G4OnboardRequest::new_with_connector_req(
+        g4_req.request_id.clone(),
+        g4_req.operation_id,
+        g4_req.sequence_hashes,
+        g4_req.device_block_ids,
+        host_block_ids,
+        LeaderTransferRequest {
+            request_id: request_id.clone(),
+            uuid: *operation_id,
+            requirement: None,
+            request_type: RequestType::Immediate,
+        },
+    );
+
+    let notify_receiver = leader.g4_onboard_request(g4_onboard_req).await?;
+
+    match notify_receiver.await {
+        Ok(_) => {
+            tracing::info!(
+                request_id = %request_id,
+                operation_id = %operation_id,
+                "G4 onboard transfer completed successfully"
+            );
         }
-        return Ok(());
-    }
-
-    // Read-through path: use host cache
-    let host_pool = block_manager.host().ok_or_else(|| {
-        anyhow::anyhow!("Host pool required for read-through onboard")
-    })?;
-
-    // Check host cache for hits
-    let match_start = std::time::Instant::now();
-
-    // Add timeout to match_sequence_hashes to prevent hanging on block pool deadlocks
-    let cached_blocks = match tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        host_pool.match_sequence_hashes(&sequence_hashes)
-    ).await {
-        Ok(result) => result.unwrap_or_default(),
         Err(_) => {
-            // Fallback to empty hits (will force reload)
-            Default::default()
-        }
-    };
-
-    let cache_hits = cached_blocks.len();
-    let cache_misses = num_blocks - cache_hits;
-
-    tracing::debug!(
-        target: "object_transfer_timing",
-        request_id = %ctx.request_id,
-        operation_id = %ctx.operation_id,
-        num_blocks = num_blocks,
-        cache_hits = cache_hits,
-        cache_misses = cache_misses,
-        elapsed_ms = match_start.elapsed().as_millis(),
-        "OBJ_ONBOARD_RT: {} blocks | {} hits, {} misses | match={:.2}ms",
-        num_blocks,
-        cache_hits,
-        cache_misses,
-        match_start.elapsed().as_secs_f64() * 1000.0
-    );
-
-    // Partition blocks into cache hits vs misses
-    let mut hit_pairs = Vec::with_capacity(cache_hits);
-    let mut miss_hashes = Vec::with_capacity(cache_misses);
-    let mut miss_dst_ids = Vec::with_capacity(cache_misses);
-
-    let mut cached_idx = 0;
-    for (i, &src_hash) in sequence_hashes.iter().enumerate() {
-        if cached_idx < cached_blocks.len() && cached_blocks[cached_idx].sequence_hash() == src_hash {
-            hit_pairs.push((cached_blocks[cached_idx].block_id(), onboard_req.dst_block_ids[i]));
-            cached_idx += 1;
-        } else {
-            miss_hashes.push(src_hash);
-            miss_dst_ids.push(onboard_req.dst_block_ids[i]);
+            return Err(anyhow::anyhow!(
+                "G4 onboard transfer completion notification failed"
+            ));
         }
     }
 
-    // Handle cache misses: try Object → Host → GPU, fallback to Object → GPU
-    let mut miss_host_ids = Vec::new();
-    let mut use_direct_fallback = false;
-
-    // Hold host blocks until Host→GPU transfer completes to prevent reallocation
-    let mut allocated_host_blocks = None;
-
-    if !miss_hashes.is_empty() {
-
-        match host_pool.allocate_blocks(cache_misses).await {
-            Ok(host_blocks) => {
-
-                miss_host_ids = host_blocks.iter().map(|b| b.block_id()).collect();
-                // Object → Host
-                let obj_to_host = zip_to_pairs(
-                    miss_hashes.iter().map(|&h| h as usize),
-                    miss_host_ids.iter().copied(),
-                );
-
-
-                // Use execute_internal to avoid triggering scheduler completion for this intermediate step
-                ctx.execute_internal(BlockTransferPool::Object, BlockTransferPool::Host, obj_to_host)
-                    .await?;
-
-                // Keep blocks allocated until after Host→GPU transfer
-                allocated_host_blocks = Some(host_blocks);
-            }
-            Err(_) => {
-                use_direct_fallback = true;
-            }
-        }
-    }
-
-    // Transfer cache hits: Host → GPU
-    // Use execute_internal (no scheduler notification) to avoid double-counting.
-    // We'll send exactly ONE completion notification at the end of this function.
-    if !hit_pairs.is_empty() {
-        ctx.execute_internal(BlockTransferPool::Host, BlockTransferPool::Device, hit_pairs)
-            .await?;
-    }
-
-    // Track whether we've sent a completion notification to scheduler
-    let mut completion_sent = false;
-
-    // Transfer cache misses to GPU
-    // Hold bounce blocks until transfer completes (if we allocate them)
-    let mut allocated_bounce_blocks = None;
-
-    if !miss_hashes.is_empty() {
-        if use_direct_fallback {
-            // Direct: Object → GPU (requires bounce buffer from host pool)
-            let pairs = zip_to_pairs(
-                miss_hashes.iter().map(|&h| h as usize),
-                miss_dst_ids.iter().copied(),
-            );
-
-            // Try to allocate bounce blocks from host pool for staging
-            let batch_size = dynamo_llm::block_manager::offload::max_transfer_batch_size();
-            let num_bounce_needed = cache_misses.min(batch_size);
-
-            tracing::debug!(
-                request_id = %ctx.request_id,
-                num_blocks = num_bounce_needed,
-                "Allocating bounce blocks from host pool for Object→GPU"
-            );
-
-            match host_pool.allocate_blocks(num_bounce_needed).await {
-                Ok(bounce_blocks) => {
-                    let bounce_ids: Vec<usize> = bounce_blocks.iter().map(|b| b.block_id()).collect();
-                    tracing::debug!(
-                        request_id = %ctx.request_id,
-                        num_blocks = bounce_ids.len(),
-                        "Allocated bounce blocks from host pool for Object→GPU: {:?}",
-                        bounce_ids
-                    );
-
-                    let xfer_start = std::time::Instant::now();
-                    // Add timeout to execute_immediate to detect transfer hangs
-                    let result = tokio::time::timeout(
-                        std::time::Duration::from_secs(60),
-                        ctx.execute_immediate_with_bounce(
-                            BlockTransferPool::Object,
-                            BlockTransferPool::Device,
-                            pairs,
-                            bounce_ids,
-                        )
-                    ).await;
-
-                    match result {
-                        Ok(Ok(_)) => {
-                            tracing::info!(
-                                target: "object_transfer_timing",
-                                request_id = %ctx.request_id,
-                                elapsed_ms = xfer_start.elapsed().as_millis(),
-                                "OBJ_DIRECT_XFER_COMPLETE"
-                            );
-                            completion_sent = true;
-                        },
-                        Ok(Err(e)) => tracing::error!("Direct transfer failed: {:?}", e),
-                        Err(_) => tracing::error!("Direct transfer timed out after 60s"),
-                    }
-
-                    // Keep bounce blocks allocated until transfer completes
-                    allocated_bounce_blocks = Some(bounce_blocks);
-                }
-                Err(e) => {
-                    // Host pool exhausted - cannot transfer from object storage
-                    tracing::warn!(
-                        request_id = %ctx.request_id,
-                        error = %e,
-                        num_blocks = cache_misses,
-                        "Host pool exhausted, cannot onboard from object storage - skipping {} blocks",
-                        cache_misses
-                    );
-                    // Skip the object transfer - vLLM will recompute these blocks
-                    // Still mark operation as complete so worker doesn't get stuck
-                    ctx.mark_already_complete().await?;
-                    completion_sent = true;
-                }
-            }
-        } else {
-            // Via host: Host → GPU
-            let pairs = zip_to_pairs(miss_host_ids.iter().copied(), miss_dst_ids.iter().copied());
-
-            ctx.execute_immediate(BlockTransferPool::Host, BlockTransferPool::Device, pairs)
-                .await?;
-            completion_sent = true;
-        }
-    }
-
-    // Now safe to release host blocks back to pool
-    drop(allocated_host_blocks);
-    drop(allocated_bounce_blocks);
-
-    // Ensure exactly ONE completion notification is sent per operation.
-    // If we only had cache hits (no misses), we haven't sent one yet.
-    if !completion_sent {
-        tracing::debug!(
-            request_id = %ctx.request_id,
-            operation_id = %ctx.operation_id,
-            "Sending completion for cache-hit-only onboard"
-        );
-        ctx.mark_already_complete().await?;
-    }
-
-    tracing::debug!(
-        target: "object_transfer_timing",
-        request_id = %ctx.request_id,
-        operation_id = %ctx.operation_id,
-        num_blocks = num_blocks,
-        cache_hits = cache_hits,
-        cache_misses = cache_misses,
-        direct_fallback = use_direct_fallback,
-        total_ms = ctx.elapsed().as_ms(),
-        "OBJ_ONBOARD_RT: {} blocks | {} hits, {} misses | {:.2}ms",
-        num_blocks,
-        cache_hits,
-        cache_misses,
-        ctx.elapsed().as_ms()
-    );
+    // host_blocks (MutableBlocks) are released here when they go out of scope
 
     Ok(())
 }
@@ -2954,35 +1999,5 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> AnyBlocks for AnyImmutab
 
     fn block_ids(&self) -> Vec<BlockId> {
         self.block_ids()
-    }
-}
-
-/// Object storage blocks for onboarding from S3/GCS.
-///
-/// Unlike ImmutableBlocks, object storage blocks are represented as
-/// (sequence_hash, object_key) pairs since objects are dynamically allocated.
-struct ObjectStorageBlocks {
-    /// Vec of (sequence_hash, object_key) pairs
-    keys: Vec<(u64, u64)>,
-}
-
-impl ObjectStorageBlocks {
-    pub fn new(keys: Vec<(u64, u64)>) -> Self {
-        Self { keys }
-    }
-}
-
-impl AnyBlocks for ObjectStorageBlocks {
-    fn len(&self) -> usize {
-        self.keys.len()
-    }
-
-    fn storage_pool(&self) -> BlockTransferPool {
-        BlockTransferPool::Object
-    }
-
-    fn block_ids(&self) -> Vec<BlockId> {
-        // For object storage, the "block ID" is the object key
-        self.keys.iter().map(|(_hash, key)| *key as BlockId).collect()
     }
 }

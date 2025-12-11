@@ -3,7 +3,7 @@
 
 use super::*;
 use anyhow;
-use dynamo_llm::block_manager::kv_consolidator::tracker::EventSource;
+use dynamo_llm::block_manager::kv_consolidator::EventSource;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Action {
@@ -106,10 +106,6 @@ impl KvConnectorLeaderRecorder {
             kvbm_metrics_endpoint_enabled(),
             parse_kvbm_metrics_port(),
         );
-
-        // Spawn periodic stats logger (logs every 30 seconds)
-        kvbm_metrics.spawn_periodic_stats_logger(std::time::Duration::from_secs(30));
-
         let kvbm_metrics_clone = kvbm_metrics.clone();
 
         let token = CancellationToken::new();
@@ -157,7 +153,11 @@ impl KvConnectorLeaderRecorder {
                     (consolidator_vllm_ep, consolidator_output_ep)
                 {
                     block_manager_builder =
-                        block_manager_builder.consolidator_config(vllm_ep, output_ep, EventSource::Vllm);
+                        block_manager_builder.consolidator_config(
+                            vllm_ep,
+                            Some(output_ep),
+                            EventSource::Vllm,
+                        );
                 }
 
                 let block_manager = match block_manager_builder.build().await {
@@ -173,7 +173,7 @@ impl KvConnectorLeaderRecorder {
                     block_manager.get_block_manager().clone(),
                     leader.clone(),
                     kvbm_metrics_clone.clone(),
-                    None, // Recorder doesn't need identifier
+                    Some(format!("worker-{}", worker_id)),
                 );
 
                 let _ = slot_manager_cell.set(sm);

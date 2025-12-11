@@ -16,7 +16,8 @@ use crate::tokens::SequenceHash;
 use moka::sync::Cache;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::block_manager::distributed::ObjectStorageConfig;
+use crate::block_manager::ObjectStorageConfig;
+use super::external_registry::ExternalRegistry;
 
 /// Object key for S3/GCS storage (u64 used by NIXL OBJ backend)
 pub type ObjectKey = u64;
@@ -236,6 +237,103 @@ impl ObjectRegistry {
     }
 }
 
+// ============================================================================
+// ExternalRegistry Implementation
+// ============================================================================
+
+impl ExternalRegistry<SequenceHash> for ObjectRegistry {
+    fn match_keys(&self, keys: &[SequenceHash]) -> Vec<SequenceHash> {
+        tracing::debug!(
+            target: "external_registry",
+            num_keys = keys.len(),
+            backend = self.backend_name(),
+            "match_keys: querying {} keys",
+            keys.len()
+        );
+
+        let matched: Vec<SequenceHash> = keys
+            .iter()
+            .copied()
+            .take_while(|k| self.cache.contains_key(k))
+            .collect();
+
+        tracing::debug!(
+            target: "external_registry",
+            matched = matched.len(),
+            queried = keys.len(),
+            "match_keys: matched {} of {} keys",
+            matched.len(),
+            keys.len()
+        );
+
+        matched
+    }
+
+    fn register(&self, keys: &[SequenceHash]) -> usize {
+        let mut registered = 0;
+        for key in keys {
+            // Use key as both sequence_hash and object_key (common pattern)
+            self.cache.insert(*key, *key);
+            self.total_registered.fetch_add(1, Ordering::Relaxed);
+            registered += 1;
+
+            tracing::trace!(
+                target: "external_registry",
+                key = %key,
+                "register: key={:#018x}",
+                key
+            );
+        }
+
+        tracing::debug!(
+            target: "external_registry",
+            registered = registered,
+            total = keys.len(),
+            "register: registered {} keys",
+            registered
+        );
+
+        registered
+    }
+
+    fn unregister(&self, keys: &[SequenceHash]) -> usize {
+        let mut removed = 0;
+        for key in keys {
+            if self.cache.contains_key(key) {
+                self.cache.invalidate(key);
+                removed += 1;
+
+                tracing::trace!(
+                    target: "external_registry",
+                    key = %key,
+                    "unregister: key={:#018x}",
+                    key
+                );
+            }
+        }
+
+        tracing::debug!(
+            target: "external_registry",
+            removed = removed,
+            total = keys.len(),
+            "unregister: removed {} of {} keys",
+            removed,
+            keys.len()
+        );
+
+        removed
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "object_storage"
+    }
+
+    fn can_register(&self) -> bool {
+        // TinyLFU will evict entries if at capacity, so we can always accept registrations
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +478,72 @@ mod tests {
         }
 
         assert_eq!(registry.total_registered(), 10000);
+    }
+
+    // ========================================================================
+    // ExternalRegistry Trait Tests
+    // ========================================================================
+
+    mod external_registry_tests {
+        use super::*;
+        use crate::block_manager::v2::logical::external_registry::ExternalRegistry;
+
+        #[test]
+        fn test_trait_match_keys_contiguous() {
+            let registry = ObjectRegistry::with_capacity(100);
+
+            // Register some keys
+            ExternalRegistry::register(&registry, &[100, 200, 300]);
+
+            // Match contiguous prefix
+            let matched = ExternalRegistry::match_keys(&registry, &[100, 200, 300, 400, 500]);
+            assert_eq!(matched, vec![100, 200, 300]);
+        }
+
+        #[test]
+        fn test_trait_match_keys_stops_on_miss() {
+            let registry = ObjectRegistry::with_capacity(100);
+
+            ExternalRegistry::register(&registry, &[100, 300]); // 200 is missing
+
+            let matched = ExternalRegistry::match_keys(&registry, &[100, 200, 300]);
+            assert_eq!(matched, vec![100]); // Stops at 200
+        }
+
+        #[test]
+        fn test_trait_register_returns_count() {
+            let registry = ObjectRegistry::with_capacity(100);
+
+            let count = ExternalRegistry::register(&registry, &[1, 2, 3, 4, 5]);
+            assert_eq!(count, 5);
+        }
+
+        #[test]
+        fn test_trait_unregister_returns_count() {
+            let registry = ObjectRegistry::with_capacity(100);
+
+            ExternalRegistry::register(&registry, &[10, 20, 30]);
+
+            // Unregister some (20 exists, 40 doesn't)
+            let count = ExternalRegistry::unregister(&registry, &[20, 40]);
+            assert_eq!(count, 1);
+
+            // Verify 20 is gone
+            let matched = ExternalRegistry::match_keys(&registry, &[10, 20, 30]);
+            assert_eq!(matched, vec![10]); // Stops at missing 20
+        }
+
+        #[test]
+        fn test_trait_backend_name() {
+            let registry = ObjectRegistry::with_capacity(100);
+            assert_eq!(ExternalRegistry::<u64>::backend_name(&registry), "object_storage");
+        }
+
+        #[test]
+        fn test_trait_can_register() {
+            let registry = ObjectRegistry::with_capacity(100);
+            // TinyLFU always allows registration (evicts if needed)
+            assert!(ExternalRegistry::<u64>::can_register(&registry));
+        }
     }
 }

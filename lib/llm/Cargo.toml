@@ -73,6 +73,7 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 validator = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
@@ -102,7 +103,7 @@ dialoguer = { version = "0.11", default-features = false, features = [
 
 # block_manager
 aligned-vec = { version = "0.6.4", optional = true }
-nixl-sys = { git = "https://github.com/cheese-head/nixl.git", branch = "cheese-head/rust-param-bindings", optional = true }
+nixl-sys = { path = "../../nixl/src/bindings/rust", optional = true }
 cudarc = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
 

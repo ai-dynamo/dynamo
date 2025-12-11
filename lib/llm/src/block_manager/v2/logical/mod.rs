@@ -4,6 +4,7 @@
 //! Logical block management for v2 KV cache.
 //!
 //! This module handles the logical layer of block management:
+//! - External registry trait for storage tier catalogs
 //! - Object storage registry (sequence hash → object key mapping)
 //! - Distributed registry for multi-node coordination
 //! - Block location tracking across storage tiers
@@ -13,12 +14,15 @@
 //!
 //! # Modules
 //!
+//! - [`external_registry`]: Trait for external storage registries
 //! - [`registry`]: Local object registry (single-node, Moka-based)
 //! - [`distributed`]: Distributed registry for multi-node deployments
 
 pub mod distributed;
+pub mod external_registry;
 pub mod registry;
 
+pub use external_registry::{ExternalRegistry, RegistryKey, SequenceHashRegistry, SharedExternalRegistry};
 pub use registry::ObjectRegistry;
 
 // Re-export distributed types for convenience
