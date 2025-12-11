@@ -538,7 +538,10 @@ impl ConnectorLeader {
                 tracing::info!("Control server started successfully");
             }
             Err(e) => {
-                tracing::warn!("Failed to start control server: {}. Continuing without it.", e);
+                tracing::warn!(
+                    "Failed to start control server: {}. Continuing without it.",
+                    e
+                );
             }
         }
 

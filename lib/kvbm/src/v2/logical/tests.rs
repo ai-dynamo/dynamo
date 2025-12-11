@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use dynamo_tokens::TokenBlockSequence;
 
 use crate::logical::pools::backends::{FifoReusePolicy, HashMapBackend};

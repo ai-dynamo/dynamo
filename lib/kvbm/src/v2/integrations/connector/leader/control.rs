@@ -8,12 +8,11 @@
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::put,
-    Json,
 };
 use serde::Serialize;
 use tokio::net::TcpListener;
@@ -197,4 +196,3 @@ pub async fn start_control_server(
 
     Ok(shutdown_tx)
 }
-
