@@ -10,9 +10,13 @@ inputs:
     required: false
     default: '4'
   linux_amd64:
-    description: 'Enable linux/amd64 builder'
+    description: 'Enable linux/amd64 builder (CPU nodes)'
     required: false
     default: 'true'
+  linux_amd64_gpu:
+    description: 'Enable linux/amd64 builder (GPU L40 nodes)'
+    required: false
+    default: 'false'
   linux_arm64:
     description: 'Enable linux/arm64 builder'
     required: false
@@ -32,14 +36,26 @@ runs:
         nodeselector: 'eks.amazonaws.com/nodegroup=cpu-amd-m5-2xlarge,kubernetes.io/arch=amd64'
         tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
 
+    - name: Define amd64 GPU builder
+      if: inputs.linux_amd64_gpu == 'true'
+      uses: ./.github/actions/buildkit-builder
+      with:
+        builder_name: ${{ inputs.builder_name }}
+        mode: ${{ inputs.linux_amd64 == 'true' && 'append' || 'create' }}
+        platform: linux/amd64
+        replicas: ${{ inputs.replicas }}
+        nodeselector: 'eks.amazonaws.com/nodegroup=gpu-l40-g6-4xlarge,kubernetes.io/arch=amd64'
+        tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
+
     - name: Define arm64 builder
       if: inputs.linux_arm64 == 'true'
       uses: ./.github/actions/buildkit-builder
       with:
         builder_name: ${{ inputs.builder_name }}
-        mode: ${{ inputs.linux_amd64 == 'true' && 'append' || 'create' }}
+        mode: ${{ (inputs.linux_amd64 == 'true' || inputs.linux_amd64_gpu == 'true') && 'append' || 'create' }}
         platform: linux/arm64
         replicas: ${{ inputs.replicas }}
         nodeselector: 'eks.amazonaws.com/nodegroup=cpu-arm-r8g-4xlarge,kubernetes.io/arch=arm64'
         tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
+
 

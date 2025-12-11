@@ -74,6 +74,7 @@ jobs:
         replicas: '4'
         linux_amd64: 'true'
         linux_arm64: 'true'
+        linux_amd64_gpu: 'true'
 
     - name: Bootstrap buildkit builder
       shell: bash
@@ -137,6 +138,7 @@ jobs:
         replicas: '4'
         linux_amd64: 'true'
         linux_arm64: 'true'
+        linux_amd64_gpu: 'true'
     - name: Cleanup Buildkit Builder
       shell: bash
       run: |
@@ -172,7 +174,7 @@ jobs:
           replicas: '4'
           linux_amd64: 'true'
           linux_arm64: 'true'
-
+          linux_amd64_gpu: 'false'
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -255,8 +257,9 @@ jobs:
         with:
           builder_name: ${{ env.BUILDER_NAME }}
           replicas: '4'
-          linux_amd64: 'true'
+          linux_amd64: 'false'
           linux_arm64: 'true'
+          linux_amd64_gpu: 'true'
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
