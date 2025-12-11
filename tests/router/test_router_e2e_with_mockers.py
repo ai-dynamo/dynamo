@@ -40,19 +40,23 @@ BLOCK_SIZE = 16
 
 
 def get_unique_ports(
-    request, num_ports: int = 1, store_backend: str = "etcd"
+    request,
+    num_ports: int = 1,
+    store_backend: str = "etcd",
+    request_plane: str = "nats",
 ) -> list[int]:
     """Generate unique ports for parallel test execution.
 
     Ports are unique based on:
     - Test function name (each test gets a base offset)
-    - Parametrization value (etcd=0, file=50)
+    - Parametrization value (etcd=0, file=50; nats=0, tcp=25)
     - Port index (for multi-port tests)
 
     Args:
         request: Pytest request fixture
         num_ports: Number of ports needed (1 for single router, 2 for two routers)
         store_backend: Storage backend parameter ("etcd" or "file")
+        request_plane: Request plane parameter ("nats" or "tcp")
 
     Returns:
         List of unique port numbers
@@ -72,11 +76,15 @@ def get_unique_ports(
 
     base_offset = test_offsets.get(test_name, 0)
 
-    # Parametrization offset (etcd=0, file=50)
-    param_offset = 0 if store_backend == "etcd" else 50
+    # Parametrization offset (etcd=0, file=50; nats=0, tcp=25)
+    store_offset = 0 if store_backend == "etcd" else 50
+    plane_offset = 0 if request_plane == "nats" else 25
 
     # Generate ports
-    ports = [BASE_PORT + base_offset + param_offset + i for i in range(num_ports)]
+    ports = [
+        BASE_PORT + base_offset + store_offset + plane_offset + i
+        for i in range(num_ports)
+    ]
     return ports
 
 
@@ -684,7 +692,9 @@ def test_busy_threshold_endpoint(
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
-        frontend_port = get_unique_ports(request, num_ports=1)[0]
+        frontend_port = get_unique_ports(
+            request, num_ports=1, request_plane=request_plane
+        )[0]
 
         _test_busy_threshold_endpoint(
             engine_workers=mockers,
