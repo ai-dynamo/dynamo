@@ -4,14 +4,6 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
-# Follow the README.md instructions to setup MinIO or upload the LoRA to s3/minio
-# Adjust these values to match your local MinIO or S3 setup
-
-
-# load math lora to minio
-# LORA_NAME=Neural-Hacker/Qwen3-Math-Reasoning-LoRA HF_LORA_REPO=Neural-Hacker/Qwen3-Math-Reasoning-LoRA ./setup_minio.sh
-
-
 export AWS_ENDPOINT=http://localhost:9000
 export AWS_ACCESS_KEY_ID=minioadmin
 export AWS_SECRET_ACCESS_KEY=minioadmin
@@ -21,8 +13,6 @@ export AWS_ALLOW_HTTP=true
 # Dynamo LoRA Configuration
 export DYN_LORA_ENABLED=true
 export DYN_LORA_PATH=/tmp/dynamo_loras_minio
-export DYN_LOG=debug
-# export DYN_LOG_LEVEL=debug
 
 mkdir -p $DYN_LORA_PATH
 
@@ -63,7 +53,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-0.6B",
-    "messages": [{"role": "user", "content": "Solve (x*x - x + 1 = 0) for x"}],
+    "messages": [{"role": "user", "content": "What is deep learning?"}],
     "max_tokens": 300,
     "temperature": 0.0
   }'
