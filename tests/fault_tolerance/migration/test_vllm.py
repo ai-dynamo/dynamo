@@ -55,7 +55,10 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Set environment variables
         env = os.environ.copy()
-        env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
+        req_plane = request.getfixturevalue("request_plane")
+        env["DYN_REQUEST_PLANE"] = req_plane
+        if req_plane == "tcp":
+            env["DYN_TCP_RPC_PORT"] = f"990{worker_id[-1]}"
 
         env["DYN_VLLM_KV_EVENT_PORT"] = f"2008{worker_id[-1]}"
         env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = f"560{worker_id[-1]}"
@@ -68,6 +71,8 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = f"808{worker_id[-1]}"
+        if req_plane == "tcp":
+            env["DYN_TCP_RPC_PORT"] = f"990{worker_id[-1]}"
 
         # TODO: Have the managed process take a command name explicitly to distinguish
         #       between processes started with the same command.
