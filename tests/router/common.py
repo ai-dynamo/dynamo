@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import string
 import time
@@ -38,6 +39,7 @@ class KVRouterProcess(ManagedProcess):
         store_backend: str = "etcd",
         enforce_disagg: bool = False,
         busy_threshold: float | None = None,
+        request_plane: str = "nats",
     ):
         command = [
             "python3",
@@ -61,8 +63,12 @@ class KVRouterProcess(ManagedProcess):
         if busy_threshold is not None:
             command.extend(["--busy-threshold", str(busy_threshold)])
 
+        env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = request_plane
+
         super().__init__(
             command=command,
+            env=env,
             timeout=60,
             display_output=True,
             health_check_ports=[frontend_port],
@@ -125,6 +131,23 @@ def verify_response_worker_ids(
     )
     logger.info(
         f"✓ Verified all {len(response_worker_ids)} responses have {key}={actual_worker_id}"
+    )
+
+
+def verify_response_timing(timing_info: dict[str, Any]) -> None:
+    """Verify timing info has valid values (ttft_ms > 0, total_time_ms > 0)."""
+    ttft_ms = timing_info.get("ttft_ms")
+    total_time_ms = timing_info.get("total_time_ms")
+
+    assert ttft_ms is not None and ttft_ms > 0, f"Expected ttft_ms > 0, got: {ttft_ms}"
+    assert (
+        total_time_ms is not None and total_time_ms > 0
+    ), f"Expected total_time_ms > 0, got: {total_time_ms}"
+    assert (
+        total_time_ms >= ttft_ms
+    ), f"Expected total_time_ms >= ttft_ms, got {total_time_ms} < {ttft_ms}"
+    logger.info(
+        f"✓ Verified timing: ttft_ms={ttft_ms:.2f}, total_time_ms={total_time_ms:.2f}"
     )
 
 
@@ -1640,7 +1663,7 @@ def _test_router_decisions_disagg(
                     # Each iteration adds more content to extend the prefix
                     progressive_content = " ".join([base_content] * (i + 1))
 
-                    # Create payload with worker_id in extra_fields to get prefill/decode worker IDs
+                    # Create payload with worker_id and timing in extra_fields
                     payload = {
                         **test_payload,
                         "messages": [
@@ -1649,7 +1672,7 @@ def _test_router_decisions_disagg(
                                 "content": progressive_content,
                             }
                         ],
-                        "nvext": {"extra_fields": ["worker_id"]},
+                        "nvext": {"extra_fields": ["worker_id", "timing"]},
                         "stream": True,
                     }
 
@@ -1663,9 +1686,10 @@ def _test_router_decisions_disagg(
                             response.status == 200
                         ), f"Request {i + 1} failed with status {response.status}"
 
-                        # Collect all chunks and look for nvext with worker_id
+                        # Collect all chunks and look for nvext with worker_id and timing
                         prefill_wid = None
                         decode_wid = None
+                        timing_info = None
 
                         async for line in response.content:
                             if not line:
@@ -1681,30 +1705,41 @@ def _test_router_decisions_disagg(
 
                             try:
                                 data = json.loads(data_str)
-                                # Check for nvext.worker_id in the response
+                                # Check for nvext in the response
                                 nvext = data.get("nvext", {})
-                                worker_id_info = nvext.get("worker_id", {})
-
-                                if worker_id_info:
-                                    if "prefill_worker_id" in worker_id_info:
-                                        prefill_wid = worker_id_info[
-                                            "prefill_worker_id"
-                                        ]
-                                    if "decode_worker_id" in worker_id_info:
-                                        decode_wid = worker_id_info["decode_worker_id"]
+                                if nvext:
+                                    worker_id_info = nvext.get("worker_id", {})
+                                    if worker_id_info:
+                                        if "prefill_worker_id" in worker_id_info:
+                                            prefill_wid = worker_id_info[
+                                                "prefill_worker_id"
+                                            ]
+                                        if "decode_worker_id" in worker_id_info:
+                                            decode_wid = worker_id_info[
+                                                "decode_worker_id"
+                                            ]
+                                    # Timing info appears in final chunk
+                                    if "timing" in nvext:
+                                        timing_info = nvext["timing"]
 
                             except json.JSONDecodeError:
                                 continue
 
                         logger.info(
                             f"Request {i + 1}: prefill_worker_id={prefill_wid}, "
-                            f"decode_worker_id={decode_wid}"
+                            f"decode_worker_id={decode_wid}, timing={timing_info}"
                         )
 
                         if prefill_wid is not None:
                             prefill_worker_ids.append(prefill_wid)
                         if decode_wid is not None:
                             decode_worker_ids.append(decode_wid)
+
+                        # Verify timing info is present and valid
+                        assert (
+                            timing_info is not None
+                        ), f"Request {i + 1}: Expected timing info in final chunk, got None"
+                        verify_response_timing(timing_info)
 
                     # Small delay between requests
                     await asyncio.sleep(0.5)
@@ -1980,6 +2015,7 @@ def _test_busy_threshold_endpoint(
     frontend_port: int,
     test_payload: dict,
     store_backend: str = "etcd",
+    request_plane: str = "nats",
 ):
     """Test that the /busy_threshold endpoint can be hit and responds correctly.
 
@@ -1997,6 +2033,7 @@ def _test_busy_threshold_endpoint(
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload (used to extract model name)
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        request_plane: Request plane to use ("nats" or "tcp"). Defaults to "nats".
 
     Raises:
         AssertionError: If endpoint responses are incorrect
@@ -2014,6 +2051,7 @@ def _test_busy_threshold_endpoint(
             engine_workers.namespace,
             store_backend,
             busy_threshold=initial_threshold,
+            request_plane=request_plane,
         )
         kv_router.__enter__()
 
