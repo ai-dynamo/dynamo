@@ -487,7 +487,7 @@ impl ModelManager {
 
     /// Gets or sets the busy threshold for a model via its worker monitor.
     ///
-    /// Get or set the blocks threshold for a model's worker monitor.
+    /// Get or set the active decode blocks threshold for a model's worker monitor.
     ///
     /// This is the primary API for HTTP endpoints and external callers.
     /// The threshold (0.0 to 1.0) controls when workers are marked as "busy"
@@ -501,20 +501,20 @@ impl ModelManager {
     /// # Returns
     ///
     /// The threshold value as f64, or `None` if no monitor exists for this model.
-    pub fn blocks_threshold(&self, model: &str, threshold: Option<f64>) -> Option<f64> {
+    pub fn active_decode_blocks_threshold(&self, model: &str, threshold: Option<f64>) -> Option<f64> {
         let monitors = self.worker_monitors.read();
         let monitor = monitors.get(model)?;
 
         match threshold {
             Some(value) => {
-                monitor.set_blocks_threshold(value);
+                monitor.set_active_decode_blocks_threshold(value);
                 Some(value)
             }
-            None => Some(monitor.blocks_threshold()),
+            None => Some(monitor.active_decode_blocks_threshold()),
         }
     }
 
-    /// Get or set the tokens threshold for a model's worker monitor.
+    /// Get or set the active prefill tokens threshold for a model's worker monitor.
     ///
     /// The threshold can exceed 1.0 since active prefill tokens include queued tokens.
     ///
@@ -526,16 +526,16 @@ impl ModelManager {
     /// # Returns
     ///
     /// The threshold value as f64, or `None` if no monitor exists for this model.
-    pub fn tokens_threshold(&self, model: &str, threshold: Option<f64>) -> Option<f64> {
+    pub fn active_prefill_tokens_threshold(&self, model: &str, threshold: Option<f64>) -> Option<f64> {
         let monitors = self.worker_monitors.read();
         let monitor = monitors.get(model)?;
 
         match threshold {
             Some(value) => {
-                monitor.set_tokens_threshold(value);
+                monitor.set_active_prefill_tokens_threshold(value);
                 Some(value)
             }
-            None => Some(monitor.tokens_threshold()),
+            None => Some(monitor.active_prefill_tokens_threshold()),
         }
     }
 
@@ -548,8 +548,8 @@ impl ModelManager {
     ///
     /// * `model` - The model name
     /// * `client` - The client for subscribing to KV metrics (only used if creating new)
-    /// * `blocks_threshold` - The initial/updated blocks threshold value (0.0-1.0)
-    /// * `tokens_threshold` - The initial/updated tokens threshold value (can exceed 1.0)
+    /// * `active_decode_blocks_threshold` - The initial/updated active decode blocks threshold value (0.0-1.0)
+    /// * `active_prefill_tokens_threshold` - The initial/updated active prefill tokens threshold value (can exceed 1.0)
     ///
     /// # Returns
     ///
@@ -558,17 +558,17 @@ impl ModelManager {
         &self,
         model: &str,
         client: Client,
-        blocks_threshold: f64,
-        tokens_threshold: f64,
+        active_decode_blocks_threshold: f64,
+        active_prefill_tokens_threshold: f64,
     ) -> KvWorkerMonitor {
         let mut monitors = self.worker_monitors.write();
 
         if let Some(existing) = monitors.get(model) {
-            existing.set_blocks_threshold(blocks_threshold);
-            existing.set_tokens_threshold(tokens_threshold);
+            existing.set_active_decode_blocks_threshold(active_decode_blocks_threshold);
+            existing.set_active_prefill_tokens_threshold(active_prefill_tokens_threshold);
             existing.clone()
         } else {
-            let monitor = KvWorkerMonitor::new(client, blocks_threshold, tokens_threshold);
+            let monitor = KvWorkerMonitor::new(client, active_decode_blocks_threshold, active_prefill_tokens_threshold);
             monitors.insert(model.to_string(), monitor.clone());
             monitor
         }
@@ -581,7 +581,7 @@ impl ModelManager {
 
     /// Lists all models that have worker monitors (and thus busy thresholds) configured.
     ///
-    /// Returns a vector of (model_name, blocks_threshold, tokens_threshold) tuples.
+    /// Returns a vector of (model_name, active_decode_blocks_threshold, active_prefill_tokens_threshold) tuples.
     pub fn list_busy_thresholds(&self) -> Vec<(String, f64, f64)> {
         self.worker_monitors
             .read()
@@ -589,8 +589,8 @@ impl ModelManager {
             .map(|(k, monitor)| {
                 (
                     k.clone(),
-                    monitor.blocks_threshold(),
-                    monitor.tokens_threshold(),
+                    monitor.active_decode_blocks_threshold(),
+                    monitor.active_prefill_tokens_threshold(),
                 )
             })
             .collect()

@@ -324,9 +324,9 @@ async def async_main():
         "router_config": RouterConfig(
             router_mode,
             kv_router_config,
-            flags.active_decode_blocks_threshold,
-            flags.active_prefill_tokens_threshold,
-            flags.enforce_disagg,
+            active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
+            active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
+            enforce_disagg=flags.enforce_disagg,
         ),
     }
 

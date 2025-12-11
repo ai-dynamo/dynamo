@@ -866,11 +866,11 @@ impl WorkerMetricsPublisher {
                     // Timer expired - publish if we have pending metrics
                     _ = &mut publish_timer => {
                         if let Some(metrics) = pending_publish.take() {
-                            // Create ActiveLoad with only kv_active_blocks (worker doesn't know prefill tokens)
+                            // Create ActiveLoad with only active_decode_blocks (worker doesn't know prefill tokens)
                             let active_load = ActiveLoad {
                                 worker_id,
                                 dp_rank: metrics.worker_stats.data_parallel_rank.unwrap_or(0),
-                                kv_active_blocks: Some(metrics.kv_stats.kv_active_blocks),
+                                active_decode_blocks: Some(metrics.kv_stats.kv_active_blocks),
                                 active_prefill_tokens: None,
                             };
 
@@ -1302,7 +1302,7 @@ mod test_integration_publisher {
 
         let event = result.unwrap().unwrap(); // Unwrap the Option and the Result
         assert_eq!(event.worker_id, worker_id);
-        assert_eq!(event.kv_active_blocks, Some(900)); // Last value: 9 * 100
+        assert_eq!(event.active_decode_blocks, Some(900)); // Last value: 9 * 100
         assert_eq!(event.active_prefill_tokens, None); // Worker doesn't publish prefill tokens
 
         // Ensure no more events are waiting

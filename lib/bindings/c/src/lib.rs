@@ -966,9 +966,9 @@ pub async fn create_worker_selection_pipeline_chat(
     let router_config = dynamo_llm::entrypoint::RouterConfig {
         router_mode,
         kv_router_config: kv_router_config.unwrap_or_default(),
-        // C bindings only support blocks_threshold for now (via busy_threshold param)
-        blocks_threshold: busy_threshold,
-        tokens_threshold: None,
+        // C bindings only support active_decode_blocks_threshold for now (via busy_threshold param)
+        active_decode_blocks_threshold: busy_threshold,
+        active_prefill_tokens_threshold: None,
         enforce_disagg: false,
     };
     let watcher = ModelWatcher::new(
@@ -1033,7 +1033,7 @@ pub async fn create_worker_selection_pipeline_chat(
 
     // Create worker monitor if busy_threshold is set
     // Note: C bindings don't register with ModelManager, so HTTP endpoint won't see this
-    // C bindings only support blocks_threshold for now (tokens_threshold defaults to 1000.0 = effectively disabled)
+    // C bindings only support active_decode_blocks_threshold for now (active_prefill_tokens_threshold defaults to 1000.0 = effectively disabled)
     let worker_monitor = busy_threshold.map(|t| KvWorkerMonitor::new(client.clone(), t, 1000.0));
 
     let engine = build_routed_pipeline::<

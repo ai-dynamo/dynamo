@@ -315,7 +315,7 @@ impl KvScheduler {
                             let active_load = ActiveLoad {
                                 worker_id: worker.worker_id,
                                 dp_rank: worker.dp_rank,
-                                kv_active_blocks: blocks.map(|b| b as u64),
+                                active_decode_blocks: blocks.map(|b| b as u64),
                                 active_prefill_tokens: Some(*tokens as u64),
                             };
 

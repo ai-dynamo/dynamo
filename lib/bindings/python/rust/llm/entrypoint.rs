@@ -77,29 +77,29 @@ impl KvRouterConfig {
 pub struct RouterConfig {
     router_mode: RouterMode,
     kv_router_config: KvRouterConfig,
-    /// Threshold for KV cache block utilization (0.0-1.0)
-    blocks_threshold: Option<f64>,
-    /// Threshold for prefill token utilization (can exceed 1.0)
-    tokens_threshold: Option<f64>,
+    /// Threshold for active decode blocks utilization (0.0-1.0)
+    active_decode_blocks_threshold: Option<f64>,
+    /// Threshold for active prefill tokens utilization (can exceed 1.0)
+    active_prefill_tokens_threshold: Option<f64>,
     enforce_disagg: bool,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, blocks_threshold=None, tokens_threshold=None, enforce_disagg=false))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, enforce_disagg=false))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
-        blocks_threshold: Option<f64>,
-        tokens_threshold: Option<f64>,
+        active_decode_blocks_threshold: Option<f64>,
+        active_prefill_tokens_threshold: Option<f64>,
         enforce_disagg: bool,
     ) -> Self {
         Self {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
-            blocks_threshold,
-            tokens_threshold,
+            active_decode_blocks_threshold,
+            active_prefill_tokens_threshold,
             enforce_disagg,
         }
     }
@@ -110,8 +110,8 @@ impl From<RouterConfig> for RsRouterConfig {
         RsRouterConfig {
             router_mode: rc.router_mode.into(),
             kv_router_config: rc.kv_router_config.inner,
-            blocks_threshold: rc.blocks_threshold,
-            tokens_threshold: rc.tokens_threshold,
+            active_decode_blocks_threshold: rc.active_decode_blocks_threshold,
+            active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,
             enforce_disagg: rc.enforce_disagg,
         }
     }

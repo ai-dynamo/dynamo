@@ -405,17 +405,17 @@ impl ModelWatcher {
             // Get or create the worker monitor for this model
             // This allows dynamic threshold updates via the ModelManager
             // Create monitor if either threshold is configured
-            let worker_monitor = if self.router_config.blocks_threshold.is_some()
-                || self.router_config.tokens_threshold.is_some()
+            let worker_monitor = if self.router_config.active_decode_blocks_threshold.is_some()
+                || self.router_config.active_prefill_tokens_threshold.is_some()
             {
-                // Default thresholds: blocks=1.0 (disabled), tokens=1000.0 (effectively disabled)
-                let blocks = self.router_config.blocks_threshold.unwrap_or(1.0);
-                let tokens = self.router_config.tokens_threshold.unwrap_or(1000.0);
+                // Default thresholds: active_decode_blocks=1.0 (disabled), active_prefill_tokens=1000.0 (effectively disabled)
+                let active_decode_blocks = self.router_config.active_decode_blocks_threshold.unwrap_or(1.0);
+                let active_prefill_tokens = self.router_config.active_prefill_tokens_threshold.unwrap_or(1000.0);
                 Some(self.manager.get_or_create_worker_monitor(
                     card.name(),
                     client.clone(),
-                    blocks,
-                    tokens,
+                    active_decode_blocks,
+                    active_prefill_tokens,
                 ))
             } else {
                 None

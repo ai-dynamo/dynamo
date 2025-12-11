@@ -594,25 +594,25 @@ The busy thresholds can be updated at runtime without restarting the frontend. T
 # Set both thresholds for a model
 curl -X POST http://localhost:8000/busy_threshold \
   -H "Content-Type: application/json" \
-  -d '{"model": "meta-llama/Llama-2-7b-hf", "blocks_threshold": 0.85, "tokens_threshold": 1.5}'
-# Response: {"model": "meta-llama/Llama-2-7b-hf", "blocks_threshold": 0.85, "tokens_threshold": 1.5}
+  -d '{"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1.5}'
+# Response: {"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1.5}
 
-# Set only blocks threshold
+# Set only active decode blocks threshold
 curl -X POST http://localhost:8000/busy_threshold \
   -H "Content-Type: application/json" \
-  -d '{"model": "meta-llama/Llama-2-7b-hf", "blocks_threshold": 0.85}'
-# Response: {"model": "meta-llama/Llama-2-7b-hf", "blocks_threshold": 0.85, "tokens_threshold": <current_value>}
+  -d '{"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85}'
+# Response: {"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": <current_value>}
 
 # Get current thresholds (omit threshold fields)
 curl -X POST http://localhost:8000/busy_threshold \
   -H "Content-Type: application/json" \
   -d '{"model": "meta-llama/Llama-2-7b-hf"}'
-# Response: {"model": "meta-llama/Llama-2-7b-hf", "blocks_threshold": 0.85, "tokens_threshold": 1.5}
-# Or if not configured: {"model": "...", "blocks_threshold": null, "tokens_threshold": null}
+# Response: {"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1.5}
+# Or if not configured: {"model": "...", "active_decode_blocks_threshold": null, "active_prefill_tokens_threshold": null}
 ```
 
 **List all configured thresholds (GET):**
 ```bash
 curl http://localhost:8000/busy_threshold
-# Response: {"thresholds": [{"model": "meta-llama/Llama-2-7b-hf", "blocks_threshold": 0.85, "tokens_threshold": 1.5}]}
+# Response: {"thresholds": [{"model": "meta-llama/Llama-2-7b-hf", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1.5}]}
 ```
