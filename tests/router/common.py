@@ -134,6 +134,23 @@ def verify_response_worker_ids(
     )
 
 
+def verify_response_timing(timing_info: dict[str, Any]) -> None:
+    """Verify timing info has valid values (ttft_ms > 0, total_time_ms > 0)."""
+    ttft_ms = timing_info.get("ttft_ms")
+    total_time_ms = timing_info.get("total_time_ms")
+
+    assert ttft_ms is not None and ttft_ms > 0, f"Expected ttft_ms > 0, got: {ttft_ms}"
+    assert (
+        total_time_ms is not None and total_time_ms > 0
+    ), f"Expected total_time_ms > 0, got: {total_time_ms}"
+    assert (
+        total_time_ms >= ttft_ms
+    ), f"Expected total_time_ms >= ttft_ms, got {total_time_ms} < {ttft_ms}"
+    logger.info(
+        f"✓ Verified timing: ttft_ms={ttft_ms:.2f}, total_time_ms={total_time_ms:.2f}"
+    )
+
+
 ########################################################
 # Utility functions
 ########################################################
@@ -1646,7 +1663,7 @@ def _test_router_decisions_disagg(
                     # Each iteration adds more content to extend the prefix
                     progressive_content = " ".join([base_content] * (i + 1))
 
-                    # Create payload with worker_id in extra_fields to get prefill/decode worker IDs
+                    # Create payload with worker_id and timing in extra_fields
                     payload = {
                         **test_payload,
                         "messages": [
@@ -1655,7 +1672,7 @@ def _test_router_decisions_disagg(
                                 "content": progressive_content,
                             }
                         ],
-                        "nvext": {"extra_fields": ["worker_id"]},
+                        "nvext": {"extra_fields": ["worker_id", "timing"]},
                         "stream": True,
                     }
 
@@ -1669,9 +1686,10 @@ def _test_router_decisions_disagg(
                             response.status == 200
                         ), f"Request {i + 1} failed with status {response.status}"
 
-                        # Collect all chunks and look for nvext with worker_id
+                        # Collect all chunks and look for nvext with worker_id and timing
                         prefill_wid = None
                         decode_wid = None
+                        timing_info = None
 
                         async for line in response.content:
                             if not line:
@@ -1687,30 +1705,41 @@ def _test_router_decisions_disagg(
 
                             try:
                                 data = json.loads(data_str)
-                                # Check for nvext.worker_id in the response
+                                # Check for nvext in the response
                                 nvext = data.get("nvext", {})
-                                worker_id_info = nvext.get("worker_id", {})
-
-                                if worker_id_info:
-                                    if "prefill_worker_id" in worker_id_info:
-                                        prefill_wid = worker_id_info[
-                                            "prefill_worker_id"
-                                        ]
-                                    if "decode_worker_id" in worker_id_info:
-                                        decode_wid = worker_id_info["decode_worker_id"]
+                                if nvext:
+                                    worker_id_info = nvext.get("worker_id", {})
+                                    if worker_id_info:
+                                        if "prefill_worker_id" in worker_id_info:
+                                            prefill_wid = worker_id_info[
+                                                "prefill_worker_id"
+                                            ]
+                                        if "decode_worker_id" in worker_id_info:
+                                            decode_wid = worker_id_info[
+                                                "decode_worker_id"
+                                            ]
+                                    # Timing info appears in final chunk
+                                    if "timing" in nvext:
+                                        timing_info = nvext["timing"]
 
                             except json.JSONDecodeError:
                                 continue
 
                         logger.info(
                             f"Request {i + 1}: prefill_worker_id={prefill_wid}, "
-                            f"decode_worker_id={decode_wid}"
+                            f"decode_worker_id={decode_wid}, timing={timing_info}"
                         )
 
                         if prefill_wid is not None:
                             prefill_worker_ids.append(prefill_wid)
                         if decode_wid is not None:
                             decode_worker_ids.append(decode_wid)
+
+                        # Verify timing info is present and valid
+                        assert (
+                            timing_info is not None
+                        ), f"Request {i + 1}: Expected timing info in final chunk, got None"
+                        verify_response_timing(timing_info)
 
                     # Small delay between requests
                     await asyncio.sleep(0.5)

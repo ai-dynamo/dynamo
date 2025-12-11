@@ -8,14 +8,14 @@ import shutil
 import socket
 import threading
 import time
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, cast
 
 import pytest
 import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
-from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,11 @@ class DynamoFrontendProcess(ManagedProcess):
     """Process manager for Dynamo frontend"""
 
     def __init__(self, request):
-        command = ["python", "-m", "dynamo.frontend"]
+        # Allocate frontend port
+        frontend_port = allocate_port(8100)
+        self.frontend_port = frontend_port
+
+        command = ["python", "-m", "dynamo.frontend", "--http-port", str(frontend_port)]
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
@@ -51,9 +55,19 @@ class DynamoFrontendProcess(ManagedProcess):
             command=command,
             env=env,
             display_output=True,
-            terminate_existing=True,
+            terminate_existing=False,  # Don't terminate other processes of the same name, we'll only terminate our own PID
             log_dir=log_dir,
         )
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Release allocated port when frontend exits."""
+        try:
+            # frontend_port is always allocated in __init__
+            deallocate_port(self.frontend_port)
+        except Exception as e:
+            logger.warning(f"Failed to release frontend port: {e}")
+
+        return super().__exit__(exc_type, exc_val, exc_tb)
 
 
 class CancellableRequest:
@@ -174,12 +188,15 @@ class CancellableRequest:
         return self.response
 
 
-def send_completion_request(prompt: str, max_tokens: int) -> CancellableRequest:
+def send_completion_request(
+    prompt: str, max_tokens: int, frontend_port: int
+) -> CancellableRequest:
     """Send a completion request to the frontend
 
     Args:
         prompt: The prompt for completion
         max_tokens: Maximum tokens to generate
+        frontend_port: Port where the frontend is running
 
     Returns:
         A CancellableRequest object that can be explicitly cancelled
@@ -199,7 +216,7 @@ def send_completion_request(prompt: str, max_tokens: int) -> CancellableRequest:
     # Return a cancellable request object
     cancellable_req = CancellableRequest()
     cancellable_req.post(
-        f"http://localhost:{FRONTEND_PORT}/v1/completions",
+        f"http://localhost:{frontend_port}/v1/completions",
         headers=headers,
         json=payload,
     )
@@ -207,13 +224,14 @@ def send_completion_request(prompt: str, max_tokens: int) -> CancellableRequest:
 
 
 def send_chat_completion_request(
-    prompt: str, max_tokens: int, stream: bool = False
+    prompt: str, max_tokens: int, frontend_port: int, stream: bool = False
 ) -> CancellableRequest:
     """Send a chat completion request to the frontend
 
     Args:
         prompt: The prompt for chat completion
         max_tokens: Maximum tokens to generate
+        frontend_port: Port where the frontend is running
         stream: Whether to stream the response
 
     Returns:
@@ -235,7 +253,7 @@ def send_chat_completion_request(
     # Return a cancellable request object
     cancellable_req = CancellableRequest()
     cancellable_req.post(
-        f"http://localhost:{FRONTEND_PORT}/v1/chat/completions",
+        f"http://localhost:{frontend_port}/v1/chat/completions",
         headers=headers,
         json=payload,
         stream=stream,
@@ -244,12 +262,14 @@ def send_chat_completion_request(
 
 
 def send_cancellable_request(
+    frontend_port: int,
     request_type: str = "completion",
     use_long_prompt: bool = False,
 ) -> CancellableRequest:
     """Send a request that can be manually cancelled.
 
     Args:
+        frontend_port: Port where the frontend is running
         request_type: Type of request - "completion", "chat_completion", or "chat_completion_stream"
         use_long_prompt: Whether to use an extremely long prompt
 
@@ -261,11 +281,11 @@ def send_cancellable_request(
         prompt += " Make sure it is" + " long" * 16000 + "!"
 
     if request_type == "completion":
-        return send_completion_request(prompt, 16384)
+        return send_completion_request(prompt, 16384, frontend_port)
     elif request_type == "chat_completion":
-        return send_chat_completion_request(prompt, 16384, stream=False)
+        return send_chat_completion_request(prompt, 16384, frontend_port, stream=False)
     elif request_type == "chat_completion_stream":
-        return send_chat_completion_request(prompt, 16384, stream=True)
+        return send_chat_completion_request(prompt, 16384, frontend_port, stream=True)
     else:
         raise ValueError(f"Unknown request type: {request_type}")
 
@@ -283,12 +303,15 @@ def read_streaming_responses(
     Raises:
         pytest.fail if stream ends before expected_count responses
     """
-    response = cancellable_req.get_response()
-    if not response or response.status_code != 200:
+    response_raw = cancellable_req.get_response()
+    if response_raw is None:
+        pytest.fail("Failed to get streaming response: response is None")
+    if response_raw.status_code != 200:
         pytest.fail(
-            f"Failed to get streaming response: status_code={response.status_code if response else 'None'}"
+            f"Failed to get streaming response: status_code={response_raw.status_code}"
         )
 
+    response = cast(requests.Response, response_raw)  # Type narrowing after checks
     response_count = 0
     for line in response.iter_lines():
         response_count += 1
