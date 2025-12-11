@@ -24,6 +24,8 @@ set -e
 TAG=
 RUN_PREFIX=
 PLATFORM=linux/amd64
+MULTI_ARCH=
+PUSH=
 
 # Get short commit hash
 commit_id=${commit_id:-$(git rev-parse --short HEAD)}
@@ -125,8 +127,6 @@ NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 NIXL_GDRCOPY_REF=v2.5.1
 
 NO_CACHE=""
-PUSH=""
-LOAD=""
 
 # KVBM (KV Cache Block Manager) - default disabled, enabled automatically for VLLM/TRTLLM
 # or can be explicitly enabled via --enable-kvbm flag
@@ -268,12 +268,6 @@ get_options() {
         --no-cache)
             NO_CACHE=" --no-cache"
             ;;
-        --push)
-            PUSH="--push"
-            ;;
-        --load)
-            LOAD="--load"
-            ;;
         --cache-from)
             if [ "$2" ]; then
                 CACHE_FROM+="--cache-from $2 "
@@ -339,6 +333,12 @@ get_options() {
         --no-tag-latest)
             NO_TAG_LATEST=true
             ;;
+        --multi-arch)
+            MULTI_ARCH=true
+            ;;
+        --push)
+            PUSH=true
+            ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
             ;;
@@ -397,15 +397,6 @@ get_options() {
     fi
 
     if [ -n "$PLATFORM" ]; then
-        # Check if multi-platform build (contains comma)
-        if [[ "$PLATFORM" == *","* ]]; then
-            MULTI_PLATFORM=true
-            if [ -n "$LOAD" ]; then
-                error "ERROR: --load cannot be used with multi-platform builds. Docker cannot load multi-arch images locally." "Remove --load to build without loading, or use --push to push to a registry."
-            fi
-            echo "INFO: Multi-platform build detected. Docker TARGETARCH will be used for architecture detection."
-            echo "      Note: For manylinux wheel builds, ARCH_ALT is derived from TARGETARCH automatically."
-        fi
         PLATFORM="--platform ${PLATFORM}"
     fi
 
@@ -436,17 +427,9 @@ show_image_options() {
     if [[ $FRAMEWORK == "TRTLLM" ]]; then
         echo "   Tensorrtllm_Pip_Wheel: '${PRINT_TRTLLM_WHEEL_FILE}'"
     fi
-    echo "   Platform: '${PLATFORM}'"
     echo "   Build Context: '${BUILD_CONTEXT}'"
     echo "   Build Arguments: '${BUILD_ARGS}'"
     echo "   Framework: '${FRAMEWORK}'"
-    if [ -n "$PUSH" ]; then
-        echo "   Output: Push to registry"
-    elif [ -n "$LOAD" ]; then
-        echo "   Output: Load locally"
-    else
-        echo "   Output: Build only (cached)"
-    fi
     if [ "$USE_SCCACHE" = true ]; then
         echo "   sccache: Enabled"
         echo "   sccache Bucket: '${SCCACHE_BUCKET}'"
@@ -463,9 +446,7 @@ show_help() {
     echo "usage: build.sh"
     echo "  [--base-image base image]"
     echo "  [--base-image-tag base image tag]"
-    echo "  [--platform platform(s) for docker build (e.g., linux/amd64 or linux/amd64,linux/arm64)]"
-    echo "  [--load load image into local docker (single-platform only)]"
-    echo "  [--push push image to registry]"
+    echo "  [--platform platform for docker build]"
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
     echo "  [--tensorrtllm-pip-wheel-dir path to tensorrtllm pip wheel directory]"
     echo "  [--tensorrtllm-commit tensorrtllm commit/tag/branch to use for building the trtllm wheel if the wheel is not provided]"
@@ -490,6 +471,11 @@ show_help() {
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
     echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
     echo "  [--no-tag-latest do not add latest-{framework} tag to built image]"
+    echo "  [--multi-arch build multi-architecture image for linux/amd64 and linux/arm64]"
+    echo "  [--push push the image to a registry (required for multi-arch builds)]"
+    echo ""
+    echo "  Note: Multi-arch builds require docker buildx and cannot use --load."
+    echo "        Use --push with --tag to push to a registry (e.g., --multi-arch --push --tag myregistry/dynamo:latest)"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -508,18 +494,28 @@ error() {
 
 get_options "$@"
 
-# For multi-platform builds, don't pass ARCH/ARCH_ALT - Docker buildx sets TARGETARCH automatically
-# For single-platform builds, set ARCH/ARCH_ALT explicitly
-ARCH="amd64"
-if [[ "${MULTI_PLATFORM:-false}" != "true" ]]; then
+# Handle multi-arch builds
+if [ "$MULTI_ARCH" = "true" ]; then
+    # Check if buildx is available
+    if ! docker buildx version &>/dev/null; then
+        error "ERROR: --multi-arch requires docker buildx to be installed"
+    fi
+    # Check if --platform was also passed (mutually exclusive with --multi-arch)
+    if [ "$PLATFORM" != "linux/amd64" ]; then
+        error "ERROR: --multi-arch and --platform are mutually exclusive. Use --multi-arch for linux/amd64,linux/arm64 or --platform for a specific architecture."
+    fi
+    # Set multi-arch platform
+    PLATFORM="linux/amd64,linux/arm64"
+    echo "INFO: Multi-arch build enabled for platforms: $PLATFORM"
+    # Do not set ARCH/ARCH_ALT for multi-arch builds - let Docker use TARGETARCH
+    ARCH=""
+else
+    # Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64 (single-arch builds only)
+    ARCH="amd64"
     if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
         ARCH="arm64"
         BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
-    else
-        BUILD_ARGS+=" --build-arg ARCH=amd64 --build-arg ARCH_ALT=x86_64 "
     fi
-else
-    echo "INFO: Multi-platform build detected - using Docker TARGETARCH for architecture detection"
 fi
 
 # Set the commit sha in the container so we can inspect what build this relates to
@@ -527,7 +523,8 @@ DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA:-$(git rev-parse HEAD)}
 BUILD_ARGS+=" --build-arg DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA "
 
 # Special handling for vLLM on ARM64 - set required defaults if not already specified by user
-if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
+# (Skipped for multi-arch builds since each platform handles its own configuration)
+if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]] && [[ "$MULTI_ARCH" != "true" ]]; then
     # Set base image tag to CUDA 12.9 if using the default value (user didn't override)
     if [ "$BASE_IMAGE_TAG" == "$VLLM_BASE_IMAGE_TAG" ]; then
         BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
@@ -626,10 +623,16 @@ build_local_dev_with_header() {
 }
 
 
-# Handle local-dev target
+# Handle local-dev target (not supported for multi-arch builds)
 if [[ $TARGET == "local-dev" ]]; then
-    LOCAL_DEV_BUILD=true
-    TARGET_STR="--target dev"
+    if [[ "$MULTI_ARCH" == "true" ]]; then
+        echo "WARNING: --target local-dev is not supported with --multi-arch (local-dev requires host UID/GID matching)"
+        echo "         Building standard dev target instead for multi-arch"
+        TARGET_STR="--target dev"
+    else
+        LOCAL_DEV_BUILD=true
+        TARGET_STR="--target dev"
+    fi
 fi
 
 # BUILD DEV IMAGE
@@ -876,8 +879,8 @@ if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID"
     BUILD_ARGS+=" --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY"
 fi
-if [[ "$PLATFORM" == *"linux/arm64"* && "${FRAMEWORK}" == "SGLANG" ]]; then
-    # Add arguments required for sglang blackwell build
+if [[ "$PLATFORM" == *"linux/arm64"* && "${FRAMEWORK}" == "SGLANG" ]] && [[ "$MULTI_ARCH" != "true" ]]; then
+    # Add arguments required for sglang blackwell build (single-arch arm64 only)
     BUILD_ARGS+=" --build-arg GRACE_BLACKWELL=true --build-arg BUILD_TYPE=blackwell_aarch64"
 fi
 LATEST_TAG=""
@@ -896,19 +899,37 @@ BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
 mkdir -p "${BUILD_LOG_DIR}"
 SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
 
-# Determine output mode: --push for registry, --load for local (single-platform only)
+# Determine output mode (--load vs --push)
 OUTPUT_MODE=""
-if [ -n "$PUSH" ]; then
-    OUTPUT_MODE="$PUSH"
-elif [ -n "$LOAD" ]; then
-    OUTPUT_MODE="$LOAD"
+if [ "$PUSH" = "true" ]; then
+    OUTPUT_MODE="--push"
+elif [ "$MULTI_ARCH" != "true" ]; then
+    # Single-arch builds can use --load (multi-arch cannot)
+    OUTPUT_MODE="--load"
 fi
 
 # Use BuildKit for enhanced metadata
-if docker buildx version &>/dev/null; then
+if [ "$MULTI_ARCH" = "true" ]; then
+    # Multi-arch build: use buildx (--load is not supported for multi-platform)
+    echo ""
+    echo "=============================="
+    echo "MULTI-ARCH BUILD"
+    if [ "$PUSH" != "true" ]; then
+        echo "NOTE: --load is not supported for multi-arch. Consider using --push to push to a registry."
+    fi
+    echo "=============================="
+    echo ""
+    $RUN_PREFIX docker buildx build --progress=plain $OUTPUT_MODE -f $DOCKERFILE $TARGET_STR --platform $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+    BUILD_EXIT_CODE=${PIPESTATUS[0]}
+elif docker buildx version &>/dev/null; then
+    # Single-arch build with buildx available
     $RUN_PREFIX docker buildx build --progress=plain $OUTPUT_MODE -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
     BUILD_EXIT_CODE=${PIPESTATUS[0]}
 else
+    # Fallback to regular docker build (no buildx, --push not supported)
+    if [ "$PUSH" = "true" ]; then
+        error "ERROR: --push requires docker buildx to be installed"
+    fi
     $RUN_PREFIX DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
     BUILD_EXIT_CODE=${PIPESTATUS[0]}
 fi
@@ -917,8 +938,8 @@ if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
     exit ${BUILD_EXIT_CODE}
 fi
 
-# Handle local-dev target
-if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
+# Handle local-dev target (not supported for multi-arch builds)
+if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]] && [[ "$MULTI_ARCH" != "true" ]]; then
     # Use the first tag name (TAG) if available, otherwise use latest
     if [[ -n "$TAG" ]]; then
         DEV_IMAGE=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev$//')

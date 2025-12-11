@@ -59,16 +59,19 @@ ARG NIXL_UCX_REF
 ARG NIXL_REF
 ARG NIXL_GDRCOPY_REF
 
-# Architecture configuration for multi-arch builds
-# Docker buildx sets TARGETARCH automatically ("amd64" or "arm64") during builds.
-# ARCH_ALT maps to Rust/manylinux naming: amd64->x86_64, arm64->aarch64
+# Define general architecture ARGs for supporting both x86 and aarch64 builds.
+#   ARCH: Used for package suffixes (e.g., amd64, arm64)
+#   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
 #
-# For single-platform builds, build.sh passes both ARCH and ARCH_ALT explicitly.
-# For multi-platform builds with buildx --platform linux/amd64,linux/arm64:
-#   - TARGETARCH is set automatically per-platform
-#   - ARCH_ALT must still be passed or will use default (x86_64)
-ARG TARGETARCH=amd64
-ARG ARCH=${TARGETARCH}
+# Default values are for x86/amd64:
+#   --build-arg ARCH=amd64 --build-arg ARCH_ALT=x86_64
+#
+# For arm64/aarch64, build with:
+#   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
+#
+# NOTE: There isn't an easy way to define one of these values based on the other value
+# without adding if statements everywhere, so just define both as ARGs for now.
+ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
 # Copy artifacts from NGC PyTorch image
@@ -125,16 +128,13 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
 ##### Wheel Build Image ##########
 ##################################
 
-# Multi-arch wheel builder selection
-# Use TARGETARCH to select the correct manylinux image for multi-platform builds
-ARG TARGETARCH
-FROM quay.io/pypa/manylinux_2_28_x86_64 AS manylinux_amd64
-FROM quay.io/pypa/manylinux_2_28_aarch64 AS manylinux_arm64
-FROM manylinux_${TARGETARCH} AS wheel_builder
+# Redeclare ARCH_ALT ARG so it's available for interpolation in the FROM instruction
+ARG ARCH_ALT
+
+FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 
 # Redeclare ARGs for this stage
-ARG TARGETARCH
-ARG ARCH=${TARGETARCH}
+ARG ARCH
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
 

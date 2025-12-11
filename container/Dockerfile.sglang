@@ -43,11 +43,7 @@ ARG ENABLE_MEDIA_NIXL
 ARG CARGO_BUILD_JOBS
 ARG CUDA_VERSION
 
-# Architecture configuration for multi-arch builds
-# Docker buildx sets TARGETARCH automatically ("amd64" or "arm64") during builds.
-# ARCH_ALT maps to Rust/manylinux naming: amd64->x86_64, arm64->aarch64
-ARG TARGETARCH=amd64
-ARG ARCH=${TARGETARCH}
+ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
 # sccache configuration - inherit from base build
@@ -111,16 +107,13 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
 ##### Wheel Build Image ##########
 ##################################
 
-# Multi-arch wheel builder selection
-# Use TARGETARCH to select the correct manylinux image for multi-platform builds
-ARG TARGETARCH
-FROM quay.io/pypa/manylinux_2_28_x86_64 AS manylinux_amd64
-FROM quay.io/pypa/manylinux_2_28_aarch64 AS manylinux_arm64
-FROM manylinux_${TARGETARCH} AS wheel_builder
+# Redeclare ARCH_ALT ARG so it's available for interpolation in the FROM instruction
+ARG ARCH_ALT
+
+FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 
 # Redeclare ARGs for this stage
-ARG TARGETARCH
-ARG ARCH=${TARGETARCH}
+ARG ARCH
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
 
