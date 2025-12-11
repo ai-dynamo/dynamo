@@ -127,12 +127,12 @@ if [ "$ARCH" = "amd64" ]; then
         --no-cache \
         --index-strategy=unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND} \
-        lmcache==${LMCACHE_REF} \
+        # lmcache==${LMCACHE_REF} \ # temp disable lmcache as it only supports CUDA 12 at this time
         nixl[cu13]==0.7.1 \
         https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER}/vllm-${VLLM_VER}+${TORCH_BACKEND}-cp38-abi3-manylinux_2_31_x86_64.whl[flashinfer] \
         --torch-backend=${TORCH_BACKEND}
-    uv pip uninstall cupy-cuda12x # lmcache still lists cupy-cuda12x as dependency - uninstall it first
-    uv pip --no-cache install cupy-cuda13x
+    # uv pip uninstall cupy-cuda12x # lmcache still lists cupy-cuda12x as dependency - uninstall it first
+    # uv pip --no-cache install cupy-cuda13x
     uv pip install --no-cache flashinfer-cubin==$FLASHINF_REF
     uv pip install --no-cache flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
     echo "✓ vLLM installation completed"
