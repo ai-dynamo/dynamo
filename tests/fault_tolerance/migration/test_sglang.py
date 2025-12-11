@@ -37,7 +37,7 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.pre_merge,  # pre_merge to run before merging
+    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
 ]
 
 
