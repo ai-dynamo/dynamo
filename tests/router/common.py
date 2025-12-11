@@ -2224,23 +2224,25 @@ def _test_busy_threshold_endpoint(
                         f"POST /busy_threshold (large tokens threshold) response: {data}"
                     )
 
-            # Test 9: Invalid active_prefill_tokens_threshold value (should fail validation for < 0)
-            # Note: Returns 422 because -1.0 can't be deserialized into u64 (type validation)
-            # vs Test 7 which returns 400 because 1.5 is a valid f64 but fails range validation
-            logger.info(
-                "Testing POST /busy_threshold with invalid active_prefill_tokens_threshold (< 0)"
-            )
-            async with session.post(
-                busy_threshold_url,
-                json={"model": model_name, "active_prefill_tokens_threshold": -1.0},
-            ) as response:
-                assert (
-                    response.status == 422
-                ), f"Expected 422 for negative active_prefill_tokens_threshold, got {response.status}"
-                data = await response.json()
-                logger.info(f"POST /busy_threshold (invalid tokens) response: {data}")
+                # Test 9: Invalid active_prefill_tokens_threshold value (should fail validation for < 0)
+                # Note: Returns 422 because -1.0 can't be deserialized into u64 (type validation)
+                # vs Test 7 which returns 400 because 1.5 is a valid f64 but fails range validation
+                logger.info(
+                    "Testing POST /busy_threshold with invalid active_prefill_tokens_threshold (< 0)"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={"model": model_name, "active_prefill_tokens_threshold": -1.0},
+                ) as response:
+                    assert (
+                        response.status == 422
+                    ), f"Expected 422 for negative active_prefill_tokens_threshold, got {response.status}"
+                    data = await response.json()
+                    logger.info(
+                        f"POST /busy_threshold (invalid tokens) response: {data}"
+                    )
 
-            logger.info("All busy_threshold endpoint tests passed!")
+                logger.info("All busy_threshold endpoint tests passed!")
 
         asyncio.run(test_busy_threshold_api())
 
