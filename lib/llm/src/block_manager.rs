@@ -56,6 +56,14 @@ use storage::nixl::MemType;
 use tokio::sync::oneshot;
 use validator::Validate;
 
+pub use v2::logical::registry::ObjectRegistry;
+pub use v2::logical::external_registry::{
+    ExternalRegistry, RegistryKey, SequenceHashRegistry, SharedExternalRegistry,
+};
+pub use v2::memory::ObjectStorage;
+pub use config::ObjectStorageConfig;
+
+
 pub type WorkerID = u64;
 
 pub type ReferenceBlockManager = KvBlockManager<locality::Local, BasicMetadata>;
@@ -72,7 +80,7 @@ pub enum CacheLevel {
     /// Represents KV blocks in Local NVMe storage
     G3,
 
-    /// Represents KV blocks in Remote NVMe storage
+    /// Represents KV blocks in Remote storage
     G4,
 }
 
@@ -102,6 +110,7 @@ pub struct KvBlockManager<Locality: LocalityProvider, Metadata: BlockMetadata> {
     state: Arc<state::KvBlockManagerState<Locality, Metadata>>,
     _cancellation_token: Arc<CancelOnLastDrop>,
     block_size: usize,
+    external_registry: Option<SequenceHashRegistry>,
 }
 
 impl<Locality: LocalityProvider, Metadata: BlockMetadata> Clone
@@ -112,6 +121,7 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> Clone
             state: self.state.clone(),
             _cancellation_token: self._cancellation_token.clone(),
             block_size: self.block_size,
+            external_registry: self.external_registry.clone(),
         }
     }
 }
@@ -150,6 +160,61 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManager<Localit
     ) -> oneshot::Receiver<BlockResult<DeviceStorage, Locality, Metadata>> {
         self.state.onboard_blocks(blocks, targets)
     }
+
+    /// Get the external storage registry if configured.
+    ///
+    /// The external registry tracks which sequence hashes have been offloaded
+    /// to external storage (object storage).
+    pub fn external_registry(&self) -> Option<&SequenceHashRegistry> {
+        self.external_registry.as_ref()
+    }
+
+    /// Set the external storage registry.
+    ///
+    /// This allows configuring an external registry after construction,
+    /// useful when the registry needs to be shared across multiple managers.
+    pub fn set_external_registry(&mut self, registry: SequenceHashRegistry) {
+        self.external_registry = Some(registry);
+    }
+
+    /// Match sequence hashes against external storage.
+    ///
+    /// Returns the longest contiguous prefix of hashes that exist in
+    /// the external registry. Returns empty vec if no registry configured.
+    pub fn external_match(&self, hashes: &[u64]) -> Vec<u64> {
+        self.external_registry
+            .as_ref()
+            .map(|r| r.match_keys(hashes))
+            .unwrap_or_default()
+    }
+
+    /// Register sequence hashes in external storage.
+    ///
+    /// Returns the number of hashes registered, or 0 if no registry configured.
+    pub fn external_register(&self, hashes: &[u64]) -> usize {
+        self.external_registry
+            .as_ref()
+            .map(|r| r.register(hashes))
+            .unwrap_or(0)
+    }
+
+    /// Unregister sequence hashes from external storage.
+    ///
+    /// Returns the number of hashes removed, or 0 if no registry configured.
+    pub fn external_unregister(&self, hashes: &[u64]) -> usize {
+        self.external_registry
+            .as_ref()
+            .map(|r| r.unregister(hashes))
+            .unwrap_or(0)
+    }
+
+    /// Check if external registry is configured and can accept registrations.
+    pub fn external_can_register(&self) -> bool {
+        self.external_registry
+            .as_ref()
+            .map(|r| r.can_register())
+            .unwrap_or(false)
+    }
 }
 
 fn build_cancel_token(config: &mut KvBlockManagerConfig) -> Arc<CancelOnLastDrop> {
@@ -181,7 +246,21 @@ impl<Metadata: BlockMetadata> KvBlockManager<locality::Local, Metadata> {
             state,
             _cancellation_token,
             block_size,
+            external_registry: None,
         })
+    }
+
+    /// Create a new [KvBlockManager] with an external registry.
+    ///
+    /// The external registry tracks which sequence hashes have been offloaded
+    /// to external storage (object storage).
+    pub async fn with_external_registry(
+        config: KvBlockManagerConfig,
+        registry: SequenceHashRegistry,
+    ) -> Result<Self> {
+        let mut manager = Self::new(config).await?;
+        manager.external_registry = Some(registry);
+        Ok(manager)
     }
 
     /// Exports the local blockset configuration as a serialized object.
@@ -230,7 +309,19 @@ impl<R: LogicalResources, Metadata: BlockMetadata> KvBlockManager<locality::Logi
             state,
             _cancellation_token,
             block_size,
+            external_registry: None,
         })
+    }
+
+    /// Create a new [KvBlockManager] with an external registry.
+    pub async fn with_external_registry(
+        config: KvBlockManagerConfig,
+        logical_resources: R,
+        registry: SequenceHashRegistry,
+    ) -> Result<Self> {
+        let mut manager = Self::new(config, logical_resources).await?;
+        manager.external_registry = Some(registry);
+        Ok(manager)
     }
 }
 

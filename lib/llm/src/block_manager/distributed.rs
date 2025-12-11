@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod transfer;
+mod transfer_object;
 mod utils;
 mod zmq;
 
@@ -9,10 +10,11 @@ mod leader;
 mod worker;
 
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
+pub use transfer_object::ObjectTransferHandler;
 pub use transfer::{BlockTransferHandler, BlockTransferHandlerV1, BlockTransferHandlerV2};
 pub use utils::{
     BlockTransferPool, BlockTransferRequest, ConnectorRequestLeader, ConnectorTransferType,
-    ObjectStorageConfig,
+    G4OnboardRequest, ZMQ_G4_ONBOARD_MESSAGE,
 };
 pub use worker::{KvbmWorker, KvbmWorkerConfig};
 pub use zmq::Handler;

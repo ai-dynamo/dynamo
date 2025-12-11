@@ -4,6 +4,7 @@
 use super::*;
 
 use async_trait::async_trait;
+use std::sync::OnceLock;
 use transfer::*;
 use utils::*;
 use zmq::*;
@@ -14,20 +15,25 @@ use crate::block_manager::{
         Block, layout_to_blocks, locality,
         transfer::{PoolConfig, TransferContext},
     },
+    config::ObjectStorageConfig,
     connector::scheduler::TransferSchedulerClient,
     layout::LayoutType,
-    offload::{MAX_CONCURRENT_TRANSFERS, max_transfer_batch_size},
+    offload::{MAX_CONCURRENT_TRANSFERS, MAX_TRANSFER_BATCH_SIZE},
     storage::{DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
+    v2::logical::distributed::create_registry_from_env,
+    v2::logical::registry::ObjectRegistry,
     v2::memory::DeviceStorage as DeviceStorageV2,
     v2::physical::{
         layout::{BlockDimension, LayoutConfig as LayoutConfigV2, builder::PhysicalLayoutBuilder},
         manager::TransportManager,
-        transfer::{NixlAgent as NixlAgentV2, TransferCapabilities},
+        transfer::{LayoutHandle, NixlAgent as NixlAgentV2, TransferCapabilities},
     },
 };
 
+use super::transfer_object::ObjectTransferHandler;
+
 use derive_builder::Builder;
-use nixl_sys::Agent as NixlAgent;
+use nixl_sys::{Agent as NixlAgent, Params};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,84 +43,6 @@ use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 use tokio::sync::{Mutex, RwLock, oneshot};
-
-/// Inject NIXL OBJ backend environment variables with resolved worker_id.
-///
-/// This allows using `{worker_id}` template in bucket names.
-/// Environment variables are set BEFORE creating the NIXL agent so it
-/// picks them up during backend initialization.
-///
-/// NIXL's S3 client reads these parameters (lowercase version of env var suffix):
-/// - `DYN_KVBM_NIXL_BACKEND_OBJ_BUCKET` → `bucket`
-/// - `DYN_KVBM_NIXL_BACKEND_OBJ_ENDPOINT_OVERRIDE` → `endpoint_override`
-/// - `DYN_KVBM_NIXL_BACKEND_OBJ_ACCESS_KEY` → `access_key`
-/// - `DYN_KVBM_NIXL_BACKEND_OBJ_SECRET_KEY` → `secret_key`
-/// - `DYN_KVBM_NIXL_BACKEND_OBJ_REGION` → `region`
-///
-/// This function also forwards standard AWS credentials if NIXL-specific ones aren't set.
-///
-/// # Safety
-/// Uses `set_var` which is unsafe because environment variable mutation is
-/// not thread-safe. However, this is called during worker initialization
-/// before any concurrent access to these specific variables.
-fn inject_nixl_object_env_vars(worker_id: u32, config: &Option<ObjectStorageConfig>) {
-    let Some(config) = config else {
-        return;
-    };
-
-    // Resolve bucket template with worker_id
-    let bucket = config.resolve_bucket(worker_id);
-
-    // Collect optional env vars to set
-    let endpoint = config.endpoint_override.as_ref();
-    let region = config.region.as_ref();
-
-    // Forward AWS credentials to NIXL format if not already set
-    // This allows users to use standard AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
-    let access_key = if std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_ACCESS_KEY").is_err() {
-        std::env::var("AWS_ACCESS_KEY_ID").ok()
-    } else {
-        None
-    };
-
-    let secret_key = if std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_SECRET_KEY").is_err() {
-        std::env::var("AWS_SECRET_ACCESS_KEY").ok()
-    } else {
-        None
-    };
-
-    // SAFETY: Called during single-threaded worker initialization phase,
-    // before NIXL agent creation reads these variables.
-    unsafe {
-        std::env::set_var("DYN_KVBM_NIXL_BACKEND_OBJ_BUCKET", &bucket);
-
-        if let Some(endpoint) = endpoint {
-            std::env::set_var("DYN_KVBM_NIXL_BACKEND_OBJ_ENDPOINT_OVERRIDE", endpoint);
-        }
-
-        if let Some(region) = region {
-            std::env::set_var("DYN_KVBM_NIXL_BACKEND_OBJ_REGION", region);
-        }
-
-        if let Some(ref access_key) = access_key {
-            std::env::set_var("DYN_KVBM_NIXL_BACKEND_OBJ_ACCESS_KEY", access_key);
-        }
-
-        if let Some(ref secret_key) = secret_key {
-            std::env::set_var("DYN_KVBM_NIXL_BACKEND_OBJ_SECRET_KEY", secret_key);
-        }
-    }
-
-    tracing::info!(
-        worker_id = worker_id,
-        bucket = %bucket,
-        endpoint = ?config.endpoint_override,
-        region = ?config.region,
-        has_access_key = std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_ACCESS_KEY").is_ok(),
-        has_secret_key = std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_SECRET_KEY").is_ok(),
-        "Injected NIXL OBJ backend env vars"
-    );
-}
 
 struct WorkerState {
     ready_for_ping: AtomicBool,
@@ -174,7 +102,7 @@ pub fn load_and_validate_tensors(
     Ok((device_tensors, shape.unwrap()))
 }
 
-fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
+fn build_agent(worker_id: usize, use_gds: bool, use_obj: bool) -> anyhow::Result<NixlAgent> {
     let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id))?;
     if use_gds {
         let (_, gds_params) = agent.get_plugin_params("GDS_MT")?;
@@ -182,6 +110,19 @@ fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
     }
     let (_, posix_params) = agent.get_plugin_params("POSIX")?;
     agent.create_backend("POSIX", &posix_params)?;
+
+    // Load OBJ backend for G4 object storage
+    if use_obj {
+        match agent.get_plugin_params("OBJ") {
+            Ok((_, obj_params)) => {
+                agent.create_backend("OBJ", &obj_params)?;
+                tracing::info!("NIXL OBJ backend loaded for object storage");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load NIXL OBJ backend: {}. G4 object storage will not be available.", e);
+            }
+        }
+    }
 
     Ok(agent)
 }
@@ -205,42 +146,71 @@ async fn perform_allocation_and_build_handler(
     if use_v2_transfer {
         tracing::warn!("Using V2 transfer handler. This is experimental. Use at your own risk.");
 
-        // Build backend list based on configured storage tiers
-        let mut backends = vec!["POSIX"];
+        // Build backend params list based on configuration
+        let mut backend_params: Vec<(&str, Params)> = Vec::new();
+
+        // Helper to create empty params (signals "use defaults")
+        let empty_params = || Params::from(std::iter::empty::<(&str, &str)>());
+
+        // POSIX backend - get params from env or use defaults
+        let posix_params = NixlAgentV2::create_backend_params_from_env("POSIX")?
+            .map_or_else(|| empty_params(), Ok)?;
+        backend_params.push(("POSIX", posix_params));
+
+        // GDS_MT backend if disk blocks are configured
         if leader_meta.num_disk_blocks > 0 {
-            backends.push("GDS_MT");
-        }
-        if leader_meta.num_object_blocks > 0 {
-            backends.push("OBJ");
-
-            // Inject NIXL OBJ backend env vars with resolved worker_id
-            // This allows using {worker_id} template in bucket names
-            inject_nixl_object_env_vars(worker_id as u32, &leader_meta.object_storage_config);
+            let gds_params = NixlAgentV2::create_backend_params_from_env("GDS_MT")?
+                .map_or_else(|| empty_params(), Ok)?;
+            backend_params.push(("GDS_MT", gds_params));
         }
 
-        let agent = NixlAgentV2::new_with_backends(worker_id.to_string().as_str(), &backends)?;
+        // OBJ backend for object storage - build params with resolved bucket
+        if let Some(config) = &leader_meta.object_storage_config {
+            let resolved_bucket = config.resolve_bucket(worker_id as u32);
+            tracing::info!("Resolved bucket for worker {}: {}", worker_id, resolved_bucket);
 
-        let device_cfg = device_layout.config();
-        tracing::info!(
-            "Device layout config: num_blocks={}, num_layers={}, outer_dim={}, inner_dim={}, page_size={}, dtype_bytes={}",
-            device_cfg.num_blocks,
-            device_cfg.num_layers,
-            device_cfg.outer_dim,
-            device_cfg.inner_dim,
-            device_cfg.page_size,
-            device_cfg.dtype_width_bytes
-        );
+            // Build OBJ params from config + credentials from env
+            let mut obj_param_pairs: Vec<(String, String)> = vec![
+                ("bucket".to_string(), resolved_bucket),
+            ];
+
+            if let Some(endpoint) = &config.endpoint_override {
+                obj_param_pairs.push(("endpoint".to_string(), endpoint.clone()));
+            }
+            if let Some(region) = &config.region {
+                obj_param_pairs.push(("region".to_string(), region.clone()));
+            }
+
+            // Credentials still come from env vars (should not be in config for security)
+            if let Ok(access_key) = std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_ACCESS_KEY") {
+                obj_param_pairs.push(("access_key".to_string(), access_key));
+            }
+            if let Ok(secret_key) = std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_SECRET_KEY") {
+                obj_param_pairs.push(("secret_key".to_string(), secret_key));
+            }
+
+            let obj_params = Params::from(
+                obj_param_pairs.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+            )?;
+            backend_params.push(("OBJ", obj_params));
+        }
+
+        let agent = NixlAgentV2::new_with_backends_and_params(
+            worker_id.to_string().as_str(),
+            &backend_params,
+        )?;
 
         let mut layout_config = LayoutConfigV2::builder()
-            .num_blocks(device_cfg.num_blocks)
-            .num_layers(device_cfg.num_layers)
-            .outer_dim(device_cfg.outer_dim)
-            .inner_dim(device_cfg.inner_dim)
-            .page_size(device_cfg.page_size)
-            .alignment(device_cfg.alignment)
-            .dtype_width_bytes(device_cfg.dtype_width_bytes)
+            .num_blocks(device_layout.config().num_blocks)
+            .num_layers(device_layout.config().num_layers)
+            .outer_dim(device_layout.config().outer_dim)
+            .inner_dim(device_layout.config().inner_dim)
+            .page_size(device_layout.config().page_size)
+            .alignment(device_layout.config().alignment)
+            .dtype_width_bytes(device_layout.config().dtype_width_bytes)
             .build()?;
 
+        let layout_config_for_handler = layout_config.clone();
         let v2_device_layout =
             PhysicalLayoutBuilder::new(agent.clone()).with_config(layout_config.clone());
 
@@ -279,7 +249,7 @@ async fn perform_allocation_and_build_handler(
             layout_config.num_blocks = leader_meta.num_disk_blocks;
             Some(
                 PhysicalLayoutBuilder::new(agent.clone())
-                    .with_config(layout_config.clone())
+                    .with_config(layout_config)
                     .fully_contiguous()
                     .allocate_disk(None)
                     .build()?,
@@ -288,37 +258,12 @@ async fn perform_allocation_and_build_handler(
             None
         };
 
-        if leader_meta.num_object_blocks > 0 {
-            if let Some(ref obj_config) = leader_meta.object_storage_config {
-                tracing::info!(
-                    "Object storage enabled: bucket_template='{}', resolved='{}', max_blocks={}",
-                    obj_config.bucket_template,
-                    obj_config.resolve_bucket(worker_id as u32),
-                    leader_meta.num_object_blocks
-                );
-            } else {
-                tracing::warn!(
-                    "Object storage blocks configured ({}) but no ObjectStorageConfig provided",
-                    leader_meta.num_object_blocks
-                );
-            }
-        }
-
         let transport_manager = TransportManager::builder()
             .capabilities(TransferCapabilities::default().with_gds(true))
             .worker_id(worker_id as u64)
-            .nixl_agent(agent)
+            .nixl_agent(agent.clone())
             .cuda_device_id(device_id)
             .build()?;
-
-        // Pass object storage config for dynamic layout creation
-        // Create bounce allocators if object storage is ENABLED (via config), not just if num_object_blocks > 0
-        let object_storage_config = leader_meta.object_storage_config.clone();
-        let object_layout_config = if object_storage_config.is_some() {
-            Some(layout_config.clone())
-        } else {
-            None
-        };
 
         let handler = BlockTransferHandlerV2::new(
             Some(v2_device_layout),
@@ -326,18 +271,21 @@ async fn perform_allocation_and_build_handler(
             disk_layout,
             transport_manager,
             scheduler_client,
-            object_storage_config,
-            object_layout_config,
-            worker_id as u32,
+            Some(layout_config_for_handler),
+            Some(agent),
         )?;
 
         Ok(Arc::new(handler) as Arc<dyn BlockTransferHandler>)
     } else {
-        let agent = build_agent(worker_id, leader_meta.num_disk_blocks > 0)?;
+        let agent = build_agent(
+            worker_id,
+            leader_meta.num_disk_blocks > 0,
+            leader_meta.num_object_blocks > 0,
+        )?;
         let pool_config = PoolConfig {
             enable_pool: true,
             max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
-            max_transfer_batch_size: max_transfer_batch_size(),
+            max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
             num_outer_components: device_layout.config().outer_dim,
             num_layers: device_layout.config().num_layers,
         };
@@ -497,6 +445,10 @@ impl Handler for LeaderMetadataHandler {
         let handler_tx = self.handler_tx.clone();
         let state = self.state.clone();
 
+        // Capture G4 config before moving leader_meta
+        let g4_config = leader_meta.object_storage_config.clone();
+        let g4_num_blocks = leader_meta.num_object_blocks;
+
         tokio::spawn(async move {
             match perform_allocation_and_build_handler(
                 dev_layout,
@@ -510,6 +462,36 @@ impl Handler for LeaderMetadataHandler {
             .await
             {
                 Ok(handler) => {
+                    // Initialize G4 object storage if configured
+                    if let Some(config) = &g4_config {
+                        if g4_num_blocks > 0 {
+                            // Try to downcast to V2 handler and set up G4
+                            if let Some(v2_handler) = handler
+                                .as_any()
+                                .downcast_ref::<BlockTransferHandlerV2>()
+                            {
+                                // Create object handler using V2's resources
+                                let registry = Arc::new(ObjectRegistry::new());
+                                let distributed_registry = create_registry_from_env().await;
+                                if let Some(obj_handler) = v2_handler
+                                    .create_object_handler(config.clone(), registry, distributed_registry)
+                                {
+                                    let obj_handler = Arc::new(obj_handler);
+                                    v2_handler.set_object_handler(obj_handler);
+                                    tracing::info!(
+                                        "G4 object storage initialized on worker (write-through enabled)"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "Failed to create G4 object handler (host layout or resources missing)"
+                                    );
+                                }
+                            } else {
+                                tracing::debug!("G4 requires V2 transfer handler, skipping");
+                            }
+                        }
+                    }
+
                     // Install transfer handler
                     {
                         let mut w = handler_cell.write().await;
@@ -587,6 +569,114 @@ impl Handler for BlockTransferDispatch {
     }
 }
 
+/// Handler for G4 onboard requests (G4->Host->Device transfers).
+///
+/// This handler is responsible for:
+/// 1. Onboarding blocks from object storage to host bounce buffers
+/// 2. Transferring from host bounce buffers to device
+/// 3. Releasing bounce buffers
+struct G4OnboardDispatch {
+    cell: Arc<RwLock<Option<Arc<dyn BlockTransferHandler>>>>,
+}
+
+#[async_trait]
+impl Handler for G4OnboardDispatch {
+    async fn handle(&self, mut message: MessageHandle) -> anyhow::Result<()> {
+        let maybe = { self.cell.read().await.clone() };
+        let handler = match maybe {
+            Some(h) => h,
+            None => {
+                tracing::warn!("G4 onboard handler not ready yet");
+                message.mark_handled();
+                return Err(anyhow::anyhow!("G4 onboard handler not ready yet"));
+            }
+        };
+
+        // Deserialize G4 onboard request
+        if message.data.len() != 1 {
+            return Err(anyhow::anyhow!(
+                "G4 onboard request must have exactly one data element"
+            ));
+        }
+
+        let request: G4OnboardRequest = serde_json::from_slice(&message.data[0])?;
+
+        tracing::info!(
+            request_id = %request.request_id,
+            operation_id = %request.operation_id,
+            num_blocks = request.sequence_hashes.len(),
+            "Processing G4 onboard request"
+        );
+
+        // Try to downcast to V2 handler for G4 support
+        let v2_handler = handler
+            .as_any()
+            .downcast_ref::<BlockTransferHandlerV2>()
+            .ok_or_else(|| anyhow::anyhow!("G4 requires V2 transfer handler"))?;
+
+        // Get the object handler
+        let object_handler = v2_handler
+            .object_handler()
+            .ok_or_else(|| anyhow::anyhow!("Object handler not configured"))?;
+
+        let device_handle = v2_handler
+            .device_handle()
+            .ok_or_else(|| anyhow::anyhow!("Device handle not available"))?;
+
+        // If connector_req is present, schedule the transfer with the connector scheduler
+        // This allows the worker-side connector to track completion
+        let completion_handle = if let Some(connector_req) = request.connector_req {
+            let client = v2_handler
+                .scheduler_client()
+                .expect("scheduler client is required for G4 onboard with connector_req");
+
+            let handle = client.schedule_transfer(connector_req).await?;
+            assert_eq!(
+                handle.scheduler_decision(),
+                crate::block_manager::connector::scheduler::SchedulingDecision::Execute
+            );
+            Some(handle)
+        } else {
+            None
+        };
+
+        // Execute G4->Host->Device transfer (Object->Host bounce->Device)
+        // Host blocks for bounce buffers are provided by the leader
+        let result = object_handler
+            .onboard(
+                &request.sequence_hashes,
+                &request.host_block_ids,
+                device_handle,
+                &request.device_block_ids,
+            )
+            .await;
+
+        // Note: The ObjectTransferHandler.onboard() already handles the H->D transfer
+        // internally as part of its implementation, so we don't need a separate step.
+        // The leader has already verified these hashes exist in the distributed registry.
+
+        // Mark the transfer as complete (success or failure) to notify the connector scheduler
+        if let Some(handle) = completion_handle {
+            match &result {
+                Ok(_) => handle.mark_complete(Ok(())).await,
+                Err(e) => handle.mark_complete(Err(anyhow::anyhow!("{}", e))).await,
+            }
+        }
+
+        let matched_hashes = result?;
+
+        tracing::info!(
+            request_id = %request.request_id,
+            operation_id = %request.operation_id,
+            "G4 onboard complete: {} blocks",
+            matched_hashes.len()
+        );
+
+        message.ack().await?;
+        Ok(())
+    }
+}
+
 #[derive(Builder, Clone)]
 #[builder(pattern = "owned")]
 pub struct KvbmWorkerConfig {
@@ -634,6 +724,11 @@ impl KvbmWorkerConfig {
 pub struct KvbmWorker {
     task: Option<CriticalTaskExecutionHandle>,
     block_transfer_handler_rx: Option<oneshot::Receiver<Arc<dyn BlockTransferHandler>>>,
+
+    // G4 resources (created lazily when first needed)
+    object_handler: OnceLock<Arc<ObjectTransferHandler>>,
+    device_handle: OnceLock<LayoutHandle>,
+    transfer_handler: OnceLock<Arc<dyn BlockTransferHandler>>,
 }
 
 impl KvbmWorker {
@@ -746,6 +841,9 @@ impl KvbmWorker {
         Ok(Self {
             task: Some(task),
             block_transfer_handler_rx: Some(handler_rx),
+            object_handler: OnceLock::new(),
+            device_handle: OnceLock::new(),
+            transfer_handler: OnceLock::new(),
         })
     }
 
@@ -881,6 +979,125 @@ impl KvbmWorker {
         self.block_transfer_handler_rx.take()
     }
 
+    // ===== G4 Object Storage Methods =====
+
+    /// Initialize G4 object storage support.
+    ///
+    /// Must be called after the transfer handler is ready.
+    /// Returns Ok(true) if G4 was enabled, Ok(false) if not configured or not supported.
+    pub async fn init_g4(
+        &self,
+        handler: Arc<dyn BlockTransferHandler>,
+        config: ObjectStorageConfig,
+    ) -> anyhow::Result<bool> {
+        // Store the transfer handler
+        let _ = self.transfer_handler.set(handler.clone());
+
+        // Try to downcast to V2 handler
+        let v2_handler = handler
+            .as_any()
+            .downcast_ref::<BlockTransferHandlerV2>()
+            .ok_or_else(|| anyhow::anyhow!("G4 requires V2 transfer handler"))?;
+
+        // Store device handle for offload/onboard
+        if let Some(device_handle) = v2_handler.device_handle() {
+            let _ = self.device_handle.set(device_handle);
+        } else {
+            return Err(anyhow::anyhow!("No device layout configured"));
+        }
+
+        // Create object handler using V2's resources
+        let registry = Arc::new(ObjectRegistry::new());
+        let distributed_registry = create_registry_from_env().await;
+        let obj_handler = v2_handler
+            .create_object_handler(config, registry, distributed_registry)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Failed to create object handler (host layout or V2 resources missing)"
+                )
+            })?;
+
+        // Wrap in Arc to share between worker and V2 handler
+        let obj_handler = Arc::new(obj_handler);
+
+        // Wire up the object handler to V2 for write-through offloads
+        v2_handler.set_object_handler(obj_handler.clone());
+
+        self.object_handler
+            .set(obj_handler)
+            .map_err(|_| anyhow::anyhow!("Object handler already initialized"))?;
+
+        tracing::info!("G4 object storage initialized on worker (write-through enabled)");
+        Ok(true)
+    }
+
+    /// Check if G4 object storage is available.
+    pub fn has_g4(&self) -> bool {
+        self.object_handler.get().is_some()
+    }
+
+    /// Get the object transfer handler (if G4 is enabled).
+    pub fn object_handler(&self) -> Option<&Arc<ObjectTransferHandler>> {
+        self.object_handler.get()
+    }
+
+    /// Get the device handle (if G4 is enabled).
+    pub fn g4_device_handle(&self) -> Option<LayoutHandle> {
+        self.device_handle.get().copied()
+    }
+
+    /// Offload blocks to object storage.
+    pub async fn offload_to_g4(
+        &self,
+        block_ids: &[usize],
+        sequence_hashes: &[u64],
+    ) -> anyhow::Result<usize> {
+        let handler = self
+            .object_handler
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("G4 not initialized"))?;
+        let device_handle = self
+            .device_handle
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("Device handle not available"))?;
+
+        handler.offload(*device_handle, block_ids, sequence_hashes).await
+    }
+
+    /// Onboard blocks from object storage.
+    ///
+    /// # Arguments
+    /// * `sequence_hashes` - Sequence hashes to onboard (object keys)
+    /// * `host_block_ids` - Host block IDs to use as bounce buffers
+    /// * `device_block_ids` - Destination device block IDs
+    pub async fn onboard_from_g4(
+        &self,
+        sequence_hashes: &[u64],
+        host_block_ids: &[usize],
+        device_block_ids: &[usize],
+    ) -> anyhow::Result<Vec<u64>> {
+        let handler = self
+            .object_handler
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("G4 not initialized"))?;
+        let device_handle = self
+            .device_handle
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("Device handle not available"))?;
+
+        handler
+            .onboard(sequence_hashes, host_block_ids, *device_handle, device_block_ids)
+            .await
+    }
+
+    /// Lookup which hashes exist in object storage.
+    pub fn lookup_g4(&self, sequence_hashes: &[u64]) -> Vec<u64> {
+        self.object_handler
+            .get()
+            .map(|h| h.lookup(sequence_hashes))
+            .unwrap_or_default()
+    }
+
     fn make_layout<S: Storage, M: BlockMetadata>(
         mut layout: Box<dyn NixlLayout<StorageType = S>>,
         agent: &Option<NixlAgent>,
@@ -957,6 +1174,14 @@ impl KvbmWorker {
         handlers.insert(
             ZMQ_TRANSFER_BLOCKS_MESSAGE.to_string(),
             Arc::new(BlockTransferDispatch {
+                cell: transfer_handler_cell.clone(),
+            }) as Arc<dyn Handler>,
+        );
+
+        // G4 onboard requests get dispatched to the same handler cell
+        handlers.insert(
+            ZMQ_G4_ONBOARD_MESSAGE.to_string(),
+            Arc::new(G4OnboardDispatch {
                 cell: transfer_handler_cell.clone(),
             }) as Arc<dyn Handler>,
         );

@@ -2680,6 +2680,7 @@ dependencies = [
  "mockito",
  "modelexpress-client",
  "modelexpress-common",
+ "moka",
  "ndarray",
  "ndarray-interp",
  "ndarray-npy",
@@ -6677,15 +6678,17 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "0.8.0"
-source = "git+https://github.com/cheese-head/nixl.git?branch=cheese-head%2Frust-param-bindings#d53bd5f98b68debadb0dbf3c5900f3bbb6b807c1"
+version = "0.7.0"
 dependencies = [
+ "anyhow",
+ "bincode 1.3.3",
  "bindgen",
  "cc",
  "libc",
  "os_info",
  "pkg-config",
  "serde",
+ "tempfile",
  "thiserror 2.0.17",
  "tracing",
 ]

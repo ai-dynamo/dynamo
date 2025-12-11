@@ -137,6 +137,38 @@ pub trait DistributedRegistry: Send + Sync {
     /// For implementations that batch registrations, this ensures all
     /// pending registrations are sent immediately.
     async fn flush(&self) -> Result<()>;
+
+    /// Blocking version of match_sequence_hashes for use in sync contexts.
+    ///
+    /// This uses tokio's block_in_place + block_on pattern to safely call
+    /// the async method from a sync context. Requires a multi-threaded runtime.
+    ///
+    /// Returns just the hashes (not the object keys) for simpler integration.
+    fn match_sequence_hashes_blocking(
+        &self,
+        bucket_name: &str,
+        hashes: &[SequenceHash],
+    ) -> Result<Vec<SequenceHash>>
+    where
+        Self: Sync,
+    {
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| anyhow::anyhow!("No tokio runtime available"))?;
+
+        let bucket = bucket_name.to_string();
+        let hashes_vec = hashes.to_vec();
+
+        // Use catch_unwind to handle single-threaded runtime gracefully
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tokio::task::block_in_place(|| {
+                handle.block_on(async {
+                    self.match_sequence_hashes(&bucket, &hashes_vec).await
+                })
+            })
+        }))
+        .map_err(|_| anyhow::anyhow!("block_in_place failed (single-threaded runtime?)"))?
+        .map(|matches| matches.into_iter().map(|(h, _)| h).collect())
+    }
 }
 
 /// Registry hub trait (runs on leader/coordinator).

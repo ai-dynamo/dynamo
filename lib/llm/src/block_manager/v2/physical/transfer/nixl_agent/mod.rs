@@ -81,21 +81,37 @@ impl NixlAgent {
         let prefix = format!("DYN_KVBM_NIXL_BACKEND_{}_", backend_name);
         let mut param_pairs: Vec<(String, String)> = Vec::new();
 
+        tracing::info!(
+            "Searching for {} backend parameters with prefix: {}",
+            backend_name,
+            prefix
+        );
+
         // Parse DYN_KVBM_NIXL_BACKEND_{BACKEND_NAME}_* variables
         for (env_key, env_value) in std::env::vars() {
             if let Some(param_name) = env_key.strip_prefix(&prefix) {
                 let param_key = param_name.to_lowercase();
+                tracing::info!(
+                    "Found env var: {} -> param: {}",
+                    env_key,
+                    param_key
+                );
                 param_pairs.push((param_key, env_value));
             }
         }
 
         if param_pairs.is_empty() {
+            tracing::warn!(
+                "No environment variables found with prefix '{}'. Backend {} will use default plugin params.",
+                prefix,
+                backend_name
+            );
             return Ok(None);
         }
 
         // Sanitize sensitive parameters before logging
         let sanitized_params = Self::sanitize_params_for_logging(&param_pairs);
-        tracing::debug!(
+        tracing::info!(
             "{} backend parameters configured from environment: {:?}",
             backend_name,
             sanitized_params
@@ -226,25 +242,56 @@ impl NixlAgent {
                 }
                 Ok(None) => {
                     // No custom parameters - fall back to default plugin parameters
-                    tracing::debug!(
-                        "Attempting to create {} backend with default params",
+                    tracing::warn!(
+                        "No DYN_KVBM_NIXL_BACKEND_{}_* env vars found, falling back to default plugin params. \
+                         For OBJ backend, you may need to set: \
+                         DYN_KVBM_NIXL_BACKEND_OBJ_BUCKET, DYN_KVBM_NIXL_BACKEND_OBJ_ACCESS_KEY, \
+                         DYN_KVBM_NIXL_BACKEND_OBJ_SECRET_KEY, DYN_KVBM_NIXL_BACKEND_OBJ_ENDPOINT, \
+                         DYN_KVBM_NIXL_BACKEND_OBJ_REGION",
                         backend_upper
                     );
                     match agent.get_plugin_params(&backend_upper) {
-                        Ok((_, params)) => match agent.create_backend(&backend_upper, &params) {
-                            Ok(_) => {
-                                available_backends.insert(backend_upper.clone());
-                                tracing::info!("Successfully created {} backend", backend_upper);
+                        Ok((_, params)) => {
+                            // Log the default params being used
+                            if !params.is_empty().unwrap_or(true) {
+                                tracing::info!(
+                                    "{} backend using default plugin params:",
+                                    backend_upper
+                                );
+                                if let Ok(iter) = params.iter() {
+                                    for result in iter {
+                                        if let Ok((key, value)) = result {
+                                            let display_value = if key.contains("secret") || key.contains("password") || key.contains("token") {
+                                                "[REDACTED]".to_string()
+                                            } else {
+                                                value.to_string()
+                                            };
+                                            tracing::info!("  {} = {}", key, display_value);
+                                        }
+                                    }
+                                }
+                            } else {
+                                tracing::warn!(
+                                    "{} backend has no default plugin params configured",
+                                    backend_upper
+                                );
                             }
-                            Err(e) => {
-                                tracing::error!(
-                                    "Failed to create {} backend: {}. Operations requiring this backend will fail.",
-                                    backend_upper, e
-                                );
-                                eprintln!(
-                                    "Failed to create {} backend: {}. Operations requiring this backend will fail.",
-                                    backend_upper, e
-                                );
+
+                            match agent.create_backend(&backend_upper, &params) {
+                                Ok(_) => {
+                                    available_backends.insert(backend_upper.clone());
+                                    tracing::info!("Successfully created {} backend with default params", backend_upper);
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Failed to create {} backend: {}. Operations requiring this backend will fail.",
+                                        backend_upper, e
+                                    );
+                                    eprintln!(
+                                        "Failed to create {} backend: {}. Operations requiring this backend will fail.",
+                                        backend_upper, e
+                                    );
+                                }
                             }
                         },
                         Err(e) => {

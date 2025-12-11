@@ -26,7 +26,7 @@ dynamo-config = { workspace = true }
 
 anyhow = { workspace = true }
 cudarc = { workspace = true }
-nixl-sys = { git = "https://github.com/cheese-head/nixl.git", branch = "cheese-head/rust-param-bindings" }
+nixl-sys = { path = "../../nixl/src/bindings/rust" }
 serde = { workspace = true}
 thiserror = { workspace = true }
 tracing = { workspace = true }

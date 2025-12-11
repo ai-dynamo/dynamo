@@ -15,16 +15,78 @@ pub(crate) use local::LocalLayout;
 pub(crate) use metadata::LocalLayoutDescriptor;
 pub(crate) use remote::RemoteLayout;
 
-use crate::block_manager::v2::memory::StorageKind;
+use crate::block_manager::config::ObjectStorageConfig;
+use crate::block_manager::v2::memory::{ObjectStorage, StorageKind};
 use crate::block_manager::v2::physical::layout::PhysicalLayout;
 use crate::block_manager::v2::physical::transfer::TransferContext;
 use crate::block_manager::v2::physical::transfer::context::TransferCompleteNotification;
 use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;
 use crate::block_manager::v2::physical::transfer::options::TransferOptions;
 use anyhow::{Result, anyhow, bail};
+use nixl_sys::{MemType, XferDescList, XferOp};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
+
+/// Direction of G4 (object storage) transfer.
+#[derive(Debug, Clone, Copy)]
+pub enum G4TransferDirection {
+    /// Local → Object Storage (offload/persist)
+    Offload,
+    /// Object Storage → Local (onboard/restore)
+    Onboard,
+}
+
+/// Result of a G4 transfer operation.
+#[derive(Debug)]
+pub struct G4TransferResult {
+    /// Number of blocks successfully transferred
+    pub transferred: usize,
+}
+
+/// Descriptor for a remote object in G4 (object storage) transfers.
+///
+/// This encapsulates all the information needed to identify and transfer
+/// a single block to/from object storage.
+#[derive(Debug, Clone)]
+pub struct RemoteDescriptor {
+    /// Object key (typically a sequence hash) identifying the object
+    pub object_key: u64,
+    /// Resolved bucket name for the object
+    pub bucket: String,
+}
+
+impl RemoteDescriptor {
+    /// Create a new RemoteDescriptor.
+    ///
+    /// # Arguments
+    /// * `object_key` - The key identifying the object (typically sequence hash)
+    /// * `bucket` - The resolved bucket name
+    pub fn new(object_key: u64, bucket: impl Into<String>) -> Self {
+        Self {
+            object_key,
+            bucket: bucket.into(),
+        }
+    }
+
+    /// Create RemoteDescriptors from object keys and config.
+    ///
+    /// # Arguments
+    /// * `object_keys` - Slice of object keys
+    /// * `config` - Object storage configuration
+    /// * `worker_id` - Worker ID for bucket resolution
+    pub fn from_keys(
+        object_keys: &[u64],
+        config: &ObjectStorageConfig,
+        worker_id: u32,
+    ) -> Vec<Self> {
+        let bucket = config.resolve_bucket(worker_id);
+        object_keys
+            .iter()
+            .map(|&key| Self::new(key, bucket.clone()))
+            .collect()
+    }
+}
 
 /// Public entry point for layout and transfer management.
 ///
@@ -38,6 +100,8 @@ use std::sync::{Arc, RwLock};
 pub struct TransportManager {
     registry: Arc<RwLock<LayoutRegistry>>,
     context: Arc<TransferContext>,
+    // we need to have a way to provdie a g4 manager here?
+    // it needs access to the external registry client
 }
 
 impl TransportManager {
@@ -199,6 +263,751 @@ impl TransportManager {
             options,
             &self.context,
         )
+    }
+
+
+
+    /// Execute a G4 (object storage) transfer.
+    ///
+    /// This is the main entry point for object storage transfers. It delegates
+    /// to either offload or onboard based on the direction.
+    ///
+    /// # Arguments
+    /// * `direction` - Whether to offload (local→object) or onboard (object→local)
+    /// * `local_handle` - Handle to the local layout (device or host)
+    /// * `local_blocks` - Block indices in the local layout
+    /// * `remote_descriptors` - Remote descriptors containing object keys and bucket info
+    ///
+    /// # Returns
+    /// Result containing the number of blocks successfully transferred
+    pub fn execute_g4_transfer(
+        &self,
+        direction: G4TransferDirection,
+        local_handle: LayoutHandle,
+        local_blocks: &[usize],
+        remote_descriptors: &[RemoteDescriptor],
+    ) -> Result<G4TransferResult> {
+        match direction {
+            G4TransferDirection::Offload => {
+                self.execute_g4_offload_with_descriptors(local_handle, local_blocks, remote_descriptors)
+            }
+            G4TransferDirection::Onboard => {
+                self.execute_g4_onboard_with_descriptors(local_handle, local_blocks, remote_descriptors)
+            }
+        }
+    }
+
+    /// Async version of [`Self::execute_g4_transfer`].
+    ///
+    /// Use this in async contexts to avoid blocking the runtime.
+    pub async fn execute_g4_transfer_async(
+        &self,
+        direction: G4TransferDirection,
+        local_handle: LayoutHandle,
+        local_blocks: &[usize],
+        remote_descriptors: &[RemoteDescriptor],
+    ) -> Result<G4TransferResult> {
+        match direction {
+            G4TransferDirection::Offload => {
+                self.execute_g4_offload_with_descriptors_async(local_handle, local_blocks, remote_descriptors).await
+            }
+            G4TransferDirection::Onboard => {
+                self.execute_g4_onboard_with_descriptors_async(local_handle, local_blocks, remote_descriptors).await
+            }
+        }
+    }
+
+    /// Execute G4 offload: transfer blocks from local layout to object storage.
+    ///
+    /// Transfers blocks from a local layout (device/host) to object storage using
+    /// NIXL's OBJ plugin. Each block is stored as a separate object with the key
+    /// derived from the sequence hash.
+    ///
+    /// # Arguments
+    /// * `local_handle` - Handle to the source layout (device or host)
+    /// * `local_blocks` - Block indices in the source layout to offload
+    /// * `object_keys` - Object keys (typically sequence hashes) for each block
+    /// * `host_handle` - Host pool handle for bounce buffers (used if source is device)
+    /// * `config` - Object storage configuration (bucket, endpoint, etc.)
+    ///
+    /// # Returns
+    /// Result containing the number of blocks successfully transferred
+    pub fn execute_g4_offload(
+        &self,
+        local_handle: LayoutHandle,
+        local_blocks: &[usize],
+        object_keys: &[u64],
+        _host_handle: LayoutHandle,
+        config: &ObjectStorageConfig,
+    ) -> Result<G4TransferResult> {
+        if local_blocks.len() != object_keys.len() {
+            bail!(
+                "local_blocks.len() ({}) != object_keys.len() ({})",
+                local_blocks.len(),
+                object_keys.len()
+            );
+        }
+
+        if local_blocks.is_empty() {
+            return Ok(G4TransferResult { transferred: 0 });
+        }
+
+        // Get source layout from registry
+        let src_layout = {
+            let registry = self.registry.read().unwrap();
+            registry
+                .get_layout(local_handle)
+                .ok_or_else(|| anyhow!("invalid source handle: {}", local_handle))?
+                .clone()
+        };
+
+        let nixl_agent = self.context.nixl_agent();
+
+        // Validate NIXL has OBJ backend loaded
+        if !nixl_agent.has_backend("OBJ") {
+            bail!("NIXL OBJ backend not available for object storage transfers");
+        }
+
+        let src_layout_inner = src_layout.layout();
+        let layout_config = src_layout_inner.config();
+
+        // Calculate the size of one contiguous block
+        // block_size = num_layers * outer_dim * page_size * inner_dim * dtype_width_bytes
+        let block_size = layout_config.num_layers
+            * layout_config.outer_dim
+            * layout_config.page_size
+            * layout_config.inner_dim
+            * layout_config.dtype_width_bytes;
+
+        // Get source NIXL metadata
+        let src_metadata = src_layout.nixl_metadata();
+        let src_mem_type = src_metadata.mem_type();
+        let src_device_id = src_metadata.device_id();
+
+        // Resolve the bucket name for this worker
+        let bucket = config.resolve_bucket(self.worker_id() as u32);
+
+        // Register object storage slots with NIXL
+        // Each object is registered with its key as the device_id
+        let mut obj_storages = Vec::with_capacity(object_keys.len());
+        let mut registration_handles = Vec::with_capacity(object_keys.len());
+
+        for &key in object_keys.iter() {
+            let obj_storage = ObjectStorage::new(&bucket, key, block_size)
+                .map_err(|e| anyhow!("Failed to create object storage: {:?}", e))?;
+
+            let handle = nixl_agent
+                .register_memory(&obj_storage, None)
+                .map_err(|e| anyhow!("Failed to register object storage: {:?}", e))?;
+
+            obj_storages.push(obj_storage);
+            registration_handles.push(handle);
+        }
+
+        // Build transfer descriptor lists
+        let mut src_dl = XferDescList::new(src_mem_type)?;
+        let mut dst_dl = XferDescList::new(MemType::Object)?;
+
+        // Add one descriptor per block
+        for (&src_block_id, &key) in local_blocks.iter().zip(object_keys.iter()) {
+            // Get the base address of the block (first layer, first outer dim)
+            let src_region = src_layout.memory_region(src_block_id, 0, 0)?;
+
+            // Add to source descriptor list - full contiguous block
+            src_dl.add_desc(src_region.addr(), block_size, src_device_id);
+
+            // Add to destination descriptor list
+            // The object key is used as the device_id for the OBJ backend
+            dst_dl.add_desc(0, block_size, key);
+        }
+
+        // Create transfer request using loopback (agent's own name for OBJ plugin)
+        let agent_name = nixl_agent.name();
+        let xfer_req = nixl_agent.create_xfer_req(
+            XferOp::Write,
+            &src_dl,
+            &dst_dl,
+            &agent_name,
+            None,
+        )?;
+
+        // Post transfer request
+        let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
+
+        // Keep registration handles alive until transfer completes
+        // For sync completion, we can drop them immediately after posting
+        let transferred = local_blocks.len();
+
+        // Drop registration handles - safe because transfer has been posted
+        drop(registration_handles);
+        drop(obj_storages);
+
+        if still_pending {
+            // For async completion, we need to wait for it
+            // Register for completion and block on it
+            let notification = self.context.register_nixl_status(xfer_req);
+            // Block synchronously since this method is not async
+            notification.wait()?;
+        }
+
+        Ok(G4TransferResult { transferred })
+    }
+
+    /// Execute G4 onboard: transfer blocks from object storage to local layout.
+    ///
+    /// Transfers blocks from object storage to a local layout (device/host) using
+    /// NIXL's OBJ plugin. Each object is identified by its key (sequence hash).
+    ///
+    /// # Arguments
+    /// * `local_handle` - Handle to the destination layout (device or host)
+    /// * `local_blocks` - Block indices in the destination layout
+    /// * `object_keys` - Object keys (typically sequence hashes) to retrieve
+    /// * `host_handle` - Host pool handle for bounce buffers (used if dest is device)
+    /// * `config` - Object storage configuration (bucket, endpoint, etc.)
+    ///
+    /// # Returns
+    /// Result containing the number of blocks successfully transferred
+    pub fn execute_g4_onboard(
+        &self,
+        local_handle: LayoutHandle,
+        local_blocks: &[usize],
+        object_keys: &[u64],
+        _host_handle: LayoutHandle,
+        config: &ObjectStorageConfig,
+    ) -> Result<G4TransferResult> {
+        if local_blocks.len() != object_keys.len() {
+            bail!(
+                "local_blocks.len() ({}) != object_keys.len() ({})",
+                local_blocks.len(),
+                object_keys.len()
+            );
+        }
+
+        if local_blocks.is_empty() {
+            return Ok(G4TransferResult { transferred: 0 });
+        }
+
+        // Get destination layout from registry
+        let dst_layout = {
+            let registry = self.registry.read().unwrap();
+            registry
+                .get_layout(local_handle)
+                .ok_or_else(|| anyhow!("invalid destination handle: {}", local_handle))?
+                .clone()
+        };
+
+        let nixl_agent = self.context.nixl_agent();
+
+        // Validate NIXL has OBJ backend loaded
+        if !nixl_agent.has_backend("OBJ") {
+            bail!("NIXL OBJ backend not available for object storage transfers");
+        }
+
+        let dst_layout_inner = dst_layout.layout();
+        let layout_config = dst_layout_inner.config();
+
+        // Calculate the size of one contiguous block
+        let block_size = layout_config.num_layers
+            * layout_config.outer_dim
+            * layout_config.page_size
+            * layout_config.inner_dim
+            * layout_config.dtype_width_bytes;
+
+        // Get destination NIXL metadata
+        let dst_metadata = dst_layout.nixl_metadata();
+        let dst_mem_type = dst_metadata.mem_type();
+        let dst_device_id = dst_metadata.device_id();
+
+        // Resolve the bucket name for this worker
+        let bucket = config.resolve_bucket(self.worker_id() as u32);
+
+        // Register object storage slots with NIXL
+        let mut obj_storages = Vec::with_capacity(object_keys.len());
+        let mut registration_handles = Vec::with_capacity(object_keys.len());
+
+        for &key in object_keys.iter() {
+            let obj_storage = ObjectStorage::new(&bucket, key, block_size)
+                .map_err(|e| anyhow!("Failed to create object storage: {:?}", e))?;
+
+            let handle = nixl_agent
+                .register_memory(&obj_storage, None)
+                .map_err(|e| anyhow!("Failed to register object storage: {:?}", e))?;
+
+            obj_storages.push(obj_storage);
+            registration_handles.push(handle);
+        }
+
+        // Build transfer descriptor lists
+        // IMPORTANT: For OBJ backend, the first descriptor list (src_dl) must be local DRAM.
+        // For READ operations, we put local DRAM in src_dl and object storage in dst_dl.
+        let mut src_dl = XferDescList::new(dst_mem_type)?;  // Local DRAM (destination)
+        let mut dst_dl = XferDescList::new(MemType::Object)?;  // Object storage (source)
+
+        // Add one descriptor per block
+        for (&dst_block_id, &key) in local_blocks.iter().zip(object_keys.iter()) {
+            // Get the base address of the destination block (local DRAM)
+            let dst_region = dst_layout.memory_region(dst_block_id, 0, 0)?;
+
+            // src_dl = local DRAM buffer where data will be read INTO
+            src_dl.add_desc(dst_region.addr(), block_size, dst_device_id);
+
+            // dst_dl = object storage (the object key is used as device_id)
+            dst_dl.add_desc(0, block_size, key);
+        }
+
+        // Create transfer request using loopback
+        let agent_name = nixl_agent.name();
+        let xfer_req = nixl_agent.create_xfer_req(
+            XferOp::Read,
+            &src_dl,
+            &dst_dl,
+            &agent_name,
+            None,
+        )?;
+
+        // Post transfer request
+        let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
+
+        let transferred = local_blocks.len();
+
+        // Drop registration handles - safe because transfer has been posted
+        drop(registration_handles);
+        drop(obj_storages);
+
+        if still_pending {
+            let notification = self.context.register_nixl_status(xfer_req);
+            notification.wait()?;
+        }
+
+        Ok(G4TransferResult { transferred })
+    }
+
+    /// Execute G4 offload using RemoteDescriptors.
+    ///
+    /// This is a convenience wrapper that extracts object keys and bucket info
+    /// from RemoteDescriptors.
+    fn execute_g4_offload_with_descriptors(
+        &self,
+        local_handle: LayoutHandle,
+        local_blocks: &[usize],
+        remote_descriptors: &[RemoteDescriptor],
+    ) -> Result<G4TransferResult> {
+        if local_blocks.len() != remote_descriptors.len() {
+            bail!(
+                "local_blocks.len() ({}) != remote_descriptors.len() ({})",
+                local_blocks.len(),
+                remote_descriptors.len()
+            );
+        }
+
+        if remote_descriptors.is_empty() {
+            return Ok(G4TransferResult { transferred: 0 });
+        }
+
+        // Get source layout from registry
+        let src_layout = {
+            let registry = self.registry.read().unwrap();
+            registry
+                .get_layout(local_handle)
+                .ok_or_else(|| anyhow!("invalid source handle: {}", local_handle))?
+                .clone()
+        };
+
+        let nixl_agent = self.context.nixl_agent();
+
+        // Validate NIXL has OBJ backend loaded
+        if !nixl_agent.has_backend("OBJ") {
+            bail!("NIXL OBJ backend not available for object storage transfers");
+        }
+
+        let src_layout_inner = src_layout.layout();
+        let layout_config = src_layout_inner.config();
+
+        // Calculate the size of one contiguous block
+        let block_size = layout_config.num_layers
+            * layout_config.outer_dim
+            * layout_config.page_size
+            * layout_config.inner_dim
+            * layout_config.dtype_width_bytes;
+
+        // Get source NIXL metadata
+        let src_metadata = src_layout.nixl_metadata();
+        let src_mem_type = src_metadata.mem_type();
+        let src_device_id = src_metadata.device_id();
+
+        // Register object storage slots with NIXL
+        let mut obj_storages = Vec::with_capacity(remote_descriptors.len());
+        let mut registration_handles = Vec::with_capacity(remote_descriptors.len());
+
+        for desc in remote_descriptors.iter() {
+            let obj_storage = ObjectStorage::new(&desc.bucket, desc.object_key, block_size)
+                .map_err(|e| anyhow!("Failed to create object storage: {:?}", e))?;
+
+            let handle = nixl_agent
+                .register_memory(&obj_storage, None)
+                .map_err(|e| anyhow!("Failed to register object storage: {:?}", e))?;
+
+            obj_storages.push(obj_storage);
+            registration_handles.push(handle);
+        }
+
+        // Build transfer descriptor lists
+        let mut src_dl = XferDescList::new(src_mem_type)?;
+        let mut dst_dl = XferDescList::new(MemType::Object)?;
+
+        // Add one descriptor per block
+        for (&src_block_id, desc) in local_blocks.iter().zip(remote_descriptors.iter()) {
+            let src_region = src_layout.memory_region(src_block_id, 0, 0)?;
+            src_dl.add_desc(src_region.addr(), block_size, src_device_id);
+            dst_dl.add_desc(0, block_size, desc.object_key);
+        }
+
+        // Create transfer request
+        let agent_name = nixl_agent.name();
+        let xfer_req = nixl_agent.create_xfer_req(
+            XferOp::Write,
+            &src_dl,
+            &dst_dl,
+            &agent_name,
+            None,
+        )?;
+
+        let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
+        let transferred = local_blocks.len();
+
+        drop(registration_handles);
+        drop(obj_storages);
+
+        if still_pending {
+            let notification = self.context.register_nixl_status(xfer_req);
+            notification.wait()?;
+        }
+
+        Ok(G4TransferResult { transferred })
+    }
+
+    /// Async version of G4 offload using RemoteDescriptors.
+    async fn execute_g4_offload_with_descriptors_async(
+        &self,
+        local_handle: LayoutHandle,
+        local_blocks: &[usize],
+        remote_descriptors: &[RemoteDescriptor],
+    ) -> Result<G4TransferResult> {
+        if local_blocks.len() != remote_descriptors.len() {
+            bail!(
+                "local_blocks.len() ({}) != remote_descriptors.len() ({})",
+                local_blocks.len(),
+                remote_descriptors.len()
+            );
+        }
+
+        if remote_descriptors.is_empty() {
+            return Ok(G4TransferResult { transferred: 0 });
+        }
+
+        // Get source layout from registry
+        let src_layout = {
+            let registry = self.registry.read().unwrap();
+            registry
+                .get_layout(local_handle)
+                .ok_or_else(|| anyhow!("invalid source handle: {}", local_handle))?
+                .clone()
+        };
+
+        let nixl_agent = self.context.nixl_agent();
+
+        // Validate NIXL has OBJ backend loaded
+        if !nixl_agent.has_backend("OBJ") {
+            bail!("NIXL OBJ backend not available for object storage transfers");
+        }
+
+        let src_layout_inner = src_layout.layout();
+        let layout_config = src_layout_inner.config();
+
+        // Calculate the size of one contiguous block
+        let block_size = layout_config.num_layers
+            * layout_config.outer_dim
+            * layout_config.page_size
+            * layout_config.inner_dim
+            * layout_config.dtype_width_bytes;
+
+        // Get source NIXL metadata
+        let src_metadata = src_layout.nixl_metadata();
+        let src_mem_type = src_metadata.mem_type();
+        let src_device_id = src_metadata.device_id();
+
+        // Use a scope block to ensure all non-Send types (XferDescList, ObjectStorage, etc.)
+        // are dropped before the await point, making the future Send-safe
+        let (xfer_req, transferred, still_pending) = {
+            // Register object storage slots with NIXL
+            let mut obj_storages = Vec::with_capacity(remote_descriptors.len());
+            let mut registration_handles = Vec::with_capacity(remote_descriptors.len());
+
+            for desc in remote_descriptors.iter() {
+                let obj_storage = ObjectStorage::new(&desc.bucket, desc.object_key, block_size)
+                    .map_err(|e| anyhow!("Failed to create object storage: {:?}", e))?;
+
+                let handle = nixl_agent
+                    .register_memory(&obj_storage, None)
+                    .map_err(|e| anyhow!("Failed to register object storage: {:?}", e))?;
+
+                obj_storages.push(obj_storage);
+                registration_handles.push(handle);
+            }
+
+            // Build transfer descriptor lists
+            let mut src_dl = XferDescList::new(src_mem_type)?;
+            let mut dst_dl = XferDescList::new(MemType::Object)?;
+
+            // Add one descriptor per block
+            for (&src_block_id, desc) in local_blocks.iter().zip(remote_descriptors.iter()) {
+                let src_region = src_layout.memory_region(src_block_id, 0, 0)?;
+                src_dl.add_desc(src_region.addr(), block_size, src_device_id);
+                dst_dl.add_desc(0, block_size, desc.object_key);
+            }
+
+            // Create transfer request
+            let agent_name = nixl_agent.name();
+            let xfer_req = nixl_agent.create_xfer_req(
+                XferOp::Write,
+                &src_dl,
+                &dst_dl,
+                &agent_name,
+                None,
+            )?;
+
+            let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
+            let transferred = local_blocks.len();
+
+            // All non-Send types (src_dl, dst_dl, registration_handles, obj_storages)
+            // are dropped here when the block ends
+            (xfer_req, transferred, still_pending)
+        };
+
+        if still_pending {
+            let notification = self.context.register_nixl_status(xfer_req);
+            notification.await?;
+        }
+
+        Ok(G4TransferResult { transferred })
+    }
+
+    /// Execute G4 onboard using RemoteDescriptors.
+    ///
+    /// This is a convenience wrapper that extracts object keys and bucket info
+    /// from RemoteDescriptors.
+    fn execute_g4_onboard_with_descriptors(
+        &self,
+        local_handle: LayoutHandle,
+        local_blocks: &[usize],
+        remote_descriptors: &[RemoteDescriptor],
+    ) -> Result<G4TransferResult> {
+        if local_blocks.len() != remote_descriptors.len() {
+            bail!(
+                "local_blocks.len() ({}) != remote_descriptors.len() ({})",
+                local_blocks.len(),
+                remote_descriptors.len()
+            );
+        }
+
+        if remote_descriptors.is_empty() {
+            return Ok(G4TransferResult { transferred: 0 });
+        }
+
+        // Get destination layout from registry
+        let dst_layout = {
+            let registry = self.registry.read().unwrap();
+            registry
+                .get_layout(local_handle)
+                .ok_or_else(|| anyhow!("invalid destination handle: {}", local_handle))?
+                .clone()
+        };
+
+        let nixl_agent = self.context.nixl_agent();
+
+        // Validate NIXL has OBJ backend loaded
+        if !nixl_agent.has_backend("OBJ") {
+            bail!("NIXL OBJ backend not available for object storage transfers");
+        }
+
+        let dst_layout_inner = dst_layout.layout();
+        let layout_config = dst_layout_inner.config();
+
+        // Calculate the size of one contiguous block
+        let block_size = layout_config.num_layers
+            * layout_config.outer_dim
+            * layout_config.page_size
+            * layout_config.inner_dim
+            * layout_config.dtype_width_bytes;
+
+        // Get destination NIXL metadata
+        let dst_metadata = dst_layout.nixl_metadata();
+        let dst_mem_type = dst_metadata.mem_type();
+        let dst_device_id = dst_metadata.device_id();
+
+        // Register object storage slots with NIXL
+        let mut obj_storages = Vec::with_capacity(remote_descriptors.len());
+        let mut registration_handles = Vec::with_capacity(remote_descriptors.len());
+
+        for desc in remote_descriptors.iter() {
+            let obj_storage = ObjectStorage::new(&desc.bucket, desc.object_key, block_size)
+                .map_err(|e| anyhow!("Failed to create object storage: {:?}", e))?;
+
+            let handle = nixl_agent
+                .register_memory(&obj_storage, None)
+                .map_err(|e| anyhow!("Failed to register object storage: {:?}", e))?;
+
+            obj_storages.push(obj_storage);
+            registration_handles.push(handle);
+        }
+
+        // Build transfer descriptor lists
+        // IMPORTANT: For OBJ backend, the first descriptor list (src_dl) must be local DRAM.
+        // For READ operations, we put local DRAM in src_dl and object storage in dst_dl.
+        let mut src_dl = XferDescList::new(dst_mem_type)?;  // Local DRAM (destination)
+        let mut dst_dl = XferDescList::new(MemType::Object)?;  // Object storage (source)
+
+        // Add one descriptor per block
+        for (&dst_block_id, desc) in local_blocks.iter().zip(remote_descriptors.iter()) {
+            let dst_region = dst_layout.memory_region(dst_block_id, 0, 0)?;
+            // src_dl = local DRAM buffer where data will be read INTO
+            src_dl.add_desc(dst_region.addr(), block_size, dst_device_id);
+            // dst_dl = object storage (the object key is used as device_id)
+            dst_dl.add_desc(0, block_size, desc.object_key);
+        }
+
+        // Create transfer request
+        let agent_name = nixl_agent.name();
+        let xfer_req = nixl_agent.create_xfer_req(
+            XferOp::Read,
+            &src_dl,
+            &dst_dl,
+            &agent_name,
+            None,
+        )?;
+
+        let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
+        let transferred = local_blocks.len();
+
+        drop(registration_handles);
+        drop(obj_storages);
+
+        if still_pending {
+            let notification = self.context.register_nixl_status(xfer_req);
+            notification.wait()?;
+        }
+
+        Ok(G4TransferResult { transferred })
+    }
+
+    /// Async version of G4 onboard using RemoteDescriptors.
+    async fn execute_g4_onboard_with_descriptors_async(
+        &self,
+        local_handle: LayoutHandle,
+        local_blocks: &[usize],
+        remote_descriptors: &[RemoteDescriptor],
+    ) -> Result<G4TransferResult> {
+        if local_blocks.len() != remote_descriptors.len() {
+            bail!(
+                "local_blocks.len() ({}) != remote_descriptors.len() ({})",
+                local_blocks.len(),
+                remote_descriptors.len()
+            );
+        }
+
+        if remote_descriptors.is_empty() {
+            return Ok(G4TransferResult { transferred: 0 });
+        }
+
+        // Get destination layout from registry
+        let dst_layout = {
+            let registry = self.registry.read().unwrap();
+            registry
+                .get_layout(local_handle)
+                .ok_or_else(|| anyhow!("invalid destination handle: {}", local_handle))?
+                .clone()
+        };
+
+        let nixl_agent = self.context.nixl_agent();
+
+        // Validate NIXL has OBJ backend loaded
+        if !nixl_agent.has_backend("OBJ") {
+            bail!("NIXL OBJ backend not available for object storage transfers");
+        }
+
+        let dst_layout_inner = dst_layout.layout();
+        let layout_config = dst_layout_inner.config();
+
+        // Calculate the size of one contiguous block
+        let block_size = layout_config.num_layers
+            * layout_config.outer_dim
+            * layout_config.page_size
+            * layout_config.inner_dim
+            * layout_config.dtype_width_bytes;
+
+        // Get destination NIXL metadata
+        let dst_metadata = dst_layout.nixl_metadata();
+        let dst_mem_type = dst_metadata.mem_type();
+        let dst_device_id = dst_metadata.device_id();
+
+        // Use a scope block to ensure all non-Send types (XferDescList, ObjectStorage, etc.)
+        // are dropped before the await point, making the future Send-safe
+        let (xfer_req, transferred, still_pending) = {
+            // Register object storage slots with NIXL
+            let mut obj_storages = Vec::with_capacity(remote_descriptors.len());
+            let mut registration_handles = Vec::with_capacity(remote_descriptors.len());
+
+            for desc in remote_descriptors.iter() {
+                let obj_storage = ObjectStorage::new(&desc.bucket, desc.object_key, block_size)
+                    .map_err(|e| anyhow!("Failed to create object storage: {:?}", e))?;
+
+                let handle = nixl_agent
+                    .register_memory(&obj_storage, None)
+                    .map_err(|e| anyhow!("Failed to register object storage: {:?}", e))?;
+
+                obj_storages.push(obj_storage);
+                registration_handles.push(handle);
+            }
+
+            // Build transfer descriptor lists
+            // IMPORTANT: For OBJ backend, the first descriptor list (src_dl) must be local DRAM.
+            // For READ operations, we put local DRAM in src_dl and object storage in dst_dl.
+            let mut src_dl = XferDescList::new(dst_mem_type)?;  // Local DRAM (destination)
+            let mut dst_dl = XferDescList::new(MemType::Object)?;  // Object storage (source)
+
+            // Add one descriptor per block
+            for (&dst_block_id, desc) in local_blocks.iter().zip(remote_descriptors.iter()) {
+                let dst_region = dst_layout.memory_region(dst_block_id, 0, 0)?;
+                // src_dl = local DRAM buffer where data will be read INTO
+                src_dl.add_desc(dst_region.addr(), block_size, dst_device_id);
+                // dst_dl = object storage (the object key is used as device_id)
+                dst_dl.add_desc(0, block_size, desc.object_key);
+            }
+
+            // Create transfer request
+            let agent_name = nixl_agent.name();
+            let xfer_req = nixl_agent.create_xfer_req(
+                XferOp::Read,
+                &src_dl,
+                &dst_dl,
+                &agent_name,
+                None,
+            )?;
+
+            let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
+            let transferred = local_blocks.len();
+
+            // All non-Send types (src_dl, dst_dl, registration_handles, obj_storages)
+            // are dropped here when the block ends
+            (xfer_req, transferred, still_pending)
+        };
+
+        if still_pending {
+            let notification = self.context.register_nixl_status(xfer_req);
+            notification.await?;
+        }
+
+        Ok(G4TransferResult { transferred })
     }
 
     // ===== Query Methods =====
@@ -638,5 +1447,419 @@ mod tests {
         assert_eq!(handles.len(), 2);
         assert!(handles.contains(&h1));
         assert!(handles.contains(&h2));
+    }
+}
+
+/// Tests for G4 (object storage) transfers.
+///
+/// These tests verify the `execute_g4_offload`, `execute_g4_onboard`, and
+/// `execute_g4_transfer` methods using NIXL's OBJ backend.
+///
+/// # Requirements
+/// - NIXL with OBJ backend support
+/// - Object storage (e.g., MinIO, S3)
+/// - Environment variables for connection configuration
+///
+/// # Environment Variables
+/// ```bash
+/// export DYN_KVBM_NIXL_BACKEND_OBJ_ENDPOINT="http://localhost:9000"
+/// export DYN_KVBM_NIXL_BACKEND_OBJ_BUCKET="test-bucket"
+/// export DYN_KVBM_NIXL_BACKEND_OBJ_ACCESS_KEY=""
+/// export DYN_KVBM_NIXL_BACKEND_OBJ_SECRET_KEY=""
+/// ```
+#[cfg(all(test, feature = "testing-nixl"))]
+mod g4_transfer_tests {
+    use super::*;
+    use crate::block_manager::config::ObjectStorageConfig;
+    use crate::block_manager::v2::physical::layout::LayoutConfig;
+    use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;
+    use crate::block_manager::v2::physical::transfer::{FillPattern, TransferCapabilities, fill_blocks, compute_block_checksums};
+    use std::collections::HashMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Generate a unique object key for testing (based on timestamp).
+    fn generate_test_key() -> u64 {
+        let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        duration.as_nanos() as u64
+    }
+
+    /// Get bucket name from environment or use default.
+    fn get_test_bucket() -> String {
+        std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_BUCKET")
+            .unwrap_or_else(|_| "test-bucket".to_string())
+    }
+
+    /// Create a test agent with OBJ backend.
+    fn make_g4_test_agent(name: &str) -> Result<NixlAgent> {
+        NixlAgent::new_with_backends(name, &["OBJ", "POSIX"])
+    }
+
+    /// Create a standard layout config for testing.
+    fn make_test_config(num_blocks: usize) -> LayoutConfig {
+        LayoutConfig::builder()
+            .num_blocks(num_blocks)
+            .num_layers(2)
+            .outer_dim(2)
+            .page_size(16)
+            .inner_dim(128)
+            .dtype_width_bytes(2)
+            .build()
+            .unwrap()
+    }
+
+    /// Create an ObjectStorageConfig for testing.
+    fn make_object_storage_config() -> ObjectStorageConfig {
+        ObjectStorageConfig {
+            bucket_template: get_test_bucket(),
+            endpoint_override: std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_ENDPOINT").ok(),
+            region: std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_REGION").ok(),
+        }
+    }
+
+    /// Create a pinned memory layout.
+    fn make_pinned_layout(agent: &NixlAgent, num_blocks: usize) -> Result<PhysicalLayout> {
+        let config = make_test_config(num_blocks);
+        PhysicalLayout::builder(agent.clone())
+            .with_config(config)
+            .fully_contiguous()
+            .allocate_pinned(false)
+            .build()
+    }
+
+    /// Create a TransportManager for testing.
+    fn make_transport_manager(agent: NixlAgent, worker_id: u64) -> Result<TransportManager> {
+        TransportManager::builder()
+            .capabilities(TransferCapabilities::default())
+            .worker_id(worker_id)
+            .nixl_agent(agent)
+            .cuda_device_id(0)
+            .build()
+    }
+
+    /// Fill blocks with test data and compute checksums.
+    fn fill_and_checksum(
+        layout: &PhysicalLayout,
+        block_ids: &[usize],
+    ) -> Result<HashMap<usize, crate::block_manager::v2::physical::transfer::BlockChecksum>> {
+        fill_blocks(layout, block_ids, FillPattern::Sequential)?;
+        compute_block_checksums(layout, block_ids)
+    }
+
+    // =========================================================================
+    // Basic G4 Transfer Tests
+    // =========================================================================
+
+    /// Test basic G4 offload operation.
+    ///
+    /// This test:
+    /// 1. Creates a pinned memory layout with test data
+    /// 2. Offloads blocks to object storage using execute_g4_offload
+    /// 3. Verifies the transfer completes successfully
+    #[test]
+    #[ignore] // Requires OBJ backend and object storage
+    fn test_g4_offload_basic() -> Result<()> {
+        let test_name = format!("test-g4-offload-{}", generate_test_key());
+        let agent = make_g4_test_agent(&test_name)?;
+        let config = make_object_storage_config();
+        let num_blocks = 4;
+
+        // Create transport manager
+        let transport = make_transport_manager(agent.clone(), 0)?;
+
+        // Create source layout with test data
+        let src_layout = make_pinned_layout(&agent, num_blocks)?;
+        let src_handle = transport.register_layout(src_layout.clone())?;
+
+        // Create dummy host handle (for bounce buffers - not used in pinned->object)
+        let host_layout = make_pinned_layout(&agent, num_blocks)?;
+        let host_handle = transport.register_layout(host_layout)?;
+
+        let block_ids: Vec<usize> = (0..num_blocks).collect();
+
+        // Fill with test data
+        let _checksums = fill_and_checksum(&src_layout, &block_ids)?;
+
+        // Generate unique object keys
+        let base_key = generate_test_key();
+        let object_keys: Vec<u64> = (0..num_blocks as u64).map(|i| base_key + i).collect();
+
+        // Execute offload
+        let result = transport.execute_g4_offload(
+            src_handle,
+            &block_ids,
+            &object_keys,
+            host_handle,
+            &config,
+        )?;
+
+        assert_eq!(result.transferred, num_blocks);
+        Ok(())
+    }
+
+    /// Test basic G4 onboard operation.
+    ///
+    /// This test:
+    /// 1. Offloads test data to object storage
+    /// 2. Onboards the data back to a new layout
+    /// 3. Verifies the transfer completes successfully
+    #[test]
+    #[ignore] // Requires OBJ backend and object storage
+    fn test_g4_onboard_basic() -> Result<()> {
+        let test_name = format!("test-g4-onboard-{}", generate_test_key());
+        let agent = make_g4_test_agent(&test_name)?;
+        let config = make_object_storage_config();
+        let num_blocks = 4;
+
+        // Create transport manager
+        let transport = make_transport_manager(agent.clone(), 0)?;
+
+        // Create source layout and offload first
+        let src_layout = make_pinned_layout(&agent, num_blocks)?;
+        let src_handle = transport.register_layout(src_layout.clone())?;
+
+        let host_layout = make_pinned_layout(&agent, num_blocks)?;
+        let host_handle = transport.register_layout(host_layout)?;
+
+        let block_ids: Vec<usize> = (0..num_blocks).collect();
+        let _checksums = fill_and_checksum(&src_layout, &block_ids)?;
+
+        let base_key = generate_test_key();
+        let object_keys: Vec<u64> = (0..num_blocks as u64).map(|i| base_key + i).collect();
+
+        // First offload
+        transport.execute_g4_offload(
+            src_handle,
+            &block_ids,
+            &object_keys,
+            host_handle,
+            &config,
+        )?;
+
+        // Create destination layout
+        let dst_layout = make_pinned_layout(&agent, num_blocks)?;
+        let dst_handle = transport.register_layout(dst_layout)?;
+
+        // Execute onboard
+        let result = transport.execute_g4_onboard(
+            dst_handle,
+            &block_ids,
+            &object_keys,
+            host_handle,
+            &config,
+        )?;
+
+        assert_eq!(result.transferred, num_blocks);
+        Ok(())
+    }
+
+    // =========================================================================
+    // G4 Transfer with RemoteDescriptor Tests
+    // =========================================================================
+
+    /// Test G4 transfer using RemoteDescriptor API.
+    #[test]
+    #[ignore] // Requires OBJ backend and object storage
+    fn test_g4_transfer_with_remote_descriptor() -> Result<()> {
+        let test_name = format!("test-g4-descriptor-{}", generate_test_key());
+        let agent = make_g4_test_agent(&test_name)?;
+        let config = make_object_storage_config();
+        let num_blocks = 4;
+
+        let transport = make_transport_manager(agent.clone(), 0)?;
+
+        let src_layout = make_pinned_layout(&agent, num_blocks)?;
+        let src_handle = transport.register_layout(src_layout.clone())?;
+
+        let block_ids: Vec<usize> = (0..num_blocks).collect();
+        let _checksums = fill_and_checksum(&src_layout, &block_ids)?;
+
+        let base_key = generate_test_key();
+        let object_keys: Vec<u64> = (0..num_blocks as u64).map(|i| base_key + i).collect();
+
+        // Create RemoteDescriptors
+        let remote_descriptors = RemoteDescriptor::from_keys(
+            &object_keys,
+            &config,
+            transport.worker_id() as u32,
+        );
+
+        // Execute offload using execute_g4_transfer
+        let result = transport.execute_g4_transfer(
+            G4TransferDirection::Offload,
+            src_handle,
+            &block_ids,
+            &remote_descriptors,
+        )?;
+
+        assert_eq!(result.transferred, num_blocks);
+
+        // Create destination and onboard
+        let dst_layout = make_pinned_layout(&agent, num_blocks)?;
+        let dst_handle = transport.register_layout(dst_layout)?;
+
+        let result = transport.execute_g4_transfer(
+            G4TransferDirection::Onboard,
+            dst_handle,
+            &block_ids,
+            &remote_descriptors,
+        )?;
+
+        assert_eq!(result.transferred, num_blocks);
+        Ok(())
+    }
+
+    // =========================================================================
+    // Roundtrip Tests
+    // =========================================================================
+
+    /// Test G4 roundtrip: offload → onboard with data verification.
+    ///
+    /// This is the most important test - it verifies data integrity
+    /// through a complete offload/onboard cycle.
+    #[test]
+    #[ignore] // Requires OBJ backend and object storage
+    fn test_g4_roundtrip_with_verification() -> Result<()> {
+        let test_name = format!("test-g4-roundtrip-{}", generate_test_key());
+        let agent = make_g4_test_agent(&test_name)?;
+        let config = make_object_storage_config();
+        let num_blocks = 4;
+
+        let transport = make_transport_manager(agent.clone(), 0)?;
+
+        // Create source layout with test data
+        let src_layout = make_pinned_layout(&agent, num_blocks)?;
+        let src_handle = transport.register_layout(src_layout.clone())?;
+
+        let host_layout = make_pinned_layout(&agent, num_blocks)?;
+        let host_handle = transport.register_layout(host_layout)?;
+
+        let block_ids: Vec<usize> = (0..num_blocks).collect();
+
+        // Fill and compute original checksums
+        let original_checksums = fill_and_checksum(&src_layout, &block_ids)?;
+
+        let base_key = generate_test_key();
+        let object_keys: Vec<u64> = (0..num_blocks as u64).map(|i| base_key + i).collect();
+
+        // Step 1: Offload to object storage
+        let offload_result = transport.execute_g4_offload(
+            src_handle,
+            &block_ids,
+            &object_keys,
+            host_handle,
+            &config,
+        )?;
+        assert_eq!(offload_result.transferred, num_blocks);
+
+        // Step 2: Create fresh destination and onboard
+        let dst_layout = make_pinned_layout(&agent, num_blocks)?;
+        let dst_handle = transport.register_layout(dst_layout.clone())?;
+
+        let onboard_result = transport.execute_g4_onboard(
+            dst_handle,
+            &block_ids,
+            &object_keys,
+            host_handle,
+            &config,
+        )?;
+        assert_eq!(onboard_result.transferred, num_blocks);
+
+        // Step 3: Verify checksums match
+        let final_checksums = compute_block_checksums(&dst_layout, &block_ids)?;
+
+        for block_id in &block_ids {
+            let original = original_checksums.get(block_id)
+                .unwrap_or_else(|| panic!("Missing original checksum for block {}", block_id));
+            let final_cs = final_checksums.get(block_id)
+                .unwrap_or_else(|| panic!("Missing final checksum for block {}", block_id));
+
+            assert_eq!(
+                original, final_cs,
+                "Checksum mismatch for block {}: original={}, final={}",
+                block_id, original, final_cs
+            );
+        }
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Edge Case Tests
+    // =========================================================================
+
+    /// Test G4 transfer with empty block list.
+    #[test]
+    fn test_g4_offload_empty_blocks() -> Result<()> {
+        let test_name = format!("test-g4-empty-{}", generate_test_key());
+        let agent = NixlAgent::require_backends(&test_name, &[])?;
+        let config = make_object_storage_config();
+
+        let transport = make_transport_manager(agent.clone(), 0)?;
+
+        let src_layout = make_pinned_layout(&agent, 4)?;
+        let src_handle = transport.register_layout(src_layout)?;
+
+        let host_layout = make_pinned_layout(&agent, 4)?;
+        let host_handle = transport.register_layout(host_layout)?;
+
+        // Empty block list should succeed with 0 transferred
+        let result = transport.execute_g4_offload(
+            src_handle,
+            &[],
+            &[],
+            host_handle,
+            &config,
+        )?;
+
+        assert_eq!(result.transferred, 0);
+        Ok(())
+    }
+
+    /// Test G4 transfer with mismatched block/key counts.
+    #[test]
+    fn test_g4_offload_mismatched_counts() -> Result<()> {
+        let test_name = format!("test-g4-mismatch-{}", generate_test_key());
+        let agent = NixlAgent::require_backends(&test_name, &[])?;
+        let config = make_object_storage_config();
+
+        let transport = make_transport_manager(agent.clone(), 0)?;
+
+        let src_layout = make_pinned_layout(&agent, 4)?;
+        let src_handle = transport.register_layout(src_layout)?;
+
+        let host_layout = make_pinned_layout(&agent, 4)?;
+        let host_handle = transport.register_layout(host_layout)?;
+
+        // Mismatched counts should fail
+        let result = transport.execute_g4_offload(
+            src_handle,
+            &[0, 1, 2],  // 3 blocks
+            &[100, 200], // 2 keys
+            host_handle,
+            &config,
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("!="));
+        Ok(())
+    }
+
+    /// Test RemoteDescriptor::from_keys helper.
+    #[test]
+    fn test_remote_descriptor_from_keys() {
+        let config = ObjectStorageConfig {
+            bucket_template: "bucket-{worker_id}".to_string(),
+            endpoint_override: None,
+            region: None,
+        };
+
+        let keys = vec![100u64, 200, 300];
+        let descriptors = RemoteDescriptor::from_keys(&keys, &config, 42);
+
+        assert_eq!(descriptors.len(), 3);
+        assert_eq!(descriptors[0].object_key, 100);
+        assert_eq!(descriptors[0].bucket, "bucket-42");
+        assert_eq!(descriptors[1].object_key, 200);
+        assert_eq!(descriptors[2].object_key, 300);
     }
 }

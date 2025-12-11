@@ -96,6 +96,27 @@ impl super::registered::NixlCompatible for ObjectStorage {
     }
 }
 
+// Implement nixl_sys traits for direct registration with NIXL agent
+impl nixl_sys::MemoryRegion for ObjectStorage {
+    unsafe fn as_ptr(&self) -> *const u8 {
+        std::ptr::null() // Object storage doesn't use direct memory pointers
+    }
+
+    fn size(&self) -> usize {
+        self.size
+    }
+}
+
+impl nixl_sys::NixlDescriptor for ObjectStorage {
+    fn mem_type(&self) -> nixl_sys::MemType {
+        nixl_sys::MemType::Object
+    }
+
+    fn device_id(&self) -> u64 {
+        self.key()
+    }
+}
+
 impl fmt::Debug for ObjectStorage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = f.debug_struct("ObjectStorage");
