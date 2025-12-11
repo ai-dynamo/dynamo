@@ -11,7 +11,7 @@ use crate::pipeline::network::PushWorkHandler;
 use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,7 +39,7 @@ pub struct SharedTcpServer {
     /// The address to bind to (may have port 0 for OS-assigned port)
     bind_addr: SocketAddr,
     /// The actual bound address (populated after bind_and_start, contains actual port)
-    actual_addr: std::sync::RwLock<Option<SocketAddr>>,
+    actual_addr: RwLock<Option<SocketAddr>>,
     cancellation_token: CancellationToken,
 }
 
@@ -61,7 +61,7 @@ impl SharedTcpServer {
             // address we requested to bind to.
             bind_addr,
             // actual address after free port assignment (if DYN_TCP_RPC_PORT is not specified)
-            actual_addr: std::sync::RwLock::new(None),
+            actual_addr: RwLock::new(None),
             cancellation_token,
         })
     }
@@ -86,7 +86,7 @@ impl SharedTcpServer {
         );
 
         // Store the actual bound address
-        *self.actual_addr.write().unwrap() = Some(actual_addr);
+        *self.actual_addr.write() = Some(actual_addr);
 
         // Start accepting connections in a background task
         let server = self.clone();
@@ -101,7 +101,7 @@ impl SharedTcpServer {
     ///
     /// Returns None if the server hasn't been started yet.
     pub fn actual_address(&self) -> Option<SocketAddr> {
-        *self.actual_addr.read().unwrap()
+        *self.actual_addr.read()
     }
 
     /// Internal accept loop - runs after binding
