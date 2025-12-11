@@ -83,7 +83,7 @@ pub struct NvExt {
 
     /// Extra fields to be included in the response's nvext
     /// This is a list of field names that should be populated in the response
-    /// Supported fields: "worker_id", "timing"
+    /// Supported fields: "worker_id", "timing", which has a 1:1 mapping with the NvExtResponse names
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub extra_fields: Option<Vec<String>>,
