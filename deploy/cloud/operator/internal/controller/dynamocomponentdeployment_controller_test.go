@@ -1259,6 +1259,12 @@ func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_R
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(reconciledDeployment.Spec.Replicas).NotTo(gomega.BeNil())
 	g.Expect(*reconciledDeployment.Spec.Replicas).To(gomega.Equal(int32(1)), "Deployment should have been reconciled back to 1 replica")
+
+	// Step 5: Call createOrUpdateOrDeleteDeployments again - it should not be modified
+	modified3, deployment3, err := reconciler.createOrUpdateOrDeleteDeployments(ctx, opt)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(modified3).To(gomega.BeFalse(), "Deployment should have been not modified")
+	g.Expect(deployment3).NotTo(gomega.BeNil())
 }
 
 func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
