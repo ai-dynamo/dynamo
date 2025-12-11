@@ -142,7 +142,7 @@ class VllmBaseWorker:
             vllm_config=vllm_config,
             usage_context=usage_context,
             stat_loggers=[self.stats_logger],
-            disable_log_requests=self.engine_args.disable_log_requests,
+            enable_log_requests=self.engine_args.enable_log_requests,
             disable_log_stats=self.engine_args.disable_log_stats,
         )
 

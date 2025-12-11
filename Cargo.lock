@@ -2378,6 +2378,7 @@ dependencies = [
  "num-traits",
  "openai-harmony",
  "regex",
+ "rstest 0.25.0",
  "rustpython-parser",
  "serde",
  "serde_json",
