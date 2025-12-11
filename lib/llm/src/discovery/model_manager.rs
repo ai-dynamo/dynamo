@@ -141,6 +141,7 @@ impl ModelManager {
     pub fn has_model_any(&self, model: &str) -> bool {
         self.chat_completion_engines.read().contains(model)
             || self.completion_engines.read().contains(model)
+            || self.prefill_engines.read().contains(model)
     }
 
     pub fn model_display_names(&self) -> HashSet<String> {
