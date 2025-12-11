@@ -16,7 +16,7 @@ from tests.serve.common import (
     run_serve_deployment,
 )
 from tests.serve.conftest import MULTIMODAL_IMG_PATH, MULTIMODAL_IMG_URL
-from tests.serve.lora_utils import MinioLoraConfig, load_lora_adapter
+from tests.serve.lora_utils import MinioLoraConfig
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload,
@@ -26,7 +26,7 @@ from tests.utils.payload_builder import (
     completion_payload_with_logprobs,
     metric_payload_default,
 )
-from tests.utils.payloads import ChatPayload, ToolCallingChatPayload
+from tests.utils.payloads import LoraTestChatPayload, ToolCallingChatPayload
 
 logger = logging.getLogger(__name__)
 
@@ -612,93 +612,6 @@ def test_multimodal_b64(request, runtime_services, predownload_models):
 
 # LoRA Test Directory
 lora_dir = os.path.join(vllm_dir, "launch/lora")
-
-
-class LoraTestChatPayload(ChatPayload):
-    """
-    Chat payload that loads a LoRA adapter before sending inference requests.
-
-    This payload first loads the specified LoRA adapter via the system API,
-    then sends chat completion requests using the LoRA model.
-    """
-
-    def __init__(
-        self,
-        body: dict,
-        lora_name: str,
-        s3_uri: str,
-        system_port: int = 8081,
-        repeat_count: int = 1,
-        expected_response: Optional[list] = None,
-        expected_log: Optional[list] = None,
-        timeout: int = 60,
-    ):
-        super().__init__(
-            body=body,
-            repeat_count=repeat_count,
-            expected_response=expected_response or [],
-            expected_log=expected_log or [],
-            timeout=timeout,
-        )
-        self.system_port = system_port
-        self.lora_name = lora_name
-        self.s3_uri = s3_uri
-        self._lora_loaded = False
-
-    def _ensure_lora_loaded(self) -> None:
-        """Ensure the LoRA adapter is loaded before making inference requests"""
-        if not self._lora_loaded:
-            import time
-
-            import requests
-
-            load_lora_adapter(
-                system_port=self.system_port,
-                lora_name=self.lora_name,
-                s3_uri=self.s3_uri,
-                timeout=self.timeout,
-            )
-
-            # Wait for the LoRA model to appear in /v1/models
-            models_url = f"http://{self.host}:{self.port}/v1/models"
-            start_time = time.time()
-            max_wait = 60  # 1 minute timeout
-
-            logger.info(
-                f"Waiting for LoRA model '{self.lora_name}' to appear in /v1/models..."
-            )
-
-            while time.time() - start_time < max_wait:
-                try:
-                    response = requests.get(models_url, timeout=5)
-                    if response.status_code == 200:
-                        data = response.json()
-                        models = data.get("data", [])
-                        model_ids = [m.get("id", "") for m in models]
-
-                        if self.lora_name in model_ids:
-                            logger.info(
-                                f"LoRA model '{self.lora_name}' is now available"
-                            )
-                            self._lora_loaded = True
-                            return
-
-                        logger.debug(
-                            f"Available models: {model_ids}, waiting for '{self.lora_name}'..."
-                        )
-                except requests.RequestException as e:
-                    logger.debug(f"Error checking /v1/models: {e}")
-
-                time.sleep(1)
-
-            raise RuntimeError(
-                f"Timeout: LoRA model '{self.lora_name}' did not appear in /v1/models within {max_wait}s"
-            )
-
-    def url(self) -> str:
-        """Load LoRA before first request, then return URL"""
-        self._ensure_lora_loaded()
-        return super().url()
 
 
 def lora_chat_payload(
