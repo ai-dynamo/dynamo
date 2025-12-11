@@ -256,6 +256,7 @@ class EtcdServer(ManagedProcess):
 
         self.port = port
         self.peer_port = peer_port  # Store for cleanup
+        self.use_random_port = use_random_port  # Track if we allocated the port
         port_string = str(port)
         etcd_env = os.environ.copy()
         etcd_env["ALLOW_NONE_AUTHENTICATION"] = "yes"
@@ -303,13 +304,12 @@ class EtcdServer(ManagedProcess):
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Release allocated ports when server exits."""
         try:
-            # self.port is always set in __init__ (either from param or allocated)
-            # self.peer_port may be None (only set for dynamic port allocation)
-            ports_to_release = [self.port]
-            if self.peer_port is not None:
-                ports_to_release.append(self.peer_port)
-
-            deallocate_ports(ports_to_release)
+            # Only deallocate ports that were dynamically allocated (not default ports)
+            if self.use_random_port:
+                ports_to_release = [self.port]
+                if self.peer_port is not None:
+                    ports_to_release.append(self.peer_port)
+                deallocate_ports(ports_to_release)
         except Exception as e:
             logging.warning(f"Failed to release EtcdServer port: {e}")
 
@@ -325,6 +325,7 @@ class NatsServer(ManagedProcess):
             port = allocate_port(4223)
 
         self.port = port
+        self.use_random_port = use_random_port  # Track if we allocated the port
         data_dir = tempfile.mkdtemp(prefix="nats_")
         command = [
             "nats-server",
@@ -348,8 +349,9 @@ class NatsServer(ManagedProcess):
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Release allocated port when server exits."""
         try:
-            # self.port is always set in __init__ (either from param or allocated)
-            deallocate_port(self.port)
+            # Only deallocate ports that were dynamically allocated (not default ports)
+            if self.use_random_port:
+                deallocate_port(self.port)
         except Exception as e:
             logging.warning(f"Failed to release NatsServer port: {e}")
 
