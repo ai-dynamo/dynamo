@@ -105,7 +105,27 @@ impl SharedHttpServer {
                 .system_health
                 .lock()
                 .set_endpoint_health_status(endpoint_name, HealthStatus::NotReady);
-            tracing::debug!("Unregistered endpoint handler for subject: {}", subject);
+            tracing::debug!(
+                endpoint_name = %endpoint_name,
+                subject = %subject,
+                "Unregistered HTTP endpoint handler"
+            );
+
+            let inflight_count = handler.inflight.load(Ordering::SeqCst);
+            if inflight_count > 0 {
+                tracing::info!(
+                    endpoint_name = %endpoint_name,
+                    inflight_count = inflight_count,
+                    "Waiting for inflight HTTP requests to complete"
+                );
+                while handler.inflight.load(Ordering::SeqCst) > 0 {
+                    handler.notify.notified().await;
+                }
+                tracing::info!(
+                    endpoint_name = %endpoint_name,
+                    "All inflight HTTP requests completed"
+                );
+            }
         }
     }
 
