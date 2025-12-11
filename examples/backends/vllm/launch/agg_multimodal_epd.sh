@@ -79,7 +79,7 @@ python -m dynamo.frontend &
 EXTRA_ARGS=""
 if [[ "$SINGLE_GPU" == "true" ]]; then
     # Single GPU mode: reduce memory utilization to allow both workers to fit
-    EXTRA_ARGS="--gpu-memory-utilization 0.45 --max-model-len 2048"
+    EXTRA_ARGS="--gpu-memory-utilization 0.3 --max-model-len 1024"
 else
     # Multi-GPU mode: standard memory settings
     EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
