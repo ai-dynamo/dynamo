@@ -1,6 +1,6 @@
 # Grafana Dashboard Metrics Documentation
 
-This document explains where each panel in the `grafana-disagg-dashboard.json` gets its data and how it's displayed.
+This document explains where each panel in the `disagg-dashboard.json` gets its data and how it's displayed.
 
 ## Dashboard Organization
 
