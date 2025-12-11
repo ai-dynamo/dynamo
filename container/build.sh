@@ -125,6 +125,8 @@ NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 NIXL_GDRCOPY_REF=v2.5.1
 
 NO_CACHE=""
+PUSH=""
+LOAD=""
 
 # KVBM (KV Cache Block Manager) - default disabled, enabled automatically for VLLM/TRTLLM
 # or can be explicitly enabled via --enable-kvbm flag
@@ -275,6 +277,12 @@ get_options() {
         --no-cache)
             NO_CACHE=" --no-cache"
             ;;
+        --push)
+            PUSH="--push"
+            ;;
+        --load)
+            LOAD="--load"
+            ;;
         --cache-from)
             if [ "$2" ]; then
                 CACHE_FROM+="--cache-from $2 "
@@ -408,6 +416,13 @@ get_options() {
     fi
 
     if [ -n "$PLATFORM" ]; then
+        # Check if multi-platform build (contains comma)
+        if [[ "$PLATFORM" == *","* ]]; then
+            MULTI_PLATFORM=true
+            if [ -n "$LOAD" ]; then
+                error "ERROR: --load cannot be used with multi-platform builds. Docker cannot load multi-arch images locally." "Remove --load to build without loading, or use --push to push to a registry."
+            fi
+        fi
         PLATFORM="--platform ${PLATFORM}"
     fi
 
@@ -438,9 +453,17 @@ show_image_options() {
     if [[ $FRAMEWORK == "TRTLLM" ]]; then
         echo "   Tensorrtllm_Pip_Wheel: '${PRINT_TRTLLM_WHEEL_FILE}'"
     fi
+    echo "   Platform: '${PLATFORM}'"
     echo "   Build Context: '${BUILD_CONTEXT}'"
     echo "   Build Arguments: '${BUILD_ARGS}'"
     echo "   Framework: '${FRAMEWORK}'"
+    if [ -n "$PUSH" ]; then
+        echo "   Output: Push to registry"
+    elif [ -n "$LOAD" ]; then
+        echo "   Output: Load locally"
+    else
+        echo "   Output: Build only (cached)"
+    fi
     if [ "$USE_SCCACHE" = true ]; then
         echo "   sccache: Enabled"
         echo "   sccache Bucket: '${SCCACHE_BUCKET}'"
@@ -457,7 +480,9 @@ show_help() {
     echo "usage: build.sh"
     echo "  [--base-image base image]"
     echo "  [--base-image-tag base image tag]"
-    echo "  [--platform platform for docker build]"
+    echo "  [--platform platform(s) for docker build (e.g., linux/amd64 or linux/amd64,linux/arm64)]"
+    echo "  [--load load image into local docker (single-platform only)]"
+    echo "  [--push push image to registry]"
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
     echo "  [--tensorrtllm-pip-wheel-dir path to tensorrtllm pip wheel directory]"
     echo "  [--tensorrtllm-commit tensorrtllm commit/tag/branch to use for building the trtllm wheel if the wheel is not provided]"
@@ -892,9 +917,17 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
     SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
 
     # Use BuildKit for enhanced metadata
+    # Determine output mode: --push for registry, --load for local (single-platform only)
+    OUTPUT_MODE=""
+    if [ -n "$PUSH" ]; then
+        OUTPUT_MODE="$PUSH"
+    elif [ -n "$LOAD" ]; then
+        OUTPUT_MODE="$LOAD"
+    fi
+
     if [ -z "$RUN_PREFIX" ]; then
         if docker buildx version &>/dev/null; then
-            docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+            docker buildx build --progress=plain $OUTPUT_MODE -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
             BUILD_EXIT_CODE=${PIPESTATUS[0]}
         else
             DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
