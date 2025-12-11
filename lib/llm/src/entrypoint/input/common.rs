@@ -237,7 +237,10 @@ where
     };
 
     // Get threshold value and wrap monitor for PushRouter
-    let threshold_value = worker_monitor.as_ref().map(|m| m.threshold());
+    // Note: PushRouter uses active_decode_blocks_threshold for its internal logic
+    let threshold_value = worker_monitor
+        .as_ref()
+        .map(|m| m.active_decode_blocks_threshold());
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 

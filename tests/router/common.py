@@ -38,7 +38,8 @@ class KVRouterProcess(ManagedProcess):
         namespace: str,
         store_backend: str = "etcd",
         enforce_disagg: bool = False,
-        busy_threshold: float | None = None,
+        blocks_threshold: float | None = None,
+        tokens_threshold: float | None = None,
         request_plane: str = "nats",
     ):
         command = [
@@ -60,8 +61,11 @@ class KVRouterProcess(ManagedProcess):
         if enforce_disagg:
             command.append("--enforce-disagg")
 
-        if busy_threshold is not None:
-            command.extend(["--busy-threshold", str(busy_threshold)])
+        if blocks_threshold is not None:
+            command.extend(["--active-decode-blocks-threshold", str(blocks_threshold)])
+
+        if tokens_threshold is not None:
+            command.extend(["--active-prefill-tokens-threshold", str(tokens_threshold)])
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
@@ -1156,7 +1160,7 @@ def _test_router_overload_503(
     request,
     frontend_port: int,
     test_payload: dict,
-    busy_threshold: float = 0.2,
+    blocks_threshold: float = 0.2,
 ):
     """Test that KV router returns 503 when all workers are busy.
 
@@ -1169,7 +1173,7 @@ def _test_router_overload_503(
         request: Pytest request fixture for managing resources
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload to send to /v1/chat/completions
-        busy_threshold: Busy threshold for the router (default 0.2)
+        blocks_threshold: Active decode blocks threshold for the router (default 0.2)
 
     Raises:
         AssertionError: If 503 response is not received when expected
@@ -1185,8 +1189,8 @@ def _test_router_overload_503(
             "python",
             "-m",
             "dynamo.frontend",
-            "--busy-threshold",
-            str(busy_threshold),
+            "--active-decode-blocks-threshold",
+            str(blocks_threshold),
             "--kv-cache-block-size",
             str(block_size),
             "--router-mode",
@@ -2038,11 +2042,12 @@ def _test_busy_threshold_endpoint(
     Raises:
         AssertionError: If endpoint responses are incorrect
     """
-    # Initial threshold - we need to start with one so the monitor is created
-    initial_threshold = 0.9
+    # Initial thresholds - we need to start with these so the monitor is created
+    initial_active_decode_blocks_threshold = 0.9
+    initial_active_prefill_tokens_threshold = 1000  # Literal token count threshold
 
     try:
-        # Start KV router frontend with initial busy_threshold to create monitor
+        # Start KV router frontend with initial thresholds to create monitor
         logger.info(f"Starting KV router frontend on port {frontend_port}")
         kv_router = KVRouterProcess(
             request,
@@ -2050,7 +2055,8 @@ def _test_busy_threshold_endpoint(
             frontend_port,
             engine_workers.namespace,
             store_backend,
-            busy_threshold=initial_threshold,
+            blocks_threshold=initial_active_decode_blocks_threshold,
+            tokens_threshold=initial_active_prefill_tokens_threshold,
             request_plane=request_plane,
         )
         kv_router.__enter__()
@@ -2073,7 +2079,6 @@ def _test_busy_threshold_endpoint(
         async def test_busy_threshold_api():
             async with aiohttp.ClientSession() as session:
                 # Test 1: GET /busy_threshold - list all thresholds
-                # Should have the initial threshold since we started with --busy-threshold
                 logger.info("Testing GET /busy_threshold (list all)")
                 async with session.get(busy_threshold_url) as response:
                     assert (
@@ -2083,14 +2088,11 @@ def _test_busy_threshold_endpoint(
                     assert (
                         "thresholds" in data
                     ), f"Expected 'thresholds' key in response: {data}"
-                    thresholds = data.get("thresholds", [])
-                    # Should have at least the model with initial_threshold
                     logger.info(f"GET /busy_threshold response: {data}")
 
-                # Test 2: POST /busy_threshold with model only (get threshold)
-                # Should return the initial threshold since we started with --busy-threshold
+                # Test 2: POST /busy_threshold with model only (get thresholds)
                 logger.info(
-                    f"Testing POST /busy_threshold to get threshold for model '{model_name}'"
+                    f"Testing POST /busy_threshold to get thresholds for model '{model_name}'"
                 )
                 async with session.post(
                     busy_threshold_url,
@@ -2101,99 +2103,173 @@ def _test_busy_threshold_endpoint(
                     ), f"POST /busy_threshold (get) failed with status {response.status}"
                     data = await response.json()
                     assert (
-                        data.get("threshold") == initial_threshold
-                    ), f"Expected initial threshold={initial_threshold}: {data}"
+                        data.get("active_decode_blocks_threshold")
+                        == initial_active_decode_blocks_threshold
+                    ), f"Expected initial active_decode_blocks_threshold={initial_active_decode_blocks_threshold}: {data}"
+                    assert (
+                        data.get("active_prefill_tokens_threshold")
+                        == initial_active_prefill_tokens_threshold
+                    ), f"Expected initial active_prefill_tokens_threshold={initial_active_prefill_tokens_threshold}: {data}"
                     logger.info(
                         f"POST /busy_threshold (get) response: status={response.status}, data={data}"
                     )
 
-                # Test 3: POST /busy_threshold to set a threshold
-                test_threshold = 0.75
+                # Test 3: POST /busy_threshold to set active_decode_blocks_threshold only
+                test_active_decode_blocks_threshold = 0.75
                 logger.info(
-                    f"Testing POST /busy_threshold to set threshold={test_threshold}"
+                    f"Testing POST /busy_threshold to set active_decode_blocks_threshold={test_active_decode_blocks_threshold}"
                 )
                 async with session.post(
                     busy_threshold_url,
-                    json={"model": model_name, "threshold": test_threshold},
+                    json={
+                        "model": model_name,
+                        "active_decode_blocks_threshold": test_active_decode_blocks_threshold,
+                    },
                 ) as response:
                     assert (
                         response.status == 200
-                    ), f"POST /busy_threshold (set) failed with status {response.status}"
+                    ), f"POST /busy_threshold (set blocks) failed with status {response.status}"
                     data = await response.json()
                     assert (
                         data.get("model") == model_name
                     ), f"Expected model={model_name}: {data}"
                     assert (
-                        data.get("threshold") == test_threshold
-                    ), f"Expected threshold={test_threshold}: {data}"
-                    logger.info(f"POST /busy_threshold (set) response: {data}")
+                        data.get("active_decode_blocks_threshold")
+                        == test_active_decode_blocks_threshold
+                    ), f"Expected active_decode_blocks_threshold={test_active_decode_blocks_threshold}: {data}"
+                    logger.info(f"POST /busy_threshold (set blocks) response: {data}")
 
-                # Test 4: POST /busy_threshold to get the threshold we just set
-                logger.info("Testing POST /busy_threshold to verify threshold was set")
-                async with session.post(
-                    busy_threshold_url,
-                    json={"model": model_name},
-                ) as response:
-                    assert (
-                        response.status == 200
-                    ), f"POST /busy_threshold (get after set) failed with status {response.status}"
-                    data = await response.json()
-                    assert (
-                        data.get("threshold") == test_threshold
-                    ), f"Expected threshold={test_threshold}: {data}"
-                    logger.info(
-                        f"POST /busy_threshold (get after set) response: {data}"
-                    )
-
-                # Test 5: POST /busy_threshold to update the threshold
-                new_threshold = 0.5
+                # Test 4: POST /busy_threshold to set active_prefill_tokens_threshold only
+                test_active_prefill_tokens_threshold = (
+                    2000  # Literal token count threshold
+                )
                 logger.info(
-                    f"Testing POST /busy_threshold to update threshold={new_threshold}"
+                    f"Testing POST /busy_threshold to set active_prefill_tokens_threshold={test_active_prefill_tokens_threshold}"
                 )
                 async with session.post(
                     busy_threshold_url,
-                    json={"model": model_name, "threshold": new_threshold},
+                    json={
+                        "model": model_name,
+                        "active_prefill_tokens_threshold": test_active_prefill_tokens_threshold,
+                    },
                 ) as response:
                     assert (
                         response.status == 200
-                    ), f"POST /busy_threshold (update) failed with status {response.status}"
+                    ), f"POST /busy_threshold (set tokens) failed with status {response.status}"
                     data = await response.json()
                     assert (
-                        data.get("threshold") == new_threshold
-                    ), f"Expected threshold={new_threshold}: {data}"
-                    logger.info(f"POST /busy_threshold (update) response: {data}")
+                        data.get("active_prefill_tokens_threshold")
+                        == test_active_prefill_tokens_threshold
+                    ), f"Expected active_prefill_tokens_threshold={test_active_prefill_tokens_threshold}: {data}"
+                    logger.info(f"POST /busy_threshold (set tokens) response: {data}")
 
-                # Test 6: GET /busy_threshold - verify threshold appears in list
-                logger.info("Testing GET /busy_threshold to verify threshold in list")
+                # Test 5: POST /busy_threshold to set both thresholds
+                new_active_decode_blocks_threshold = 0.5
+                new_active_prefill_tokens_threshold = (
+                    1200  # Literal token count threshold
+                )
+                logger.info(
+                    f"Testing POST /busy_threshold to set both thresholds: "
+                    f"active_decode_blocks={new_active_decode_blocks_threshold}, active_prefill_tokens={new_active_prefill_tokens_threshold}"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={
+                        "model": model_name,
+                        "active_decode_blocks_threshold": new_active_decode_blocks_threshold,
+                        "active_prefill_tokens_threshold": new_active_prefill_tokens_threshold,
+                    },
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold (set both) failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("active_decode_blocks_threshold")
+                        == new_active_decode_blocks_threshold
+                    ), f"Expected active_decode_blocks_threshold={new_active_decode_blocks_threshold}: {data}"
+                    assert (
+                        data.get("active_prefill_tokens_threshold")
+                        == new_active_prefill_tokens_threshold
+                    ), f"Expected active_prefill_tokens_threshold={new_active_prefill_tokens_threshold}: {data}"
+                    logger.info(f"POST /busy_threshold (set both) response: {data}")
+
+                # Test 6: GET /busy_threshold - verify thresholds appear in list
+                logger.info("Testing GET /busy_threshold to verify thresholds in list")
                 async with session.get(busy_threshold_url) as response:
                     assert (
                         response.status == 200
                     ), f"GET /busy_threshold failed with status {response.status}"
                     data = await response.json()
                     thresholds = data.get("thresholds", [])
-                    # thresholds is an array of {model, threshold} objects
-                    model_thresholds = {t["model"]: t["threshold"] for t in thresholds}
+                    model_entry = next(
+                        (t for t in thresholds if t["model"] == model_name), None
+                    )
                     assert (
-                        model_name in model_thresholds
+                        model_entry is not None
                     ), f"Expected model '{model_name}' in thresholds: {data}"
                     assert (
-                        model_thresholds[model_name] == new_threshold
-                    ), f"Expected threshold={new_threshold} for model '{model_name}': {data}"
+                        model_entry.get("active_decode_blocks_threshold")
+                        == new_active_decode_blocks_threshold
+                    ), f"Expected active_decode_blocks_threshold={new_active_decode_blocks_threshold}: {data}"
+                    assert (
+                        model_entry.get("active_prefill_tokens_threshold")
+                        == new_active_prefill_tokens_threshold
+                    ), f"Expected active_prefill_tokens_threshold={new_active_prefill_tokens_threshold}: {data}"
                     logger.info(f"GET /busy_threshold (after set) response: {data}")
 
-                # Test 7: Invalid threshold value (should fail validation)
+                # Test 7: Invalid active_decode_blocks_threshold value (should fail validation)
                 logger.info(
-                    "Testing POST /busy_threshold with invalid threshold (>1.0)"
+                    "Testing POST /busy_threshold with invalid active_decode_blocks_threshold (>1.0)"
                 )
                 async with session.post(
                     busy_threshold_url,
-                    json={"model": model_name, "threshold": 1.5},
+                    json={"model": model_name, "active_decode_blocks_threshold": 1.5},
                 ) as response:
                     assert (
                         response.status == 400
-                    ), f"Expected 400 for invalid threshold, got {response.status}"
+                    ), f"Expected 400 for invalid active_decode_blocks_threshold, got {response.status}"
                     data = await response.json()
-                    logger.info(f"POST /busy_threshold (invalid) response: {data}")
+                    logger.info(
+                        f"POST /busy_threshold (invalid blocks) response: {data}"
+                    )
+
+                # Test 8: active_prefill_tokens_threshold accepts large values (should be valid)
+                logger.info(
+                    "Testing POST /busy_threshold with large active_prefill_tokens_threshold (valid)"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={"model": model_name, "active_prefill_tokens_threshold": 5000},
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"Expected 200 for large active_prefill_tokens_threshold, got {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("active_prefill_tokens_threshold") == 5000
+                    ), f"Expected active_prefill_tokens_threshold=5000: {data}"
+                    logger.info(
+                        f"POST /busy_threshold (large tokens threshold) response: {data}"
+                    )
+
+                # Test 9: Invalid active_prefill_tokens_threshold value (should fail validation for < 0)
+                # Note: Returns 422 because -1.0 can't be deserialized into u64 (type validation)
+                # vs Test 7 which returns 400 because 1.5 is a valid f64 but fails range validation
+                logger.info(
+                    "Testing POST /busy_threshold with invalid active_prefill_tokens_threshold (< 0)"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={"model": model_name, "active_prefill_tokens_threshold": -1.0},
+                ) as response:
+                    assert (
+                        response.status == 422
+                    ), f"Expected 422 for negative active_prefill_tokens_threshold, got {response.status}"
+                    data = await response.json()
+                    logger.info(
+                        f"POST /busy_threshold (invalid tokens) response: {data}"
+                    )
 
                 logger.info("All busy_threshold endpoint tests passed!")
 
