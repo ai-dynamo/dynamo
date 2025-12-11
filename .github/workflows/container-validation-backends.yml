@@ -120,7 +120,7 @@ jobs:
   cleanup-cluster-builder:
     name: Cleanup Builder
     runs-on: builder-cpu-amd-runner
-    needs: [operator, vllm]
+    needs: [operator, vllm, sglang, trtllm]
     if: always()
     steps:
     - name: Checkout code

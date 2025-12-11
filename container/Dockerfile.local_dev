@@ -59,7 +59,9 @@ ENV USERNAME=dynamo
 ARG USER_UID
 ARG USER_GID
 ARG WORKSPACE_DIR=/workspace
-ARG ARCH=amd64
+# Architecture for NVIDIA devtools repository (amd64 or arm64)
+ARG TARGETARCH=amd64
+ARG ARCH=${TARGETARCH}
 
 # Add NVIDIA devtools repository and install development tools
 RUN wget -qO - https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH}/nvidia.pub | gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \

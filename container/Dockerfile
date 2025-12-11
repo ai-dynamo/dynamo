@@ -29,17 +29,20 @@ ARG ENABLE_KVBM
 ARG ENABLE_MEDIA_NIXL
 ARG CARGO_BUILD_JOBS
 
-# Define general architecture ARGs for supporting both x86 and aarch64 builds.
-#   ARCH: Used for package suffixes (e.g., amd64, arm64)
-#   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
+# Architecture configuration for multi-arch builds
+# Docker buildx sets TARGETARCH automatically ("amd64" or "arm64") during builds.
+# ARCH_ALT maps to Rust/manylinux naming: amd64->x86_64, arm64->aarch64
 #
-# Default values are for x86/amd64:
-#   --build-arg ARCH=amd64 --build-arg ARCH_ALT=x86_64
+# For single-platform builds, build.sh passes both ARCH and ARCH_ALT explicitly.
+# For multi-platform builds with buildx --platform linux/amd64,linux/arm64:
+#   - TARGETARCH is set automatically per-platform
+#   - ARCH_ALT must still be passed or will use default (x86_64)
 #
-# For arm64/aarch64, build with:
-#   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
-#TODO OPS-592: Leverage uname -m to determine ARCH instead of passing it as an arg
-ARG ARCH=amd64
+# build.sh handles this by:
+#   - Single-platform: passes --build-arg ARCH=X --build-arg ARCH_ALT=Y
+#   - Multi-platform: relies on TARGETARCH, but currently requires separate builds per arch
+ARG TARGETARCH=amd64
+ARG ARCH=${TARGETARCH}
 ARG ARCH_ALT=x86_64
 
 # SCCACHE configuration
@@ -88,11 +91,10 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:$PATH \
     RUST_VERSION=1.90.0
 
-# Define Rust target based on ARCH_ALT ARG
-ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
-
-# Install Rust
-RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+# Install Rust - compute architecture at runtime for multi-arch support
+RUN ARCH_ALT_COMPUTED="${ARCH_ALT:-$(case $ARCH in amd64) echo x86_64;; arm64) echo aarch64;; *) echo $ARCH;; esac)}" && \
+    RUSTARCH="${ARCH_ALT_COMPUTED}-unknown-linux-gnu" && \
+    wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
     rm rustup-init && \
@@ -103,13 +105,16 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
 ##### Wheel Build Image ##########
 ##################################
 
-# Redeclare ARCH_ALT ARG so it's available for interpolation in the FROM instruction
-ARG ARCH_ALT
-
-FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
+# Multi-arch wheel builder selection
+# Use TARGETARCH to select the correct manylinux image for multi-platform builds
+ARG TARGETARCH
+FROM quay.io/pypa/manylinux_2_28_x86_64 AS manylinux_amd64
+FROM quay.io/pypa/manylinux_2_28_aarch64 AS manylinux_arm64
+FROM manylinux_${TARGETARCH} AS wheel_builder
 
 # Redeclare ARGs for this stage
-ARG ARCH
+ARG TARGETARCH
+ARG ARCH=${TARGETARCH}
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
 
@@ -156,12 +161,14 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         numactl-devel
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
+# Compute ARCH_ALT from ARCH if not provided (for multi-arch builds)
 RUN set -eux; \
+    ARCH_ALT_COMPUTED="${ARCH_ALT:-$(case $ARCH in amd64) echo x86_64;; arm64) echo aarch64;; *) echo $ARCH;; esac)}"; \
     PROTOC_VERSION=25.3; \
-    case "${ARCH_ALT}" in \
+    case "${ARCH_ALT_COMPUTED}" in \
       x86_64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-x86_64.zip" ;; \
       aarch64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-aarch_64.zip" ;; \
-      *) echo "Unsupported architecture: ${ARCH_ALT}" >&2; exit 1 ;; \
+      *) echo "Unsupported architecture: ${ARCH_ALT_COMPUTED}" >&2; exit 1 ;; \
     esac; \
     wget --tries=3 --waitretry=5 -O /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${PROTOC_ZIP}"; \
     rm -f /usr/local/bin/protoc /usr/bin/protoc; \
@@ -189,11 +196,13 @@ ARG NIXL_REF
 ARG NIXL_GDRCOPY_REF
 
 # Build and install gdrcopy
-RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git && \
+# Compute ARCH_ALT from ARCH if not provided (for multi-arch builds)
+RUN ARCH_ALT_COMPUTED="${ARCH_ALT:-$(case $ARCH in amd64) echo x86_64;; arm64) echo aarch64;; *) echo $ARCH;; esac)}" && \
+    git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git && \
     cd gdrcopy/packages && \
     CUDA=/usr/local/cuda ./build-rpm-packages.sh && \
     rpm -Uvh gdrcopy-kmod-*.el8.noarch.rpm && \
-    rpm -Uvh gdrcopy-*.el8.${ARCH_ALT}.rpm && \
+    rpm -Uvh gdrcopy-*.el8.${ARCH_ALT_COMPUTED}.rpm && \
     rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
 
 # Install SCCACHE if requested
@@ -291,6 +300,7 @@ COPY components/ /opt/dynamo/components/
 ARG ENABLE_KVBM
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    ARCH_ALT_COMPUTED="${ARCH_ALT:-$(case $ARCH in amd64) echo x86_64;; arm64) echo aarch64;; *) echo $ARCH;; esac)}" && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     export CC=$(which gcc) && \
     export CXX=$(which g++) && \
@@ -310,7 +320,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             --exclude libnixl.so \
             --exclude libnixl_build.so \
             --exclude libnixl_common.so \
-            --plat manylinux_2_28_${ARCH_ALT} \
+            --plat manylinux_2_28_${ARCH_ALT_COMPUTED} \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \
     fi && \
@@ -322,6 +332,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 
 FROM base AS runtime
 
+ARG TARGETARCH
+ARG ARCH=${TARGETARCH}
 ARG ARCH_ALT
 
 # Create dynamo user with group 0 for OpenShift compatibility
@@ -332,16 +344,26 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && chown -R dynamo: /opt/dynamo /home/dynamo /workspace \
     && chmod -R g+w /opt/dynamo /home/dynamo/.cache /workspace
 
-# NIXL environment variables
+# NIXL environment variables - use uname -m for architecture detection at runtime
+# This enables multi-arch builds where ARCH_ALT may not be explicitly passed
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins \
     CARGO_TARGET_DIR=/opt/dynamo/target
 
-# Copy ucx and nixl libs
+# Copy ucx and nixl libs (to lib64, then symlink to arch-specific path)
 COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
 COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
-COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
+COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. /opt/nvidia/nvda_nixl/lib64/
+
+# Set up NIXL library paths based on detected architecture
+RUN ARCH_ALT_DETECTED="$(uname -m)" && \
+    mkdir -p ${NIXL_PREFIX}/lib/${ARCH_ALT_DETECTED}-linux-gnu && \
+    cp -a /opt/nvidia/nvda_nixl/lib64/. ${NIXL_PREFIX}/lib/${ARCH_ALT_DETECTED}-linux-gnu/ && \
+    echo "NIXL_LIB_DIR=${NIXL_PREFIX}/lib/${ARCH_ALT_DETECTED}-linux-gnu" >> /etc/environment && \
+    echo "NIXL_PLUGIN_DIR=${NIXL_PREFIX}/lib/${ARCH_ALT_DETECTED}-linux-gnu/plugins" >> /etc/environment
+
+# Set NIXL paths using uname -m for runtime detection
+ENV NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 

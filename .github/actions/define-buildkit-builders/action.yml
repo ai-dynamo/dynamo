@@ -35,6 +35,10 @@ runs:
         replicas: ${{ inputs.replicas }}
         nodeselector: 'eks.amazonaws.com/nodegroup=cpu-amd-m5-2xlarge,kubernetes.io/arch=amd64'
         tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
+        ephemeral_storage: '30Gi'
+        requests_cpu: '5'
+        requests_memory: '16Gi'
+        limits_memory: '24Gi'
 
     - name: Define amd64 GPU builder
       if: inputs.linux_amd64_gpu == 'true'
@@ -46,6 +50,10 @@ runs:
         replicas: ${{ inputs.replicas }}
         nodeselector: 'eks.amazonaws.com/nodegroup=gpu-l40-g6-4xlarge,kubernetes.io/arch=amd64'
         tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
+        ephemeral_storage: '220Gi'
+        requests_cpu: '8'
+        requests_memory: '48Gi'
+        limits_memory: '52Gi'
 
     - name: Define arm64 builder
       if: inputs.linux_arm64 == 'true'
@@ -57,5 +65,8 @@ runs:
         replicas: ${{ inputs.replicas }}
         nodeselector: 'eks.amazonaws.com/nodegroup=cpu-arm-r8g-4xlarge,kubernetes.io/arch=arm64'
         tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
-
+        ephemeral_storage: '140Gi'
+        requests_cpu: '8'
+        requests_memory: '48Gi'
+        limits_memory: '52Gi'
 

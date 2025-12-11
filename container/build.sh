@@ -403,6 +403,8 @@ get_options() {
             if [ -n "$LOAD" ]; then
                 error "ERROR: --load cannot be used with multi-platform builds. Docker cannot load multi-arch images locally." "Remove --load to build without loading, or use --push to push to a registry."
             fi
+            echo "INFO: Multi-platform build detected. Docker TARGETARCH will be used for architecture detection."
+            echo "      Note: For manylinux wheel builds, ARCH_ALT is derived from TARGETARCH automatically."
         fi
         PLATFORM="--platform ${PLATFORM}"
     fi
@@ -506,11 +508,18 @@ error() {
 
 get_options "$@"
 
-# Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64
+# For multi-platform builds, don't pass ARCH/ARCH_ALT - Docker buildx sets TARGETARCH automatically
+# For single-platform builds, set ARCH/ARCH_ALT explicitly
 ARCH="amd64"
-if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
-    ARCH="arm64"
-    BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
+if [[ "${MULTI_PLATFORM:-false}" != "true" ]]; then
+    if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
+        ARCH="arm64"
+        BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
+    else
+        BUILD_ARGS+=" --build-arg ARCH=amd64 --build-arg ARCH_ALT=x86_64 "
+    fi
+else
+    echo "INFO: Multi-platform build detected - using Docker TARGETARCH for architecture detection"
 fi
 
 # Set the commit sha in the container so we can inspect what build this relates to
