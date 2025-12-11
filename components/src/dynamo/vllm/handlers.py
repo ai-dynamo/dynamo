@@ -758,7 +758,6 @@ class BaseWorkerHandler(ABC):
                 logger.debug(
                     f"Starting token generation for request {request_id} (no LoRA)"
                 )
-
             gen = self.engine_client.generate(
                 prompt,
                 sampling_params,
@@ -947,12 +946,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     async def _generate_text_mode(self, request, context, request_id):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""
         # Get text input using InputParamManager
-        input_text = self.input_param_manager.get_input_param(
+        input_tokens = self.input_param_manager.get_input_param(
             request, use_tokenizer=True
         )
 
         # Build prompt for vLLM
-        prompt = TextPrompt(prompt=input_text)
+        prompt = TokensPrompt(prompt_token_ids=input_tokens)
 
         # Build sampling params from OpenAI-style request
         sampling_params = build_sampling_params_openai(
