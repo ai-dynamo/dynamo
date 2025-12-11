@@ -1,9 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Background processes for the KV Router including event consumption and snapshot uploads.
-
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashMap, collections::HashSet, time::Duration};
 
 use anyhow::Result;
 use dynamo_runtime::{
@@ -24,6 +22,7 @@ use crate::kv_router::{
     indexer::{DumpRequest, GetWorkersRequest, RouterEvent},
     protocols::WorkerId,
     router_discovery_query,
+    worker_query::WorkerQueryClient,
 };
 
 /// Delay between snapshot reads to verify stability
@@ -32,6 +31,163 @@ const MAX_SNAPSHOT_STABILITY_ATTEMPTS: usize = 10;
 
 const CHECK_INTERVAL_BASE: Duration = Duration::from_secs(1);
 const CHECK_INTERVAL_JITTER_MS: i64 = 100;
+
+// ============================================================================
+// Local KvIndexer-based Recovery
+// ============================================================================
+
+/// Recover missed events from all workers with local indexers.
+///
+/// This function should be called on router startup to catch up on any events
+/// that were missed while the router was offline.
+///
+/// # Arguments
+///
+/// * `worker_query_client` - Client for querying worker local indexers
+/// * `last_received_event_ids` - Map of worker ID to last received event ID
+/// * `worker_ids` - List of worker IDs to recover from
+/// * `event_tx` - Channel to send recovered events to the indexer
+///
+/// # Returns
+///
+/// Total number of events recovered across all workers
+pub async fn recover_from_all_workers(
+    worker_query_client: &WorkerQueryClient,
+    last_received_event_ids: &HashMap<WorkerId, u64>,
+    worker_ids: &Vec<WorkerId>,
+    event_tx: &mpsc::Sender<RouterEvent>,
+) -> usize {
+    let mut total_recovered = 0;
+    let mut successful_workers = 0;
+    let mut failed_workers = 0;
+
+    for &worker_id in worker_ids {
+        // Skip workers without local indexer
+        if !worker_query_client.has_local_indexer(worker_id) {
+            tracing::debug!(
+                worker_id,
+                "Skipping recovery - worker does not have local indexer enabled"
+            );
+            continue;
+        }
+
+        // If we haven't seen any events from this worker, start from beginning (None)
+        // If we've seen events, start from last_known_id + 1
+        let start_event_id = last_received_event_ids
+            .get(&worker_id)
+            .map(|&last_id| last_id + 1);
+
+        match recover_from_worker(
+            worker_query_client,
+            worker_id,
+            start_event_id,
+            None, // Get all events after start_event_id
+            event_tx,
+        )
+        .await
+        {
+            Ok(count) => {
+                total_recovered += count;
+                if count > 0 {
+                    successful_workers += 1;
+                }
+            }
+            Err(_) => {
+                failed_workers += 1;
+            }
+        }
+    }
+
+    // Log summary
+    if total_recovered > 0 || failed_workers > 0 {
+        tracing::info!(
+            total_recovered,
+            successful_workers,
+            failed_workers,
+            "Startup recovery completed"
+        );
+    }
+
+    total_recovered
+}
+
+/// Recover missed KV events from a specific worker.
+///
+/// # Arguments
+///
+/// * `worker_query_client` - Client for querying worker local indexers
+/// * `worker_id` - The worker to recover from
+/// * `start_event_id` - First event ID to fetch (inclusive), or None to start from beginning
+/// * `end_event_id` - Last event ID to fetch (inclusive), or None for all
+/// * `event_tx` - Channel to send recovered events to the indexer
+///
+/// # Returns
+///
+/// Number of events recovered, or error if recovery failed
+pub async fn recover_from_worker(
+    worker_query_client: &WorkerQueryClient,
+    worker_id: WorkerId,
+    start_event_id: Option<u64>,
+    end_event_id: Option<u64>,
+    event_tx: &mpsc::Sender<RouterEvent>,
+) -> Result<usize> {
+    if worker_query_client.has_local_indexer(worker_id) {
+        tracing::debug!(
+            worker_id,
+            start_event_id = ?start_event_id,
+            end_event_id = ?end_event_id,
+            "Attempting recovery from worker"
+        );
+    } else {
+        tracing::warn!(
+            "Worker {} does not have local indexer enabled, skipping recovery",
+            worker_id
+        );
+        return Ok(0);
+    }
+
+    // Query worker for events in range
+    let response = worker_query_client
+        .query_worker(worker_id, start_event_id, end_event_id)
+        .await?;
+
+    let events_count = response.events.len();
+
+    if events_count == 0 {
+        tracing::debug!(
+            worker_id,
+            start_event_id = ?start_event_id,
+            "No missed events to recover from worker"
+        );
+        return Ok(0);
+    }
+
+    tracing::info!(
+        worker_id,
+        start_event_id = ?start_event_id,
+        events_count,
+        "Recovered {} missed events from worker",
+        events_count
+    );
+
+    // Apply recovered events to the indexer
+    for event in response.events {
+        if let Err(e) = event_tx.send(event).await {
+            tracing::error!(
+                worker_id,
+                error = %e,
+                "Failed to send recovered event to indexer"
+            );
+            anyhow::bail!("Failed to send recovered event: {}", e);
+        }
+    }
+
+    Ok(events_count)
+}
+
+// ============================================================================
+// Snapshot Management
+// ============================================================================
 
 /// Download a stable snapshot from object store and send events to the indexer.
 /// Retries until two consecutive reads match or max attempts is reached.

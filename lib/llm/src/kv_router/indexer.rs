@@ -48,9 +48,7 @@ use std::{
     thread::JoinHandle,
     time::{Duration, Instant},
 };
-use tokio::{
-    sync::{broadcast, mpsc, oneshot},
-};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use xxhash_rust::xxh3;
 
@@ -1037,8 +1035,30 @@ impl KvIndexer {
                         }
 
                         Some(event) = event_rx.recv() => {
-                            // Track last received event ID per worker (for fault tolerance recovery)
-                            // Update before processing so we track all received events
+                            // Track last received event ID per worker
+                            // Check for gaps before updating the last received ID
+                            // TODO should this trigger a recovery event?
+                            let last_id = *last_received_event_id.get(&event.worker_id).unwrap_or(&0);
+                            let incoming_id = event.event.event_id;
+
+                            // Detect gap: if incoming ID is more than 1 greater than last received
+                            if incoming_id > last_id + 1 && last_id > 0 {
+                                let gap_start = last_id + 1;
+                                let gap_end = incoming_id - 1;
+                                tracing::warn!(
+                                    worker_id = event.worker_id,
+                                    gap_start,
+                                    gap_end,
+                                    gap_size = gap_end - gap_start + 1,
+                                    "Event ID gap detected! Missed events [{}, {}]. \
+                                     If this is a global KvIndexer, within a KvRouter context,
+                                     consider calling KvRouter::query_worker_local_kv() to potentially recover worker-stored events.",
+                                    gap_start,
+                                    gap_end,
+                                );
+                            }
+
+                            // Update last received event ID (use max to handle out-of-order events)
                             let entry = last_received_event_id.entry(event.worker_id).or_insert(0);
                             *entry = (*entry).max(event.event.event_id);
 
@@ -1250,7 +1270,9 @@ impl KvIndexer {
     ///
     /// A `HashMap` mapping worker IDs to their last received event ID.
     ///
-    pub async fn get_last_received_event_ids(&self) -> Result<HashMap<WorkerId, u64>, KvRouterError> {
+    pub async fn get_last_received_event_ids(
+        &self,
+    ) -> Result<HashMap<WorkerId, u64>, KvRouterError> {
         let (resp_tx, resp_rx) = oneshot::channel();
         let req = GetLastReceivedEventIdsRequest { resp: resp_tx };
 
@@ -1446,15 +1468,15 @@ impl LocalKvIndexer {
         end_id: Option<u64>,
     ) -> Vec<RouterEvent> {
         // Validate range if both specified
-        if let (Some(s), Some(e)) = (start_id, end_id) {
-            if s > e {
-                tracing::warn!(
-                    start_id = s,
-                    end_id = e,
-                    "Requested start_id > end_id; returning empty result."
-                );
-                return Vec::new();
-            }
+        if let (Some(s), Some(e)) = (start_id, end_id)
+            && s > e
+        {
+            tracing::warn!(
+                start_id = s,
+                end_id = e,
+                "Requested start_id > end_id; returning empty result."
+            );
+            return Vec::new();
         }
 
         // Check if we can serve from buffer
@@ -1508,7 +1530,11 @@ impl LocalKvIndexer {
     }
 
     /// Get events from the buffer in the range `[start_id, end_id]` (both inclusive).
-    pub fn get_buffer_events_in_id_range(&self, start_id: Option<u64>, end_id: Option<u64>) -> Vec<RouterEvent> {
+    pub fn get_buffer_events_in_id_range(
+        &self,
+        start_id: Option<u64>,
+        end_id: Option<u64>,
+    ) -> Vec<RouterEvent> {
         let buffer = self.event_buffer.lock().unwrap();
         if buffer.is_empty() {
             tracing::warn!("No events in buffer yet; returning empty result.");
@@ -1592,6 +1618,11 @@ impl LocalKvIndexer {
                 "Non-consecutive KV event id; buffer may have gaps"
             );
         }
+        tracing::info!(
+            "Recorded event {:?} in buffer, now size is {}",
+            event,
+            buffer.len()
+        );
 
         // Add to back
         buffer.push_back(event);
@@ -1760,7 +1791,10 @@ mod local_kv_indexer_tests {
         // Buffer will only keep the last 5: events 10-14
         // Tree will have all blocks
         for id in 5..15 {
-            indexer.apply_event_with_buffer(make_event(id)).await.unwrap();
+            indexer
+                .apply_event_with_buffer(make_event(id))
+                .await
+                .unwrap();
         }
 
         // Wait for events to be processed by the tree
@@ -1773,29 +1807,45 @@ mod local_kv_indexer_tests {
 
         // Verify buffer state: should have events 10-14 (last 5)
         let buffer_events = indexer.get_all_events_in_buffer();
-        assert_eq!(get_ids(buffer_events), vec![10, 11, 12, 13, 14], "Buffer should have events 10-14");
+        assert_eq!(
+            get_ids(buffer_events),
+            vec![10, 11, 12, 13, 14],
+            "Buffer should have events 10-14"
+        );
 
         // ========== BUFFER PATH TESTS (start_id >= first_buffered) ==========
         // Range is [start, end] inclusive
 
         // Test: start_id within buffer, no end
         let result = indexer.get_events_in_id_range(Some(11), None).await;
-        assert_eq!(get_ids(result), vec![11, 12, 13, 14],
-            "start_id=11 (in buffer) should return [11, 14]");
+        assert_eq!(
+            get_ids(result),
+            vec![11, 12, 13, 14],
+            "start_id=11 (in buffer) should return [11, 14]"
+        );
 
         // Test: start_id at buffer boundary
         let result = indexer.get_events_in_id_range(Some(10), None).await;
-        assert_eq!(get_ids(result), vec![10, 11, 12, 13, 14],
-            "start_id=10 (buffer start) should return [10, 14]");
+        assert_eq!(
+            get_ids(result),
+            vec![10, 11, 12, 13, 14],
+            "start_id=10 (buffer start) should return [10, 14]"
+        );
 
         // Test: both start and end within buffer (inclusive)
         let result = indexer.get_events_in_id_range(Some(11), Some(13)).await;
-        assert_eq!(get_ids(result), vec![11, 12, 13],
-            "range [11, 13] inclusive should return 3 events");
+        assert_eq!(
+            get_ids(result),
+            vec![11, 12, 13],
+            "range [11, 13] inclusive should return 3 events"
+        );
 
         let result = indexer.get_events_in_id_range(Some(10), Some(14)).await;
-        assert_eq!(get_ids(result), vec![10, 11, 12, 13, 14],
-            "range [10, 14] should return all buffer events");
+        assert_eq!(
+            get_ids(result),
+            vec![10, 11, 12, 13, 14],
+            "range [10, 14] should return all buffer events"
+        );
 
         // ========== TREE DUMP PATH TESTS (range extends before buffer) ==========
         // Note: Tree dumps return synthetic 0-indexed event IDs, so we just check
@@ -1803,27 +1853,44 @@ mod local_kv_indexer_tests {
 
         // Test: (None, None) dumps entire tree
         let result = indexer.get_events_in_id_range(None, None).await;
-        assert_eq!(result.len(), 10, "(None, None) should dump entire tree (10 events)");
+        assert_eq!(
+            result.len(),
+            10,
+            "(None, None) should dump entire tree (10 events)"
+        );
 
         // Test: (None, Some(_)) dumps entire tree
         let result = indexer.get_events_in_id_range(None, Some(8)).await;
-        assert_eq!(result.len(), 10,
-            "(None, Some(_)) dumps entire tree - end_id is ignored for tree dumps");
+        assert_eq!(
+            result.len(),
+            10,
+            "(None, Some(_)) dumps entire tree - end_id is ignored for tree dumps"
+        );
 
         // Test: start_id before buffer triggers tree dump
         let result = indexer.get_events_in_id_range(Some(7), None).await;
-        assert_eq!(result.len(), 10,
-            "start_id=7 (before buffer) should dump entire tree");
+        assert_eq!(
+            result.len(),
+            10,
+            "start_id=7 (before buffer) should dump entire tree"
+        );
 
         let result = indexer.get_events_in_id_range(Some(5), Some(12)).await;
-        assert_eq!(result.len(), 10,
-            "range [5, 12] extending before buffer should dump entire tree");
+        assert_eq!(
+            result.len(),
+            10,
+            "range [5, 12] extending before buffer should dump entire tree"
+        );
 
         // ========== EDGE CASES ==========
 
         // Single element when start == end (inclusive range)
         let result = indexer.get_events_in_id_range(Some(12), Some(12)).await;
-        assert_eq!(get_ids(result), vec![12], "start == end should return single event");
+        assert_eq!(
+            get_ids(result),
+            vec![12],
+            "start == end should return single event"
+        );
 
         // Empty when start > end
         let result = indexer.get_events_in_id_range(Some(15), Some(10)).await;
@@ -1831,8 +1898,11 @@ mod local_kv_indexer_tests {
 
         // Request beyond buffer but valid range -> buffer returns what it has
         let result = indexer.get_events_in_id_range(Some(12), Some(100)).await;
-        assert_eq!(get_ids(result), vec![12, 13, 14],
-            "range with end beyond buffer should return available buffer events");
+        assert_eq!(
+            get_ids(result),
+            vec![12, 13, 14],
+            "range with end beyond buffer should return available buffer events"
+        );
     }
 }
 
@@ -3593,10 +3663,44 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tests_local_indexer_query {
+mod tests_local_indexer {
     use super::*;
     use crate::kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
+    use tokio::time;
     use tokio_util::sync::CancellationToken;
+
+    fn setup() {
+        dynamo_runtime::logging::init();
+    }
+
+    fn make_blocks(hashes: Vec<u64>) -> Vec<KvCacheStoredBlockData> {
+        hashes
+            .iter()
+            .map(|i| KvCacheStoredBlockData {
+                tokens_hash: LocalBlockHash(*i),
+                block_hash: ExternalSequenceBlockHash(*i * 100),
+            })
+            .collect()
+    }
+
+    fn create_store_event(
+        worker_id: WorkerId,
+        event_id: u64,
+        hashes: Vec<u64>,
+        parent: Option<ExternalSequenceBlockHash>,
+    ) -> RouterEvent {
+        RouterEvent {
+            worker_id,
+            event: KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: parent,
+                    blocks: make_blocks(hashes),
+                }),
+                dp_rank: 0,
+            },
+        }
+    }
 
     #[tokio::test]
     async fn test_local_indexer_buffer_and_serialization() {
@@ -3665,5 +3769,50 @@ mod tests_local_indexer_query {
             }
             _ => panic!("Expected Stored event"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_gap_detection_per_worker() {
+        setup();
+
+        let token = CancellationToken::new();
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let indexer = KvIndexer::new(token.clone(), 4, metrics);
+
+        let worker_a: WorkerId = 100;
+        let worker_b: WorkerId = 200;
+        let event_tx = indexer.event_sender();
+
+        // Worker A: events 1, 2, 3 (no gap)
+        for id in 1..=3 {
+            let event = create_store_event(worker_a, id, vec![id], None);
+            event_tx.send(event).await.unwrap();
+        }
+
+        // Worker B: events 1, then 5 (gap of 2, 3, 4)
+        let event_b1 = create_store_event(worker_b, 1, vec![10], None);
+        event_tx.send(event_b1).await.unwrap();
+
+        let event_b5 = create_store_event(worker_b, 5, vec![50], None);
+        event_tx.send(event_b5).await.unwrap();
+
+        // Give time for events to be processed
+        time::sleep(Duration::from_millis(20)).await;
+
+        // Verify each worker has correct last_received_event_id
+        let last_ids = indexer.get_last_received_event_ids().await.unwrap();
+        assert_eq!(
+            last_ids.get(&worker_a),
+            Some(&3),
+            "Worker A should have last_id = 3 (no gap)"
+        );
+        assert_eq!(
+            last_ids.get(&worker_b),
+            Some(&5),
+            "Worker B should have last_id = 5 (despite gap)"
+        );
+
+        // Cleanup
+        token.cancel();
     }
 }

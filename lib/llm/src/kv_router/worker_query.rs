@@ -47,7 +47,12 @@ impl WorkerQueryClient {
 
     /// Query a specific worker's local KV indexer and return its buffered events.
     /// Returns an error if the worker does not have enable_local_indexer=true.
-    pub async fn query_worker(&self, worker_id: WorkerId, start_event_id: Option<u64>, end_event_id: Option<u64>) -> Result<WorkerKvQueryResponse> {
+    pub async fn query_worker(
+        &self,
+        worker_id: WorkerId,
+        start_event_id: Option<u64>,
+        end_event_id: Option<u64>,
+    ) -> Result<WorkerKvQueryResponse> {
         // Check if worker has local indexer enabled
         if !self.has_local_indexer(worker_id) {
             anyhow::bail!(
@@ -67,7 +72,11 @@ impl WorkerQueryClient {
         );
 
         // Create and serialize request
-        let request = WorkerKvQueryRequest { worker_id, start_event_id, end_event_id };
+        let request = WorkerKvQueryRequest {
+            worker_id,
+            start_event_id,
+            end_event_id,
+        };
         let request_bytes =
             serde_json::to_vec(&request).context("Failed to serialize WorkerKvQueryRequest")?;
 

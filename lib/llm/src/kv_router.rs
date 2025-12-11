@@ -51,7 +51,7 @@ use crate::{
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         sequence::SequenceError,
-        subscriber::start_kv_router_background,
+        subscriber::{recover_from_all_workers, start_kv_router_background},
     },
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
@@ -358,6 +358,12 @@ impl KvRouter {
         )
         .await?;
 
+        // Initialize worker query client using namespace abstraction
+        // (created before background task so we can use it for startup recovery)
+        let worker_query_client =
+            worker_query::WorkerQueryClient::new(component.clone(), local_indexer_rx);
+        tracing::info!("Worker query client initialized");
+
         // Start KV event subscriber background process (only when use_kv_events is enabled)
         if kv_router_config.use_kv_events
             && let Indexer::KvIndexer(ref kv_indexer) = indexer
@@ -378,14 +384,48 @@ impl KvRouter {
                 kv_router_config.router_reset_states,
             )
             .await?;
-        }
 
-        // Initialize worker query client using namespace abstraction
-        let worker_query_client = Some(worker_query::WorkerQueryClient::new(
-            component.clone(),
-            local_indexer_rx,
-        ));
-        tracing::info!("Worker query client initialized");
+            // Perform startup recovery from workers with local indexers
+            // This catches up on any events missed while the router was offline
+            let last_event_ids = kv_indexer
+                .get_last_received_event_ids()
+                .await
+                .unwrap_or_default();
+            let instances = client.instance_source.as_ref().borrow().clone();
+            let worker_ids: Vec<WorkerId> = instances.iter().map(|i| i.instance_id).collect();
+
+            if !worker_ids.is_empty() {
+                tracing::info!(
+                    worker_count = worker_ids.len(),
+                    "Starting recovery from workers with local indexers"
+                );
+
+                // NOTE: recover_from_all_workers() is a no-op if
+                // Worker with worker_id is not associated with a
+                // local indexer instance.
+                let recovered = recover_from_all_workers(
+                    &worker_query_client,
+                    &last_event_ids,
+                    &worker_ids,
+                    &kv_indexer.event_sender(),
+                )
+                .await;
+
+                if recovered > 0 {
+                    tracing::info!(
+                        recovered_events = recovered,
+                        "KV Router startup: Recovered {} KV events from workers {:?}",
+                        recovered,
+                        worker_ids
+                    );
+                } else {
+                    tracing::info!(
+                        "KV Router startup: No KV events recovered from workers {:?}",
+                        worker_ids
+                    );
+                }
+            }
+        }
 
         tracing::info!("KV Routing initialized");
         Ok(Self {
@@ -395,7 +435,7 @@ impl KvRouter {
             kv_router_config,
             cancellation_token,
             client,
-            worker_query_client,
+            worker_query_client: Some(worker_query_client),
         })
     }
 
@@ -530,7 +570,7 @@ impl KvRouter {
     }
 
     /// Query a specific worker's local KV indexer for its events
-    /// (See documentation for `WorkerQueryClient.query_worker()`)
+    /// (See docstring for `WorkerQueryClient.query_worker()`)
     pub async fn query_worker_local_kv(
         &self,
         worker_id: WorkerId,
@@ -542,9 +582,48 @@ impl KvRouter {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Worker query client not available (NATS required)"))?;
 
-        query_client.query_worker(worker_id, start_event_id, end_event_id).await
+        query_client
+            .query_worker(worker_id, start_event_id, end_event_id)
+            .await
     }
 
+    /// Recover missed KV events from a specific worker.
+    ///
+    /// Queries the worker's local KV indexer for events starting from
+    /// `start_event_id` and applies them to the router's indexer.
+    ///
+    /// # Arguments
+    ///
+    /// * `worker_id` - The worker to recover from
+    /// * `start_event_id` - First event ID to fetch (inclusive), or None to start from beginning
+    /// * `end_event_id` - Last event ID to fetch (inclusive), or None for all
+    pub async fn recover_from_worker(
+        &self,
+        worker_id: WorkerId,
+        start_event_id: Option<u64>,
+        end_event_id: Option<u64>,
+    ) -> Result<usize> {
+        let query_client = self
+            .worker_query_client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Worker query client not available"))?;
+
+        let event_tx = match &self.indexer {
+            Indexer::KvIndexer(kv_indexer) => kv_indexer.event_sender(),
+            Indexer::None => {
+                anyhow::bail!("Cannot recover: indexer is disabled (--overlap_score_weight is 0)")
+            }
+        };
+
+        subscriber::recover_from_worker(
+            query_client,
+            worker_id,
+            start_event_id,
+            end_event_id,
+            &event_tx,
+        )
+        .await
+    }
 }
 
 // NOTE: KVRouter works like a PushRouter,
