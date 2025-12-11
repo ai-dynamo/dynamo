@@ -386,6 +386,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         enable_multimodal=config.enable_multimodal,
         generate_endpoint=generate_endpoint,
         config=config,
+        use_vllm_tokenizer=config.use_vllm_tokenizer,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -420,8 +421,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     # Register prefill model with ModelType.Prefill
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
+        model_input = (
+            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+        )
         await register_vllm_model(
-            ModelInput.Tokens,
+            model_input,
             ModelType.Prefill,
             generate_endpoint,
             config,
@@ -430,7 +434,9 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             migration_limit=0,  # Prefill doesn't support migration
         )
 
-    health_check_payload = VllmPrefillHealthCheckPayload(engine_client).to_dict()
+    health_check_payload = VllmPrefillHealthCheckPayload(
+        engine_client, use_text_input=config.use_vllm_tokenizer
+    ).to_dict()
 
     try:
         logger.debug("Starting serve_endpoint for prefill worker")
@@ -499,6 +505,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         enable_multimodal=config.enable_multimodal,
         generate_endpoint=generate_endpoint,
         config=config,
+        use_vllm_tokenizer=config.use_vllm_tokenizer,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -538,6 +545,10 @@ async def init(runtime: DistributedRuntime, config: Config):
             f"Registering model with endpoint types: {config.dyn_endpoint_types}"
         )
 
+        model_input = (
+            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+        )
+
         # Warn if custom template provided but chat endpoint not enabled
         if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
             logger.warning(
@@ -546,7 +557,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             )
 
         await register_vllm_model(
-            ModelInput.Tokens,
+            model_input,
             model_type,
             generate_endpoint,
             config,
@@ -555,7 +566,9 @@ async def init(runtime: DistributedRuntime, config: Config):
             migration_limit=config.migration_limit,
         )
 
-    health_check_payload = VllmHealthCheckPayload(engine_client).to_dict()
+    health_check_payload = VllmHealthCheckPayload(
+        engine_client, use_text_input=config.use_vllm_tokenizer
+    ).to_dict()
 
     try:
         logger.debug("Starting serve_endpoint for decode worker")

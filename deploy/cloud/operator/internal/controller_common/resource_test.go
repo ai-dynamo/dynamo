@@ -532,3 +532,75 @@ func TestGetResourcesConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestAppendUniqueImagePullSecrets(t *testing.T) {
+	tests := []struct {
+		name       string
+		existing   []corev1.LocalObjectReference
+		additional []corev1.LocalObjectReference
+		expected   []corev1.LocalObjectReference
+	}{
+		{
+			name:       "empty existing, empty additional",
+			existing:   []corev1.LocalObjectReference{},
+			additional: []corev1.LocalObjectReference{},
+			expected:   []corev1.LocalObjectReference{},
+		},
+		{
+			name:       "empty existing, some additional",
+			existing:   []corev1.LocalObjectReference{},
+			additional: []corev1.LocalObjectReference{{Name: "secret-a"}, {Name: "secret-b"}},
+			expected:   []corev1.LocalObjectReference{{Name: "secret-a"}, {Name: "secret-b"}},
+		},
+		{
+			name:       "some existing, empty additional",
+			existing:   []corev1.LocalObjectReference{{Name: "secret-a"}},
+			additional: []corev1.LocalObjectReference{},
+			expected:   []corev1.LocalObjectReference{{Name: "secret-a"}},
+		},
+		{
+			name:       "no duplicates",
+			existing:   []corev1.LocalObjectReference{{Name: "secret-a"}},
+			additional: []corev1.LocalObjectReference{{Name: "secret-b"}, {Name: "secret-c"}},
+			expected:   []corev1.LocalObjectReference{{Name: "secret-a"}, {Name: "secret-b"}, {Name: "secret-c"}},
+		},
+		{
+			name:       "all duplicates",
+			existing:   []corev1.LocalObjectReference{{Name: "secret-a"}, {Name: "secret-b"}},
+			additional: []corev1.LocalObjectReference{{Name: "secret-a"}, {Name: "secret-b"}},
+			expected:   []corev1.LocalObjectReference{{Name: "secret-a"}, {Name: "secret-b"}},
+		},
+		{
+			name:       "some duplicates",
+			existing:   []corev1.LocalObjectReference{{Name: "secret-a"}, {Name: "secret-b"}},
+			additional: []corev1.LocalObjectReference{{Name: "secret-b"}, {Name: "secret-c"}},
+			expected:   []corev1.LocalObjectReference{{Name: "secret-a"}, {Name: "secret-b"}, {Name: "secret-c"}},
+		},
+		{
+			name:       "duplicates within additional",
+			existing:   []corev1.LocalObjectReference{{Name: "secret-a"}},
+			additional: []corev1.LocalObjectReference{{Name: "secret-b"}, {Name: "secret-b"}, {Name: "secret-c"}},
+			expected:   []corev1.LocalObjectReference{{Name: "secret-a"}, {Name: "secret-b"}, {Name: "secret-c"}},
+		},
+		{
+			name:       "nil existing",
+			existing:   nil,
+			additional: []corev1.LocalObjectReference{{Name: "secret-a"}},
+			expected:   []corev1.LocalObjectReference{{Name: "secret-a"}},
+		},
+		{
+			name:       "nil additional",
+			existing:   []corev1.LocalObjectReference{{Name: "secret-a"}},
+			additional: nil,
+			expected:   []corev1.LocalObjectReference{{Name: "secret-a"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+			result := AppendUniqueImagePullSecrets(tt.existing, tt.additional)
+			g.Expect(result).To(gomega.Equal(tt.expected))
+		})
+	}
+}

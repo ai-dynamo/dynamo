@@ -50,6 +50,7 @@ from benchmarks.profiler.utils.profile_prefill import (
     profile_prefill_aiconfigurator,
 )
 from benchmarks.profiler.utils.profiler_argparse import create_profiler_parser
+from benchmarks.profiler.webui.select_config import pick_config_with_webui
 from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
@@ -476,45 +477,57 @@ async def run_profile(args):
             # Safety guards: no results → exit early with a clear message
             if not prefill_data.num_gpus:
                 logger.error("No prefill results produced; skipping recommendations.")
-
-            # select best parallel mapping for prefill
-            if min(prefill_data.ttft) > args.ttft:
-                logger.warning(
-                    "No engine configuration satisfies the TTFT requirement, please try a smaller model or more powerful hardware"
-                )
-                selected_prefill_idx = int(np.argmin(np.array(prefill_data.ttft)))
-            else:
-                valid_indices = [
-                    i for i, ttft in enumerate(prefill_data.ttft) if ttft <= args.ttft
-                ]
-                # Among valid TP sizes, select the one with highest throughput per GPU
-                valid_thpts = [prefill_data.thpt_per_gpu[i] for i in valid_indices]
-                max_thpt_idx = valid_indices[int(np.argmax(valid_thpts))]
-                selected_prefill_idx = max_thpt_idx
-            logger.info(
-                f"Suggested prefill parallel mapping: {prefill_data.parallel_mapping_labels[selected_prefill_idx]} on {prefill_data.num_gpus[selected_prefill_idx]} GPU(s) (TTFT {prefill_data.ttft[selected_prefill_idx]:.2f} ms, throughput {prefill_data.thpt_per_gpu[selected_prefill_idx]:.2f} tokens/s/GPU)"
-            )
-
-            # select best parallel mapping for decode
-            if not decode_data.num_gpus:
-                logger.error("No decode results produced; skipping recommendations.")
                 return
-            if min(decode_data.itl) > args.itl:
-                logger.warning(
-                    "No engine configuration satisfies the ITL requirement, please try a smaller model or more powerful hardware"
+
+            if args.pick_with_webui:
+                # select best P/D config in webUI
+                selected_prefill_idx, selected_decode_idx = pick_config_with_webui(
+                    prefill_data, decode_data, args
                 )
-                selected_decode_idx = int(np.argmin(np.array(decode_data.itl)))
             else:
-                valid_indices = [
-                    i for i, itl in enumerate(decode_data.itl) if itl <= args.itl
-                ]
-                # Among valid TP sizes, select the one with highest throughput per GPU
-                valid_thpts = [decode_data.thpt_per_gpu[i] for i in valid_indices]
-                max_thpt_idx = valid_indices[int(np.argmax(valid_thpts))]
-                selected_decode_idx = max_thpt_idx
-            logger.info(
-                f"Suggested decode parallel mapping: {decode_data.parallel_mapping_labels[selected_decode_idx]} on {decode_data.num_gpus[selected_decode_idx]} GPU(s) (ITL {decode_data.itl[selected_decode_idx]:.2f} ms, throughput {decode_data.thpt_per_gpu[selected_decode_idx]:.2f} tokens/s/GPU)"
-            )
+                # automatically select P/D config within SLA with the highest throughput/GPU
+                # select best parallel mapping for prefill
+                if min(prefill_data.ttft) > args.ttft:
+                    logger.warning(
+                        "No engine configuration satisfies the TTFT requirement, please try a smaller model or more powerful hardware"
+                    )
+                    selected_prefill_idx = int(np.argmin(np.array(prefill_data.ttft)))
+                else:
+                    valid_indices = [
+                        i
+                        for i, ttft in enumerate(prefill_data.ttft)
+                        if ttft <= args.ttft
+                    ]
+                    # Among valid TP sizes, select the one with highest throughput per GPU
+                    valid_thpts = [prefill_data.thpt_per_gpu[i] for i in valid_indices]
+                    max_thpt_idx = valid_indices[int(np.argmax(valid_thpts))]
+                    selected_prefill_idx = max_thpt_idx
+                logger.info(
+                    f"Suggested prefill parallel mapping: {prefill_data.parallel_mapping_labels[selected_prefill_idx]} on {prefill_data.num_gpus[selected_prefill_idx]} GPU(s) (TTFT {prefill_data.ttft[selected_prefill_idx]:.2f} ms, throughput {prefill_data.thpt_per_gpu[selected_prefill_idx]:.2f} tokens/s/GPU)"
+                )
+
+                # select best parallel mapping for decode
+                if not decode_data.num_gpus:
+                    logger.error(
+                        "No decode results produced; skipping recommendations."
+                    )
+                    return
+                if min(decode_data.itl) > args.itl:
+                    logger.warning(
+                        "No engine configuration satisfies the ITL requirement, please try a smaller model or more powerful hardware"
+                    )
+                    selected_decode_idx = int(np.argmin(np.array(decode_data.itl)))
+                else:
+                    valid_indices = [
+                        i for i, itl in enumerate(decode_data.itl) if itl <= args.itl
+                    ]
+                    # Among valid TP sizes, select the one with highest throughput per GPU
+                    valid_thpts = [decode_data.thpt_per_gpu[i] for i in valid_indices]
+                    max_thpt_idx = valid_indices[int(np.argmax(valid_thpts))]
+                    selected_decode_idx = max_thpt_idx
+                logger.info(
+                    f"Suggested decode parallel mapping: {decode_data.parallel_mapping_labels[selected_decode_idx]} on {decode_data.num_gpus[selected_decode_idx]} GPU(s) (ITL {decode_data.itl[selected_decode_idx]:.2f} ms, throughput {decode_data.thpt_per_gpu[selected_decode_idx]:.2f} tokens/s/GPU)"
+                )
 
         if args.dry_run:
             # use min value for prefill and decode GPU counts
