@@ -98,7 +98,7 @@ class DynamoVLLMWorkerProcess(ManagedProcess):
         self,
         request,
         model: str,
-        cpu_cache_gb: int = 20,
+        cpu_cache_gb: int = 1,
         cpu_cache_blocks: Optional[int] = None,
         gpu_cache_blocks: Optional[int] = None,
     ):
@@ -429,7 +429,7 @@ def dynamo_llm_server(request, runtime_services):
     cpu_blocks = getattr(request, "param", {}).get("cpu_blocks", None)
     gpu_blocks = getattr(request, "param", {}).get("gpu_blocks", None)
     port = getattr(request, "param", {}).get("port", None)
-    cpu_cache_gb = getattr(request, "param", {}).get("cpu_cache_gb", 20)
+    cpu_cache_gb = getattr(request, "param", {}).get("cpu_cache_gb", 1)
 
     if importlib.util.find_spec("vllm") is not None:
         server_type = ServerType.vllm

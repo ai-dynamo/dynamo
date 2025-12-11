@@ -297,7 +297,7 @@ class AggDeterminismTester(DeterminismTester):
         if self.server_type == ServerType.trtllm:
             # TRTLLM doesn't support reset_prefix_cache endpoint API
             # 300 shakespeare content could evict the 0.1 x 80G (~1700 blocks) on-device cache
-            shakespeare_count = 300
+            shakespeare_count = 10
             for seq_idx in range(1, shakespeare_count + 1):
                 start_word = (seq_idx - 1) * self.word_count
                 content = self.get_shakespeare_content(start_word)

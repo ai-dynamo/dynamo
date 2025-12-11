@@ -37,12 +37,11 @@ from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.config_dump import dump_config
-from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
+from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import get_publisher
@@ -107,7 +106,7 @@ async def worker():
     config = cmd_line_args()
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, config.store_kv, config.request_plane)
+    runtime = DistributedRuntime(loop, config.store_kv, False)
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
@@ -144,6 +143,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
     component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
 
     # Convert model path to Path object if it's a local path, otherwise keep as string
     model_path = str(config.model_path)
@@ -182,7 +182,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         "tensor_parallel_size": config.tensor_parallel_size,
         "pipeline_parallel_size": config.pipeline_parallel_size,
         "moe_expert_parallel_size": config.expert_parallel_size,
-        "backend": Backend.PYTORCH,
+        "backend": "pytorch",
+        "skip_tokenizer_init": True,
         "build_config": build_config,
         "kv_cache_config": kv_cache_config,
         "gpus_per_node": gpus_per_node,
@@ -226,12 +227,10 @@ async def init(runtime: DistributedRuntime, config: Config):
 
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
-            arg_map["backend"] = Backend.PYTORCH
-        elif arg_map["backend"] not in Backend:
+            arg_map["backend"] = "pytorch"
+        elif arg_map["backend"] != "pytorch":
             logging.error(
-                "Only %s supported for now to publish events and metrics. Got: %s",
-                [b.value for b in Backend],
-                arg_map["backend"],
+                "Only pytorch backend is supported for now to publish events and metrics."
             )
             sys.exit(1)
 
@@ -241,27 +240,15 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Populate default sampling params from the model
     tokenizer = tokenizer_factory(arg_map["model"])
     default_sampling_params = SamplingParams()
-
-    # Enable perf metrics so prompt_tokens_details can be returned
-    if hasattr(default_sampling_params, "return_perf_metrics"):
-        default_sampling_params.return_perf_metrics = True
+    default_sampling_params._setup(tokenizer)
+    default_sampling_params.stop = None
     model_input = ModelInput.Tokens
 
     # Set model type based on disaggregation mode for unified frontend support
     if config.disaggregation_mode == DisaggregationMode.PREFILL:
         model_type = ModelType.Prefill
     else:
-        model_type = parse_endpoint_types(config.dyn_endpoint_types)
-        logging.info(
-            f"Registering model with endpoint types: {config.dyn_endpoint_types}"
-        )
-
-        # Warn if custom template provided but chat endpoint not enabled
-        if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
-            logging.warning(
-                "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
-                "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
-            )
+        model_type = ModelType.Chat | ModelType.Completions
 
     multimodal_processor = None
 
@@ -274,6 +261,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     if modality == "multimodal":
         engine_args["skip_tokenizer_init"] = False
+        model_input = ModelInput.Text
         model_config = AutoConfig.from_pretrained(
             config.model_path, trust_remote_code=True
         )
@@ -344,12 +332,12 @@ async def init(runtime: DistributedRuntime, config: Config):
                 logging.info("TensorRT-LLM MetricsCollector initialized")
 
                 # Register callback to expose TRT-LLM metrics via Dynamo endpoint
-                # Filter out python_/process_ metrics and add trtllm_ prefix to remaining metrics
+                # Filter out python_/process_ metrics and add trtllm: prefix to remaining metrics
                 register_engine_metrics_callback(
                     endpoint=endpoint,
                     registry=REGISTRY,
                     exclude_prefixes=["python_", "process_"],
-                    add_prefix="trtllm_",
+                    add_prefix="trtllm:",
                 )
                 logging.info("TensorRT-LLM Prometheus metrics registered")
             except Exception as e:
@@ -369,7 +357,6 @@ async def init(runtime: DistributedRuntime, config: Config):
             connector=connector,
             runtime=runtime,  # Pass runtime for graceful shutdown
             metrics_collector=metrics_collector,
-            kv_block_size=config.kv_block_size,
         )
 
         # Register the model with runtime config

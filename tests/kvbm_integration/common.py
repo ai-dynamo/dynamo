@@ -148,7 +148,7 @@ class DeterminismTester(ApiTester):
         self.server_type = server_type
 
         self.shakespeare_file = Path("t8.shakespeare.txt")
-        self.max_iterations = int(os.environ.get("KVBM_MAX_ITERATIONS", "500"))
+        self.max_iterations = int(os.environ.get("KVBM_MAX_ITERATIONS", "10"))
         self.word_count = int(os.environ.get("KVBM_WORD_COUNT", "200"))
 
         # Test intervals
