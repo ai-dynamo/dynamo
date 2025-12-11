@@ -65,9 +65,8 @@ jobs:
     #   shell: bash
     #   run: |
     #     sleep 3600 
-
         
-    - name: Create amd64 builder
+    - name: Define amd64 builder
       uses: ./.github/actions/buildkit-builder
       with:
         builder_name: ${{ env.BUILDER_NAME }}
@@ -77,7 +76,7 @@ jobs:
         nodeselector: 'eks.amazonaws.com/nodegroup=cpu-amd-m5-2xlarge,kubernetes.io/arch=amd64'
         tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
 
-    - name: Create arm64 builder
+    - name: Define arm64 builder
       uses: ./.github/actions/buildkit-builder
       with:
         builder_name: ${{ env.BUILDER_NAME }}
@@ -95,10 +94,31 @@ jobs:
 
   test-building:
     name: test building
+    needs: [create-buildkit-builders]
     runs-on: builder-cpu-amd-runner
     steps:
     - name: Checkout code
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+    - name: Define amd64 builder
+      uses: ./.github/actions/buildkit-builder
+      with:
+        builder_name: ${{ env.BUILDER_NAME }}
+        mode: create
+        platform: linux/amd64
+        replicas: '4'
+        nodeselector: 'eks.amazonaws.com/nodegroup=cpu-amd-m5-2xlarge,kubernetes.io/arch=amd64'
+        tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
+
+    - name: Define arm64 builder
+      uses: ./.github/actions/buildkit-builder
+      with:
+        builder_name: ${{ env.BUILDER_NAME }}
+        mode: append
+        platform: linux/arm64
+        replicas: '4'
+        nodeselector: 'eks.amazonaws.com/nodegroup=cpu-arm-r8g-4xlarge,kubernetes.io/arch=arm64'
+        tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
 
     - name: debuggin
       shell: bash
