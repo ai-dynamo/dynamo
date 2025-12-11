@@ -105,7 +105,10 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Set environment variables
         env = os.environ.copy()
-        env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
+        req_plane = request.getfixturevalue("request_plane")
+        env["DYN_REQUEST_PLANE"] = req_plane
+        if req_plane == "tcp":
+            env["DYN_TCP_RPC_PORT"] = f"{int(port) + 1000}"
 
         env["DYN_LOG"] = "debug"
         # Disable canary health check - these tests expect full control over requests

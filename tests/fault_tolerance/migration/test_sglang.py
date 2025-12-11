@@ -75,7 +75,8 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Set environment variables
         env = os.environ.copy()
-        env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
+        req_plane = request.getfixturevalue("request_plane")
+        env["DYN_REQUEST_PLANE"] = req_plane
         env["DYN_LOG"] = "debug"
         # Disable canary health check - these tests expect full control over requests
         # sent to the workers where canary health check intermittently sends dummy
@@ -83,8 +84,9 @@ class DynamoWorkerProcess(ManagedProcess):
         # intermittent failures
         env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
-        env["DYN_SYSTEM_PORT"] = str(system_port)
-        env["DYN_HTTP_PORT"] = str(frontend_port)
+        env["DYN_SYSTEM_PORT"] = f"808{worker_id[-1]}"
+        if req_plane == "tcp":
+            env["DYN_TCP_RPC_PORT"] = f"990{worker_id[-1]}"
 
         # TODO: Have the managed process take a command name explicitly to distinguish
         #       between processes started with the same command.
