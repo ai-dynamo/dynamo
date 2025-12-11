@@ -342,7 +342,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 	}
 
 	anyModified := false
-	var leaderWorkerSets []*leaderworkersetv1.LeaderWorkerSet
+	leaderWorkerSets := make([]*leaderworkersetv1.LeaderWorkerSet, 0, desiredReplicas)
 	for i := range int(desiredReplicas) {
 		volcanoPodGroupModified, _, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*volcanov1beta1.PodGroup, bool, error) {
 			return r.generateVolcanoPodGroup(ctx, generateResourceOption{

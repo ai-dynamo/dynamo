@@ -498,10 +498,8 @@ func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Re
 		ready, reason := resource.IsReady()
 
 		resourceServiceStatuses := resource.GetServiceStatuses()
-		if resourceServiceStatuses != nil {
-			for serviceName, serviceStatus := range resourceServiceStatuses {
-				serviceStatuses[serviceName] = serviceStatus
-			}
+		for serviceName, serviceStatus := range resourceServiceStatuses {
+			serviceStatuses[serviceName] = serviceStatus
 		}
 
 		if !ready {
