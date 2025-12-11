@@ -71,7 +71,7 @@ jobs:
       uses: ./.github/actions/define-buildkit-builders
       with:
         builder_name: ${{ env.BUILDER_NAME }}
-        replicas: '4'
+        replicas: '1'
         linux_amd64: 'true'
         linux_arm64: 'true'
         linux_amd64_gpu: 'true'
@@ -136,7 +136,7 @@ jobs:
       uses: ./.github/actions/define-buildkit-builders
       with:
         builder_name: ${{ env.BUILDER_NAME }}
-        replicas: '4'
+        replicas: '1'
         linux_amd64: 'true'
         linux_arm64: 'true'
         linux_amd64_gpu: 'true'
@@ -172,7 +172,7 @@ jobs:
         uses: ./.github/actions/define-buildkit-builders
         with:
           builder_name: ${{ env.BUILDER_NAME }}
-          replicas: '4'
+          replicas: '1'
           linux_amd64: 'true'
           linux_arm64: 'true'
           linux_amd64_gpu: 'false'
@@ -262,7 +262,7 @@ jobs:
   #       uses: ./.github/actions/define-buildkit-builders
   #       with:
   #         builder_name: ${{ env.BUILDER_NAME }}
-  #         replicas: '4'
+  #         replicas: '1'
   #         linux_amd64: 'false'
   #         linux_arm64: 'true'
   #         linux_amd64_gpu: 'true'
@@ -337,7 +337,7 @@ jobs:
   #       uses: ./.github/actions/define-buildkit-builders
   #       with:
   #         builder_name: ${{ env.BUILDER_NAME }}
-  #         replicas: '4'
+  #         replicas: 1'
   #         linux_amd64: 'false'
   #         linux_arm64: 'true'
   #         linux_amd64_gpu: 'true'
@@ -402,7 +402,7 @@ jobs:
   #       uses: ./.github/actions/define-buildkit-builders
   #       with:
   #         builder_name: ${{ env.BUILDER_NAME }}
-  #         replicas: '4'
+  #         replicas: '1'
   #         linux_amd64: 'false'
   #         linux_arm64: 'true'
   #         linux_amd64_gpu: 'true'
