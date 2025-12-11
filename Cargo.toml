@@ -14,8 +14,14 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "lib/engines/*",
-    "lib/discovery",
     "lib/config",
+    "lib/nova",
+    "lib/nova-backend",
+    "lib/nova-discovery",
+    "lib/identity",
+    "lib/kvbm",
+    "lib/kvbm-config",
+    "lib/kvbm-kernels",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
@@ -29,6 +35,13 @@ default-members = [
     "lib/async-openai",
     "lib/parsers",
     "lib/bindings/c",
+    "lib/nova",
+    "lib/nova-backend",
+    "lib/nova-discovery",
+    "lib/identity",
+    "lib/kvbm",
+    "lib/kvbm-config",
+    "lib/kvbm-kernels",
 ]
 resolver = "3"
 
@@ -53,6 +66,18 @@ dynamo-async-openai = { path = "lib/async-openai", version = "0.7.0", features =
     "rustls",
 ] }
 dynamo-parsers = { path = "lib/parsers", version = "0.7.0" }
+dynamo-memory = { path = "lib/memory", version = "0.7.0" }
+
+# nova
+dynamo-nova = { path = "lib/nova", version = "0.7.0" }
+dynamo-nova-backend = { path = "lib/nova-backend", version = "0.7.0" }
+dynamo-nova-discovery = { path = "lib/nova-discovery", version = "0.7.0" }
+dynamo-identity = { path = "lib/identity", version = "0.7.0" }
+
+# kvbm
+dynamo-kvbm = { path = "lib/kvbm", version = "0.7.0" }
+dynamo-kvbm-config = { path = "lib/kvbm-config", version = "0.7.0" }
+dynamo-kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.7.0" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -61,6 +86,7 @@ async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 async_zmq = { version = "0.4.0" }
 blake3 = { version = "1" }
+bs58 = { version = "0.5" }
 bytes = { version = "1" }
 chrono = { version = "0.4", default-features = false, features = [
     "alloc",
@@ -69,7 +95,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "now",
     "serde",
 ] }
-cudarc = { version = "0.17.8", features = ["cuda-12020"] }
+cudarc = { version = "0.18.1", features = ["cuda-12020"] }
 dashmap = { version = "6.1" }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }

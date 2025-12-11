@@ -3,7 +3,7 @@
 
 //! CUDA pinned host memory storage.
 
-use super::{MemoryDescription, Result, StorageError, StorageKind, actions, nixl::NixlDescriptor};
+use super::{MemoryDescriptor, Result, StorageError, StorageKind, actions, nixl::NixlDescriptor};
 use cudarc::driver::CudaContext;
 use cudarc::driver::sys;
 use std::any::Any;
@@ -97,7 +97,7 @@ impl Drop for PinnedStorage {
     }
 }
 
-impl MemoryDescription for PinnedStorage {
+impl MemoryDescriptor for PinnedStorage {
     fn addr(&self) -> usize {
         unsafe { self.as_ptr() as usize }
     }

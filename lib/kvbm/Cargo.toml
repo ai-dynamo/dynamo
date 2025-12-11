@@ -1,0 +1,60 @@
+[package]
+name = "dynamo-kvbm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dynamo-nova = { workspace = true }
+dynamo-tokens = { workspace = true }
+dynamo-config = { workspace = true }
+dynamo-identity = { workspace = true }
+dynamo-kvbm-config = { workspace = true }
+dynamo-kvbm-kernels = { workspace = true }
+dynamo-memory = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+cudarc = { workspace = true }
+dashmap = { workspace = true }
+derive_builder = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+validator = { workspace = true }
+xxhash-rust = { workspace = true }
+axum = { workspace = true }
+
+aligned-vec = "0.6.4"
+bincode = { version = "2.0.1", features = ["serde", "derive"] }
+blake3 = { version = "1" }
+bytes = "1.10"
+crossbeam-queue = "0.3"
+derive-getters = "0.5"
+figment = { version = "0.10", features = ["env"] }
+lru = "0.16"
+oneshot = "0.1.11"
+
+dynamo-nova-backend = { workspace = true, optional = true }
+
+[features]
+default = ["testing"]
+console = []
+testing = ["dynamo-nova-backend"]
+
+
+[dev-dependencies]
+dynamo-memory = {workspace=true, features = ["unsafe-slices"]}
+dynamo-nova-backend = { workspace = true }
+proptest = "1.5.0"
+tempfile = "3"
+rstest = "0.26"
+tracing-subscriber = { workspace = true }
