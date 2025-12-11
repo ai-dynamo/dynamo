@@ -421,7 +421,9 @@ ENV MAX_JOBS=$MAX_JOBS
 ENV CUDA_HOME=/usr/local/cuda
 
 # Install VLLM and related dependencies
-RUN cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
+RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
+    --mount=type=cache,target=/root/.cache/uv \
+    cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
     chmod +x /tmp/install_vllm.sh && \
     /tmp/install_vllm.sh --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} ${LMCACHE_REF:+--lmcache-ref "$LMCACHE_REF"} --cuda-version $CUDA_VERSION
 
