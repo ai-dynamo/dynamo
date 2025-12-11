@@ -77,9 +77,8 @@ fn may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
 /// Maps source types (e.g., "image_url") to target placeholder types (e.g., "image").
 const DEFAULT_MEDIA_TYPE_CONVERSIONS: &[(&str, &str)] = &[
     ("image_url", "image"),
-    // Add more conversions as needed:
-    // ("video_url", "video"),
-    // ("audio_url", "audio"),
+    ("video_url", "video"),
+    ("audio_url", "audio"),
 ];
 
 /// Convert media URL content parts to empty placeholder types.
@@ -518,12 +517,12 @@ mod tests {
         assert!(result[0].get("image_url").is_none());
 
         // video_url should NOT be converted (not in the default map)
-        assert_eq!(result[1]["type"], "video_url");
-        assert!(result[1].get("video_url").is_some());
+        assert_eq!(result[1]["type"], "video");
+        assert!(result[1].get("video_url").is_none());
 
         // audio_url should NOT be converted (not in the default map)
-        assert_eq!(result[2]["type"], "audio_url");
-        assert!(result[2].get("audio_url").is_some());
+        assert_eq!(result[2]["type"], "audio");
+        assert!(result[2].get("audio_url").is_none());
 
         // text should be unchanged
         assert_eq!(result[3]["type"], "text");
@@ -937,7 +936,7 @@ NORMAL MODE
         let content_array = messages[0]["content"].as_array().unwrap();
         assert_eq!(content_array.len(), 5);
         assert_eq!(content_array[0]["type"], "text");
-        assert_eq!(content_array[1]["type"], "audio_url");
+        assert_eq!(content_array[1]["type"], "audio");
         assert_eq!(content_array[2]["type"], "text");
         assert_eq!(content_array[3]["type"], "image");
         assert_eq!(content_array[4]["type"], "text");
