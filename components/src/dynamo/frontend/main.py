@@ -193,13 +193,13 @@ def parse_args():
         "--active-decode-blocks-threshold",
         type=float,
         default=None,
-        help="Threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache block utilization. If not set, blocks-based busy detection is disabled.",
+        help="Threshold percentage (0.0-1.0) for determining when a worker is considered busy based on KV cache block utilization. If not set, blocks-based busy detection is disabled.",
     )
     parser.add_argument(
         "--active-prefill-tokens-threshold",
         type=float,
         default=None,
-        help="Threshold for determining when a worker is considered busy based on prefill token utilization. Can exceed 1.0 since active prefill tokens include queued tokens. If not set, tokens-based busy detection is disabled.",
+        help="Threshold percentage for determining when a worker is considered busy based on prefill token utilization. Can exceed 1.0 since active prefill tokens include queued tokens. If not set, tokens-based busy detection is disabled.",
     )
     parser.add_argument(
         "--model-name",
