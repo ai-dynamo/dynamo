@@ -26,7 +26,7 @@ dynamo-config = { workspace = true }
 
 anyhow = { workspace = true }
 cudarc = { workspace = true }
-nixl-sys = { path = "../../nixl/src/bindings/rust" }
+nixl-sys = { git = "https://github.com/ai-dynamo/nixl.git", branch = "main" }
 serde = { workspace = true}
 thiserror = { workspace = true }
 tracing = { workspace = true }
