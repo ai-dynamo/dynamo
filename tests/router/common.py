@@ -593,7 +593,7 @@ def _test_router_basic(
     Always waits for workers to be properly registered before sending requests to avoid flakiness.
 
     Args:
-        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
+        engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
         block_size: Block size for KV cache
         request: Pytest request fixture for managing resources
         frontend_port: Port to start the frontend HTTP server on
@@ -975,7 +975,6 @@ def _test_router_query_instance_id(
     Raises:
         AssertionError: If annotation response structure is incorrect or contains generation content
     """
-    import aiohttp
 
     try:
         # Start KV router (frontend)
@@ -1152,9 +1151,6 @@ def _test_router_overload_503(
     Raises:
         AssertionError: If 503 response is not received when expected
     """
-    import aiohttp
-
-    from tests.utils.managed_process import ManagedProcess
 
     try:
         logger.info(
@@ -1311,7 +1307,7 @@ def _test_router_indexers_sync(
     This validates that the snapshot mechanism works and routers can sync state from NATS.
 
     Args:
-        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
+        engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
         block_size: Block size for KV cache
         model_name: Model name to use for requests
         num_workers: Expected number of workers
@@ -1320,7 +1316,6 @@ def _test_router_indexers_sync(
     Raises:
         AssertionError: If router states don't synchronize correctly or snapshot is missing
     """
-    import nats
 
     # Use async to manage the test flow
     async def test_sync():
@@ -1762,15 +1757,16 @@ def _test_router_decisions(
     model_name: str,
     request,
     test_dp_rank: bool = False,
+    block_size: int = BLOCK_SIZE,
 ):
     """Validate KV cache prefix reuse and worker routing by sending progressive requests with overlapping prefixes.
 
     Assumes engine workers are already initialized. Sends 4 progressive requests where each extends
-    the previous tokens by BLOCK_SIZE. The first request is forced to a specific worker (and optionally
+    the previous tokens by `block_size`. The first request is forced to a specific worker (and optionally
     dp_rank), and subsequent requests should naturally route to the same worker due to prefix reuse.
 
     Args:
-        engine_workers: MockerProcess or VLLMProcess instance (already initialized with __enter__())
+        engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
         endpoint: Endpoint of the engine workers
         model_name: Name of the model
         request: Pytest request fixture
@@ -1783,7 +1779,7 @@ def _test_router_decisions(
     kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
     kv_push_router = KvPushRouter(
         endpoint=endpoint,
-        block_size=BLOCK_SIZE,
+        block_size=block_size,
         kv_router_config=kv_router_config,
     )
 
@@ -1814,8 +1810,8 @@ def _test_router_decisions(
         response_worker_ids: list[dict[str, Optional[int]]] = []
 
         for i in range(4):
-            # Add BLOCK_SIZE new random tokens
-            new_tokens = [random.randint(1, 10000) for _ in range(BLOCK_SIZE)]
+            # Add `block_size` new random tokens
+            new_tokens = [random.randint(1, 10000) for _ in range(block_size)]
             cumulative_tokens.extend(new_tokens)
 
             # Force first request to specific worker_id (and dp_rank if testing DP), let subsequent requests follow naturally
@@ -1995,7 +1991,7 @@ def _test_busy_threshold_endpoint(
     For now, this test only verifies the endpoint is accessible and returns valid responses.
 
     Args:
-        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
+        engine_workers: MockerProcess instance (already initialized with __enter__())
         block_size: Block size for KV cache
         request: Pytest request fixture for managing resources
         frontend_port: Port for the frontend HTTP server

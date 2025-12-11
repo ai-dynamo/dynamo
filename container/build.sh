@@ -552,16 +552,12 @@ fi
 # Add NIXL_REF as a build argument
 BUILD_ARGS+=" --build-arg NIXL_REF=${NIXL_REF} "
 
-# Function to build local-dev image with header
+# Function to build local-dev image
 build_local_dev_with_header() {
     local dev_base_image="$1"
     local tags="$2"
     local success_msg="$3"
     local header_title="$4"
-
-    echo "======================================"
-    echo "$header_title"
-    echo "======================================"
 
     # Get user info right before using it
     USER_UID=${CUSTOM_UID:-$(id -u)}
@@ -575,7 +571,8 @@ build_local_dev_with_header() {
         exit 1
     fi
 
-    echo "Building new local-dev image from: $dev_base_image"
+    echo ""
+    echo "Now building new local-dev image from: $dev_base_image"
     echo "User 'dynamo' will have UID: $USER_UID, GID: $USER_GID"
 
     # Show the docker command being executed if not in dry-run mode
@@ -602,8 +599,8 @@ build_local_dev_with_header() {
     # Show usage instructions
     echo ""
     echo "To run the local-dev image as the local user ($USER_UID/$USER_GID):"
-    # Extract the last tag from the tags string
-    last_tag=$(echo "$tags" | grep -o -- '--tag [^ ]*' | tail -1 | cut -d' ' -f2)
+    # Extract the first tag from the tags string (the full version tag, not the latest tag)
+    last_tag=$(echo "$tags" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
     # Calculate relative path to run.sh from current working directory
     # Get the directory where build.sh is located
     build_dir="$(dirname "${BASH_SOURCE[0]}")"
@@ -948,7 +945,9 @@ elif [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
         LOCAL_DEV_TAGS+=" --tag ${LATEST_TAG_NAME}-local-dev"
     fi
 
-    build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built local-dev images" "Starting Build 3: Local-Dev Image"
+    # Extract first tag for success message
+    FIRST_TAG=$(echo "$LOCAL_DEV_TAGS" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
+    build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built $FIRST_TAG" "Building Local-Dev Image"
 fi
 
 
