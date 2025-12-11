@@ -26,6 +26,7 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
     pytest.mark.post_merge,  # post_merge to pinpoint failure commit
+    pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
 ]
 
 
@@ -166,7 +167,6 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.timeout(160)  # 3x average
 @pytest.mark.gpu_1
 @pytest.mark.xfail(strict=False)
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_request_cancellation_sglang_aggregated(request, runtime_services):
     """
     End-to-end test for request cancellation functionality in aggregated mode.
@@ -251,11 +251,6 @@ def test_request_cancellation_sglang_aggregated(request, runtime_services):
 
 @pytest.mark.timeout(185)  # 3x average
 @pytest.mark.gpu_2
-@pytest.mark.parametrize(
-    "request_plane",
-    ["nats", "tcp"],
-    indirect=True,
-)
 def test_request_cancellation_sglang_decode_cancel(request, runtime_services):
     """
     End-to-end test for request cancellation during decode phase.
