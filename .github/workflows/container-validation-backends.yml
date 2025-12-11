@@ -160,7 +160,6 @@ jobs:
     runs-on: builder-cpu-amd-runner
     env:
       BUILD_PLATFORMS: linux/amd64,linux/arm64
-      JOB_BUILDER_NAME: ${{ env.BUILDER_NAME }}-operator
     steps:
       - name: Output Node Name
         shell: bash
@@ -172,7 +171,7 @@ jobs:
       - name: Define buildkit builders
         uses: ./.github/actions/define-buildkit-builders
         with:
-          builder_name: ${{ env.JOB_BUILDER_NAME }}
+          builder_name: ${{ env.BUILDER_NAME }}-operator
           replicas: '1'
           linux_amd64: 'true'
           linux_arm64: 'true'
@@ -242,7 +241,7 @@ jobs:
         shell: bash
         if: always()
         run: |
-          docker buildx rm ${{ env.JOB_BUILDER_NAME }} || true
+          docker buildx rm ${{ env.BUILDER_NAME }}-operator || true
 
 
 
