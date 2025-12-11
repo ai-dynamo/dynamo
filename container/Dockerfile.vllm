@@ -235,24 +235,17 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 
 # Set SCCACHE environment variables
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
-    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    SCCACHE_ERROR_LOG=/workspace/sccache_log.txt \
-    SCCACHE_LOG_LEVEL="debug"
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} 
 
 # Build and install UCX
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
-    export CC=$(which gcc) && \
-    export CXX=$(which g++) && \
-    export CUDA_CXX=$(which nvcc) && \
-    sccache --start-server && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
         export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
         export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
     fi && \
-    /tmp/use-sccache.sh show-stats "DEBUG" && \
     cd /usr/local/src && \
      git clone https://github.com/openucx/ucx.git && \
      cd ucx && 			     \
@@ -283,9 +276,11 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
-    export CC=$(which gcc) && \
-    export CXX=$(which g++) && \
-    /tmp/use-sccache.sh show-stats "DEBUG" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
     git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
@@ -310,10 +305,12 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    export CC=$(which gcc) && \
-    export CXX=$(which g++) && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
-    /tmp/use-sccache.sh show-stats "DEBUG" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
     cd /workspace/nixl && \
     uv build . --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
@@ -328,14 +325,11 @@ ARG ENABLE_KVBM
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
-    export CC=$(which gcc) && \
-    export CXX=$(which g++) && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
         export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
         export RUSTC_WRAPPER="sccache"; \
     fi && \
-    /tmp/use-sccache.sh show-stats "DEBUG" && \
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
@@ -426,43 +420,10 @@ ARG MAX_JOBS=16
 ENV MAX_JOBS=$MAX_JOBS
 ENV CUDA_HOME=/usr/local/cuda
 
-# Install sccache if requested
-COPY container/use-sccache.sh /tmp/use-sccache.sh
-# Install sccache if requested
-ARG USE_SCCACHE
-ARG ARCH_ALT
-ARG SCCACHE_BUCKET
-ARG SCCACHE_REGION
-
-ENV ARCH_ALT=${ARCH_ALT}
-RUN if [ "$USE_SCCACHE" = "true" ]; then \
-        /tmp/use-sccache.sh install; \
-    fi
-
-# Set environment variables - they'll be empty strings if USE_SCCACHE=false
-ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
-    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    SCCACHE_ERROR_LOG=/workspace/sccache_log.txt \
-    SCCACHE_LOG_LEVEL="debug"
-
 # Install VLLM and related dependencies
-RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
-    --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
-    /tmp/use-sccache.sh show-stats "DEBUG" && \
-    export CC=$(which gcc) && \
-    export CXX=$(which g++) && \
-    if [ "$USE_SCCACHE" = "true" ]; then \
-        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
-    fi && \
-        cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
-        chmod +x /tmp/install_vllm.sh && \
-        /tmp/install_vllm.sh --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} ${LMCACHE_REF:+--lmcache-ref "$LMCACHE_REF"} --cuda-version $CUDA_VERSION || cat /workspace/sccache_log.txt && \
-        /tmp/use-sccache.sh show-stats "vLLM";
+RUN cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
+    chmod +x /tmp/install_vllm.sh && \
+    /tmp/install_vllm.sh --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} ${LMCACHE_REF:+--lmcache-ref "$LMCACHE_REF"} --cuda-version $CUDA_VERSION
 
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
