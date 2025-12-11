@@ -98,7 +98,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "now",
     "serde",
 ] }
-cudarc = { version = "0.18.1", features = ["cuda-12020"] }
+cudarc = { version = "0.18.2", features = ["cuda-12020"] }
 dashmap = { version = "6.1" }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }

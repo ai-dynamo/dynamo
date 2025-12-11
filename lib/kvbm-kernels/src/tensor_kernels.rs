@@ -265,7 +265,7 @@ mod tests {
                 for offset in 0..inner {
                     host_chunk.push((global_idx * inner + offset) as f32 + 0.25f32);
                 }
-                let slice = stream.memcpy_stod(&host_chunk)?;
+                let slice = stream.clone_htod(&host_chunk)?;
                 {
                     let (ptr_raw, _guard) = slice.device_ptr(&stream);
                     block_ptrs_host.push(ptr_raw as usize as *const c_void);
@@ -278,7 +278,7 @@ mod tests {
             host_block_chunks.push(host_chunks_for_block);
         }
 
-        let block_ptrs_device = stream.memcpy_stod(block_ptr_values.as_slice())?;
+        let block_ptrs_device = stream.clone_htod(block_ptr_values.as_slice())?;
 
         let mut universal_slices = Vec::with_capacity(num_blocks);
         let mut universal_ptr_values = Vec::with_capacity(num_blocks);
@@ -290,7 +290,7 @@ mod tests {
             }
             universal_slices.push(slice);
         }
-        let universal_ptrs_device = stream.memcpy_stod(universal_ptr_values.as_slice())?;
+        let universal_ptrs_device = stream.clone_htod(universal_ptr_values.as_slice())?;
 
         let mut operational_slices = Vec::with_capacity(num_blocks);
         let mut operational_ptrs_host = Vec::with_capacity(num_blocks);
@@ -304,7 +304,7 @@ mod tests {
             }
             operational_slices.push(slice);
         }
-        let operational_ptrs_device = stream.memcpy_stod(operational_ptr_values.as_slice())?;
+        let operational_ptrs_device = stream.clone_htod(operational_ptr_values.as_slice())?;
 
         // Block -> Universal
         {
@@ -340,7 +340,7 @@ mod tests {
         };
 
         for (block_idx, universal_slice) in universal_slices.iter().enumerate().take(num_blocks) {
-            let host_universal = stream.memcpy_dtov(universal_slice)?;
+            let host_universal = stream.clone_dtoh(universal_slice)?;
             for nh_idx in 0..nh {
                 for nl_idx in 0..nl {
                     for no_idx in 0..no {
@@ -410,7 +410,7 @@ mod tests {
 
         for block_idx in 0..num_blocks {
             for chunk_idx in 0..chunk_count {
-                let host_chunk = stream.memcpy_dtov(&block_slices[block_idx][chunk_idx])?;
+                let host_chunk = stream.clone_dtoh(&block_slices[block_idx][chunk_idx])?;
                 for (inner_idx, value) in host_chunk.iter().enumerate() {
                     let expected = host_block_chunks[block_idx][chunk_idx][inner_idx];
                     assert!(
@@ -456,7 +456,7 @@ mod tests {
         stream.synchronize()?;
 
         for block_idx in 0..num_blocks {
-            let host_operational = stream.memcpy_dtov(&operational_slices[block_idx])?;
+            let host_operational = stream.clone_dtoh(&operational_slices[block_idx])?;
             for chunk_idx in 0..chunk_count {
                 for inner_idx in 0..inner {
                     let expected = host_block_chunks[block_idx][chunk_idx][inner_idx];
@@ -511,7 +511,7 @@ mod tests {
 
         for block_idx in 0..num_blocks {
             for chunk_idx in 0..chunk_count {
-                let host_chunk = stream.memcpy_dtov(&block_slices[block_idx][chunk_idx])?;
+                let host_chunk = stream.clone_dtoh(&block_slices[block_idx][chunk_idx])?;
                 for (inner_idx, value) in host_chunk.iter().enumerate() {
                     let expected = host_block_chunks[block_idx][chunk_idx][inner_idx];
                     assert!(

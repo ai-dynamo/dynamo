@@ -315,14 +315,14 @@ unsafe fn block_to_universal(
     }
 
     let block_ptrs_device = stream
-        .memcpy_stod(block_ptr_values.as_slice())
+        .clone_htod(block_ptr_values.as_slice())
         .map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to upload pointer buffer: {:?}", e))
         })?;
 
     let universal_ptr_values: Vec<usize> = universal_infos.iter().map(|info| info.ptr).collect();
     let universal_ptrs_device = stream
-        .memcpy_stod(universal_ptr_values.as_slice())
+        .clone_htod(universal_ptr_values.as_slice())
         .map_err(|e| {
             PyRuntimeError::new_err(format!(
                 "Failed to upload universal pointer buffer: {:?}",
@@ -458,14 +458,14 @@ unsafe fn universal_to_block(
     }
 
     let block_ptrs_device = stream
-        .memcpy_stod(block_ptr_values.as_slice())
+        .clone_htod(block_ptr_values.as_slice())
         .map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to upload pointer buffer: {:?}", e))
         })?;
 
     let universal_ptr_values: Vec<usize> = universal_infos.iter().map(|info| info.ptr).collect();
     let universal_ptrs_device = stream
-        .memcpy_stod(universal_ptr_values.as_slice())
+        .clone_htod(universal_ptr_values.as_slice())
         .map_err(|e| {
             PyRuntimeError::new_err(format!(
                 "Failed to upload universal pointer buffer: {:?}",
@@ -600,7 +600,7 @@ unsafe fn block_to_operational(
     }
 
     let block_ptrs_device = stream
-        .memcpy_stod(block_ptr_values.as_slice())
+        .clone_htod(block_ptr_values.as_slice())
         .map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to upload pointer buffer: {:?}", e))
         })?;
@@ -618,7 +618,7 @@ unsafe fn block_to_operational(
     let operational_ptr_values: Vec<usize> =
         operational_infos.iter().map(|info| info.ptr).collect();
     let operational_ptrs_device = stream
-        .memcpy_stod(operational_ptr_values.as_slice())
+        .clone_htod(operational_ptr_values.as_slice())
         .map_err(|e| {
             PyRuntimeError::new_err(format!(
                 "Failed to upload operational pointer buffer: {:?}",
@@ -754,7 +754,7 @@ unsafe fn operational_to_block(
     }
 
     let block_ptrs_device = stream
-        .memcpy_stod(block_ptr_values.as_slice())
+        .clone_htod(block_ptr_values.as_slice())
         .map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to upload pointer buffer: {:?}", e))
         })?;
@@ -772,7 +772,7 @@ unsafe fn operational_to_block(
     let operational_ptr_values: Vec<usize> =
         operational_infos.iter().map(|info| info.ptr).collect();
     let operational_ptrs_device = stream
-        .memcpy_stod(operational_ptr_values.as_slice())
+        .clone_htod(operational_ptr_values.as_slice())
         .map_err(|e| {
             PyRuntimeError::new_err(format!(
                 "Failed to upload operational pointer buffer: {:?}",
