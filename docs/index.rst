@@ -71,6 +71,7 @@ Quickstart
    :caption: Components
 
    Backends <_sections/backends>
+   Frontends <_sections/frontends>
    Router <router/README>
    Planner <planner/planner_intro>
    KVBM <kvbm/kvbm_intro>

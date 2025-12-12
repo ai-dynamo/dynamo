@@ -74,14 +74,14 @@ Specifies the container image used for DynamoGraphDeployment worker components (
 - Temporary DGDs created during online profiling (for performance measurements)
 - The final DGD deployed after profiling completes
 
-If `workersImage` is omitted, the image from the base config file (e.g., `disagg.yaml`) is used. You may use our public images (0.6.1 and later) or build and push your own.
+If `workersImage` is omitted, the image from the base config file (e.g., `disagg.yaml`) is used. You may use our public images (0.7.1 and later) or build and push your own.
 
 ```yaml
 spec:
   profilingConfig:
-    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.1"
   deploymentOverrides:
-    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Optional
+    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.1"  # Optional
 ```
 
 ## Quick Start: Deploy with DGDR
@@ -92,7 +92,7 @@ Dynamo provides sample DGDR configurations in `benchmarks/profiler/deploy/`. You
 
 **Available Sample DGDRs:**
 - **`profile_sla_dgdr.yaml`**: Standard online profiling for dense models
-- **`profile_sla_aic_dgdr.yaml`**: Fast offline profiling using AI Configurator (TensorRT-LLM)
+- **`profile_sla_aic_dgdr.yaml`**: Fast offline profiling using AI Configurator (vLLM, SGLang, TensorRT-LLM)
 - **`profile_sla_moe_dgdr.yaml`**: Online profiling for MoE models (SGLang)
 
 Or, you can create your own DGDR for your own needs:
@@ -108,7 +108,7 @@ spec:
   backend: vllm                # Backend: vllm, sglang, or trtllm
 
   profilingConfig:
-    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Required
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.1"  # Required
     config:
       sla:
         isl: 3000    # Adjust to your workload
@@ -117,10 +117,10 @@ spec:
         itl: 20      # Your target (ms)
 
       sweep:
-        use_ai_configurator: false  # Set to true for fast profiling (TensorRT-LLM only)
+        use_ai_configurator: false  # Set to true for fast profiling with AI Configurator
 
   deploymentOverrides:
-    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Optional
+    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.1"  # Optional
 
   autoApply: true  # Auto-deploy after profiling
 ```
@@ -244,7 +244,7 @@ Choose between **online profiling** (real measurements, 2-4 hours) or **offline 
 sweep:
   use_ai_configurator: false
 
-# Offline Profiling (AI Configurator - TensorRT-LLM only)
+# Offline Profiling (AI Configurator - supports vLLM, SGLang, TensorRT-LLM)
 sweep:
   use_ai_configurator: true
   aic_system: h200_sxm
@@ -286,7 +286,7 @@ spec:
   backend: sglang
 
   profilingConfig:
-    profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.7.1"
     configMapRef:
       name: deepseek-r1-config
       key: disagg.yaml  # Must match the key used in --from-file
@@ -304,7 +304,7 @@ spec:
         backend_version: "0.20.0"
 
   deploymentOverrides:
-    workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
+    workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.7.1"
 
   autoApply: true
 ```
