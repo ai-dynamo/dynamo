@@ -61,7 +61,7 @@ class MinioService:
     def __init__(self, config: MinioLoraConfig):
         self.config = config
         self._logger = logging.getLogger(self.__class__.__name__)
-        self._temp_dir: Optional[str] = None
+        self._temp_download_dir: Optional[str] = None
 
     def start(self) -> None:
         """Start MinIO container"""
@@ -183,9 +183,9 @@ class MinioService:
 
     def download_lora(self) -> str:
         """Download LoRA from Hugging Face Hub, returns temp directory path"""
-        self._temp_dir = tempfile.mkdtemp(prefix="lora_download_")
+        self._temp_download_dir = tempfile.mkdtemp(prefix="lora_download_")
         self._logger.info(
-            f"Downloading LoRA {self.config.lora_repo} to {self._temp_dir}"
+            f"Downloading LoRA {self.config.lora_repo} to {self._temp_download_dir}"
         )
 
         result = subprocess.run(
@@ -194,7 +194,7 @@ class MinioService:
                 "download",
                 self.config.lora_repo,
                 "--local-dir",
-                self._temp_dir,
+                self._temp_download_dir,
                 "--local-dir-use-symlinks",
                 "False",
             ],
@@ -206,11 +206,11 @@ class MinioService:
             raise RuntimeError(f"Failed to download LoRA: {result.stderr}")
 
         # Clean up cache directory
-        cache_dir = os.path.join(self._temp_dir, ".cache")
+        cache_dir = os.path.join(self._temp_download_dir, ".cache")
         if os.path.exists(cache_dir):
             shutil.rmtree(cache_dir)
 
-        return self._temp_dir
+        return self._temp_download_dir
 
     def upload_lora(self, local_path: str) -> None:
         """Upload LoRA to MinIO"""
@@ -246,11 +246,15 @@ class MinioService:
         if result.returncode != 0:
             raise RuntimeError(f"Failed to upload LoRA: {result.stderr}")
 
+    def cleanup_download(self) -> None:
+        """Clean up temporary download directory only"""
+        if self._temp_download_dir and os.path.exists(self._temp_download_dir):
+            shutil.rmtree(self._temp_download_dir)
+            self._temp_download_dir = None
+
     def cleanup_temp(self) -> None:
-        """Clean up temporary directories"""
-        if self._temp_dir and os.path.exists(self._temp_dir):
-            shutil.rmtree(self._temp_dir)
-            self._temp_dir = None
+        """Clean up all temporary directories including MinIO data dir"""
+        self.cleanup_download()
 
         if self.config.data_dir and os.path.exists(self.config.data_dir):
             shutil.rmtree(self.config.data_dir, ignore_errors=True)

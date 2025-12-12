@@ -426,7 +426,7 @@ def test_mocker_kv_router_overload_503(
             request=request,
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
-            busy_threshold=0.2,
+            blocks_threshold=0.2,
         )
 
     finally:
