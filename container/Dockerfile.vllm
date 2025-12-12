@@ -252,12 +252,21 @@ COPY --chown=dynamo: --from=dynamo_base /usr/local/ucx /usr/local/ucx
 COPY --chown=dynamo: --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
 ENV PATH=/usr/local/ucx/bin:$PATH
 
+# Copy AWS SDK C++ libraries (required for NIXL OBJ backend / S3 support)
+# In dynamo_base, libs are already in /usr/local/lib/ (copied from wheel_builder's lib64)
+COPY --chown=dynamo: --from=dynamo_base /usr/local/lib/libaws* /usr/local/lib/
+COPY --chown=dynamo: --from=dynamo_base /usr/local/lib/libs2n* /usr/local/lib/
+# Copy OpenSSL 1.1 (s2n-tls requires it, Ubuntu 24.04 only has OpenSSL 3)
+COPY --chown=dynamo: --from=dynamo_base /usr/local/lib/libcrypto.so.1.1* /usr/local/lib/
+COPY --chown=dynamo: --from=dynamo_base /usr/local/lib/libssl.so.1.1* /usr/local/lib/
+
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
 $NIXL_LIB_DIR:\
 $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
+/usr/local/lib:\
 $LD_LIBRARY_PATH
 
 ### VIRTUAL ENVIRONMENT SETUP ###

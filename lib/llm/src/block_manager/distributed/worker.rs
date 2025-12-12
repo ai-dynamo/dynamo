@@ -127,7 +127,7 @@ fn build_agent(
         ];
 
         if let Some(endpoint) = &config.endpoint_override {
-            obj_param_pairs.push(("endpoint".to_string(), endpoint.clone()));
+            obj_param_pairs.push(("endpoint_override".to_string(), endpoint.clone()));
         }
         if let Some(region) = &config.region {
             obj_param_pairs.push(("region".to_string(), region.clone()));
@@ -215,7 +215,7 @@ async fn perform_allocation_and_build_handler(
             ];
 
             if let Some(endpoint) = &config.endpoint_override {
-                obj_param_pairs.push(("endpoint".to_string(), endpoint.clone()));
+                obj_param_pairs.push(("endpoint_override".to_string(), endpoint.clone()));
             }
             if let Some(region) = &config.region {
                 obj_param_pairs.push(("region".to_string(), region.clone()));
@@ -1163,20 +1163,45 @@ impl KvbmWorker {
     ///
     /// Must be called after the transfer handler is ready.
     /// Returns Ok(true) if G4 was enabled, Ok(false) if not configured or not supported.
+    ///
+    /// Supports both V1 and V2 transfer handlers:
+    /// - V2: Uses ObjectTransferHandler with newer architecture
+    /// - V1: Uses G4TransferHandler with legacy architecture
+    ///
+    /// # Arguments
+    /// * `handler` - The block transfer handler (V1 or V2)
+    /// * `config` - Object storage configuration
+    /// * `worker_id` - Worker ID for bucket resolution and identification
     pub async fn init_g4(
         &self,
         handler: Arc<dyn BlockTransferHandler>,
         config: ObjectStorageConfig,
+        worker_id: usize,
     ) -> anyhow::Result<bool> {
         // Store the transfer handler
         let _ = self.transfer_handler.set(handler.clone());
 
-        // Try to downcast to V2 handler
-        let v2_handler = handler
-            .as_any()
-            .downcast_ref::<BlockTransferHandlerV2>()
-            .ok_or_else(|| anyhow::anyhow!("G4 requires V2 transfer handler"))?;
+        // Try V2 handler first (preferred)
+        if let Some(v2_handler) = handler.as_any().downcast_ref::<BlockTransferHandlerV2>() {
+            return self.init_g4_v2(v2_handler, config).await;
+        }
 
+        // Fall back to V1 handler
+        if let Some(v1_handler) = handler.as_any().downcast_ref::<BlockTransferHandlerV1>() {
+            return self.init_g4_v1(v1_handler, config, worker_id).await;
+        }
+
+        Err(anyhow::anyhow!(
+            "G4 requires either V1 or V2 transfer handler"
+        ))
+    }
+
+    /// Initialize G4 with V2 transfer handler (preferred path).
+    async fn init_g4_v2(
+        &self,
+        v2_handler: &BlockTransferHandlerV2,
+        config: ObjectStorageConfig,
+    ) -> anyhow::Result<bool> {
         // Store device handle for offload/onboard
         if let Some(device_handle) = v2_handler.device_handle() {
             let _ = self.device_handle.set(device_handle);
@@ -1205,7 +1230,55 @@ impl KvbmWorker {
             .set(obj_handler)
             .map_err(|_| anyhow::anyhow!("Object handler already initialized"))?;
 
-        tracing::info!("G4 object storage initialized on worker (write-through enabled)");
+        tracing::info!("G4 object storage initialized on worker via V2 handler (write-through enabled)");
+        Ok(true)
+    }
+
+    /// Initialize G4 with V1 transfer handler (legacy path).
+    async fn init_g4_v1(
+        &self,
+        v1_handler: &BlockTransferHandlerV1,
+        config: ObjectStorageConfig,
+        worker_id: usize,
+    ) -> anyhow::Result<bool> {
+        // Get host and device blocks from V1 handler
+        let host_blocks = v1_handler
+            .host_blocks()
+            .ok_or_else(|| anyhow::anyhow!("V1 handler has no host blocks for G4 bounce buffers"))?;
+
+        let device_blocks = v1_handler
+            .device_blocks()
+            .ok_or_else(|| anyhow::anyhow!("V1 handler has no device blocks"))?;
+
+        // Get the NIXL agent from the transfer context
+        let context = v1_handler.context();
+        let agent = context.nixl_agent();
+
+        // Create registries
+        let local_registry = Arc::new(ObjectRegistry::new());
+        let distributed_registry = create_registry_from_env().await;
+
+        // Create G4TransferHandler for V1
+        let g4_handler = G4TransferHandler::new(
+            agent,
+            local_registry,
+            distributed_registry,
+            config,
+            host_blocks.to_vec(),
+            device_blocks.to_vec(),
+            context.clone(),
+            worker_id as u64,
+            None, // kvbm_metrics - could be added if needed
+        )?;
+
+        let g4_handler = Arc::new(g4_handler);
+
+        // Wire up the G4 handler to V1
+        v1_handler.set_object_handler(g4_handler.clone());
+
+        // Note: V1 uses G4TransferHandler which is different from ObjectTransferHandler
+        // We can't store it in self.object_handler (wrong type), but V1 handler owns it
+        tracing::info!("G4 object storage initialized on worker via V1 handler (write-through enabled)");
         Ok(true)
     }
 

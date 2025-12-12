@@ -101,7 +101,7 @@ impl KvbmLeaderConfig {
                 • DYN_KVBM_OBJECT_BUCKET=<bucket_name>  (supports {{worker_id}} template)\n\
                 • DYN_KVBM_OBJECT_NUM_BLOCKS=<num_blocks>\n\
                 \n\
-                Note: Object storage requires DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL=1"
+                Optionally set DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL=1 for V2 handler."
             );
         }
         Ok(())
@@ -322,7 +322,7 @@ impl KvbmLeader {
 
     /// Check if G4 is enabled.
     pub fn g4_enabled(&self) -> bool {
-        tracing::info!(
+        tracing::debug!(
             "g4_enabled: g4_registry={}, distributed_registry={}",
             self.g4_registry.is_some(),
             self.distributed_registry.is_some()
