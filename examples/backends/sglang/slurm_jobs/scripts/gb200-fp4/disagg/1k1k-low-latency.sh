@@ -80,7 +80,6 @@ if [ "$mode" = "prefill" ]; then
     if [[ -n "${DUMP_CONFIG_PATH}" ]]; then command_suffix="${command_suffix} --dump-config-to ${DUMP_CONFIG_PATH}"; fi
 
     PYTHONUNBUFFERED=1 \
-    FLASHINFER_WORKSPACE_BASE=/configs/flashinfer-cache \
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
     SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
     SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
@@ -137,7 +136,6 @@ elif [ "$mode" = "decode" ]; then
     if [[ -n "${DUMP_CONFIG_PATH}" ]]; then command_suffix="${command_suffix} --dump-config-to ${DUMP_CONFIG_PATH}"; fi
 
     PYTHONUNBUFFERED=1 \
-    FLASHINFER_WORKSPACE_BASE=/configs/flashinfer-cache \
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
     SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
     SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
