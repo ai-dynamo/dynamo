@@ -25,7 +25,7 @@ import torch
 import uvloop
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 import dynamo.nixl_connect as connect
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
@@ -168,7 +168,7 @@ class VllmEncodeWorker:
             with torch.no_grad():
                 audio_embeddings = self.get_audio_embeddings(audio_features)
             descriptor = connect.Descriptor(audio_embeddings)
-            with self._connector.create_readable(descriptor) as readable:
+            with await self._connector.create_readable(descriptor) as readable:
                 request.serialized_request = readable.metadata()
                 # Clear the audio URL as hint that the audio is passed as embeddings.
                 request.multimodal_input.audio_url = None
@@ -201,7 +201,6 @@ class VllmEncodeWorker:
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.
         self._connector = connect.Connector()
-        await self._connector.initialize()
 
         logger.info("Startup completed.")
 

@@ -21,6 +21,7 @@ import numpy as np
 from matplotlib import cm
 from scipy.interpolate import griddata
 
+from benchmarks.profiler.utils.defaults import GPU_COST_PER_HOUR
 from benchmarks.profiler.utils.pareto import compute_pareto
 
 logger = logging.getLogger(__name__)
@@ -297,13 +298,11 @@ def plot_pd_joint_results(isl, osl, prefill_data, decode_data, output_dir):
         decode_data: DecodeProfileData instance containing profiling results
         output_dir: directory to save the plot
     """
-    GPU_COST_PER_HOUR = 3.0  # $3/hour
-
     # compute pareto front for prefill
-    p_ttft, p_thpt = compute_pareto(prefill_data.ttft, prefill_data.thpt_per_gpu)
+    p_ttft, p_thpt, _ = compute_pareto(prefill_data.ttft, prefill_data.thpt_per_gpu)
 
     # compute pareto front for decode
-    d_itl, d_thpt = compute_pareto(decode_data.itl, decode_data.thpt_per_gpu)
+    d_itl, d_thpt, _ = compute_pareto(decode_data.itl, decode_data.thpt_per_gpu)
 
     # convert to cost per thousand requests
     p_ttft = np.array(p_ttft)
