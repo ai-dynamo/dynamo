@@ -14,8 +14,6 @@ from dynamo.sglang.protocol import DisaggPreprocessedRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
-logger = logging.getLogger(__name__)
-
 
 class DecodeWorkerHandler(BaseWorkerHandler):
     """Handler for decode workers in both aggregated and disaggregated serving modes."""
@@ -95,14 +93,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 try:
                     parsed_logprobs = int(logprobs_value)
                     if parsed_logprobs < 0:
-                        logger.warning(
+                        logging.warning(
                             f"Invalid logprobs value: {logprobs_value} (must be non-negative), ignoring"
                         )
                     else:
                         param_mapping["return_logprob"] = True
                         param_mapping["top_logprobs_num"] = parsed_logprobs
                 except (ValueError, TypeError):
-                    logger.warning(
+                    logging.warning(
                         f"Invalid logprobs value: {logprobs_value} (must be integer), ignoring"
                     )
         else:
