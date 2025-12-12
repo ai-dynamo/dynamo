@@ -56,7 +56,7 @@ jobs:
             ${{ steps.define_image_tag.outputs.image_tag }} \
             bash -ec 'rustup component add rustfmt clippy && \
                       cargo fmt -- --check && \
-                      cargo clippy --features block-manager,media-nixl --no-deps --all-targets -- -D warnings -A deprecated -A clippy::deprecated && \
+                      cargo clippy --features block-manager,media-nixl --no-deps --all-targets -- -D warnings -A deprecated && \
                       cargo test --locked --all-targets --features=block-manager,media-nixl && \
                       cargo test --locked --features integration -- --nocapture'
       - name: Cleanup services
