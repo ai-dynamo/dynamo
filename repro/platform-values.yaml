@@ -1,0 +1,26 @@
+# Install only etcd and NATS (operator already exists cluster-wide)
+dynamo-operator:
+  enabled: false
+
+etcd:
+  enabled: true
+  replicaCount: 1
+  persistence:
+    enabled: true
+    size: 1Gi
+  auth:
+    rbac:
+      create: false
+
+nats:
+  enabled: true
+  config:
+    cluster:
+      enabled: false
+    jetstream:
+      enabled: true
+      fileStore:
+        enabled: true
+        pvc:
+          enabled: true
+          size: 10Gi
