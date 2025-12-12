@@ -42,6 +42,7 @@ use crate::protocols::{
     },
 };
 use crate::tokenizers::{DecodeStream, HuggingFaceTokenizer, Tokenizer};
+use dynamo_async_openai::types::StopReason;
 use tokenizers::Tokenizer as HfTokenizer;
 
 /// Represents the output stream from the execution engine
@@ -198,11 +199,17 @@ impl
                         }
                         Some(StopTrigger::HiddenStopSequenceDetected(seq)) => {
                             // User-provided stop sequence (hidden from output)
-                            (Some(FinishReason::Stop), Some(seq.clone()))
+                            (
+                                Some(FinishReason::Stop),
+                                Some(StopReason::String(seq.clone())),
+                            )
                         }
                         Some(StopTrigger::VisibleStopSequenceDetected(seq)) => {
                             // User-provided stop sequence (included in output)
-                            (Some(FinishReason::Stop), Some(seq.clone()))
+                            (
+                                Some(FinishReason::Stop),
+                                Some(StopReason::String(seq.clone())),
+                            )
                         }
                         None => (None, None),
                     };

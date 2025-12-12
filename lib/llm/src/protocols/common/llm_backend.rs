@@ -7,6 +7,7 @@ pub use super::FinishReason;
 pub use super::preprocessor::PreprocessedRequest;
 use crate::protocols::TokenIdType;
 use dynamo_async_openai::types::CompletionUsage;
+use dynamo_async_openai::types::StopReason;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 
 pub type TokenType = Option<String>;
@@ -48,7 +49,7 @@ pub struct BackendOutput {
     /// The stop string or token that triggered the stop condition.
     /// This is set when finish_reason is Stop and identifies what triggered it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<String>,
+    pub stop_reason: Option<StopReason>,
 
     // Model Deployment Card checksum
     //pub mdcsum: String,
@@ -100,7 +101,7 @@ pub struct LLMEngineOutput {
     /// The stop string or token that triggered the stop condition.
     /// This is set when finish_reason is Stop and identifies what triggered it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<String>,
+    pub stop_reason: Option<StopReason>,
 
     // Index field for batch requests to match OpenAI format
     pub index: Option<u32>,

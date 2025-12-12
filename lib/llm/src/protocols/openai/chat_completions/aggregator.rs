@@ -12,6 +12,7 @@ use crate::protocols::{
     openai::ParsingOptions,
 };
 
+use dynamo_async_openai::types::StopReason;
 use dynamo_runtime::engine::DataStream;
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
@@ -50,7 +51,7 @@ struct DeltaChoice {
     /// The reason the completion was finished (if applicable).
     finish_reason: Option<dynamo_async_openai::types::FinishReason>,
     /// The stop string or token that triggered the stop condition.
-    stop_reason: Option<String>,
+    stop_reason: Option<StopReason>,
     /// Optional log probabilities for the chat choice.
     logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
     // Optional tool calls for the chat choice.

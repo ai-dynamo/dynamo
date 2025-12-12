@@ -104,7 +104,7 @@ fn create_choice_stream(
     content: &str,
     tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
     finish_reason: Option<FinishReason>,
-    stop_reason: Option<String>,
+    stop_reason: Option<dynamo_async_openai::types::StopReason>,
     logprobs: Option<ChatChoiceLogprobs>,
 ) -> ChatChoiceStream {
     #[allow(deprecated)]
