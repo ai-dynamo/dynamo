@@ -267,95 +267,550 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
 ############################## TEST JOBS ##############################
-# All test types consolidated into a single job with matrix configuration
 
-  tests:
-    name: ${{ matrix.framework }}-${{ matrix.arch }}-${{ matrix.test_type }}
+  unit-tests:
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-unit
     needs: [build-amd64, build-arm64]
     if: always()
-    runs-on: ${{ matrix.arch == 'amd64' && 'gpu-l40-amd64' || 'cpu-arm-r8g-4xlarge' }}
-    timeout-minutes: ${{ matrix.timeout }}
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         framework: [vllm, trtllm, sglang]
-        arch: [amd64, arm64]
-        test_type: [unit, integ, 1gpu-e2e, 2gpu-e2e]
-        include:
-          # Timeout configuration per test type
-          - test_type: unit
-            timeout: 45
-            cpu_limit: '8'
-          - test_type: integ
-            timeout: 90
-            cpu_limit: '10'
-          - test_type: 1gpu-e2e
-            timeout: 120
-            cpu_limit: '10'
-          - test_type: 2gpu-e2e
-            timeout: 150
-            cpu_limit: '10'
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup test environment
-        uses: ./.github/actions/setup-test-env
-        with:
-          framework: ${{ matrix.framework }}
-          arch: ${{ matrix.arch }}
-          image_prefix: ${{ inputs.image_prefix }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Determine pytest marks
-        id: marks
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Determine pytest marks based on test type and nightly flag
-          case "${{ matrix.test_type }}" in
-            unit)
-              if [[ "${{ inputs.include_nightly_marks }}" == "true" ]]; then
-                echo "marks=unit and (nightly or post_merge or pre_merge)" >> $GITHUB_OUTPUT
-              else
-                echo "marks=unit and (post_merge or pre_merge)" >> $GITHUB_OUTPUT
-              fi
-              ;;
-            integ)
-              if [[ "${{ inputs.include_nightly_marks }}" == "true" ]]; then
-                echo "marks=integration and (nightly or post_merge or pre_merge)" >> $GITHUB_OUTPUT
-              else
-                echo "marks=integration and (post_merge or pre_merge)" >> $GITHUB_OUTPUT
-              fi
-              ;;
-            1gpu-e2e)
-              echo "marks=${{ matrix.framework }} and e2e and gpu_1" >> $GITHUB_OUTPUT
-              ;;
-            2gpu-e2e)
-              if [[ "${{ inputs.include_nightly_marks }}" == "true" ]]; then
-                echo "marks=(nightly or post_merge or pre_merge) and e2e and gpu_2" >> $GITHUB_OUTPUT
-              else
-                echo "marks=(post_merge or pre_merge) and e2e and gpu_2" >> $GITHUB_OUTPUT
-              fi
-              ;;
-          esac
+          set +x
+          echo "==========================================="
+          echo "DEBUG: Checking build status"
+          echo "==========================================="
+          echo "Framework: ${{ matrix.framework }}"
+          echo "Architecture: ${{ matrix.arch.arch }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Run ID: ${{ github.run_id }}"
 
-      - name: Run ${{ matrix.test_type }} tests
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
+
+          # Query GitHub API for job status
+          echo ""
+          echo "Querying GitHub API..."
+          JOBS_RESPONSE=$(curl -s -S -L -w "\n%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100")
+
+          HTTP_CODE=$(echo "$JOBS_RESPONSE" | tail -n1)
+          JOBS=$(echo "$JOBS_RESPONSE" | sed '$d')
+
+          echo "HTTP Response Code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Error: GitHub API returned non-200 status code"
+            echo "Response: $JOBS"
+            exit 1
+          fi
+
+          # Debug: Show total jobs and all job names
+          TOTAL_JOBS=$(echo "$JOBS" | jq '.jobs | length')
+          echo ""
+          echo "Total jobs found: $TOTAL_JOBS"
+          echo ""
+          echo "All job names in this workflow run:"
+          echo "$JOBS" | jq -r '.jobs[] | "  - \(.name) [status: \(.status), conclusion: \(.conclusion)]"'
+          echo ""
+
+          # Try exact endswith match
+          echo "Searching for jobs ending with: '$BUILD_JOB_PATTERN'"
+          MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | endswith($pattern))] | length')
+          echo "Jobs matching endswith pattern: $MATCHING_JOBS"
+
+          if [ "$MATCHING_JOBS" -eq 0 ]; then
+            echo ""
+            echo "WARNING: No jobs found with endswith pattern"
+            echo "Trying contains pattern instead..."
+            MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | contains($pattern))] | length')
+            echo "Jobs matching contains pattern: $MATCHING_JOBS"
+
+            if [ "$MATCHING_JOBS" -gt 0 ]; then
+              BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .conclusion' | head -1)
+              MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .name' | head -1)
+            fi
+          else
+            BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .conclusion' | head -1)
+            MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .name' | head -1)
+          fi
+
+          echo ""
+          echo "==========================================="
+          echo "RESULT:"
+          echo "  Matched job: ${MATCHED_JOB_NAME:-none}"
+          echo "  Build status: ${BUILD_STATUS:-not found}"
+          echo "==========================================="
+
+          # Handle various status cases
+          if [ -z "$BUILD_STATUS" ] || [ "$BUILD_STATUS" = "null" ] || [ "$BUILD_STATUS" = "" ]; then
+            echo ""
+            echo "ERROR: Could not determine build status"
+            echo "This could mean:"
+            echo "  1. The build job is still running"
+            echo "  2. The job name pattern doesn't match"
+            echo "  3. The API response doesn't include this job yet"
+            exit 1
+          fi
+
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo ""
+            echo "ERROR: Build did not succeed (status: $BUILD_STATUS)"
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ Build succeeded. Proceeding with tests."
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ inputs.image_prefix }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: ${{ steps.marks.outputs.marks }}
+          image_tag: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: ${{ inputs.include_nightly_marks && 'unit and (nightly or post_merge or pre_merge)' || 'unit and (post_merge or pre_merge)' }}
           framework: ${{ matrix.framework }}
-          test_type: ${{ matrix.test_type }}
-          platform_arch: ${{ matrix.arch }}
-          cpu_limit: ${{ matrix.cpu_limit }}
-          dry_run: ${{ (matrix.arch == 'arm64' || matrix.test_type == '2gpu-e2e') && 'true' || 'false' }}
+          test_type: unit
+          platform_arch: ${{ matrix.arch.arch }}
+          cpu_limit: '8'
+          dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+
+  integration-tests:
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-integ
+    needs: [build-amd64, build-arm64]
+    if: always()
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 90
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +x
+          echo "==========================================="
+          echo "DEBUG: Checking build status"
+          echo "==========================================="
+          echo "Framework: ${{ matrix.framework }}"
+          echo "Architecture: ${{ matrix.arch.arch }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Run ID: ${{ github.run_id }}"
+
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
+
+          # Query GitHub API for job status
+          echo ""
+          echo "Querying GitHub API..."
+          JOBS_RESPONSE=$(curl -s -S -L -w "\n%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100")
+
+          HTTP_CODE=$(echo "$JOBS_RESPONSE" | tail -n1)
+          JOBS=$(echo "$JOBS_RESPONSE" | sed '$d')
+
+          echo "HTTP Response Code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Error: GitHub API returned non-200 status code"
+            echo "Response: $JOBS"
+            exit 1
+          fi
+
+          # Debug: Show total jobs and all job names
+          TOTAL_JOBS=$(echo "$JOBS" | jq '.jobs | length')
+          echo ""
+          echo "Total jobs found: $TOTAL_JOBS"
+          echo ""
+          echo "All job names in this workflow run:"
+          echo "$JOBS" | jq -r '.jobs[] | "  - \(.name) [status: \(.status), conclusion: \(.conclusion)]"'
+          echo ""
+
+          # Try exact endswith match
+          echo "Searching for jobs ending with: '$BUILD_JOB_PATTERN'"
+          MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | endswith($pattern))] | length')
+          echo "Jobs matching endswith pattern: $MATCHING_JOBS"
+
+          if [ "$MATCHING_JOBS" -eq 0 ]; then
+            echo ""
+            echo "WARNING: No jobs found with endswith pattern"
+            echo "Trying contains pattern instead..."
+            MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | contains($pattern))] | length')
+            echo "Jobs matching contains pattern: $MATCHING_JOBS"
+
+            if [ "$MATCHING_JOBS" -gt 0 ]; then
+              BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .conclusion' | head -1)
+              MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .name' | head -1)
+            fi
+          else
+            BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .conclusion' | head -1)
+            MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .name' | head -1)
+          fi
+
+          echo ""
+          echo "==========================================="
+          echo "RESULT:"
+          echo "  Matched job: ${MATCHED_JOB_NAME:-none}"
+          echo "  Build status: ${BUILD_STATUS:-not found}"
+          echo "==========================================="
+
+          # Handle various status cases
+          if [ -z "$BUILD_STATUS" ] || [ "$BUILD_STATUS" = "null" ] || [ "$BUILD_STATUS" = "" ]; then
+            echo ""
+            echo "ERROR: Could not determine build status"
+            echo "This could mean:"
+            echo "  1. The build job is still running"
+            echo "  2. The job name pattern doesn't match"
+            echo "  3. The API response doesn't include this job yet"
+            exit 1
+          fi
+
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo ""
+            echo "ERROR: Build did not succeed (status: $BUILD_STATUS)"
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ Build succeeded. Proceeding with tests."
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run Integration Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: ${{ inputs.include_nightly_marks && 'integration and (nightly or post_merge or pre_merge)' || 'integration and (post_merge or pre_merge)' }}
+          framework: ${{ matrix.framework }}
+          test_type: integration
+          platform_arch: ${{ matrix.arch.arch }}
+          dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+
+  e2e-single-gpu-tests:
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e
+    needs: [build-amd64, build-arm64]
+    if: always()
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 120
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +x
+          echo "==========================================="
+          echo "DEBUG: Checking build status"
+          echo "==========================================="
+          echo "Framework: ${{ matrix.framework }}"
+          echo "Architecture: ${{ matrix.arch.arch }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Run ID: ${{ github.run_id }}"
+
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
+
+          # Query GitHub API for job status
+          echo ""
+          echo "Querying GitHub API..."
+          JOBS_RESPONSE=$(curl -s -S -L -w "\n%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100")
+
+          HTTP_CODE=$(echo "$JOBS_RESPONSE" | tail -n1)
+          JOBS=$(echo "$JOBS_RESPONSE" | sed '$d')
+
+          echo "HTTP Response Code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Error: GitHub API returned non-200 status code"
+            echo "Response: $JOBS"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Debug: Show total jobs and all job names
+          TOTAL_JOBS=$(echo "$JOBS" | jq '.jobs | length')
+          echo ""
+          echo "Total jobs found: $TOTAL_JOBS"
+          echo ""
+          echo "All job names in this workflow run:"
+          echo "$JOBS" | jq -r '.jobs[] | "  - \(.name) [status: \(.status), conclusion: \(.conclusion)]"'
+          echo ""
+
+          # Try exact endswith match
+          echo "Searching for jobs ending with: '$BUILD_JOB_PATTERN'"
+          MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | endswith($pattern))] | length')
+          echo "Jobs matching endswith pattern: $MATCHING_JOBS"
+
+          if [ "$MATCHING_JOBS" -eq 0 ]; then
+            echo ""
+            echo "WARNING: No jobs found with endswith pattern"
+            echo "Trying contains pattern instead..."
+            MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | contains($pattern))] | length')
+            echo "Jobs matching contains pattern: $MATCHING_JOBS"
+
+            if [ "$MATCHING_JOBS" -gt 0 ]; then
+              BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .conclusion' | head -1)
+              MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .name' | head -1)
+            fi
+          else
+            BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .conclusion' | head -1)
+            MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .name' | head -1)
+          fi
+
+          echo ""
+          echo "==========================================="
+          echo "RESULT:"
+          echo "  Matched job: ${MATCHED_JOB_NAME:-none}"
+          echo "  Build status: ${BUILD_STATUS:-not found}"
+          echo "==========================================="
+
+          # Handle various status cases
+          if [ -z "$BUILD_STATUS" ] || [ "$BUILD_STATUS" = "null" ] || [ "$BUILD_STATUS" = "" ]; then
+            echo ""
+            echo "ERROR: Could not determine build status"
+            echo "This could mean:"
+            echo "  1. The build job is still running"
+            echo "  2. The job name pattern doesn't match"
+            echo "  3. The API response doesn't include this job yet"
+            exit 1
+          fi
+
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo ""
+            echo "ERROR: Build did not succeed (status: $BUILD_STATUS)"
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ Build succeeded. Proceeding with tests."
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run E2E Tests (gpu_1)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: "${{ matrix.framework }} and e2e and gpu_1"
+          framework: ${{ matrix.framework }}
+          test_type: e2e-single-gpu
+          platform_arch: ${{ matrix.arch.arch }}
+          dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+
+  e2e-multi-gpu-tests:
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
+    needs: [build-amd64, build-arm64]
+    if: always()
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 150
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +x
+          echo "==========================================="
+          echo "DEBUG: Checking build status"
+          echo "==========================================="
+          echo "Framework: ${{ matrix.framework }}"
+          echo "Architecture: ${{ matrix.arch.arch }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Run ID: ${{ github.run_id }}"
+
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
+
+          # Query GitHub API for job status
+          echo ""
+          echo "Querying GitHub API..."
+          JOBS_RESPONSE=$(curl -s -S -L -w "\n%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100")
+
+          HTTP_CODE=$(echo "$JOBS_RESPONSE" | tail -n1)
+          JOBS=$(echo "$JOBS_RESPONSE" | sed '$d')
+
+          echo "HTTP Response Code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Error: GitHub API returned non-200 status code"
+            echo "Response: $JOBS"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Debug: Show total jobs and all job names
+          TOTAL_JOBS=$(echo "$JOBS" | jq '.jobs | length')
+          echo ""
+          echo "Total jobs found: $TOTAL_JOBS"
+          echo ""
+          echo "All job names in this workflow run:"
+          echo "$JOBS" | jq -r '.jobs[] | "  - \(.name) [status: \(.status), conclusion: \(.conclusion)]"'
+          echo ""
+
+          # Try exact endswith match
+          echo "Searching for jobs ending with: '$BUILD_JOB_PATTERN'"
+          MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | endswith($pattern))] | length')
+          echo "Jobs matching endswith pattern: $MATCHING_JOBS"
+
+          if [ "$MATCHING_JOBS" -eq 0 ]; then
+            echo ""
+            echo "WARNING: No jobs found with endswith pattern"
+            echo "Trying contains pattern instead..."
+            MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | contains($pattern))] | length')
+            echo "Jobs matching contains pattern: $MATCHING_JOBS"
+
+            if [ "$MATCHING_JOBS" -gt 0 ]; then
+              BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .conclusion' | head -1)
+              MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .name' | head -1)
+            fi
+          else
+            BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .conclusion' | head -1)
+            MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .name' | head -1)
+          fi
+
+          echo ""
+          echo "==========================================="
+          echo "RESULT:"
+          echo "  Matched job: ${MATCHED_JOB_NAME:-none}"
+          echo "  Build status: ${BUILD_STATUS:-not found}"
+          echo "==========================================="
+
+          # Handle various status cases
+          if [ -z "$BUILD_STATUS" ] || [ "$BUILD_STATUS" = "null" ] || [ "$BUILD_STATUS" = "" ]; then
+            echo ""
+            echo "ERROR: Could not determine build status"
+            echo "This could mean:"
+            echo "  1. The build job is still running"
+            echo "  2. The job name pattern doesn't match"
+            echo "  3. The API response doesn't include this job yet"
+            exit 1
+          fi
+
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo ""
+            echo "ERROR: Build did not succeed (status: $BUILD_STATUS)"
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ Build succeeded. Proceeding with tests."
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run E2E Tests (gpu_2)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: ${{ inputs.include_nightly_marks && '(nightly or post_merge or pre_merge) and e2e and gpu_2' || '(post_merge or pre_merge) and e2e and gpu_2' }}
+          framework: ${{ matrix.framework }}
+          test_type: e2e-multi-gpu
+          platform_arch: ${{ matrix.arch.arch }}
+          dry_run: 'true'
 
   ############################## RESULTS SUMMARY ##############################
   results-summary:
     name: Results Summary
     runs-on: ubuntu-latest
     if: always()
-    needs: [build-amd64, build-arm64, tests]
+    needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
