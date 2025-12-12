@@ -16,6 +16,8 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
+
+from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import (
     ModelInput,
@@ -739,7 +741,7 @@ class BaseWorkerHandler(ABC):
 
         return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
-    def _build_trace_headers(self, context) -> dict | None:
+    def _build_trace_headers(self, context: Context) -> dict[str, str] | None:
         """
         Build trace headers from context for propagation to vLLM engine.
         """
@@ -750,6 +752,7 @@ class BaseWorkerHandler(ABC):
 
         # W3C Trace Context format: {version}-{trace_id}-{parent_id}-{trace_flags}
         # version: 00, trace_flags: 01 (sampled)
+        # TODO: properly propagte the trace-flags from current span.
         return {"traceparent": f"00-{trace_id}-{span_id}-01"}
 
     async def generate_tokens(
