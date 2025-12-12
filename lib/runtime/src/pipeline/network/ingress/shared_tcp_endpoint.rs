@@ -11,7 +11,7 @@ use crate::pipeline::network::PushWorkHandler;
 use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,7 +36,10 @@ fn get_max_message_size() -> usize {
 /// Shared TCP server that handles multiple endpoints on a single port
 pub struct SharedTcpServer {
     handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
+    /// The address to bind to (may have port 0 for OS-assigned port)
     bind_addr: SocketAddr,
+    /// The actual bound address (populated after bind_and_start, contains actual port)
+    actual_addr: RwLock<Option<SocketAddr>>,
     cancellation_token: CancellationToken,
 }
 
@@ -55,9 +58,81 @@ impl SharedTcpServer {
     pub fn new(bind_addr: SocketAddr, cancellation_token: CancellationToken) -> Arc<Self> {
         Arc::new(Self {
             handlers: Arc::new(DashMap::new()),
+            // address we requested to bind to.
             bind_addr,
+            // actual address after free port assignment (if DYN_TCP_RPC_PORT is not specified)
+            actual_addr: RwLock::new(None),
             cancellation_token,
         })
+    }
+
+    /// Bind the server and start accepting connections.
+    ///
+    /// This method binds to the configured address first, then starts the accept loop.
+    /// If the configured port is 0, the OS will assign a free port.
+    /// The actual bound address is stored and can be retrieved via `actual_address()`.
+    ///
+    /// Returns the actual bound address (useful when port 0 was specified).
+    pub async fn bind_and_start(self: Arc<Self>) -> Result<SocketAddr> {
+        tracing::info!("Binding TCP server to {}", self.bind_addr);
+
+        let listener = TcpListener::bind(&self.bind_addr).await?;
+        let actual_addr = listener.local_addr()?;
+
+        tracing::info!(
+            requested = %self.bind_addr,
+            actual = %actual_addr,
+            "TCP server bound successfully"
+        );
+
+        // Store the actual bound address
+        *self.actual_addr.write() = Some(actual_addr);
+
+        // Start accepting connections in a background task
+        let server = self.clone();
+        tokio::spawn(async move {
+            server.accept_loop(listener).await;
+        });
+
+        Ok(actual_addr)
+    }
+
+    /// Get the actual bound address (after bind_and_start has been called).
+    ///
+    /// Returns None if the server hasn't been started yet.
+    pub fn actual_address(&self) -> Option<SocketAddr> {
+        *self.actual_addr.read()
+    }
+
+    /// Internal accept loop - runs after binding
+    async fn accept_loop(self: Arc<Self>, listener: TcpListener) {
+        let cancellation_token = self.cancellation_token.clone();
+
+        loop {
+            tokio::select! {
+                accept_result = listener.accept() => {
+                    match accept_result {
+                        Ok((stream, peer_addr)) => {
+                            tracing::trace!("Accepted TCP connection from {}", peer_addr);
+
+                            let handlers = self.handlers.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = Self::handle_connection(stream, handlers).await {
+                                    tracing::error!("TCP connection error: {}", e);
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to accept TCP connection: {}", e);
+                        }
+                    }
+                }
+                _ = cancellation_token.cancelled() => {
+                    tracing::info!("SharedTcpServer received cancellation signal, shutting down");
+                    return;
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -93,7 +168,7 @@ impl SharedTcpServer {
         tracing::info!(
             "Registered endpoint '{}' with shared TCP server on {}",
             endpoint_name,
-            self.bind_addr
+            self.actual_address().unwrap_or(self.bind_addr)
         );
 
         Ok(())
@@ -129,37 +204,16 @@ impl SharedTcpServer {
         }
     }
 
+    /// Start the server (legacy method - prefer bind_and_start for new code).
+    ///
+    /// This method is kept for backwards compatibility. It binds and starts
+    /// the server but doesn't return the actual bound address.
     pub async fn start(self: Arc<Self>) -> Result<()> {
-        tracing::info!("Starting shared TCP server on {}", self.bind_addr);
-
-        let listener = TcpListener::bind(&self.bind_addr).await?;
-        let cancellation_token = self.cancellation_token.clone();
-
-        loop {
-            tokio::select! {
-                accept_result = listener.accept() => {
-                    match accept_result {
-                        Ok((stream, peer_addr)) => {
-                            tracing::trace!("Accepted TCP connection from {}", peer_addr);
-
-                            let handlers = self.handlers.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = Self::handle_connection(stream, handlers).await {
-                                    tracing::debug!("TCP connection error: {}", e);
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to accept TCP connection: {}", e);
-                        }
-                    }
-                }
-                _ = cancellation_token.cancelled() => {
-                    tracing::info!("SharedTcpServer received cancellation signal, shutting down");
-                    return Ok(());
-                }
-            }
-        }
+        let cancel_token = self.cancellation_token.clone();
+        self.bind_and_start().await?;
+        // Wait for cancellation (the accept loop runs in background)
+        cancel_token.cancelled().await;
+        Ok(())
     }
 
     async fn handle_connection(
@@ -378,7 +432,10 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
     }
 
     fn address(&self) -> String {
-        format!("tcp://{}:{}", self.bind_addr.ip(), self.bind_addr.port())
+        // Return actual bound address if available (after bind_and_start),
+        // otherwise fall back to configured bind address
+        let addr = self.actual_address().unwrap_or(self.bind_addr);
+        format!("tcp://{}:{}", addr.ip(), addr.port())
     }
 
     fn transport_name(&self) -> &'static str {

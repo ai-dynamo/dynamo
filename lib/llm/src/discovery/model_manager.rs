@@ -141,6 +141,7 @@ impl ModelManager {
     pub fn has_model_any(&self, model: &str) -> bool {
         self.chat_completion_engines.read().contains(model)
             || self.completion_engines.read().contains(model)
+            || self.prefill_engines.read().contains(model)
     }
 
     pub fn model_display_names(&self) -> HashSet<String> {
@@ -330,12 +331,11 @@ impl ModelManager {
         // Register router via discovery mechanism
         let discovery = endpoint.component().drt().discovery();
         let instance_id = discovery.instance_id();
-        let request_plane_mode = endpoint.drt().request_plane();
 
         // Build transport for router endpoint based on request plane mode
         // Use KV_ROUTER_COMPONENT as the component name to distinguish from the generate endpoint's component
         let router_endpoint_id = router_endpoint_id(endpoint.id().namespace);
-        let transport = build_transport_type(request_plane_mode, &router_endpoint_id, instance_id);
+        let transport = build_transport_type(endpoint, &router_endpoint_id, instance_id).await?;
 
         let discovery_spec = DiscoverySpec::Endpoint {
             namespace: router_endpoint_id.namespace.clone(),
