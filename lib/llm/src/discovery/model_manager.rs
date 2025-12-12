@@ -138,10 +138,21 @@ impl ModelManager {
         self.cards.lock().values().cloned().collect()
     }
 
-    pub fn has_model_any(&self, model: &str) -> bool {
+    /// Check if a decode model (chat or completions) is registered
+    pub fn has_decode_model(&self, model: &str) -> bool {
         self.chat_completion_engines.read().contains(model)
             || self.completion_engines.read().contains(model)
-            || self.prefill_engines.read().contains(model)
+    }
+
+    /// Check if a prefill model is registered
+    pub fn has_prefill_model(&self, model: &str) -> bool {
+        self.prefill_engines.read().contains(model)
+    }
+
+    /// Check if any model (decode or prefill) is registered.
+    /// Note: For registration skip-checks, use has_decode_model() or has_prefill_model() instead.
+    pub fn has_model_any(&self, model: &str) -> bool {
+        self.has_decode_model(model) || self.has_prefill_model(model)
     }
 
     pub fn model_display_names(&self) -> HashSet<String> {

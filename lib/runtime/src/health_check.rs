@@ -267,6 +267,39 @@ impl HealthCheckManager {
             .get_or_create_router(endpoint_subject, endpoint)
             .await?;
 
+        // Wait for watch stream to discover instances before checking
+        // This ensures the router's client has populated its instance list
+        // from etcd before we attempt to send the health check request.
+        // Without this, the first health check can fail due to a race condition
+        // where the watch stream hasn't completed its initial discovery yet.
+        match tokio::time::timeout(
+            Duration::from_secs(10), // 10 second timeout for discovery
+            router.client.wait_for_instances(),
+        )
+        .await
+        {
+            Ok(Ok(instances)) => {
+                debug!(
+                    "Health check for {}: watch stream ready, found {} instance(s)",
+                    endpoint_subject,
+                    instances.len()
+                );
+            }
+            Ok(Err(e)) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to discover instances for {} during health check: {}",
+                    endpoint_subject,
+                    e
+                ));
+            }
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "Timeout waiting for instance discovery for {} during health check",
+                    endpoint_subject
+                ));
+            }
+        }
+
         // Create the request context
         let request: SingleIn<serde_json::Value> = Context::new(payload.clone());
 
