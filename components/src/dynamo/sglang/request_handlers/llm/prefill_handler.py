@@ -106,16 +106,38 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         """
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future = asyncio.Future()
-        async with self._cancellation_monitor(request_id_future, context):
-            async for res in results:
-                # Extract SGLang request ID from the first response and set the future
-                if not request_id_future.done():
-                    meta_info = res.get("meta_info", {})
-                    sglang_request_id = meta_info.get("id")
-                    if sglang_request_id:
-                        request_id_future.set_result(sglang_request_id)
-                        logging.debug(f"New Prefill Request ID: {sglang_request_id}")
+        try:
+            async with self._cancellation_monitor(request_id_future, context):
+                async for res in results:
+                    if hasattr(res, "is_error") and callable(getattr(res, "is_error")):
+                        try:
+                            if res.is_error():
+                                err = None
+                                err_attr = getattr(res, "error_message", None)
+                                if callable(err_attr):
+                                    err = err_attr()
+                                elif err_attr is not None:
+                                    err = err_attr
+                                raise GeneratorExit(
+                                    f"SGLang prefill engine returned error: {err or 'incomplete stream'}"
+                                )
+                        except AttributeError:
+                            pass
 
-                # Note: No explicit cancellation checks needed here.
-                # When abort_request is called by the cancellation monitor,
-                # SGLang will terminate this async generator automatically.
+                    # Extract SGLang request ID from the first response and set the future
+                    if not request_id_future.done():
+                        meta_info = res.get("meta_info", {})
+                        sglang_request_id = meta_info.get("id")
+                        if sglang_request_id:
+                            request_id_future.set_result(sglang_request_id)
+                            logging.debug(
+                                f"New Prefill Request ID: {sglang_request_id}"
+                            )
+
+                    # Note: No explicit cancellation checks needed here.
+                    # When abort_request is called by the cancellation monitor,
+                    # SGLang will terminate this async generator automatically.
+        except asyncio.CancelledError:
+            raise GeneratorExit(
+                "SGLang prefill engine was shut down during token generation."
+            ) from None
