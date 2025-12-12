@@ -238,7 +238,7 @@ impl NumaWorker {
                 offset = offset.saturating_add(page_size);
             }
             // Ensure the last page is touched
-            if size > 0 && (size % page_size) != 0 {
+            if size > 0 && !size.is_multiple_of(page_size) {
                 std::ptr::write_volatile(ptr.add(size - 1), 0);
             }
 

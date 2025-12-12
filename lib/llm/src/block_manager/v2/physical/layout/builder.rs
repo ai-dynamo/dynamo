@@ -232,7 +232,7 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
     ///
     /// # Arguments
     /// * `device_id` - If `Some(id)`, enables NUMA-aware allocation on the GPU's NUMA node
-    ///                 (when `DYN_KVBM_ENABLE_NUMA=1` is set). If `None`, uses direct allocation.
+    ///   (when `DYN_KVBM_ENABLE_NUMA=1` is set). If `None`, uses direct allocation.
     pub fn allocate_pinned(
         self,
         device_id: Option<u32>,

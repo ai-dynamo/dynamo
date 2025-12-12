@@ -426,10 +426,7 @@ mod tests {
                 tokio::time::timeout(Duration::from_secs(timeout_secs), transfer_handle.wait())
                     .await
             })
-            .expect(&format!(
-                "Transfer should complete within {}s",
-                timeout_secs
-            ))?;
+            .unwrap_or_else(|_| panic!("Transfer should complete within {}s", timeout_secs))?;
 
         // 7. Verify transfer completed
         assert_eq!(

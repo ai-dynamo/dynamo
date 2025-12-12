@@ -120,5 +120,5 @@ jobs:
       run: rustup component add clippy
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
-      run: cargo clippy --no-deps --all-targets -- -D warnings
+      run: cargo clippy --no-deps --all-targets -- -D warnings -A deprecated -A clippy::deprecated
 

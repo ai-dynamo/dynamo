@@ -254,9 +254,6 @@ async fn test_completion_history_bounded() {
         next_event.trigger().unwrap();
         // Don't need to wait, just testing memory doesn't explode
     }
-
-    // If we get here without OOM, Issue #3 fix is working
-    assert!(true, "Completed 150 generations without unbounded growth");
 }
 
 // ========== Concurrency & Race Tests ==========

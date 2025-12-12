@@ -1440,10 +1440,10 @@ mod tests {
 
             assert_eq!(range, 0..10);
             assert_eq!(slot.block_matches.assigned_blocks.len(), 10);
-            for i in 0..10 {
+            for (i, expected_hash) in expected_hashes.iter().enumerate().take(10) {
                 assert_eq!(
                     slot.block_matches.assigned_blocks[i],
-                    (expected_hashes[i], (i + 1) * 100)
+                    (*expected_hash, (i + 1) * 100)
                 );
             }
             assert!(slot.block_matches.unassigned_blocks.is_empty());
@@ -1467,8 +1467,8 @@ mod tests {
             assert_eq!(slot.block_matches.assigned_blocks[4].1, 555);
 
             // And hashes match expected sequence order
-            for i in 0..5 {
-                assert_eq!(slot.block_matches.assigned_blocks[i].0, expected_hashes[i]);
+            for (i, expected_hash) in expected_hashes.iter().enumerate().take(5) {
+                assert_eq!(slot.block_matches.assigned_blocks[i].0, *expected_hash);
             }
         }
 
@@ -1513,8 +1513,8 @@ mod tests {
                         assert_eq!(slot.block_matches.assigned_blocks.len(), fewer);
                         assert!(slot.block_matches.unassigned_blocks.is_empty());
 
-                        for i in 0..fewer {
-                            assert_eq!(slot.block_matches.assigned_blocks[i].0, expected_hashes[i]);
+                        for (i, expected_hash) in expected_hashes.iter().enumerate().take(fewer) {
+                            assert_eq!(slot.block_matches.assigned_blocks[i].0, *expected_hash);
                             assert_eq!(slot.block_matches.assigned_blocks[i].1, i);
                         }
                     }
@@ -1530,8 +1530,10 @@ mod tests {
                         assert_eq!(slot.block_matches.assigned_blocks.len(), available_blocks);
                         assert!(slot.block_matches.unassigned_blocks.is_empty());
 
-                        for i in 0..available_blocks {
-                            assert_eq!(slot.block_matches.assigned_blocks[i].0, expected_hashes[i]);
+                        for (i, expected_hash) in
+                            expected_hashes.iter().enumerate().take(available_blocks)
+                        {
+                            assert_eq!(slot.block_matches.assigned_blocks[i].0, *expected_hash);
                             assert_eq!(slot.block_matches.assigned_blocks[i].1, i);
                         }
                     }
@@ -1549,8 +1551,10 @@ mod tests {
                         assert_eq!(slot.block_matches.assigned_blocks.len(), available_blocks);
                         assert_eq!(slot.block_matches.unassigned_blocks.len(), excess);
 
-                        for i in 0..available_blocks {
-                            assert_eq!(slot.block_matches.assigned_blocks[i].0, expected_hashes[i]);
+                        for (i, expected_hash) in
+                            expected_hashes.iter().enumerate().take(available_blocks)
+                        {
+                            assert_eq!(slot.block_matches.assigned_blocks[i].0, *expected_hash);
                             assert_eq!(slot.block_matches.assigned_blocks[i].1, i);
                         }
 

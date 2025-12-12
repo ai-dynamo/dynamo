@@ -70,12 +70,7 @@ mod tests {
 
         // Extract only blocks 0-7 from the full sequence
         // These blocks have positions 0-7 (matching the query positions)
-        let remote_blocks: Vec<_> = full_blocks
-            .iter()
-            .skip(REMOTE_START_BLOCK)
-            .take(REMOTE_BLOCKS)
-            .cloned()
-            .collect();
+        let remote_blocks: Vec<_> = full_blocks.iter().take(REMOTE_BLOCKS).cloned().collect();
 
         // Register blocks 0-7 on Leader B's G2 manager
         let remote_hashes = populate_manager_with_blocks(&pair.leader_b.g2_manager, &remote_blocks)

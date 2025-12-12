@@ -88,7 +88,7 @@ pub async fn multiple_messages_same_connection<F: TransportFactory>() {
         .unwrap();
 
     // Generate expected messages and sort them the same way
-    let mut expected: Vec<_> = (0..10).map(|i| test_message(i)).collect();
+    let mut expected: Vec<_> = (0..10).map(test_message).collect();
     expected.sort_by(|a, b| a.0.cmp(&b.0));
 
     for (i, msg) in messages.iter().enumerate() {
@@ -441,7 +441,7 @@ pub async fn high_throughput<F: TransportFactory>() {
     assert_eq!(messages.len(), num_messages as usize);
 
     // Generate expected messages and sort them the same way
-    let mut expected: Vec<_> = (0..num_messages).map(|i| test_message(i)).collect();
+    let mut expected: Vec<_> = (0..num_messages).map(test_message).collect();
     expected.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Verify all messages received correctly

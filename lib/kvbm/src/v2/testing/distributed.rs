@@ -724,7 +724,7 @@ mod tests {
                     for hash in &sorted_hashes {
                         if let Some(block) = ctx.accessor().find(*hash) {
                             let pos = block.position();
-                            let is_contiguous = last_pos.map_or(true, |p| pos == p + 1);
+                            let is_contiguous = last_pos.is_none_or(|p| pos == p + 1);
 
                             if is_contiguous {
                                 current_run.push(block);
@@ -794,7 +794,7 @@ mod tests {
                     for hash in &sorted_hashes {
                         if let Some(block) = ctx.accessor().find(*hash) {
                             let pos = block.position();
-                            let is_contiguous = last_pos.map_or(true, |p| pos == p + 1);
+                            let is_contiguous = last_pos.is_none_or(|p| pos == p + 1);
 
                             if is_contiguous {
                                 current_run.push(block);

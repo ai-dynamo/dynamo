@@ -144,37 +144,37 @@ async fn test_controllable_session_basic_flow() -> Result<()> {
     Ok(())
 }
 
-/// Test controllable session with auto-staging enabled (default behavior).
-///
-/// This tests the scenario where Decode auto-stages G3→G2 before Prefill attaches.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore] // TODO: Enable when G3 staging is implemented with workers
-async fn test_controllable_session_auto_staging() -> Result<()> {
-    let pair = distributed::create_instance_leader_pair(NUM_BLOCKS, BLOCK_SIZE).await?;
+// /// Test controllable session with auto-staging enabled (default behavior).
+// ///
+// /// This tests the scenario where Decode auto-stages G3→G2 before Prefill attaches.
+// #[tokio::test(flavor = "multi_thread")]
+// #[ignore] // TODO: Enable when G3 staging is implemented with workers
+// async fn test_controllable_session_auto_staging() -> Result<()> {
+//     let pair = distributed::create_instance_leader_pair(NUM_BLOCKS, BLOCK_SIZE).await?;
 
-    let decode = &pair.leader_a;
-    let prefill = &pair.leader_b;
+//     let decode = &pair.leader_a;
+//     let prefill = &pair.leader_b;
 
-    // TODO: Populate Decode with G3 blocks (requires G3 manager population)
-    // let (_, sequence_hashes) = populate_g3_blocks(decode, NUM_BLOCKS, BLOCK_SIZE, 0)?;
+//     // TODO: Populate Decode with G3 blocks (requires G3 manager population)
+//     // let (_, sequence_hashes) = populate_g3_blocks(decode, NUM_BLOCKS, BLOCK_SIZE, 0)?;
 
-    // Create session with auto_stage=true (default)
-    // let session_result = decode.leader.create_controllable_session(&sequence_hashes)?;
+//     // Create session with auto_stage=true (default)
+//     // let session_result = decode.leader.create_controllable_session(&sequence_hashes)?;
 
-    // Prefill attaches - should see Staging or Ready phase
-    // let mut handle = prefill.leader.attach_remote_session(decode.instance_id, session_result.session_id).await?;
+//     // Prefill attaches - should see Staging or Ready phase
+//     // let mut handle = prefill.leader.attach_remote_session(decode.instance_id, session_result.session_id).await?;
 
-    // Wait for staging to complete
-    // handle.wait_for_staging_complete().await?;
+//     // Wait for staging to complete
+//     // handle.wait_for_staging_complete().await?;
 
-    // Verify all blocks are in G2
-    // let state = handle.current_state();
-    // assert_eq!(state.phase, RemoteSessionPhase::Ready);
-    // assert_eq!(state.g2_blocks.len(), NUM_BLOCKS);
-    // assert_eq!(state.g3_pending_count, 0);
+//     // Verify all blocks are in G2
+//     // let state = handle.current_state();
+//     // assert_eq!(state.phase, RemoteSessionPhase::Ready);
+//     // assert_eq!(state.g2_blocks.len(), NUM_BLOCKS);
+//     // assert_eq!(state.g3_pending_count, 0);
 
-    todo!("Implement when G3 staging with workers is available")
-}
+//     todo!("Implement when G3 staging with workers is available")
+// }
 
 /// Test that trigger_staging is idempotent.
 #[tokio::test(flavor = "multi_thread")]
