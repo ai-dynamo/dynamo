@@ -362,13 +362,13 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         let index = 0;
         let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
 
-        // Extract worker_id and query_instance_id from disaggregated_params and inject into nvext if present
+        // Extract worker selection data from disaggregated_params and inject into nvext if present
         if let Some(params) = delta.disaggregated_params.as_ref() {
-            use crate::protocols::openai::nvext::{NvExtResponse, QueryInstanceIdResponse, WorkerIdInfo};
+            use crate::protocols::openai::nvext::{NvExtResponse, WorkerIdInfo};
 
             let mut nvext_response = NvExtResponse::default();
 
-            // Extract worker_id if present
+            // Extract worker_id if present (standard Dynamo flow)
             if let Some(worker_id_json) = params.get("worker_id") {
                 let prefill_worker_id = worker_id_json
                     .get("prefill_worker_id")
@@ -383,45 +383,34 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                 });
             }
 
-            // Extract query_instance_id if present (GAIE Stage 1 response)
-            if let Some(query_json) = params.get("query_instance_id") {
-                // Extract token_ids as Vec<u32>
-                let token_ids = query_json
-                    .get("token_ids")
-                    .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok());
-
-                let query_response = QueryInstanceIdResponse {
-                    query_complete: query_json
-                        .get("query_complete")
-                        .and_then(|v| v.as_bool()),
-                    prefill_worker_id: query_json
-                        .get("prefill_worker_id")
-                        .and_then(|v| v.as_u64()),
-                    decode_worker_id: query_json
-                        .get("decode_worker_id")
-                        .and_then(|v| v.as_u64()),
-                    token_ids,
-                };
-
-                nvext_response.query_instance_id = Some(query_response);
-                tracing::debug!(
-                    "Injected query_instance_id into chat completion nvext: prefill={:?}, decode={:?}, token_count={:?}",
-                    query_json.get("prefill_worker_id"),
-                    query_json.get("decode_worker_id"),
-                    query_json.get("token_ids").map(|t| t.as_array().map(|a| a.len()))
-                );
-            }
+            // Extract GAIE Stage 1 response fields directly
+            nvext_response.prefill_worker_id = params
+                .get("prefill_worker_id")
+                .and_then(|v| v.as_u64());
+            nvext_response.decode_worker_id = params
+                .get("decode_worker_id")
+                .and_then(|v| v.as_u64());
+            nvext_response.token_data = params
+                .get("token_data")
+                .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok());
 
             // Only inject nvext if we have data
-            if (nvext_response.worker_id.is_some() || nvext_response.query_instance_id.is_some())
-                && let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
+            let has_data = nvext_response.worker_id.is_some()
+                || nvext_response.prefill_worker_id.is_some()
+                || nvext_response.decode_worker_id.is_some()
+                || nvext_response.token_data.is_some();
+
+            if has_data {
+                if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
                     stream_response.nvext = Some(nvext_json);
                     tracing::debug!(
-                        "Injected nvext into chat completion: worker_id={:?}, query_instance_id={:?}",
-                        nvext_response.worker_id,
-                        nvext_response.query_instance_id
+                        "Injected nvext into chat completion: prefill_worker={:?}, decode_worker={:?}, token_count={:?}",
+                        nvext_response.prefill_worker_id,
+                        nvext_response.decode_worker_id,
+                        nvext_response.token_data.as_ref().map(|t| t.len())
                     );
                 }
+            }
         }
 
         Ok(stream_response)

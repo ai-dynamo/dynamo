@@ -336,7 +336,7 @@ impl
                 "Stage 1 (query_instance_id): Querying prefill and decode worker selection"
             );
             return self
-                .handle_query_instance_id(req, context, next, &request_id, &engine_ctx)
+                .select_prefill_decode_workers(req, context, next, &request_id, &engine_ctx)
                 .await;
         }
 
@@ -461,7 +461,7 @@ impl PrefillRouter {
     }
 
     /// Route to decode worker after prefill completes
-    /// Common logic for both normal flow and Stage 2 execute flow
+    /// Common logic for both Dynamo normal flow and Stage 2 GAIE flow
     async fn route_to_decode(
         req: PreprocessedRequest,
         mut context: Context<()>,
@@ -499,9 +499,9 @@ impl PrefillRouter {
         next.generate(decode_request).await
     }
 
-    /// GAIE Stage 1: Handle query_instance_id annotation
-    /// Returns prefill_worker_id and decode_worker_id without executing prefill/decode.
-    async fn handle_query_instance_id(
+    /// GAIE Stage 1: Select prefill and decode workers using KV-aware routing
+    /// Returns worker IDs without executing prefill/decode.
+    async fn select_prefill_decode_workers(
         &self,
         req: PreprocessedRequest,
         _context: Context<()>,
@@ -552,7 +552,7 @@ impl PrefillRouter {
             }
         }
 
-        // Build query_instance_id response with token_ids for Stage 2 optimization
+        // Build response with selected worker IDs and tokens for Stage 2
         let query_response = LLMEngineOutput {
             token_ids: vec![],
             tokens: None,
@@ -563,12 +563,9 @@ impl PrefillRouter {
             finish_reason: None,
             index: None,
             disaggregated_params: Some(json!({
-                "query_instance_id": {
-                    "query_complete": true,
-                    "prefill_worker_id": prefill_worker_id,
-                    "decode_worker_id": decode_worker_id,
-                    "token_ids": req.token_ids,  // Include tokens for Stage 2 to skip re-tokenization
-                }
+                "prefill_worker_id": prefill_worker_id,
+                "decode_worker_id": decode_worker_id,
+                "token_data": req.token_ids,  // Include tokens for Stage 2 to skip re-tokenization
             })),
             extra_args: None,
             completion_usage: None,
@@ -578,7 +575,7 @@ impl PrefillRouter {
             request_id = %request_id,
             prefill_worker_id = ?prefill_worker_id,
             decode_worker_id = ?decode_worker_id,
-            "query_instance_id complete, returning worker IDs"
+            "Worker selection complete, returning IDs"
         );
 
         let response_stream = stream::once(async { Annotated::from_data(query_response) });

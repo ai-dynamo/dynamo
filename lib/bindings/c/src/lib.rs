@@ -716,7 +716,6 @@ pub unsafe extern "C" fn dynamo_query_workers_for_disagg(
     };
 
     unsafe {
-        *query_complete_out = if result.query_complete.unwrap_or(false) { 1 } else { 0 };
         *prefill_worker_id_out = result.prefill_worker_id.unwrap_or(0);
         *decode_worker_id_out = result.decode_worker_id.unwrap_or(0);
         *token_ids_out = tokens_ptr;
@@ -816,8 +815,7 @@ pub unsafe extern "C" fn dynamo_free_worker_selection_result(
 pub struct WorkerSelectionResult {
     pub worker_id: i64,
     pub tokens: Vec<u32>,
-    // Query instance ID results (only populated when query_instance_id annotation is used)
-    pub query_complete: Option<bool>,
+    // GAIE Stage 1 results (only populated when query_instance_id annotation is used)
     pub prefill_worker_id: Option<i64>,
     pub decode_worker_id: Option<i64>,
 }
@@ -832,37 +830,35 @@ pub async fn extract_worker_selection_from_stream(
     let mut result = WorkerSelectionResult::default();
 
     while let Some(response) = stream.next().await {
-        // Check for query_instance_id data in nvext (from GAIE Stage 1)
+        // Check for GAIE Stage 1 data in nvext
         if let Some(data) = response.data.as_ref()
             && let Some(nvext_value) = data.nvext.as_ref()
-                && let Ok(nvext_response) = serde_json::from_value::<NvExtResponse>(nvext_value.clone()) {
-                    // Extract query_instance_id data if present
-                    if let Some(query_data) = nvext_response.query_instance_id {
-                        result.query_complete = query_data.query_complete;
-                        result.prefill_worker_id = query_data.prefill_worker_id.map(|id| id as i64);
-                        result.decode_worker_id = query_data.decode_worker_id.map(|id| id as i64);
-                        // Extract token_ids from query_instance_id for Stage 2 optimization
-                        if let Some(tokens) = query_data.token_ids {
-                            result.tokens = tokens;
-                            tracing::debug!(
-                                "Extracted {} tokens from query_instance_id for Stage 2",
-                                result.tokens.len()
-                            );
-                        }
-                        tracing::debug!(
-                            "Extracted query_instance_id from nvext: complete={:?}, prefill_worker={:?}, decode_worker={:?}, tokens={}",
-                            result.query_complete,
-                            result.prefill_worker_id,
-                            result.decode_worker_id,
-                            result.tokens.len()
-                        );
-                    }
-                    // Also extract worker_id from nvext if present
-                    if let Some(worker_id_info) = nvext_response.worker_id
-                        && let Some(decode_id) = worker_id_info.decode_worker_id {
-                            result.worker_id = decode_id as i64;
-                        }
-                }
+            && let Ok(nvext_response) = serde_json::from_value::<NvExtResponse>(nvext_value.clone())
+        {
+            // Extract worker IDs directly from nvext
+            result.prefill_worker_id = nvext_response.prefill_worker_id.map(|id| id as i64);
+            result.decode_worker_id = nvext_response.decode_worker_id.map(|id| id as i64);
+            // Extract token_data for Stage 2 optimization
+            if let Some(tokens) = nvext_response.token_data {
+                result.tokens = tokens;
+                tracing::debug!(
+                    "Extracted {} tokens from nvext.token_data for Stage 2",
+                    result.tokens.len()
+                );
+            }
+            tracing::debug!(
+                "Extracted from nvext: prefill_worker={:?}, decode_worker={:?}, tokens={}",
+                result.prefill_worker_id,
+                result.decode_worker_id,
+                result.tokens.len()
+            );
+            // Also extract worker_id from nvext if present
+            if let Some(worker_id_info) = nvext_response.worker_id
+                && let Some(decode_id) = worker_id_info.decode_worker_id
+            {
+                result.worker_id = decode_id as i64;
+            }
+        }
 
         let Some(event) = &response.event else {
             // Not an event-based response, skip
@@ -933,10 +929,11 @@ pub async fn extract_worker_selection_from_stream(
     }
 
     tracing::info!(
-        "Final worker_id={}, tokens.len()={}, query_complete={:?}",
+        "Final worker_id={}, tokens.len()={}, prefill_worker={:?}, decode_worker={:?}",
         result.worker_id,
         result.tokens.len(),
-        result.query_complete
+        result.prefill_worker_id,
+        result.decode_worker_id
     );
     Ok(result)
 }
