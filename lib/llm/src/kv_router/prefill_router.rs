@@ -541,8 +541,14 @@ impl PrefillRouter {
         };
 
         // Query decode worker using next stage's router (with query_instance_id annotation)
+        // Match Standard Dynamo behavior: ignore KV overlap for decode selection
+        // since KV cache will be transferred from prefill worker
         let mut query_req = req.clone();
         query_req.annotations.push("query_instance_id".to_string());
+        query_req.router_config_override = Some(RouterConfigOverride {
+            overlap_score_weight: Some(0.0),
+            ..Default::default()
+        });
         let query_context = Context::with_id(query_req, request_id.to_string());
         engine_ctx.link_child(query_context.context());
 
