@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Setup Test Environment'
+description: 'Verify build succeeded, login to registries, and pull test image'
+
+inputs:
+  framework:
+    description: 'Framework name (vllm, trtllm, sglang)'
+    required: true
+  arch:
+    description: 'Architecture (amd64, arm64)'
+    required: true
+  image_prefix:
+    description: 'Image tag prefix (nightly, main)'
+    required: true
+  aws_account_id:
+    description: 'AWS Account ID'
+    required: true
+  aws_default_region:
+    description: 'AWS Default Region'
+    required: true
+  github_token:
+    description: 'GitHub token for API calls'
+    required: true
+
+outputs:
+  image_tag:
+    description: 'The full image tag to use for testing'
+    value: ${{ inputs.image_prefix }}-${{ inputs.framework }}-${{ inputs.arch }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Verify build-${{ inputs.arch }} (${{ inputs.framework }}) succeeded
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+      run: |
+        BUILD_PATTERN="Build ${{ inputs.framework }} (${{ inputs.arch }})"
+        STATUS=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
+          --jq ".jobs[] | select(.name | endswith(\"$BUILD_PATTERN\")) | .conclusion" | head -1)
+
+        echo "Build status for '$BUILD_PATTERN': ${STATUS:-not found}"
+        [[ "$STATUS" == "success" ]] || { echo "::error::Build did not succeed"; exit 1; }
+
+    - name: Login to Container Registries
+      uses: ./.github/actions/docker-login
+      with:
+        aws_default_region: ${{ inputs.aws_default_region }}
+        aws_account_id: ${{ inputs.aws_account_id }}
+
+    - name: Pull test image
+      shell: bash
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+        IMAGE_TAG: ${{ inputs.image_prefix }}-${{ inputs.framework }}-${{ inputs.arch }}
+        REGISTRY_IMAGE: ai-dynamo/dynamo
+      run: |
+        echo "Pulling image: ${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_TAG}"
+        docker pull "${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_TAG}"
+        docker tag "${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_TAG}" "${IMAGE_TAG}"
+        echo "Image ready: ${IMAGE_TAG}"
+

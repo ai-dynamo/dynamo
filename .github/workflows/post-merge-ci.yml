@@ -8,10 +8,10 @@ on:
     branches:
       - main
       - 'release/*.*.*'
-      - 'pvijayakrish/post-merge-workflow'  # Temporary: for testing
-  workflow_dispatch:  # Temporary: for testing purposes
+      - 'pvijayakrish/post-merge-workflow'  # TODO: Remove before merge
+  workflow_dispatch:  # TODO: Remove before merge (or keep for manual testing)
 
-# Cancel any previous runs for the same branch to avoid redundant workflows
+# TODO: Uncomment before merge
 # concurrency:
 #   group: post-merge-ci-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
 #   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
