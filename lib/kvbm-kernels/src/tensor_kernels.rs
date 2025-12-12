@@ -103,6 +103,37 @@ unsafe extern "C" {
         backend: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+
+    fn has_memcpy_batch_async() -> bool;
+    fn is_stub_build() -> bool;
+}
+
+/// Check if cudaMemcpyBatchAsync is available.
+///
+/// Returns true if the library was compiled with CUDA 12.9+ which provides
+/// the `cudaMemcpyBatchAsync` API for efficient batched memory transfers.
+pub fn is_memcpy_batch_available() -> bool {
+    unsafe { has_memcpy_batch_async() }
+}
+
+/// Check if this library was built with stub kernels (no real CUDA).
+///
+/// Returns `true` if the library is using stubs that will abort on actual CUDA calls.
+/// Returns `false` if real CUDA kernels are available.
+///
+/// Downstream crates should use this to skip CUDA tests at runtime:
+/// ```ignore
+/// #[test]
+/// fn my_cuda_test() {
+///     if dynamo_kvbm_kernels::is_using_stubs() {
+///         eprintln!("Skipping CUDA test: stub kernels in use");
+///         return;
+///     }
+///     // ... actual CUDA test code ...
+/// }
+/// ```
+pub fn is_using_stubs() -> bool {
+    unsafe { is_stub_build() }
 }
 
 /// Copy `num_blocks` stacks of NHD/HND tensors into universal form.
@@ -217,7 +248,10 @@ pub unsafe fn operational_copy(
     }
 }
 
-#[cfg(all(test, feature = "testing-cuda"))]
+// Tests are gated to only run when:
+// 1. testing-cuda feature is enabled
+// 2. NOT using stub kernels (stub_kernels cfg is set by build.rs when no nvcc)
+#[cfg(all(test, feature = "testing-cuda", not(stub_kernels)))]
 mod tests {
     use super::*;
     use cudarc::driver::{CudaContext, CudaSlice, DevicePtr, DevicePtrMut, DriverError};

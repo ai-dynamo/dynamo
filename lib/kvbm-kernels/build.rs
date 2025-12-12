@@ -3,271 +3,304 @@
 
 use std::env;
 use std::fs;
-use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // Declare the stub_kernels cfg so Rust knows it's a valid cfg option
+    println!("cargo::rustc-check-cfg=cfg(stub_kernels)");
+
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "unknown".to_string());
+
+    // Track file changes
     let cu_files = discover_cuda_files();
-    for file in cu_files {
+    for file in &cu_files {
         println!("cargo:rerun-if-changed={}", file.display());
     }
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(&manifest_dir).join("cuda/stubs.c").display()
+    );
     println!("cargo:rerun-if-env-changed=CUDA_ARCHS");
+    println!("cargo:rerun-if-env-changed=KVBM_REQUIRE_CUDA");
 
-    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "unknown".to_string());
     println!("cargo:warning=Target architecture: {}", target_arch);
 
-    let use_prebuilt = determine_build_mode();
+    // Check if CUDA is required (set by Python bindings build)
+    let require_cuda = env::var("KVBM_REQUIRE_CUDA").is_ok();
+    let nvcc_available = is_nvcc_available();
 
-    if use_prebuilt {
-        build_with_prebuilt_kernels(&target_arch);
-    } else {
-        build_from_source(&target_arch);
+    // Fail early if CUDA required but not available
+    if require_cuda && !nvcc_available {
+        panic!(
+            "\n\n\
+            ╔════════════════════════════════════════════════════════════════════════╗\n\
+            ║  KVBM_REQUIRE_CUDA is set but nvcc is not available!                   ║\n\
+            ║                                                                        ║\n\
+            ║  Python bindings require real CUDA kernels. Please:                    ║\n\
+            ║    1. Install CUDA toolkit with nvcc, or                               ║\n\
+            ║    2. Unset KVBM_REQUIRE_CUDA for stub-only build                      ║\n\
+            ╚════════════════════════════════════════════════════════════════════════╝\n\
+            "
+        );
+    }
 
-        // Only link against CUDA runtime when building from source
-        // Add CUDA library search paths
-        if let Ok(cuda_path) = env::var("CUDA_PATH") {
-            println!("cargo:rustc-link-search=native={}/lib64", cuda_path);
-            println!("cargo:rustc-link-search=native={}/lib", cuda_path);
-        } else if let Ok(cuda_home) = env::var("CUDA_HOME") {
-            println!("cargo:rustc-link-search=native={}/lib64", cuda_home);
-            println!("cargo:rustc-link-search=native={}/lib", cuda_home);
-        } else {
-            // Try standard paths
-            println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");
-            println!("cargo:rustc-link-search=native=/usr/local/cuda/lib");
+    // Determine build mode
+    let build_mode = determine_build_mode(nvcc_available);
+
+    match build_mode {
+        BuildMode::FromSource => {
+            println!("cargo:warning=Building CUDA kernels from source (dynamic linking)");
+            build_cuda_shared_library(&cu_files, &out_dir, &target_arch);
         }
-
-        println!("cargo:rustc-link-lib=cudart");
+        BuildMode::Prebuilt => {
+            println!("cargo:warning=Using prebuilt CUDA kernels (dynamic linking)");
+            use_prebuilt_shared_library(&out_dir, &target_arch);
+        }
+        BuildMode::Stubs => {
+            println!("cargo:warning=Building stub kernels (no CUDA available)");
+            build_stub_shared_library(&manifest_dir, &out_dir);
+            // Set cfg flag so tests can be skipped
+            println!("cargo:rustc-cfg=stub_kernels");
+        }
     }
 }
 
-/// Returns true if the kernel requires a static library (.a) for linking.
-/// Only tensor_kernels.cu has extern "C" host functions that need static linking.
-/// vectorized_copy.cu is loaded at runtime via fatbin and doesn't need a .a file.
-fn kernel_needs_static_lib(kernel_name: &str) -> bool {
-    kernel_name == "tensor_kernels"
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BuildMode {
+    FromSource,
+    Prebuilt,
+    Stubs,
 }
 
-/// Determine whether to use prebuilt kernels based on:
-/// 1. Feature flag (highest precedence)
-/// 2. Auto-detection of nvcc
-fn determine_build_mode() -> bool {
+/// Determine the build mode based on feature flags and nvcc availability.
+fn determine_build_mode(nvcc_available: bool) -> BuildMode {
     // Check feature flag first
     #[cfg(feature = "prebuilt-kernels")]
     {
-        println!("cargo:warning=Using prebuilt kernels (feature flag enabled)");
-        return true;
+        if has_prebuilt_shared_library() {
+            return BuildMode::Prebuilt;
+        }
+        println!("cargo:warning=prebuilt-kernels feature set but no prebuilt .so found");
     }
 
-    // Auto-detect nvcc
-    if !is_nvcc_available() {
-        println!("cargo:warning=nvcc not found, using prebuilt kernels");
-        return true;
+    if nvcc_available {
+        BuildMode::FromSource
+    } else if has_prebuilt_shared_library() {
+        BuildMode::Prebuilt
+    } else {
+        BuildMode::Stubs
     }
-
-    println!("cargo:warning=Building CUDA kernels from source");
-    false
 }
 
 fn is_nvcc_available() -> bool {
     Command::new("nvcc").arg("--version").output().is_ok()
 }
 
-fn build_with_prebuilt_kernels(target_arch: &str) {
+fn has_prebuilt_shared_library() -> bool {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let out_dir = env::var("OUT_DIR").unwrap();
-    let cu_files = discover_cuda_files();
-
-    // Check if we're on an unsupported architecture for prebuilt mode
-    let is_x86_64 = target_arch == "x86_64";
-    if !is_x86_64 {
-        // Check if any kernel needs static library
-        for cu_path in &cu_files {
-            let kernel_name = cu_path.file_stem().unwrap().to_str().unwrap();
-            if kernel_needs_static_lib(kernel_name) {
-                panic!(
-                    "\n\n\
-                    ╔════════════════════════════════════════════════════════════════════════╗\n\
-                    ║  Prebuilt mode is not supported on {} architecture                     \n\
-                    ║                                                                        ║\n\
-                    ║  Static libraries (.a files) are CPU architecture-specific.           ║\n\
-                    ║  Prebuilt libtensor_kernels.a is only available for x86_64.           ║\n\
-                    ║                                                                        ║\n\
-                    ║  Please install nvcc to build from source, or use an x86_64 system.   ║\n\
-                    ╚════════════════════════════════════════════════════════════════════════╝\n\
-                    ",
-                    target_arch
-                );
-            }
-        }
-    }
-
-    for cu_path in &cu_files {
-        let kernel_name = cu_path.file_stem().unwrap().to_str().unwrap();
-        let needs_static_lib = kernel_needs_static_lib(kernel_name);
-
-        let md5_path = Path::new(&manifest_dir).join(format!("cuda/prebuilt/{}.md5", kernel_name));
-        let fatbin_path =
-            Path::new(&manifest_dir).join(format!("cuda/prebuilt/{}.fatbin", kernel_name));
-
-        // Validate prebuilt files exist
-        if !md5_path.exists() {
-            panic!(
-                "Prebuilt mode requires cuda/prebuilt/{}.md5 but it doesn't exist. \
-                 Build with nvcc first.",
-                kernel_name
-            );
-        }
-        if !fatbin_path.exists() {
-            panic!(
-                "Prebuilt mode requires cuda/prebuilt/{}.fatbin but it doesn't exist. \
-                 Build with nvcc first.",
-                kernel_name
-            );
-        }
-
-        // Only check for .a file if this kernel needs static linking
-        if needs_static_lib {
-            let lib_path =
-                Path::new(&manifest_dir).join(format!("cuda/prebuilt/lib{}.a", kernel_name));
-            if !lib_path.exists() {
-                panic!(
-                    "Prebuilt mode requires cuda/prebuilt/lib{}.a but it doesn't exist. \
-                     Build with nvcc first.",
-                    kernel_name
-                );
-            }
-        }
-
-        // Read and validate hashes (.cu and .fatbin only)
-        // Note: We don't validate .a hashes because static libraries are not reproducible
-        // across different build environments (timestamps, compiler metadata, etc.).
-        // If .cu and .fatbin match, the .a was built from the same source and is valid.
-        let stored_hashes_content = fs::read_to_string(&md5_path)
-            .unwrap_or_else(|_| panic!("Failed to read {}", md5_path.display()));
-        let stored_hashes: Vec<&str> = stored_hashes_content.lines().collect();
-
-        if stored_hashes.len() < 2 {
-            panic!(
-                "Invalid .md5 format for {} (expected at least 2 lines: .cu hash, .fatbin hash)",
-                kernel_name
-            );
-        }
-
-        let current_cu_hash = compute_file_hash(cu_path);
-        let current_fatbin_hash = compute_file_hash(&fatbin_path);
-
-        // Validate that .cu source and .fatbin GPU code match exactly.
-        // This ensures the source code and compiled GPU kernels are in sync.
-        if current_cu_hash != stored_hashes[0] || current_fatbin_hash != stored_hashes[1] {
-            panic!(
-                "Hash mismatch for {}! Rebuild with nvcc.\n  .cu: current={}, stored={}\n  .fatbin: current={}, stored={}",
-                kernel_name,
-                current_cu_hash,
-                stored_hashes[0],
-                current_fatbin_hash,
-                stored_hashes[1]
-            );
-        }
-
-        // Copy fatbin to OUT_DIR (for potential runtime use)
-        let fatbin_copy = Path::new(&out_dir).join(format!("{}.fatbin", kernel_name));
-        fs::copy(&fatbin_path, &fatbin_copy).expect("Failed to copy .fatbin");
-
-        // Only handle static library if this kernel needs it
-        if needs_static_lib {
-            let lib_path =
-                Path::new(&manifest_dir).join(format!("cuda/prebuilt/lib{}.a", kernel_name));
-
-            // Copy static library to OUT_DIR for linking
-            let lib_copy = Path::new(&out_dir).join(format!("lib{}.a", kernel_name));
-            fs::copy(&lib_path, &lib_copy).expect("Failed to copy .a");
-
-            // Link against the static library
-            println!("cargo:rustc-link-lib=static={}", kernel_name);
-            println!(
-                "cargo:warning=Loaded prebuilt kernel with static library: {}",
-                kernel_name
-            );
-        } else {
-            println!(
-                "cargo:warning=Loaded prebuilt kernel (fatbin only, runtime loading): {}",
-                kernel_name
-            );
-        }
-    }
-
-    println!("cargo:rustc-link-search=native={}", out_dir);
-
-    // Link against CUDA runtime and C++ standard library (needed by .a files)
-    if let Ok(cuda_path) = env::var("CUDA_PATH") {
-        println!("cargo:rustc-link-search=native={}/lib64", cuda_path);
-        println!("cargo:rustc-link-search=native={}/lib", cuda_path);
-    } else if let Ok(cuda_home) = env::var("CUDA_HOME") {
-        println!("cargo:rustc-link-search=native={}/lib64", cuda_home);
-        println!("cargo:rustc-link-search=native={}/lib", cuda_home);
-    } else {
-        // Try standard paths
-        println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");
-        println!("cargo:rustc-link-search=native=/usr/local/cuda/lib");
-    }
-
-    println!("cargo:rustc-link-lib=cudart");
-    println!("cargo:rustc-link-lib=stdc++");
+    let so_path = Path::new(&manifest_dir).join("cuda/prebuilt/libkvbm_kernels.so");
+    so_path.exists()
 }
 
-fn build_from_source(target_arch: &str) {
-    let cu_files = discover_cuda_files();
-    let out_dir = env::var("OUT_DIR").unwrap();
-
-    // Build with cc crate
-    let mut build = cc::Build::new();
-    build
-        .cuda(true)
-        .flag("-std=c++17")
-        .flag("-O3")
-        .flag("-Xcompiler")
-        .flag("-fPIC");
-
-    // Configure CUDA architectures
+/// Build CUDA kernels into a shared library (.so) from source.
+fn build_cuda_shared_library(cu_files: &[PathBuf], out_dir: &str, target_arch: &str) {
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let arch_flags = get_cuda_arch_flags();
-    for file in &cu_files {
-        build.file(file);
-        println!("cargo:rerun-if-changed={}", file.display());
-    }
+
+    // Only build tensor_kernels.cu into the shared library (it has the extern "C" functions)
+    let tensor_kernels_path = cu_files
+        .iter()
+        .find(|p| p.file_stem().unwrap() == "tensor_kernels")
+        .expect("tensor_kernels.cu not found");
+
+    let so_name = "libkvbm_kernels.so";
+    let so_path = Path::new(out_dir).join(so_name);
+    let obj_path = Path::new(out_dir).join("kvbm_kernels.o");
+
+    // Step 1: Compile to object file
+    let mut nvcc_cmd = Command::new("nvcc");
+    nvcc_cmd
+        .arg("-m64")
+        .arg("-c")
+        .arg("-std=c++17")
+        .arg("-O3")
+        .arg("-Xcompiler")
+        .arg("-fPIC")
+        .arg(tensor_kernels_path)
+        .arg("-o")
+        .arg(&obj_path);
+
     for flag in &arch_flags {
-        build.flag(flag);
+        nvcc_cmd.arg(flag);
     }
 
-    build.compile("dynamo_kvbm_kernels");
+    println!("cargo:warning=Compiling tensor_kernels.cu to object file...");
+    let status = nvcc_cmd
+        .status()
+        .expect("Failed to execute nvcc for object file");
 
-    // Generate .fatbin and .md5 for future prebuilt use
-    // Only generate .a files for kernels that need static linking, and only on x86_64
-    // Skip prebuilt artifact generation on non-x86_64 to avoid modifying the source tree
-    let is_x86_64 = target_arch == "x86_64";
-    println!(
-        "cargo:warning=Generating prebuilt artifacts for target architecture: {}",
-        target_arch
-    );
+    if !status.success() {
+        panic!("nvcc failed to compile tensor_kernels.cu");
+    }
 
-    for file in &cu_files {
-        let kernel_name = file.file_stem().unwrap().to_str().unwrap();
+    // Step 2: Link into shared library
+    let mut link_cmd = Command::new("nvcc");
+    link_cmd
+        .arg("-shared")
+        .arg("-o")
+        .arg(&so_path)
+        .arg(&obj_path)
+        .arg("-lcudart");
 
-        // Skip generating prebuilt artifacts for kernels that need static libs on non-x86_64
-        // This prevents modifying libtensor_kernels.a on ARM, which would dirty the git tree
-        if kernel_needs_static_lib(kernel_name) && !is_x86_64 {
-            println!(
-                "cargo:warning=Skipping prebuilt artifact generation for {} on {} \
-                 (static library is x86_64-only)",
-                kernel_name, target_arch
-            );
-            continue;
+    println!("cargo:warning=Linking kvbm_kernels into shared library...");
+    let status = link_cmd
+        .status()
+        .expect("Failed to execute nvcc for linking");
+
+    if !status.success() {
+        panic!("nvcc failed to link shared library");
+    }
+
+    // Generate prebuilt artifacts only when the feature is enabled.
+    // The .so alone is sufficient for normal operation - fatbins are only needed
+    // for runtime kernel loading which we don't currently use.
+    #[cfg(feature = "generate-prebuilt")]
+    {
+        // Generate fatbin files for all .cu files
+        for cu_file in cu_files {
+            let kernel_name = cu_file.file_stem().unwrap().to_str().unwrap();
+            generate_fatbin(cu_file, &arch_flags, out_dir);
+
+            // Copy fatbin to prebuilt directory for future use
+            if target_arch == "x86_64" {
+                copy_to_prebuilt(cu_file, out_dir, &manifest_dir);
+            }
+
+            println!("cargo:warning=Generated fatbin for {}", kernel_name);
         }
 
-        generate_prebuilt_artifacts(file, &arch_flags, &out_dir, target_arch);
+        // Copy .so to prebuilt directory for future use (x86_64 only)
+        if target_arch == "x86_64" {
+            let prebuilt_dir = Path::new(&manifest_dir).join("cuda/prebuilt");
+            fs::create_dir_all(&prebuilt_dir).expect("Failed to create prebuilt directory");
+            let prebuilt_so = prebuilt_dir.join(so_name);
+            fs::copy(&so_path, &prebuilt_so).expect("Failed to copy .so to prebuilt");
+            println!(
+                "cargo:warning=Copied {} to prebuilt directory",
+                prebuilt_so.display()
+            );
+        }
     }
+
+    #[cfg(not(feature = "generate-prebuilt"))]
+    {
+        // Suppress unused variable warnings when feature is disabled
+        let _ = cu_files;
+        let _ = target_arch;
+        let _ = manifest_dir;
+    }
+
+    // Set up linking
+    println!("cargo:rustc-link-search=native={}", out_dir);
+    println!("cargo:rustc-link-lib=dylib=kvbm_kernels");
+
+    // Add CUDA runtime library paths
+    add_cuda_library_paths();
+    println!("cargo:rustc-link-lib=cudart");
+}
+
+/// Use prebuilt shared library.
+fn use_prebuilt_shared_library(out_dir: &str, _target_arch: &str) {
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let prebuilt_so = Path::new(&manifest_dir).join("cuda/prebuilt/libkvbm_kernels.so");
+
+    if !prebuilt_so.exists() {
+        panic!(
+            "Prebuilt shared library not found at {}",
+            prebuilt_so.display()
+        );
+    }
+
+    // Copy to OUT_DIR
+    let out_so = Path::new(out_dir).join("libkvbm_kernels.so");
+    fs::copy(&prebuilt_so, &out_so).expect("Failed to copy prebuilt .so");
+
+    // Also copy fatbin files
+    let prebuilt_dir = Path::new(&manifest_dir).join("cuda/prebuilt");
+    for entry in fs::read_dir(&prebuilt_dir).expect("Failed to read prebuilt directory") {
+        let entry = entry.expect("Failed to read entry");
+        let path = entry.path();
+        if path.extension().map_or(false, |ext| ext == "fatbin") {
+            let dest = Path::new(out_dir).join(path.file_name().unwrap());
+            fs::copy(&path, &dest).expect("Failed to copy fatbin");
+        }
+    }
+
+    // Set up linking
+    println!("cargo:rustc-link-search=native={}", out_dir);
+    println!("cargo:rustc-link-lib=dylib=kvbm_kernels");
+
+    // Add CUDA runtime library paths
+    add_cuda_library_paths();
+    println!("cargo:rustc-link-lib=cudart");
+}
+
+/// Build stub shared library from stubs.c when CUDA is not available.
+fn build_stub_shared_library(manifest_dir: &str, out_dir: &str) {
+    let stubs_path = Path::new(manifest_dir).join("cuda/stubs.c");
+
+    if !stubs_path.exists() {
+        panic!(
+            "Stub source file not found at {}. Cannot build without CUDA.",
+            stubs_path.display()
+        );
+    }
+
+    // Build shared library from stubs.c using the system C compiler
+    let so_path = Path::new(out_dir).join("libkvbm_kernels.so");
+    let obj_path = Path::new(out_dir).join("stubs.o");
+
+    // Compile to object file
+    let mut gcc_compile = Command::new("cc");
+    gcc_compile
+        .arg("-c")
+        .arg("-fPIC")
+        .arg("-O2")
+        .arg(&stubs_path)
+        .arg("-o")
+        .arg(&obj_path);
+
+    println!("cargo:warning=Compiling stubs.c...");
+    let status = gcc_compile
+        .status()
+        .expect("Failed to execute cc for stubs");
+
+    if !status.success() {
+        panic!("Failed to compile stubs.c");
+    }
+
+    // Link into shared library
+    let mut gcc_link = Command::new("cc");
+    gcc_link
+        .arg("-shared")
+        .arg("-o")
+        .arg(&so_path)
+        .arg(&obj_path);
+
+    println!("cargo:warning=Linking stub shared library...");
+    let status = gcc_link.status().expect("Failed to link stub library");
+
+    if !status.success() {
+        panic!("Failed to link stub shared library");
+    }
+
+    // Set up linking
+    println!("cargo:rustc-link-search=native={}", out_dir);
+    println!("cargo:rustc-link-lib=dylib=kvbm_kernels");
 }
 
 fn discover_cuda_files() -> Vec<PathBuf> {
@@ -278,7 +311,7 @@ fn discover_cuda_files() -> Vec<PathBuf> {
     for entry in fs::read_dir(cuda_dir).expect("Failed to read cuda directory") {
         let entry = entry.expect("Failed to read entry");
         let path = entry.path();
-        if path.extension().unwrap_or_default() == "cu" {
+        if path.extension().map_or(false, |ext| ext == "cu") {
             cu_files.push(path);
         }
     }
@@ -297,7 +330,7 @@ fn get_cuda_arch_flags() -> Vec<String> {
         }
         flags.push(format!("-gencode=arch=compute_{},code=sm_{}", arch, arch));
     }
-    // GEnerate PTX for Hopper and Blackwell family
+    // Generate PTX for Hopper and Blackwell family
     flags.push("-gencode=arch=compute_90,code=compute_90".to_string());
     flags.push("-gencode=arch=compute_100,code=compute_100".to_string());
     flags.push("-gencode=arch=compute_120,code=compute_120".to_string());
@@ -305,177 +338,78 @@ fn get_cuda_arch_flags() -> Vec<String> {
     flags
 }
 
-fn generate_prebuilt_artifacts(
-    cu_path: &Path,
-    arch_flags: &[String],
-    out_dir: &str,
-    target_arch: &str,
-) {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let prebuilt_dir = Path::new(&manifest_dir).join("cuda/prebuilt");
-    let kernel_name = cu_path.file_stem().unwrap().to_str().unwrap();
-    let fatbin_path = prebuilt_dir.join(format!("{}.fatbin", kernel_name));
-    let md5_path = prebuilt_dir.join(format!("{}.md5", kernel_name));
-
-    let needs_static_lib = kernel_needs_static_lib(kernel_name);
-    let should_generate_lib = needs_static_lib && target_arch == "x86_64";
-
-    // Skip regeneration if valid prebuilt artifacts already exist
-    // (avoids modifying source tree with non-reproducible .a files in CI)
-    //
-    // LIMITATION: This only checks if the .cu source has changed, not build configuration
-    // (CUDA_ARCHS, nvcc version, compiler flags). If you change CUDA_ARCHS or update nvcc,
-    // manually delete the .md5 files to force regeneration:
-    //   rm lib/kvbm-kernels/cuda/prebuilt/*.md5
-    if fatbin_path.exists() && md5_path.exists() {
-        // For kernels that need static libs, also check if the .a exists
-        let lib_path = prebuilt_dir.join(format!("lib{}.a", kernel_name));
-        let lib_check = if should_generate_lib {
-            lib_path.exists()
-        } else {
-            true // Don't require .a for kernels that don't need it
-        };
-
-        if lib_check {
-            // Validate that existing artifacts match current source
-            if let Ok(stored_hashes) = fs::read_to_string(&md5_path) {
-                let hashes: Vec<&str> = stored_hashes.lines().collect();
-                if hashes.len() >= 2 {
-                    let current_cu_hash = compute_file_hash(cu_path);
-                    if current_cu_hash == hashes[0] {
-                        println!(
-                            "cargo:warning=Skipping regeneration of {} (valid prebuilt artifacts exist)",
-                            kernel_name
-                        );
-                        return;
-                    }
-                }
-            }
-        }
+fn add_cuda_library_paths() {
+    if let Ok(cuda_path) = env::var("CUDA_PATH") {
+        println!("cargo:rustc-link-search=native={}/lib64", cuda_path);
+        println!("cargo:rustc-link-search=native={}/lib", cuda_path);
+    } else if let Ok(cuda_home) = env::var("CUDA_HOME") {
+        println!("cargo:rustc-link-search=native={}/lib64", cuda_home);
+        println!("cargo:rustc-link-search=native={}/lib", cuda_home);
+    } else {
+        // Try standard paths
+        println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");
+        println!("cargo:rustc-link-search=native=/usr/local/cuda/lib");
     }
+}
 
-    // Generate .fatbin using nvcc
-    let temp_fatbin = Path::new(out_dir).join(format!("{}.fatbin", kernel_name));
+#[cfg(feature = "generate-prebuilt")]
+#[allow(dead_code)]
+fn generate_fatbin(cu_path: &Path, arch_flags: &[String], out_dir: &str) {
+    let kernel_name = cu_path.file_stem().unwrap().to_str().unwrap();
+    let fatbin_path = Path::new(out_dir).join(format!("{}.fatbin", kernel_name));
 
-    // Ensure prebuilt directory exists
-    fs::create_dir_all(&prebuilt_dir).expect("Failed to create cuda/prebuilt directory");
-
-    // Step 1: Generate .fatbin
-    let mut nvcc_fatbin_cmd = Command::new("nvcc");
-    nvcc_fatbin_cmd
+    let mut nvcc_cmd = Command::new("nvcc");
+    nvcc_cmd
         .arg("-m64")
         .arg("-fatbin")
         .arg("-std=c++17")
         .arg("-O3")
         .arg(cu_path)
         .arg("-o")
-        .arg(&temp_fatbin);
+        .arg(&fatbin_path);
 
     for flag in arch_flags {
-        nvcc_fatbin_cmd.arg(flag);
+        nvcc_cmd.arg(flag);
     }
 
-    println!(
-        "cargo:warning=Generating .fatbin for {} with nvcc...",
-        kernel_name
-    );
-    let status = nvcc_fatbin_cmd
+    let status = nvcc_cmd
         .status()
-        .expect("Failed to execute nvcc for .fatbin generation");
+        .expect("Failed to execute nvcc for fatbin");
 
     if !status.success() {
-        panic!("nvcc failed to generate .fatbin");
+        panic!("nvcc failed to generate fatbin for {}", kernel_name);
     }
-
-    // Copy .fatbin to prebuilt directory
-    fs::copy(&temp_fatbin, &fatbin_path).expect("Failed to copy .fatbin to cuda/prebuilt/");
-
-    // Step 2 & 3: Generate static library only if needed (tensor_kernels on x86_64)
-    if should_generate_lib {
-        let lib_path = prebuilt_dir.join(format!("lib{}.a", kernel_name));
-        let temp_obj = Path::new(out_dir).join(format!("{}.o", kernel_name));
-
-        // Generate object file for static library
-        let mut nvcc_obj_cmd = Command::new("nvcc");
-        nvcc_obj_cmd
-            .arg("-m64")
-            .arg("-c") // Compile to object file
-            .arg("-std=c++17")
-            .arg("-O3")
-            .arg("-Xcompiler")
-            .arg("-fPIC")
-            .arg(cu_path)
-            .arg("-o")
-            .arg(&temp_obj);
-
-        for flag in arch_flags {
-            nvcc_obj_cmd.arg(flag);
-        }
-
-        println!(
-            "cargo:warning=Generating object file for {} with nvcc...",
-            kernel_name
-        );
-        let status = nvcc_obj_cmd
-            .status()
-            .expect("Failed to execute nvcc for object file generation");
-
-        if !status.success() {
-            panic!("nvcc failed to generate object file");
-        }
-
-        // Create static library from object file
-        let temp_lib = Path::new(out_dir).join(format!("lib{}.a", kernel_name));
-        let mut ar_cmd = Command::new("ar");
-        ar_cmd.arg("rcs").arg(&temp_lib).arg(&temp_obj);
-
-        println!(
-            "cargo:warning=Creating static library for {} with ar...",
-            kernel_name
-        );
-        let status = ar_cmd
-            .status()
-            .expect("Failed to execute ar for static library creation");
-
-        if !status.success() {
-            panic!("ar failed to create static library");
-        }
-
-        // Copy .a to prebuilt directory
-        fs::copy(&temp_lib, &lib_path).expect("Failed to copy .a to cuda/prebuilt/");
-
-        println!(
-            "cargo:warning=Generated prebuilt artifacts for {}:\n  {}\n  {}\n  {}",
-            kernel_name,
-            fatbin_path.display(),
-            lib_path.display(),
-            md5_path.display()
-        );
-    } else {
-        println!(
-            "cargo:warning=Generated prebuilt artifacts for {} (fatbin only, no .a):\n  {}\n  {}",
-            kernel_name,
-            fatbin_path.display(),
-            md5_path.display()
-        );
-    }
-
-    // Generate MD5 hashes for consistency validation (.cu and .fatbin only)
-    // Note: We don't hash .a files because they're not reproducible across different
-    // build environments (timestamps, compiler versions, etc.). If source and .fatbin
-    // match, the .a was built from the same source and is valid.
-    let cu_hash = compute_file_hash(cu_path);
-    let fatbin_hash = compute_file_hash(&fatbin_path);
-
-    // Write hashes (one per line: .cu hash, .fatbin hash)
-    let hashes = format!("{}\n{}\n", cu_hash, fatbin_hash);
-    fs::write(&md5_path, hashes).expect("Failed to write .md5 file");
-
-    println!("cargo:warning=.cu source hash: {}", cu_hash);
-    println!("cargo:warning=.fatbin hash: {}", fatbin_hash);
 }
 
+#[cfg(feature = "generate-prebuilt")]
+#[allow(dead_code)]
+fn copy_to_prebuilt(cu_path: &Path, out_dir: &str, manifest_dir: &str) {
+    let kernel_name = cu_path.file_stem().unwrap().to_str().unwrap();
+    let prebuilt_dir = Path::new(manifest_dir).join("cuda/prebuilt");
+    fs::create_dir_all(&prebuilt_dir).expect("Failed to create prebuilt directory");
+
+    // Copy fatbin
+    let fatbin_src = Path::new(out_dir).join(format!("{}.fatbin", kernel_name));
+    let fatbin_dst = prebuilt_dir.join(format!("{}.fatbin", kernel_name));
+    if fatbin_src.exists() {
+        fs::copy(&fatbin_src, &fatbin_dst).expect("Failed to copy fatbin to prebuilt");
+    }
+
+    // Generate and save hash
+    let md5_path = prebuilt_dir.join(format!("{}.md5", kernel_name));
+    let cu_hash = compute_file_hash(cu_path);
+    if fatbin_src.exists() {
+        let fatbin_hash = compute_file_hash(&fatbin_src);
+        let hashes = format!("{}\n{}\n", cu_hash, fatbin_hash);
+        fs::write(&md5_path, hashes).expect("Failed to write md5 file");
+    }
+}
+
+#[cfg(feature = "generate-prebuilt")]
+#[allow(dead_code)]
 fn compute_file_hash(path: &Path) -> String {
+    use std::io::Read;
+
     let mut file = fs::File::open(path)
         .unwrap_or_else(|e| panic!("Failed to open {} for hashing: {}", path.display(), e));
 

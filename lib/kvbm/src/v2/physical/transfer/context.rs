@@ -217,7 +217,8 @@ pub(crate) struct TransferContext {
     #[allow(dead_code)]
     tokio_runtime: TokioRuntime,
     capabilities: TransferCapabilities,
-    operational_backend: OperationalCopyBackend,
+    // todo: make this optional and use as an override for the default behavior
+    _operational_backend: OperationalCopyBackend,
     event_system: Arc<LocalEventSystem>,
     // Channels for background notification handlers
     tx_nixl_status: mpsc::Sender<RegisterPollingNotification<notifications::NixlStatusChecker>>,
@@ -294,7 +295,7 @@ impl TransferContext {
             current_h2d_stream,
             tokio_runtime,
             capabilities,
-            operational_backend,
+            _operational_backend: operational_backend,
             event_system,
             tx_nixl_status,
             tx_cuda_event,
@@ -344,8 +345,9 @@ impl TransferContext {
         &self.capabilities
     }
 
+    #[expect(dead_code)]
     pub(crate) fn operational_backend(&self) -> OperationalCopyBackend {
-        self.operational_backend
+        self._operational_backend
     }
 
     pub(crate) fn event_system(&self) -> &Arc<LocalEventSystem> {

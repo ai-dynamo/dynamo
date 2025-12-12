@@ -29,7 +29,7 @@ kernels = ["dep:dynamo-kvbm-kernels", "dep:dynamo-memory"]
 [dependencies]
 dynamo-llm = { path = "../../llm", optional = true }
 dynamo-kvbm = { path = "../../kvbm", optional = true }
-dynamo-kvbm-kernels = { path = "../../kvbm-kernels", package = "dynamo-kvbm-kernels", optional = true }
+dynamo-kvbm-kernels = { path = "../../kvbm-kernels", optional = true }
 dynamo-memory = { path = "../../memory", optional = true }
 dynamo-runtime = { path = "../../runtime", optional = true }
 

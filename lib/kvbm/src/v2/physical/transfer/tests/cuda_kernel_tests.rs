@@ -3,7 +3,7 @@
 
 //! Unit tests for CUDA kernel compatibility and execution.
 
-use super::{NixlAgent, create_test_agent};
+use super::{NixlAgent, create_test_agent, skip_if_stubs};
 use crate::v2::physical::layout::{BlockDimension, LayoutConfig, PhysicalLayout};
 use crate::v2::physical::transfer::executor::cuda::try_execute_operational_kernel;
 use crate::v2::physical::transfer::{StorageKind, TransferContext};
@@ -58,6 +58,7 @@ fn create_lw_layout(agent: NixlAgent, storage: StorageKind) -> PhysicalLayout {
 /// Test that LW→LW (both layer-wise) is incompatible and returns error
 #[test]
 fn test_kernel_incompatible_lw_to_lw() {
+    skip_if_stubs!();
     let agent = create_test_agent("test_kernel_lw_lw");
     let ctx = TransferContext::builder()
         .nixl_agent(agent.clone())
@@ -97,6 +98,7 @@ fn test_kernel_incompatible_lw_to_lw() {
 /// Test that FC→LW is compatible and succeeds
 #[test]
 fn test_kernel_compatible_fc_to_lw() {
+    skip_if_stubs!();
     let agent = create_test_agent("test_kernel_fc_lw");
     let ctx = TransferContext::builder()
         .nixl_agent(agent.clone())
@@ -134,6 +136,7 @@ fn test_kernel_compatible_fc_to_lw() {
 /// Test that LW→FC is compatible and succeeds
 #[test]
 fn test_kernel_compatible_lw_to_fc() {
+    skip_if_stubs!();
     let agent = create_test_agent("test_kernel_lw_fc");
     let ctx = TransferContext::builder()
         .nixl_agent(agent.clone())
@@ -171,6 +174,7 @@ fn test_kernel_compatible_lw_to_fc() {
 /// Test that FC→FC is compatible and succeeds
 #[test]
 fn test_kernel_compatible_fc_to_fc() {
+    skip_if_stubs!();
     let agent = create_test_agent("test_kernel_fc_fc");
     let ctx = TransferContext::builder()
         .nixl_agent(agent.clone())

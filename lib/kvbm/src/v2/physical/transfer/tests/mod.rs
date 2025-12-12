@@ -6,6 +6,53 @@
 mod cuda_kernel_tests;
 mod local_transfers;
 
+/// Skip test if stub kernels are in use (no real CUDA available).
+///
+/// Call this at the start of any test that requires real CUDA operations.
+/// When stubs are in use, the test will print a message and return early.
+///
+/// # Example
+/// ```ignore
+/// #[test]
+/// fn my_cuda_test() {
+///     skip_if_stubs!();
+///     // ... test code that requires CUDA ...
+/// }
+/// ```
+macro_rules! skip_if_stubs {
+    () => {
+        if dynamo_kvbm_kernels::is_using_stubs() {
+            eprintln!(
+                "Skipping test '{}': stub kernels in use (no real CUDA)",
+                module_path!()
+            );
+            return;
+        }
+    };
+}
+
+/// Check if any of the storage kinds require CUDA, and skip if stubs are in use.
+///
+/// Call this at the start of parameterized tests that may or may not use Device storage.
+macro_rules! skip_if_stubs_and_device {
+    ($($kind:expr),+ $(,)?) => {
+        if dynamo_kvbm_kernels::is_using_stubs() {
+            let needs_cuda = false $(|| matches!($kind, StorageKind::Device(_)))+;
+            if needs_cuda {
+                eprintln!(
+                    "Skipping test '{}': stub kernels in use and test requires Device storage",
+                    module_path!()
+                );
+                return Ok(());
+            }
+        }
+    };
+}
+
+// Make the macros available to submodules
+pub(crate) use skip_if_stubs;
+pub(crate) use skip_if_stubs_and_device;
+
 use super::{
     BlockChecksum, FillPattern, NixlAgent, PhysicalLayout, StorageKind, TransferCapabilities,
     compute_block_checksums, compute_layer_checksums, fill_blocks, fill_layers,

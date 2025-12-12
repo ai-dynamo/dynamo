@@ -8,6 +8,7 @@
 //! - Different layout types (Fully Contiguous, Layer-wise)
 //! - Different transfer strategies (Memcpy, CUDA H2D/D2H)
 
+use super::skip_if_stubs_and_device;
 use super::*;
 use crate::physical::transfer::TransferCapabilities;
 use crate::physical::transfer::executor::TransferOptionsInternal;
@@ -90,6 +91,8 @@ async fn test_p2p(
     )]
     dst_kind: StorageKind,
 ) -> Result<()> {
+    skip_if_stubs_and_device!(src_kind, dst_kind);
+
     use crate::physical::transfer::{BounceBufferInternal, executor::TransferOptionsInternal};
 
     let agent = build_agent_for_kinds(src_kind, dst_kind)?;
@@ -133,6 +136,8 @@ async fn test_roundtrip(
     #[values(StorageKind::System, StorageKind::Pinned, StorageKind::Device(0))]
     dst_kind: StorageKind,
 ) -> Result<()> {
+    skip_if_stubs_and_device!(src_kind, inter_kind, dst_kind);
+
     use crate::physical::transfer::executor::TransferOptionsInternal;
 
     let agent = build_agent_for_kinds(src_kind, dst_kind)?;

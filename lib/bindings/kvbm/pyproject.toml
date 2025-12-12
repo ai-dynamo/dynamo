@@ -66,6 +66,12 @@ python-source = "python"
 # Skip auditwheel here - we'll run it manually in dynamo/container/Dockerfile with exclusions
 skip-auditwheel = true
 
+# Environment variables for Cargo build
+# KVBM_REQUIRE_CUDA=1 ensures we fail if nvcc is not available
+# Python bindings cannot use stub kernels because patchelf will capture the .so
+[tool.maturin.environment]
+KVBM_REQUIRE_CUDA = "1"
+
 [build-system]
 requires = ["maturin>=1.0,<2.0", "patchelf"]
 build-backend = "maturin"

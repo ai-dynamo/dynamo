@@ -71,7 +71,7 @@ pub fn execute_cuda_transfer(
     // Perform CUDA transfers based on strategy
     match strategy {
         TransferStrategy::CudaAsyncH2D => {
-            let backend = ctx.operational_backend();
+            let backend = select_backend_for_layouts(src, dst);
             if let Err(e) = try_execute_operational_kernel(
                 src,
                 dst,
@@ -94,7 +94,7 @@ pub fn execute_cuda_transfer(
             }
         }
         TransferStrategy::CudaAsyncD2H => {
-            let backend = ctx.operational_backend();
+            let backend = select_backend_for_layouts(src, dst);
             if let Err(e) = try_execute_operational_kernel(
                 src,
                 dst,
@@ -118,7 +118,7 @@ pub fn execute_cuda_transfer(
         }
         TransferStrategy::CudaAsyncD2D => {
             // Try kernel-based path first, fall back to memcpy on error
-            let backend = ctx.operational_backend();
+            let backend = select_backend_for_layouts(src, dst);
             if let Err(e) = try_execute_operational_kernel(
                 src,
                 dst,
@@ -324,6 +324,30 @@ fn map_dtype(dtype_width_bytes: usize) -> Option<TensorDataType> {
         4 => Some(TensorDataType::F32),
         8 => Some(TensorDataType::F64),
         _ => None,
+    }
+}
+
+/// Select the optimal backend for operational copy based on layout contiguity.
+///
+/// Decision logic:
+/// 1. If CUDA 12.9+ is available, use Auto (which prioritizes cudaMemcpyBatchAsync)
+/// 2. If both layouts are fully contiguous, use cudaMemcpyAsync
+/// 3. If one or both layouts are not fully contiguous (mixed), use the vectorized kernel
+fn select_backend_for_layouts(src: &PhysicalLayout, dst: &PhysicalLayout) -> OperationalCopyBackend {
+    // If batch copy available (CUDA 12.9+), let Auto handle it
+    if dynamo_kvbm_kernels::is_memcpy_batch_available() {
+        return OperationalCopyBackend::Auto;
+    }
+
+    let src_fc = src.layout().is_fully_contiguous();
+    let dst_fc = dst.layout().is_fully_contiguous();
+
+    if src_fc && dst_fc {
+        // Both contiguous: cudaMemcpyAsync is optimal
+        OperationalCopyBackend::MemcpyAsync
+    } else {
+        // Mixed contiguity: use vectorized kernel
+        OperationalCopyBackend::KernelOnly
     }
 }
 

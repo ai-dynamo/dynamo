@@ -599,15 +599,36 @@ launch_operational_copy(
       break;
     case OperationalCopyBackend::Auto:
     default:
-      status = launch_kernel();
-      if (status == cudaErrorNotSupported || status == cudaErrorInvalidValue) {
-        status = launch_memcpy_batch();
+      // Priority: batch copy (CUDA 12.9+) -> memcpy async -> kernel fallback
+      status = launch_memcpy_batch();
+      if (status == cudaErrorNotSupported) {
+        status = launch_memcpy_async();
       }
       if (status == cudaErrorNotSupported || status == cudaErrorInvalidValue) {
-        status = launch_memcpy_async();
+        status = launch_kernel();
       }
       break;
   }
 
   return status;
+}
+
+/// Check if cudaMemcpyBatchAsync is available at compile time.
+/// Returns true if CUDA 12.9+ was used to compile this library.
+extern "C" bool
+has_memcpy_batch_async()
+{
+#if CUDART_VERSION >= 12090
+  return true;
+#else
+  return false;
+#endif
+}
+
+/// Returns false - this is the real CUDA implementation, not stubs.
+/// Downstream crates can use this to skip CUDA tests at runtime when stubs are linked.
+extern "C" bool
+is_stub_build()
+{
+  return false;
 }

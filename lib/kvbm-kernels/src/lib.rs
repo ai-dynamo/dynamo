@@ -5,7 +5,8 @@ pub mod tensor_kernels;
 
 pub use tensor_kernels::{
     BlockLayout, OperationalCopyBackend, OperationalCopyDirection, TensorDataType,
-    block_from_universal, operational_copy, universal_from_block,
+    block_from_universal, is_memcpy_batch_available, is_using_stubs, operational_copy,
+    universal_from_block,
 };
 
 // #[cfg(feature = "python-bindings")]
