@@ -384,12 +384,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             }
 
             // Extract GAIE Stage 1 response fields directly
-            nvext_response.prefill_worker_id = params
-                .get("prefill_worker_id")
-                .and_then(|v| v.as_u64());
-            nvext_response.decode_worker_id = params
-                .get("decode_worker_id")
-                .and_then(|v| v.as_u64());
+            nvext_response.prefill_worker_id =
+                params.get("prefill_worker_id").and_then(|v| v.as_u64());
+            nvext_response.decode_worker_id =
+                params.get("decode_worker_id").and_then(|v| v.as_u64());
             nvext_response.token_data = params
                 .get("token_data")
                 .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok());
@@ -400,16 +398,14 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                 || nvext_response.decode_worker_id.is_some()
                 || nvext_response.token_data.is_some();
 
-            if has_data {
-                if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
-                    stream_response.nvext = Some(nvext_json);
-                    tracing::debug!(
-                        "Injected nvext into chat completion: prefill_worker={:?}, decode_worker={:?}, token_count={:?}",
-                        nvext_response.prefill_worker_id,
-                        nvext_response.decode_worker_id,
-                        nvext_response.token_data.as_ref().map(|t| t.len())
-                    );
-                }
+            if has_data && let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
+                stream_response.nvext = Some(nvext_json);
+                tracing::debug!(
+                    "Injected nvext into chat completion: prefill_worker={:?}, decode_worker={:?}, token_count={:?}",
+                    nvext_response.prefill_worker_id,
+                    nvext_response.decode_worker_id,
+                    nvext_response.token_data.as_ref().map(|t| t.len())
+                );
             }
         }
 
