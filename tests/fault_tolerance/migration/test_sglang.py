@@ -151,7 +151,6 @@ def test_request_migration_sglang_worker_failure(
                 verify_migration_occurred(frontend)
 
 
-@pytest.mark.skip(reason="SGLang graceful shutdown not yet implemented")
 def test_request_migration_sglang_graceful_shutdown(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):

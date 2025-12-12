@@ -107,8 +107,19 @@ def determine_request_receiving_worker(
     worker1_results: list[bool] = []
     worker2_results: list[bool] = []
 
+    # Capture current log contents so we only look for new request logs
+    def _read_log(path: str) -> str:
+        try:
+            with open(path, "r") as f:
+                return f.read()
+        except Exception:
+            return ""
+
+    worker1_baseline = _read_log(worker1.log_path)
+    worker2_baseline = _read_log(worker2.log_path)
+
     # Poll both workers in parallel
-    def poll_worker(worker: ManagedProcess, result_list: list[bool]):
+    def poll_worker(worker: ManagedProcess, baseline: str, result_list: list[bool]):
         max_wait_ms = 500
         poll_interval_ms = 5
         max_iterations = max_wait_ms // poll_interval_ms
@@ -119,7 +130,8 @@ def determine_request_receiving_worker(
             try:
                 with open(worker.log_path, "r") as f:
                     log_content = f.read()
-                    if receiving_pattern in log_content:
+                    new_content = log_content[len(baseline) :]
+                    if receiving_pattern in new_content:
                         result_list.append(True)
                         return
             except Exception as e:
@@ -131,10 +143,14 @@ def determine_request_receiving_worker(
 
     # Look for which worker received the request
     thread1 = threading.Thread(
-        target=poll_worker, args=(worker1, worker1_results), daemon=True
+        target=poll_worker,
+        args=(worker1, worker1_baseline, worker1_results),
+        daemon=True,
     )
     thread2 = threading.Thread(
-        target=poll_worker, args=(worker2, worker2_results), daemon=True
+        target=poll_worker,
+        args=(worker2, worker2_baseline, worker2_results),
+        daemon=True,
     )
     thread1.start()
     thread2.start()

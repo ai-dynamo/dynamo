@@ -35,6 +35,44 @@ from dynamo.sglang.request_handlers import (
 configure_dynamo_logging()
 
 
+def _install_fast_shutdown_handlers(
+    loop: asyncio.AbstractEventLoop, runtime: DistributedRuntime
+):
+    """
+    Override SIGTERM/SIGINT handlers to exit immediately.
+
+    SGLang installs its own SIGTERM handler that drains requests before exiting.
+    When request migration is enabled, we prefer fast failover: drop streams and
+    let the frontend migrate to a healthy worker.
+    """
+
+    def fast_shutdown() -> None:
+        logging.warning(
+            "Received shutdown signal with migration enabled; exiting immediately"
+        )
+        try:
+            runtime.shutdown()
+        except Exception:
+            logging.exception("Failed to shutdown DistributedRuntime before exit")
+        os._exit(0)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, fast_shutdown)
+        except NotImplementedError:
+            signal.signal(sig, lambda *_: fast_shutdown())
+
+
+async def _reinforce_fast_shutdown_handlers(
+    loop: asyncio.AbstractEventLoop, runtime: DistributedRuntime
+):
+    # SGLang may register its own SIGTERM handler asynchronously after Engine init.
+    # Reinstall ours a few times to ensure we remain the last registered handler.
+    for _ in range(5):
+        _install_fast_shutdown_handlers(loop, runtime)
+        await asyncio.sleep(0.2)
+
+
 async def _handle_non_leader_node(
     engine: sgl.Engine,
     generate_endpoint,
@@ -74,13 +112,23 @@ async def worker():
         loop, config.dynamo_args.store_kv, config.dynamo_args.request_plane
     )
 
-    def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
+    if config.dynamo_args.migration_limit > 0:
+        # Ensure SGLang skips draining on SIGTERM as a fallback.
+        # Newer SGLang uses SGLANG_FORCE_SHUTDOWN (SGL_FORCE_SHUTDOWN is deprecated).
+        os.environ.setdefault("SGLANG_FORCE_SHUTDOWN", "1")
+        _install_fast_shutdown_handlers(loop, runtime)
+        logging.info(
+            "Migration enabled; SIGTERM will trigger immediate shutdown for fast failover"
+        )
+    else:
 
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
+        def signal_handler():
+            asyncio.create_task(graceful_shutdown(runtime))
 
-    logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, signal_handler)
+
+        logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
     if config.dynamo_args.embedding_worker:
         await init_embedding(runtime, config)
@@ -110,6 +158,10 @@ async def init(runtime: DistributedRuntime, config: Config):
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
 
     engine = sgl.Engine(server_args=server_args)
+    if dynamo_args.migration_limit > 0:
+        asyncio.create_task(
+            _reinforce_fast_shutdown_handlers(asyncio.get_running_loop(), runtime)
+        )
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -212,6 +264,10 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
 
     engine = sgl.Engine(server_args=server_args)
+    if dynamo_args.migration_limit > 0:
+        asyncio.create_task(
+            _reinforce_fast_shutdown_handlers(asyncio.get_running_loop(), runtime)
+        )
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -271,6 +327,10 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     engine = sgl.Engine(server_args=server_args)
+    if dynamo_args.migration_limit > 0:
+        asyncio.create_task(
+            _reinforce_fast_shutdown_handlers(asyncio.get_running_loop(), runtime)
+        )
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -424,6 +484,10 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
     engine = sgl.Engine(server_args=server_args)
+    if dynamo_args.migration_limit > 0:
+        asyncio.create_task(
+            _reinforce_fast_shutdown_handlers(asyncio.get_running_loop(), runtime)
+        )
 
     if config.serving_mode == DisaggregationMode.DECODE:
         logging.info("Initializing prefill client for multimodal decode worker")
@@ -457,6 +521,10 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     engine = sgl.Engine(server_args=server_args)
+    if dynamo_args.migration_limit > 0:
+        asyncio.create_task(
+            _reinforce_fast_shutdown_handlers(asyncio.get_running_loop(), runtime)
+        )
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
