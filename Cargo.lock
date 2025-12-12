@@ -2663,7 +2663,7 @@ dependencies = [
  "bytes",
  "candle-core 0.9.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "chrono",
- "clap 4.5.52",
+ "clap 4.5.53",
  "criterion 0.3.6",
  "cudarc",
  "dashmap 5.5.3",
@@ -4065,8 +4065,8 @@ checksum = "629d8f3bbeda9d148036d6b0de0a3ab947abd08ce90626327fc3547a49d59d97"
 dependencies = [
  "dirs",
  "futures",
- "indicatif 0.17.11",
  "http 1.4.0",
+ "indicatif 0.17.11",
  "libc",
  "log",
  "num_cpus",
