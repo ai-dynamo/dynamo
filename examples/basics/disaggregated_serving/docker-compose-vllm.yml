@@ -99,4 +99,3 @@ services:
     ports:
       - 2379:2379  # this port exposes the http /metrics endpoint
       - 2380:2380
-  
