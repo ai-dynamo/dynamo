@@ -191,6 +191,18 @@ RUN set -eux; \
 # Point build tools explicitly at the modern protoc
 ENV PROTOC=/usr/local/bin/protoc
 
+# Install SCCACHE if requested (needed before AWS SDK C++ build)
+COPY container/use-sccache.sh /tmp/use-sccache.sh
+RUN if [ "$USE_SCCACHE" = "true" ]; then \
+        /tmp/use-sccache.sh install; \
+    fi
+
+# Set SCCACHE environment variables
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
+    CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
+    CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
+
 # Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
 ARG AWS_SDK_CPP_VERSION=1.11.581
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
@@ -223,16 +235,8 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
 
-# Install SCCACHE if requested
-COPY container/use-sccache.sh /tmp/use-sccache.sh
-RUN if [ "$USE_SCCACHE" = "true" ]; then \
-        /tmp/use-sccache.sh install; \
-    fi
-
-# Set SCCACHE environment variables
-ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
-    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
+# Set Rust-specific SCCACHE environment variable
+ENV RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
 
 # Copy CUDA from base stage
 COPY --from=base /usr/local/cuda /usr/local/cuda

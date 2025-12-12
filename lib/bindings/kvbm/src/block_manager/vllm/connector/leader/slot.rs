@@ -949,7 +949,7 @@ impl Slot for VllmConnectorSlot {
             if !remaining_hashes.is_empty() {
                 let matched = self.leader.g4_lookup(remaining_hashes);
                 if !matched.is_empty() {
-                    tracing::info!(
+                    tracing::debug!(
                         "G4 matched {} of {} remaining hashes",
                         matched.len(),
                         remaining_hashes.len()
@@ -1301,7 +1301,7 @@ impl VllmConnectorSlot {
 
         self.append_pending_operation(worker_req);
 
-        tracing::info!(
+        tracing::debug!(
             request_id = self.request_id,
             operation_id = %operation_id,
             "start onboarding {} blocks from G4 to device",
@@ -1926,7 +1926,7 @@ async fn process_g4_onboard_request(
 
     match notify_receiver.await {
         Ok(_) => {
-            tracing::info!(
+            tracing::debug!(
                 request_id = %request_id,
                 operation_id = %operation_id,
                 "G4 onboard transfer completed successfully"

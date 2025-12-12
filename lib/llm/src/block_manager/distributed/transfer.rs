@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use super::g4_transfer::G4TransferHandler;
 use super::transfer_object::ObjectTransferHandler;
 
 use futures::future::try_join_all;
@@ -24,8 +25,6 @@ use crate::block_manager::{
     connector::scheduler::{SchedulingDecision, TransferSchedulerClient},
     offload::MAX_TRANSFER_BATCH_SIZE,
     storage::{DeviceStorage, DiskStorage, Local, PinnedStorage},
-    v2::logical::distributed::traits::DistributedRegistry,
-    v2::logical::external_registry::SequenceHashRegistry,
     v2::physical::{
         layout::{LayoutConfig, PhysicalLayout},
         manager::TransportManager,
@@ -33,6 +32,7 @@ use crate::block_manager::{
         transfer::options::TransferOptions,
     },
 };
+use super::registry::{DistributedRegistry, SequenceHashRegistry};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -133,7 +133,10 @@ pub struct BlockTransferHandlerV1 {
     context: Arc<TransferContext>,
     scheduler_client: Option<TransferSchedulerClient>,
     batcher: ConnectorTransferBatcher,
-    // add worker-connector scheduler client here
+
+    /// V1 Object handler for G4 write-through and onboard operations.
+    /// Uses OnceLock for interior mutability (can set after Arc wrapping).
+    object_handler: std::sync::OnceLock<Arc<G4TransferHandler>>,
 }
 
 #[async_trait]
@@ -163,18 +166,52 @@ impl BlockTransferDirectHandler for BlockTransferHandlerV1 {
 
         tracing::debug!("request: {request:#?}");
 
+        let is_device_to_host = matches!(
+            (request.from_pool(), request.to_pool()),
+            (Device, Host)
+        );
+
         let notify = match (request.from_pool(), request.to_pool()) {
-            (Device, Host) => self.begin_transfer(&self.device, &self.host, request).await,
-            (Device, Disk) => self.begin_transfer(&self.device, &self.disk, request).await,
-            (Host, Device) => self.begin_transfer(&self.host, &self.device, request).await,
-            (Host, Disk) => self.begin_transfer(&self.host, &self.disk, request).await,
-            (Disk, Device) => self.begin_transfer(&self.disk, &self.device, request).await,
+            (Device, Host) => self.begin_transfer(&self.device, &self.host, request.clone()).await,
+            (Device, Disk) => self.begin_transfer(&self.device, &self.disk, request.clone()).await,
+            (Host, Device) => self.begin_transfer(&self.host, &self.device, request.clone()).await,
+            (Host, Disk) => self.begin_transfer(&self.host, &self.disk, request.clone()).await,
+            (Disk, Device) => self.begin_transfer(&self.disk, &self.device, request.clone()).await,
             _ => {
                 return Err(anyhow::anyhow!("Invalid transfer type."));
             }
         }?;
 
         notify.await?;
+
+        // G4 write-through: After D->H transfer completes, also offload to object storage
+        if is_device_to_host {
+            if let (Some(obj_handler), Some(hashes)) =
+                (self.object_handler.get(), &request.sequence_hashes)
+            {
+                if !hashes.is_empty() {
+                    let dst_block_ids: Vec<usize> = request.blocks()
+                        .iter()
+                        .map(|(_, to)| *to)
+                        .collect();
+
+                    match obj_handler.offload(&dst_block_ids, hashes).await {
+                        Ok(count) => {
+                            tracing::debug!(
+                                "G4 write-through (V1): offloaded {} of {} blocks",
+                                count,
+                                dst_block_ids.len()
+                            );
+                        }
+                        Err(e) => {
+                            // G4 offload failure is non-fatal - log and continue
+                            tracing::warn!("G4 write-through failed (V1, non-fatal): {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -195,7 +232,41 @@ impl BlockTransferHandlerV1 {
             context,
             scheduler_client,
             batcher: ConnectorTransferBatcher::new(),
+            object_handler: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Set the G4 object handler for write-through offloads.
+    ///
+    /// Must be called after handler creation if G4 is enabled.
+    /// Uses OnceLock so this can be called on &self (after Arc wrapping).
+    pub fn set_object_handler(&self, handler: Arc<G4TransferHandler>) {
+        let _ = self.object_handler.set(handler);
+    }
+
+    /// Get a reference to the G4 object handler (if set).
+    pub fn object_handler(&self) -> Option<&Arc<G4TransferHandler>> {
+        self.object_handler.get()
+    }
+
+    /// Check if G4 object storage is enabled.
+    pub fn has_g4(&self) -> bool {
+        self.object_handler.get().is_some()
+    }
+
+    /// Get the transfer context.
+    pub fn context(&self) -> &Arc<TransferContext> {
+        &self.context
+    }
+
+    /// Get the host blocks (needed for G4 bounce buffer setup).
+    pub fn host_blocks(&self) -> Option<&LocalBlockDataList<PinnedStorage>> {
+        self.host.as_ref()
+    }
+
+    /// Get the device blocks (needed for G4 setup).
+    pub fn device_blocks(&self) -> Option<&LocalBlockDataList<DeviceStorage>> {
+        self.device.as_ref()
     }
 
     fn get_local_data<S: Storage>(

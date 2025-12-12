@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod g4_transfer;
+pub mod registry;
 mod transfer;
 mod transfer_object;
 mod utils;
@@ -9,6 +11,13 @@ mod zmq;
 mod leader;
 mod worker;
 
+pub use g4_transfer::{
+    G4TransferDirection, G4TransferHandler, G4TransferResult, RemoteDescriptor, RemoteStorageKind,
+};
+pub use registry::{
+    DistributedRegistry, ObjectKey, ObjectRegistry, OffloadResult, SequenceHash,
+    SequenceHashRegistry, create_registry_from_env,
+};
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
 pub use transfer_object::ObjectTransferHandler;
 pub use transfer::{BlockTransferHandler, BlockTransferHandlerV1, BlockTransferHandlerV2};
