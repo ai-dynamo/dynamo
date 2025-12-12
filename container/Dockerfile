@@ -158,6 +158,7 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         numactl-devel
 
 # Build FFmpeg from source
+# Or write dummies for future stages COPY --from
 ARG FFMPEG_VERSION=7.1
 ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH}"
 RUN if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
@@ -183,6 +184,8 @@ RUN if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     make install && \
     ldconfig && \
     rm -rf /tmp/ffmpeg-${FFMPEG_VERSION}*; \
+else \
+    touch /usr/local/include/av.dummy /usr/local/lib/libav.dummy /usr/local/lib/pkgconfig/libav.dummy; \
 fi
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
@@ -391,6 +394,10 @@ COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
 COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+# Copy ffmpeg (or dummy)
+COPY --chown=dynamo: --from=wheel_builder /usr/local/include/av* /usr/local/include/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib/libav* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib/pkgconfig/libav* /usr/local/lib/pkgconfig/
 
 # Copy built artifacts
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
