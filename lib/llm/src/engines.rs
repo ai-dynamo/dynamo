@@ -160,12 +160,12 @@ impl
                 // we are returning characters not tokens, so there will be some postprocessing overhead
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
                 let response = deltas.create_choice(0, Some(c.to_string()), None, None);
-                yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
+                yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None, error_code: None };
                 id += 1;
             }
 
             let response = deltas.create_choice(0, None, Some(dynamo_async_openai::types::FinishReason::Stop), None);
-            yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
+            yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None, error_code: None };
         };
 
         Ok(ResponseStream::new(Box::pin(output), ctx))
@@ -193,11 +193,11 @@ impl
             for c in chars_string.chars() {
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
                 let response = deltas.create_choice(0, Some(c.to_string()), None, None);
-                yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
+                yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None, error_code: None };
                 id += 1;
             }
             let response = deltas.create_choice(0, None, Some(dynamo_async_openai::types::CompletionFinishReason::Stop), None);
-            yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
+            yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None, error_code: None };
 
         };
 

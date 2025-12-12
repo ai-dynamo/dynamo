@@ -680,6 +680,7 @@ impl JailedStream {
                     id,
                     event,
                     comment,
+                    error_code: None,
                 }]
             }
             EmissionMode::SingleChoicePerChunk => {
@@ -695,6 +696,7 @@ impl JailedStream {
                             id: id.clone(),
                             event: event.clone(),
                             comment: comment.clone(),
+                            error_code: None,
                         }
                     })
                     .collect()

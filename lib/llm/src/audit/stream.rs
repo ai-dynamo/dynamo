@@ -64,7 +64,7 @@ where
                                 let _ = tx.send(final_resp);
                             }
                             Err(e) => {
-                                tracing::warn!("audit: aggregation failed: {e}");
+                                tracing::warn!("audit: aggregation failed: {:?}", e);
                             }
                         }
                     });
@@ -123,7 +123,7 @@ where
                 final_response_to_one_chunk_stream(final_resp)
             }
             Err(e) => {
-                tracing::warn!("fold aggregation failed: {e}");
+                tracing::warn!("fold aggregation failed: {:?}", e);
                 let fallback = NvCreateChatCompletionResponse {
                     id: String::new(),
                     created: 0,
@@ -237,6 +237,7 @@ pub fn final_response_to_one_chunk_stream(
         id: None,
         event: None,
         comment: None,
+        error_code: None,
     };
     Box::pin(futures::stream::once(async move { annotated }))
 }

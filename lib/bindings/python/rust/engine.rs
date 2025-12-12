@@ -128,6 +128,9 @@ impl PythonServerStreamingEngine {
 
 #[derive(Debug, thiserror::Error)]
 enum ResponseProcessingError {
+    #[error("python value error exception: {0}")]
+    ValueError(String),
+
     #[error("python exception: {0}")]
     PythonException(String),
 
@@ -237,7 +240,8 @@ where
                     Err(e) => {
                         done = true;
 
-                        let msg = match &e {
+                        // Returns (optional_http_code, error_message)
+                        let (code, msg) = match &e {
                             ResponseProcessingError::DeserializeError(e) => {
                                 // tell the python async generator to stop generating
                                 // right now, this is impossible as we are not passing the context to the python async generator
@@ -247,28 +251,39 @@ where
                                     "critical error: invalid response object from python async generator; application-logic-mismatch: {}",
                                     e
                                 );
-                                msg
+                                (None, msg)
                             }
                             ResponseProcessingError::PyGeneratorExit(_) => {
-                                "Stream ended before generation completed".to_string()
+                                (None, "Stream ended before generation completed".to_string())
+                            }
+                            ResponseProcessingError::ValueError(e) => {
+                                let msg = format!(
+                                    "a python value error exception was caught while processing the async generator: {}",
+                                    e
+                                );
+                                // ValueError should return 400 Bad Request
+                                (Some(400u16), msg)
                             }
                             ResponseProcessingError::PythonException(e) => {
                                 let msg = format!(
                                     "a python exception was caught while processing the async generator: {}",
                                     e
                                 );
-                                msg
+                                (None, msg)
                             }
                             ResponseProcessingError::OffloadError(e) => {
                                 let msg = format!(
                                     "critical error: failed to offload the python async generator to a new thread: {}",
                                     e
                                 );
-                                msg
+                                (None, msg)
                             }
                         };
 
-                        Annotated::from_error(msg)
+                        match code {
+                            Some(code) => Annotated::from_error_with_code(code, msg),
+                            None => Annotated::from_error(msg),
+                        }
                     }
                 };
 
@@ -310,12 +325,16 @@ where
     let item = item.map_err(|e| {
         println!();
         let mut is_py_generator_exit = false;
+        let mut is_py_value_error = false;
         Python::with_gil(|py| {
             e.display(py);
             is_py_generator_exit = e.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py);
+            is_py_value_error = e.is_instance_of::<pyo3::exceptions::PyValueError>(py);
         });
         if is_py_generator_exit {
             ResponseProcessingError::PyGeneratorExit(e.to_string())
+        } else if is_py_value_error {
+            ResponseProcessingError::ValueError(e.to_string())
         } else {
             ResponseProcessingError::PythonException(e.to_string())
         }

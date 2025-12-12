@@ -27,6 +27,8 @@ pub struct Annotated<R> {
     pub event: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<u16>,
 }
 
 impl<R> Annotated<R> {
@@ -37,6 +39,18 @@ impl<R> Annotated<R> {
             id: None,
             event: Some("error".to_string()),
             comment: Some(vec![error]),
+            error_code: None,
+        }
+    }
+
+    /// Create a new annotated stream from the given error with an HTTP status code
+    pub fn from_error_with_code(code: u16, error: String) -> Self {
+        Self {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec![error]),
+            error_code: Some(code),
         }
     }
 
@@ -47,6 +61,7 @@ impl<R> Annotated<R> {
             id: None,
             event: None,
             comment: None,
+            error_code: None,
         }
     }
 
@@ -62,19 +77,22 @@ impl<R> Annotated<R> {
             id: None,
             event: Some(name.into()),
             comment: Some(vec![serde_json::to_string(value)?]),
+            error_code: None,
         })
     }
 
-    /// Convert to a [`Result<Self, String>`]
-    /// If [`Self::event`] is "error", return an error message(s) held by [`Self::comment`]
-    pub fn ok(self) -> Result<Self, String> {
+    /// Convert to a [`Result<Self, (Option<u16>, String)>`]
+    /// If [`Self::event`] is "error", return the error code and message(s) held by [`Self::comment`]
+    pub fn ok(self) -> Result<Self, (Option<u16>, String)> {
         if let Some(event) = &self.event
             && event == "error"
         {
-            return Err(self
-                .comment
-                .unwrap_or(vec!["unknown error".to_string()])
-                .join(", "));
+            return Err((
+                self.error_code,
+                self.comment
+                    .unwrap_or(vec!["unknown error".to_string()])
+                    .join(", "),
+            ));
         }
         Ok(self)
     }
@@ -97,6 +115,7 @@ impl<R> Annotated<R> {
             id: self.id,
             event: self.event,
             comment: self.comment,
+            error_code: self.error_code,
         }
     }
 
@@ -112,6 +131,7 @@ impl<R> Annotated<R> {
                 id: self.id,
                 event: self.event,
                 comment: self.comment,
+                error_code: self.error_code,
             },
             Err(e) => Annotated::from_error(e),
         }

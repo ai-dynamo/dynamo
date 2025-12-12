@@ -108,6 +108,7 @@ where
             id: value.id,
             event: value.event,
             comment: value.comments,
+            error_code: None,
         })
     }
 }

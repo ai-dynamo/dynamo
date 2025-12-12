@@ -763,7 +763,12 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             return Some((message, code));
         }
 
-        return Some((comment_str, StatusCode::INTERNAL_SERVER_ERROR));
+        // Fallback: use error_code from Annotated if present, otherwise 500
+        let status_code = event
+            .error_code
+            .and_then(|c| StatusCode::from_u16(c).ok())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        return Some((comment_str, status_code));
     }
 
     // Check if the data payload itself contains an error structure with code >= 400
@@ -799,7 +804,12 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
         // Comments present with no data AND no event type indicates error
         // (events with event types like "request_id" or "event.dynamo.test.sentinel" are annotations)
         if event.data.is_none() && event.event.is_none() {
-            return Some((comment_str, StatusCode::INTERNAL_SERVER_ERROR));
+            // Use error_code from Annotated if present, otherwise 500
+            let status_code = event
+                .error_code
+                .and_then(|c| StatusCode::from_u16(c).ok())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            return Some((comment_str, status_code));
         }
     }
 
@@ -1001,16 +1011,24 @@ async fn chat_completions(
         let response =
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await
-                .map_err(|e| {
+                .map_err(|(code, msg)| {
                     tracing::error!(
                         request_id,
-                        "Failed to parse chat completion response: {:?}",
-                        e
+                        "Failed to fold chat completions stream for: {:?}",
+                        msg
                     );
-                    ErrorMessage::internal_server_error(&format!(
-                        "Failed to parse chat completion response: {}",
-                        e
-                    ))
+                    // Use the error code if provided, otherwise default to 500
+                    if let Some(code) = code {
+                        ErrorMessage::from_http_error(HttpError {
+                            code,
+                            message: format!("Failed to fold chat completions stream: {}", msg),
+                        })
+                    } else {
+                        ErrorMessage::internal_server_error(&format!(
+                            "Failed to fold chat completions stream: {}",
+                            msg
+                        ))
+                    }
                 })?;
 
         inflight_guard.mark_ok();
@@ -1226,16 +1244,24 @@ async fn responses(
     let response =
         NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
             .await
-            .map_err(|e| {
+            .map_err(|(code, msg)| {
                 tracing::error!(
                     request_id,
                     "Failed to fold chat completions stream for: {:?}",
-                    e
+                    msg
                 );
-                ErrorMessage::internal_server_error(&format!(
-                    "Failed to fold chat completions stream: {}",
-                    e
-                ))
+                // Use the error code if provided, otherwise default to 500
+                if let Some(code) = code {
+                    ErrorMessage::from_http_error(HttpError {
+                        code,
+                        message: format!("Failed to fold chat completions stream: {}", msg),
+                    })
+                } else {
+                    ErrorMessage::internal_server_error(&format!(
+                        "Failed to fold chat completions stream: {}",
+                        msg
+                    ))
+                }
             })?;
 
     // Convert NvCreateChatCompletionResponse --> NvResponse
