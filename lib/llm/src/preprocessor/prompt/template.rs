@@ -119,6 +119,10 @@ struct HfTokenizerConfigJsonFormatter {
     mixins: Arc<ContextMixins>,
     supports_add_generation_prompt: bool,
     requires_content_arrays: bool,
+    /// Whether the template expects HuggingFace image type format ('image') vs OpenAI format ('image_url').
+    /// Models like LLaVa use templates with `selectattr('type', 'equalto', 'image')` which
+    /// requires transforming OpenAI's 'image_url' to 'image'.
+    requires_hf_image_type: bool,
 }
 
 // /// OpenAI Standard Prompt Formatter
