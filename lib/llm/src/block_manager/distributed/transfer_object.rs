@@ -32,8 +32,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::block_manager::config::ObjectStorageConfig;
-use crate::block_manager::v2::logical::distributed::traits::DistributedRegistry;
-use crate::block_manager::v2::logical::external_registry::SequenceHashRegistry;
+use super::registry::{DistributedRegistry, SequenceHashRegistry};
 use crate::block_manager::v2::physical::layout::{LayoutConfig, PhysicalLayout};
 use crate::block_manager::v2::physical::manager::{
     G4TransferDirection, LayoutHandle, RemoteDescriptor, TransportManager,

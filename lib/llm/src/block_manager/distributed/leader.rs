@@ -15,9 +15,7 @@ use tokio::sync::OnceCell;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 use crate::block_manager::config::ObjectStorageConfig;
-use crate::block_manager::v2::logical::distributed::DistributedRegistry;
-use crate::block_manager::v2::logical::external_registry::SequenceHashRegistry;
-use crate::block_manager::v2::logical::registry::ObjectRegistry;
+use super::registry::{DistributedRegistry, ObjectRegistry, SequenceHashRegistry};
 
 #[derive(Builder, Clone, Debug, Default)]
 pub struct KvbmLeaderNumBlocksConfig {
@@ -151,7 +149,7 @@ pub struct KvbmLeader {
 
 impl KvbmLeader {
     pub async fn new(config: KvbmLeaderConfig) -> anyhow::Result<Self> {
-        use crate::block_manager::v2::logical::distributed::create_registry_from_env;
+        use super::registry::create_registry_from_env;
 
         let leader_sockets = new_leader_sockets(&config.leader_pub_url, &config.leader_ack_url)?;
 
@@ -160,7 +158,7 @@ impl KvbmLeader {
         let g4_enabled = ObjectStorageConfig::is_offload_enabled() && num_object_blocks > 0;
 
         let g4_registry: Option<SequenceHashRegistry> = if g4_enabled {
-            tracing::info!(
+            tracing::debug!(
                 "G4 object storage enabled on leader with {} block capacity",
                 num_object_blocks
             );
@@ -353,21 +351,13 @@ impl KvbmLeader {
         if hashes.is_empty() {
             return vec![];
         }
-
-        tracing::info!(
-            "g4_lookup called with {} hashes, distributed_registry={}, bucket={}",
-            hashes.len(),
-            self.distributed_registry.is_some(),
-            self.g4_bucket
-        );
-
         // First check local registry (fast path)
         let local_matched = match &self.g4_registry {
             Some(registry) => registry.match_keys(hashes),
             None => vec![],
         };
 
-        tracing::info!(
+        tracing::debug!(
             "g4_lookup: local_matched={} of {} hashes",
             local_matched.len(),
             hashes.len()
@@ -383,7 +373,7 @@ impl KvbmLeader {
             let remaining_offset = local_matched.len();
             let remaining_hashes = &hashes[remaining_offset..];
 
-            tracing::info!(
+            tracing::debug!(
                 "g4_lookup: checking distributed registry for {} remaining hashes",
                 remaining_hashes.len()
             );
@@ -405,7 +395,7 @@ impl KvbmLeader {
                     })) {
                         Ok(Ok(matches)) => {
                             let result: Vec<u64> = matches.into_iter().map(|(h, _)| h).collect();
-                            tracing::info!(
+                            tracing::debug!(
                                 "g4_lookup: distributed registry returned {} matches",
                                 result.len()
                             );
@@ -426,7 +416,7 @@ impl KvbmLeader {
                 };
 
                 if !distributed_matched.is_empty() {
-                    tracing::info!(
+                    tracing::debug!(
                         "Distributed registry matched {} additional hashes",
                         distributed_matched.len()
                     );
