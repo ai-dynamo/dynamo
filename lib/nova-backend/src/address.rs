@@ -1091,7 +1091,7 @@ mod tests {
 
     #[test]
     fn test_transport_key_ordering() {
-        let mut keys = vec![
+        let mut keys = [
             TransportKey::from("udp"),
             TransportKey::from("tcp"),
             TransportKey::from("rdma"),
