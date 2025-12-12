@@ -1852,23 +1852,11 @@ def _test_router_decisions(
         # Send 3 requests with some shared prefixes and some divergent prefixes
         response_worker_ids: list[dict[str, Optional[int]]] = []
 
-<<<<<<< HEAD
-        for i in range(4):
-            # Add `block_size` new random tokens
-            new_tokens = [random.randint(1, 10000) for _ in range(block_size)]
-            cumulative_tokens.extend(new_tokens)
-||||||| parent of eef1dd3d6 (chore: add test for diverging prefixes)
-        for i in range(4):
-            # Add BLOCK_SIZE new random tokens
-            new_tokens = [random.randint(1, 10000) for _ in range(BLOCK_SIZE)]
-            cumulative_tokens.extend(new_tokens)
-=======
         num_blocks = 8
         blocks = [
-            [random.randint(1, 10000) for _ in range(BLOCK_SIZE)]
+            [random.randint(1, 10000) for _ in range(block_size)]
             for _ in range(num_blocks)
         ]
->>>>>>> eef1dd3d6 (chore: add test for diverging prefixes)
 
         requests = [
             blocks[0] + blocks[1] + blocks[2] + blocks[3],
