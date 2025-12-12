@@ -395,7 +395,7 @@ impl PrefillRouter {
             prefill_req.backend_instance_id = Some(prefill_worker_id);
         }
 
-        // Execute prefill
+        // Attempt prefill
         let prefill_result = self
             .call_prefill(&prefill_req, request_id, false, Some(engine_ctx))
             .await;

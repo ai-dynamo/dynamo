@@ -755,6 +755,16 @@ pub async fn extract_worker_selection_from_stream(
             && let Ok(nvext_response) = serde_json::from_value::<NvExtResponse>(nvext_value.clone())
         {
             // Extract worker IDs from nested worker_id structure (both standard Dynamo and GAIE)
+            // The response comes in the form:
+            // {
+            //  "nvext": {
+            //     "worker_id": {
+            //     "prefill_worker_id": 123,
+            //     "decode_worker_id": 456
+            //     },
+            //     "token_data": [1, 2, 3]
+            //   }
+            // }
             if let Some(worker_id_info) = nvext_response.worker_id {
                 result.prefill_worker_id = worker_id_info.prefill_worker_id.map(|id| id as i64);
                 if let Some(decode_id) = worker_id_info.decode_worker_id {
