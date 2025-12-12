@@ -54,7 +54,11 @@ class MinioLoraConfig:
 
 
 class MinioService:
-    """Manages MinIO Docker container lifecycle for tests"""
+    """Connects to MinIO service for tests.
+
+    In CI, MinIO is pre-started by the workflow (no Docker access needed).
+    For local development, MinIO can be started manually or via docker-compose.
+    """
 
     CONTAINER_NAME = "dynamo-minio-test"
 
@@ -64,18 +68,55 @@ class MinioService:
         self._temp_download_dir: Optional[str] = None
 
     def start(self) -> None:
-        """Start MinIO container"""
-        self._logger.info("Starting MinIO container...")
+        """Connect to MinIO service (started by CI workflow or manually)"""
+        self._logger.info("Connecting to MinIO service...")
+
+        # Check if MinIO is available (pre-started by CI or running locally)
+        if not self._is_minio_ready():
+            # For local development, try to start MinIO if docker is available
+            if self._can_use_docker():
+                self._start_local_minio()
+            else:
+                raise RuntimeError(
+                    "MinIO is not available. In CI, it should be pre-started by the workflow. "
+                    "For local development, start MinIO manually: "
+                    "docker run -d -p 9000:9000 -p 9001:9001 "
+                    "-e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin "
+                    "quay.io/minio/minio server /data --console-address ':9001'"
+                )
+
+        self._logger.info("MinIO service is ready")
+
+    def _is_minio_ready(self) -> bool:
+        """Check if MinIO is already running and ready"""
+        health_url = f"{self.config.endpoint}/minio/health/live"
+        try:
+            response = requests.get(health_url, timeout=2)
+            return response.status_code == 200
+        except requests.RequestException:
+            return False
+
+    def _can_use_docker(self) -> bool:
+        """Check if docker is available (for local development)"""
+        try:
+            result = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
+            return result.returncode == 0
+        except (subprocess.SubprocessError, FileNotFoundError):
+            return False
+
+    def _start_local_minio(self) -> None:
+        """Start MinIO locally for development (not used in CI)"""
+        self._logger.info("Starting local MinIO container for development...")
 
         # Create data directory
-        if self.config.data_dir:
-            data_dir = self.config.data_dir
-        else:
-            data_dir = tempfile.mkdtemp(prefix="minio_test_")
-        self.config.data_dir = data_dir
+        if not self.config.data_dir:
+            self.config.data_dir = tempfile.mkdtemp(prefix="minio_test_")
 
         # Stop existing container if running
-        self.stop()
+        subprocess.run(
+            ["docker", "rm", "-f", self.CONTAINER_NAME],
+            capture_output=True,
+        )
 
         # Start MinIO container
         cmd = [
@@ -89,7 +130,7 @@ class MinioService:
             "-p",
             "9001:9001",
             "-v",
-            f"{data_dir}:/data",
+            f"{self.config.data_dir}:/data",
             "quay.io/minio/minio",
             "server",
             "/data",
@@ -103,7 +144,6 @@ class MinioService:
 
         # Wait for MinIO to be ready
         self._wait_for_ready()
-        self._logger.info("MinIO started successfully")
 
     def _wait_for_ready(self, timeout: int = 30) -> None:
         """Wait for MinIO to be ready"""
@@ -122,18 +162,15 @@ class MinioService:
         raise RuntimeError(f"MinIO did not become ready within {timeout}s")
 
     def stop(self) -> None:
-        """Stop and remove MinIO container"""
-        self._logger.info("Stopping MinIO container...")
+        """Stop MinIO container (only if started locally for development)"""
+        # In CI, MinIO is managed by the workflow - don't try to stop it
+        if os.environ.get("MINIO_AVAILABLE") == "true":
+            self._logger.info("MinIO is managed by CI workflow, skipping stop")
+            return
 
-        # Stop container
+        self._logger.info("Stopping local MinIO container...")
         subprocess.run(
-            ["docker", "stop", self.CONTAINER_NAME],
-            capture_output=True,
-        )
-
-        # Remove container
-        subprocess.run(
-            ["docker", "rm", self.CONTAINER_NAME],
+            ["docker", "rm", "-f", self.CONTAINER_NAME],
             capture_output=True,
         )
 
