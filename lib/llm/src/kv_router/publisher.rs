@@ -2455,6 +2455,24 @@ mod test_integration_publisher_with_kvindexer {
             .endpoint("generate");
         let pre_client = pre_backend_endpoint.client().await?;
 
+        // Wait for the client to discover both workers
+        let discovery_timeout = Duration::from_secs(5);
+        let discovery_start = std::time::Instant::now();
+        loop {
+            let instances = pre_client.instance_source.as_ref().borrow().clone();
+            if instances.len() >= 2 {
+                tracing::info!("Discovered {} workers", instances.len());
+                break;
+            }
+            if discovery_start.elapsed() > discovery_timeout {
+                anyhow::bail!(
+                    "Timed out waiting for worker discovery: expected 2, found {}",
+                    instances.len()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
         // Create a PushRouter to send requests directly to a specific worker
         let pre_push_router =
             PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
@@ -2513,13 +2531,32 @@ mod test_integration_publisher_with_kvindexer {
             .await?,
         );
 
-        // At this point kvrouter's indexer should already have the
-        // events stored in the workers, due to the catch-up built into KvRouter::new.
+        // The KvRouter now starts its subscriber asynchronously in a background task
+        // that waits for runtime_configs. Poll until events appear or timeout.
         // Each request generates 2 events: input block (parent_hash: None) + output block (parent_hash: Some)
         // With 2 workers, that's 4 events total.
-        let global_kv_events = kv_router.indexer.dump_events().await?;
-        tracing::debug!("Global KV events: {:?}", global_kv_events);
-        assert_eq!(global_kv_events.len(), 4); // 2 workers × 2 events per request (input + output)
+        let expected_events = 4;
+        let max_wait = Duration::from_secs(10);
+        let poll_interval = Duration::from_millis(100);
+        let start = std::time::Instant::now();
+
+        let global_kv_events = loop {
+            let events = kv_router.indexer.dump_events().await?;
+            tracing::debug!("Global KV events ({}): {:?}", events.len(), events);
+            if events.len() >= expected_events {
+                break events;
+            }
+            if start.elapsed() > max_wait {
+                anyhow::bail!(
+                    "Timed out waiting for KV events: expected {}, got {}",
+                    expected_events,
+                    events.len()
+                );
+            }
+            tokio::time::sleep(poll_interval).await;
+        };
+
+        assert_eq!(global_kv_events.len(), expected_events); // 2 workers × 2 events per request (input + output)
 
         // === Cleanup ===
         for handle in server_handles {
