@@ -40,19 +40,25 @@ BLOCK_SIZE = 16
 
 
 def get_unique_ports(
-    request, num_ports: int = 1, store_backend: str = "etcd"
+    request,
+    num_ports: int = 1,
+    store_backend: str = "etcd",
+    request_plane: str = "nats",
+    registration_order: str = "prefill_first",
 ) -> list[int]:
     """Generate unique ports for parallel test execution.
 
     Ports are unique based on:
     - Test function name (each test gets a base offset)
-    - Parametrization value (etcd=0, file=50)
+    - Parametrization value (etcd=0, file=50; nats=0, tcp=25; prefill_first=0, decode_first=10)
     - Port index (for multi-port tests)
 
     Args:
         request: Pytest request fixture
         num_ports: Number of ports needed (1 for single router, 2 for two routers)
         store_backend: Storage backend parameter ("etcd" or "file")
+        request_plane: Request plane parameter ("nats" or "tcp")
+        registration_order: Registration order parameter ("prefill_first" or "decode_first")
 
     Returns:
         List of unique port numbers
@@ -72,11 +78,16 @@ def get_unique_ports(
 
     base_offset = test_offsets.get(test_name, 0)
 
-    # Parametrization offset (etcd=0, file=50)
-    param_offset = 0 if store_backend == "etcd" else 50
+    # Parametrization offset (etcd=0, file=50; nats=0, tcp=25; prefill_first=0, decode_first=10)
+    store_offset = 0 if store_backend == "etcd" else 50
+    plane_offset = 0 if request_plane == "nats" else 25
+    order_offset = 0 if registration_order == "prefill_first" else 10
 
     # Generate ports
-    ports = [BASE_PORT + base_offset + param_offset + i for i in range(num_ports)]
+    ports = [
+        BASE_PORT + base_offset + store_offset + plane_offset + order_offset + i
+        for i in range(num_ports)
+    ]
     return ports
 
 
@@ -162,6 +173,8 @@ def _build_mocker_command(
         command.extend(["--watermark", str(mocker_args["watermark"])])
     if "dp_size" in mocker_args:
         command.extend(["--data-parallel-size", str(mocker_args["dp_size"])])
+    if mocker_args.get("enable_local_indexer"):
+        command.append("--enable-local-indexer")
 
     return command
 
@@ -175,6 +188,7 @@ class MockerProcess:
         mocker_args: Optional[Dict[str, Any]] = None,
         num_mockers: int = 1,
         store_backend: str = "etcd",
+        request_plane: str = "nats",
     ):
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
@@ -191,8 +205,12 @@ class MockerProcess:
             mocker_args=mocker_args,
         )
 
+        env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = request_plane
+
         self._process = ManagedProcess(
             command=command,
+            env=env,
             timeout=60,
             display_output=True,
             health_check_ports=[],
@@ -413,7 +431,7 @@ def test_mocker_kv_router_overload_503(
             request=request,
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
-            busy_threshold=0.2,
+            blocks_threshold=0.2,
         )
 
     finally:
@@ -543,22 +561,32 @@ def test_query_instance_id_returns_worker_and_tokens(
 
 
 @pytest.mark.parallel
-def test_router_decisions(request, runtime_services_session, predownload_tokenizers):
-    """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes."""
+@pytest.mark.parametrize("use_nats_core", [False, True], ids=["jetstream", "nats_core"])
+def test_router_decisions(
+    request, runtime_services_session, predownload_tokenizers, use_nats_core
+):
+    """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
+
+    Parameterized to test both JetStream (default) and NATS Core (local indexer) modes.
+    """
 
     # runtime_services starts etcd and nats
-    logger.info("Starting test router prefix reuse and KV events synchronization")
+    mode = "NATS Core (local indexer)" if use_nats_core else "JetStream"
+    logger.info(
+        f"Starting test router prefix reuse and KV events synchronization ({mode})"
+    )
 
     # Create mocker args dictionary with dp_size=4
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
         "dp_size": 4,
+        "enable_local_indexer": use_nats_core,
     }
 
     try:
         logger.info(
-            "Starting 2 mocker instances with dp_size=4 each (8 total dp ranks)"
+            f"Starting 2 mocker instances with dp_size=4 each (8 total dp ranks), {mode}"
         )
         mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=2)
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
@@ -583,15 +611,23 @@ def test_router_decisions(request, runtime_services_session, predownload_tokeniz
 
 
 @pytest.mark.parallel
+@pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
 def test_router_decisions_disagg(
-    request, runtime_services_session, predownload_tokenizers
+    request, runtime_services_session, predownload_tokenizers, registration_order
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup.
 
     Tests that progressive requests with overlapping prefixes are routed to the
     same prefill worker due to KV cache reuse.
+
+    Parameterized to test both registration orders:
+    - prefill_first: prefill workers register before decode workers
+    - decode_first: decode workers register before prefill workers
     """
-    logger.info("Starting disaggregated router prefix reuse test")
+    logger.info(
+        f"Starting disaggregated router prefix reuse test "
+        f"(registration_order={registration_order})"
+    )
 
     # Generate shared namespace for prefill and decode workers
     namespace_suffix = generate_random_suffix()
@@ -604,32 +640,59 @@ def test_router_decisions_disagg(
     decode_workers = None
 
     try:
-        # Start prefill workers (4 instances)
-        logger.info("Starting 4 prefill mocker instances")
-        prefill_workers = DisaggMockerProcess(
-            request,
-            namespace=shared_namespace,
-            worker_type="prefill",
-            mocker_args=mocker_args,
-            num_mockers=4,
-        )
-        prefill_workers.__enter__()
-        logger.info(f"Prefill workers using endpoint: {prefill_workers.endpoint}")
+        if registration_order == "prefill_first":
+            # Start prefill workers first
+            logger.info("Starting 4 prefill mocker instances (first)")
+            prefill_workers = DisaggMockerProcess(
+                request,
+                namespace=shared_namespace,
+                worker_type="prefill",
+                mocker_args=mocker_args,
+                num_mockers=4,
+            )
+            prefill_workers.__enter__()
+            logger.info(f"Prefill workers using endpoint: {prefill_workers.endpoint}")
 
-        # Start decode workers (4 instances)
-        logger.info("Starting 4 decode mocker instances")
-        decode_workers = DisaggMockerProcess(
-            request,
-            namespace=shared_namespace,
-            worker_type="decode",
-            mocker_args=mocker_args,
-            num_mockers=4,
-        )
-        decode_workers.__enter__()
-        logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
+            # Then start decode workers
+            logger.info("Starting 4 decode mocker instances (second)")
+            decode_workers = DisaggMockerProcess(
+                request,
+                namespace=shared_namespace,
+                worker_type="decode",
+                mocker_args=mocker_args,
+                num_mockers=4,
+            )
+            decode_workers.__enter__()
+            logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
+        else:
+            # Start decode workers first
+            logger.info("Starting 4 decode mocker instances (first)")
+            decode_workers = DisaggMockerProcess(
+                request,
+                namespace=shared_namespace,
+                worker_type="decode",
+                mocker_args=mocker_args,
+                num_mockers=4,
+            )
+            decode_workers.__enter__()
+            logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
+
+            # Then start prefill workers
+            logger.info("Starting 4 prefill mocker instances (second)")
+            prefill_workers = DisaggMockerProcess(
+                request,
+                namespace=shared_namespace,
+                worker_type="prefill",
+                mocker_args=mocker_args,
+                num_mockers=4,
+            )
+            prefill_workers.__enter__()
+            logger.info(f"Prefill workers using endpoint: {prefill_workers.endpoint}")
 
         # Get unique port for this test
-        frontend_port = get_unique_ports(request, num_ports=1)[0]
+        frontend_port = get_unique_ports(
+            request, num_ports=1, registration_order=registration_order
+        )[0]
 
         # Run disagg routing test
         _test_router_decisions_disagg(
@@ -649,8 +712,9 @@ def test_router_decisions_disagg(
 
 
 @pytest.mark.parallel
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_busy_threshold_endpoint(
-    request, runtime_services_session, predownload_tokenizers
+    request, runtime_services_session, predownload_tokenizers, request_plane
 ):
     """Test that the /busy_threshold endpoint can be hit and responds correctly.
 
@@ -661,19 +725,26 @@ def test_busy_threshold_endpoint(
 
     For now, this test only verifies the endpoint is accessible and returns valid responses.
     """
-    logger.info("Starting busy_threshold endpoint test")
+    logger.info(
+        f"Starting busy_threshold endpoint test with request_plane={request_plane}"
+    )
 
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
     try:
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         mockers = MockerProcess(
-            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+            request,
+            mocker_args=mocker_args,
+            num_mockers=NUM_MOCKERS,
+            request_plane=request_plane,
         )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
-        frontend_port = get_unique_ports(request, num_ports=1)[0]
+        frontend_port = get_unique_ports(
+            request, num_ports=1, request_plane=request_plane
+        )[0]
 
         _test_busy_threshold_endpoint(
             engine_workers=mockers,
@@ -681,6 +752,7 @@ def test_busy_threshold_endpoint(
             request=request,
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
+            request_plane=request_plane,
         )
 
     finally:
