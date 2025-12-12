@@ -13,13 +13,13 @@
 //! cargo run --release
 //!
 //! # Or build from workspace root
-//! cargo build --release -p object-registry-example
+//! cargo build --manifest-path examples/kvbm/distributed/object-registry/Cargo.toml --release
 //!
 //! # Run with custom settings via environment variables
 //! DYN_REGISTRY_HUB_CAPACITY=10000000 \
 //! DYN_REGISTRY_HUB_QUERY_ADDR=tcp://*:6000 \
 //! DYN_REGISTRY_HUB_REGISTER_ADDR=tcp://*:6001 \
-//! cargo run --release
+//! cargo run --manifest-path examples/kvbm/distributed/object-registry/Cargo.toml --release
 //! ```
 //!
 //! # Environment Variables
