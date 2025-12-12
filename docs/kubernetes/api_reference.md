@@ -67,6 +67,26 @@ _Appears in:_
 
 
 
+#### ComponentKind
+
+_Underlying type:_ _string_
+
+ComponentKind represents the type of underlying Kubernetes resource.
+
+_Validation:_
+- Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet]
+
+_Appears in:_
+- [ServiceReplicaStatus](#servicereplicastatus)
+
+| Field | Description |
+| --- | --- |
+| `PodClique` | ComponentKindPodClique represents a PodClique resource.<br /> |
+| `PodCliqueScalingGroup` | ComponentKindPodCliqueScalingGroup represents a PodCliqueScalingGroup resource.<br /> |
+| `Deployment` | ComponentKindDeployment represents a Deployment resource.<br /> |
+| `LeaderWorkerSet` | ComponentKindLeaderWorkerSet represents a LeaderWorkerSet resource.<br /> |
+
+
 #### ConfigMapKeySelector
 
 
@@ -430,6 +450,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `state` _string_ | State is a high-level textual status of the graph deployment lifecycle. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
+| `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  |  |
 
 
 #### DynamoModel
@@ -737,6 +758,27 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `disable` _boolean_ | Disable indicates whether the ScalingAdapter should be disabled for this service.<br />When false (default), a DGDSA is created and owns the replicas field.<br />When true, no DGDSA is created and replicas can be modified directly in the DGD. | false |  |
+
+
+#### ServiceReplicaStatus
+
+
+
+ServiceReplicaStatus contains replica information for a single service.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `componentKind` _[ComponentKind](#componentkind)_ | ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet"). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br /> |
+| `componentName` _string_ | ComponentName is the name of the underlying resource. |  |  |
+| `replicas` _integer_ | Replicas is the total number of non-terminated replicas.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
+| `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
+| `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br /> |
+| `availableReplicas` _integer_ | AvailableReplicas is the number of available replicas.<br />For Deployment: replicas ready for >= minReadySeconds.<br />For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.<br />Not available for PodClique or LeaderWorkerSet.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br /> |
 
 
 #### SharedMemorySpec
