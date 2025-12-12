@@ -158,6 +158,7 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         numactl-devel
 
 # Build FFmpeg from source
+# Or write dummies for future stages COPY --from
 ARG FFMPEG_VERSION=7.1
 ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH}"
 RUN if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
@@ -178,11 +179,14 @@ RUN if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
         --disable-muxers \
         --disable-bsfs \
         --disable-devices \
+        --disable-libdrm \
         --enable-shared && \
     make -j$(nproc) && \
     make install && \
     ldconfig && \
     rm -rf /tmp/ffmpeg-${FFMPEG_VERSION}*; \
+else \
+    touch /usr/local/include/libav.dummy /usr/local/include/libsw.dummy  /usr/local/lib/libav.dummy /usr/local/lib/libsw.dummy  /usr/local/lib/pkgconfig/libav.dummy; \
 fi
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
@@ -391,6 +395,12 @@ COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
 COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+# Copy ffmpeg (or dummy)
+COPY --chown=dynamo: --from=wheel_builder /usr/local/include/ /usr/local/include/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib/libav* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib/libsw* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib/pkgconfig/libav* /usr/local/lib/pkgconfig/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib/pkgconfig/libsw* /usr/local/lib/pkgconfig/
 
 # Copy built artifacts
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
@@ -412,7 +422,7 @@ RUN apt-get update -y \
         clang \
         libclang-dev \
         protobuf-compiler \
-	pkg-config \
+        pkg-config \
         # sudo for dev stage
         sudo \
     && apt-get clean \
@@ -427,6 +437,7 @@ ENV HOME=/home/dynamo \
     DYNAMO_HOME=/opt/dynamo \
     CARGO_TARGET_DIR=/opt/dynamo/target
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda/compat/lib.real:${LD_LIBRARY_PATH}
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH}
 
 # Create and activate virtual environment
 ARG PYTHON_VERSION

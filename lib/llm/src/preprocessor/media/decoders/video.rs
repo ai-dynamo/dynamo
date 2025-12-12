@@ -229,12 +229,10 @@ impl Decoder for VideoDecoder {
 
         for time in target_times.iter() {
             // Try to seek if not in sequential mode
-            if !sequential_mode {
-                if let Err(e) = decoder.seek((time.as_secs() * 1000.0) as i64) {
-                    sequential_mode = true;
-                    // Re-establish decoder position at last known good position
-                    decoder.seek((last_successful_time.as_secs() * 1000.0) as i64)?;
-                }
+            if !sequential_mode && let Ok(_) = decoder.seek((time.as_secs() * 1000.0) as i64) {
+                sequential_mode = true;
+                // Re-establish decoder position at last known good position
+                decoder.seek((last_successful_time.as_secs() * 1000.0) as i64)?;
             }
 
             let offset = sampled_timestamps.len() * frame_size;

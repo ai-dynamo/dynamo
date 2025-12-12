@@ -814,7 +814,7 @@ BUILD_ARGS+=" --build-arg ENABLE_MEDIA_NIXL=${ENABLE_MEDIA_NIXL} "
 
 # ENABLE_MEDIA_FFMPEG: Enable media processing with FFMPEG support
 # Used in base Dockerfile for maturin build feature flag.
-# Can be explicitly overridden with --enable-media-nixl flag
+# Can be explicitly overridden with --enable-media-ffmpeg flag
 if [ -z "${ENABLE_MEDIA_FFMPEG}" ]; then
     if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
         ENABLE_MEDIA_FFMPEG=true
