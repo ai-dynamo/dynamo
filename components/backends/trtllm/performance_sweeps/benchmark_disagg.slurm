@@ -162,6 +162,12 @@ if [ -z "$DECODE_COUNT" ]; then
 fi
 echo "Decode Count: $DECODE_COUNT"
 
+if [[ -n $(scontrol show config | grep "GresTypes" | grep "gpu") ]]; then
+    gpus_per_node="--gpus-per-node ${ntasks_per_node}"
+else
+    gpus_per_node=""
+fi
+
 num_gen_nodes=$((gen_nodes/num_gen_servers))
 for ((i=1; i<=DECODE_COUNT; i++)); do
   echo "Running Decode Worker: ${i}"
@@ -176,10 +182,9 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
       --container-mounts=${container_mounts} \
       --mpi=pmix \
       -w ${decode_nodes_csv} \
-      --nodes ${num_gen_nodes} \
+      --nodes ${num_gen_nodes} $gpus_per_node \
       --ntasks $gen_tp_size \
       --oversubscribe \
-      --gpus-per-node $ntasks_per_node \
       --overlap \
       -e UCX_NET_DEVICES,TRTLLM_UCX_INTERFACE \
       bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/decode_config.yaml ${ctx_gpus} ${served_model_name} ${model_path} 'decode' $gen_enable_attention_dp &> ${full_logdir}/output_decode_worker_${i}.log &
@@ -206,8 +211,7 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
         --oversubscribe \
         --overlap \
         --ntasks $(( ctx_tp_size < ntasks_per_node ? ctx_tp_size : ntasks_per_node )) \
-        --gpus-per-node $ntasks_per_node \
-        --nodes 1 \
+        --nodes 1 $gpus_per_node \
         -e UCX_NET_DEVICES,TRTLLM_UCX_INTERFACE \
         bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/prefill_config.yaml ${ctx_gpus} ${served_model_name} ${model_path} 'prefill' $ctx_enable_attention_dp &> ${full_logdir}/output_prefill_worker_${i}.log &
   prefill_pids+=($!)
