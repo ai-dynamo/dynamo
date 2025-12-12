@@ -1,0 +1,531 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Scenario 2: Two DynamoGraphDeployments with Global Planner and Scheduler
+#
+# This deployment creates:
+# - Global Scheduler (routes requests to frontends)
+# - Global Planner (coordinates scaling across deployments)
+# - Two DynamoGraphDeployments (deployment-a and deployment-b)
+#
+# Two aiperf instances will send requests to separate deployments via scheduler routing.
+
+---
+# Shared PVC for all cache (HuggingFace models, vLLM compilation, etc.)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cache-volume
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: nebius-shared-fs
+
+---
+# ServiceAccount for scheduler
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dynamo-scheduler
+  labels:
+    app: dynamo-scheduler
+
+---
+# Role with permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dynamo-scheduler-role
+  labels:
+    app: dynamo-scheduler
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeployments"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+
+---
+# RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dynamo-scheduler-binding
+  labels:
+    app: dynamo-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dynamo-scheduler-role
+subjects:
+- kind: ServiceAccount
+  name: dynamo-scheduler
+
+---
+# Scheduler Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamo-scheduler
+  labels:
+    app: dynamo-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dynamo-scheduler
+  template:
+    metadata:
+      labels:
+        app: dynamo-scheduler
+    spec:
+      serviceAccountName: dynamo-scheduler
+      containers:
+      - name: scheduler
+        image: python:3.12-slim
+        workingDir: /workspace/examples/global_planner_scheduler/scheduler
+        command:
+          - /bin/bash
+          - -c
+          - |
+            set -e
+
+            echo "Installing git..."
+            apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+            echo "Cloning repository..."
+            cd /workspace
+            git clone --branch darfeen/multi-dgd-planner https://github.com/ai-dynamo/dynamo.git dynamo
+
+            echo "Installing dependencies..."
+            pip install --no-cache-dir -r /workspace/dynamo/examples/global_planner_scheduler/scheduler/reqs.txt
+
+            echo "Starting scheduler..."
+            cd /workspace/dynamo/examples/global_planner_scheduler/scheduler
+            exec uvicorn app:app --host 0.0.0.0 --port 8080
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: FRONTEND_SERVICE_PATTERN
+          value: "frontend"
+        - name: DISCOVERY_INTERVAL
+          value: "5"
+        - name: LOG_LEVEL
+          value: "INFO"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 25
+          periodSeconds: 5
+
+---
+# Scheduler Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamo-scheduler
+  labels:
+    app: dynamo-scheduler
+spec:
+  selector:
+    app: dynamo-scheduler
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: 8080
+  type: ClusterIP
+
+---
+# Global Planner Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamo-global-planner
+  labels:
+    app: dynamo-global-planner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dynamo-global-planner
+  template:
+    metadata:
+      labels:
+        app: dynamo-global-planner
+    spec:
+      serviceAccountName: dynamo-scheduler
+      containers:
+      - name: global-planner
+        image: python:3.12-slim
+        workingDir: /workspace/examples/global_planner_scheduler/global_planner
+        env:
+        - name: K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: BATCHING_WINDOW
+          value: "60"
+        - name: MAX_GPU_LIMIT
+          value: "100"
+        command:
+          - /bin/bash
+          - -c
+          - |
+            set -e
+
+            echo "Installing git..."
+            apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+            echo "Cloning repository..."
+            cd /workspace
+            git clone --branch darfeen/multi-dgd-planner https://github.com/ai-dynamo/dynamo.git dynamo
+
+            echo "Installing dependencies..."
+            pip install --no-cache-dir aiohttp uvloop pydantic kubernetes
+
+            echo "Installing dynamo..."
+            cd /workspace/dynamo
+            pip install --no-cache-dir -e .
+
+            echo "Starting global planner..."
+            cd /workspace/dynamo/examples/global_planner_scheduler/global_planner
+            exec python app.py
+        ports:
+        - name: http
+          containerPort: 9000
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+
+---
+# Global Planner Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamo-global-planner
+  labels:
+    app: dynamo-global-planner
+spec:
+  selector:
+    app: dynamo-global-planner
+  ports:
+  - name: http
+    protocol: TCP
+    port: 9000
+    targetPort: 9000
+  type: ClusterIP
+
+---
+# First DynamoGraphDeployment
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: llama-deployment-a
+spec:
+  backendFramework: vllm
+  services:
+    Frontend:
+      dynamoNamespace: llama-deployment-a
+      componentType: frontend
+      replicas: 1
+      resources:
+        requests:
+          cpu: "2"
+          memory: "4Gi"
+        limits:
+          cpu: "4"
+          memory: "8Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: llama-deployment-a
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --migration-limit=3
+            - --max-model-len=8192
+          volumeMounts:
+            - name: cache-volume
+              mountPath: /root/.cache
+        volumes:
+          - name: cache-volume
+            persistentVolumeClaim:
+              claimName: cache-volume
+
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: llama-deployment-a
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --migration-limit=3
+            - --max-model-len=8192
+          volumeMounts:
+            - name: cache-volume
+              mountPath: /root/.cache
+        volumes:
+          - name: cache-volume
+            persistentVolumeClaim:
+              claimName: cache-volume
+
+    Planner:
+      dynamoNamespace: llama-deployment-a
+      componentType: planner
+      replicas: 1
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+          workingDir: /workspace
+          env:
+          - name: PLANNER_PRIORITY
+            value: "10"
+          - name: GLOBAL_PLANNER_SERVICE
+            value: "dynamo-global-planner"
+          - name: K8S_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: PROMETHEUS_ENDPOINT
+            value: "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+
+              echo "Checking for git..."
+              if ! command -v git &> /dev/null; then
+                  echo "Installing git..."
+                  apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+              fi
+
+              echo "Cloning repository..."
+              cd /workspace
+              git clone --branch darfeen/multi-dgd-planner https://github.com/ai-dynamo/dynamo.git dynamo
+
+              echo "Installing dynamo..."
+              cd /workspace/dynamo
+              uv pip install -e .
+
+              export PYTHONPATH="${PYTHONPATH}:/workspace/dynamo/components/src"
+
+              echo "Starting planner..."
+              exec python3 -m dynamo.planner.planner_sla \
+                --namespace llama-deployment-a \
+                --environment global \
+                --backend vllm \
+                --model-name nvidia/llama-3.1-8b-instruct-fp8 \
+                --adjustment-interval=60 \
+                --profile-results-dir=/workspace/dynamo/tests/planner/profiling_results/H200_TP1P_TP1D \
+                --ttft=__LOW_TTFT__ \
+                --itl=__LOW_ITL__ \
+                --load-predictor=constant \
+                --no-correction
+
+---
+# Second DynamoGraphDeployment
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: llama-deployment-b
+spec:
+  backendFramework: vllm
+  services:
+    Frontend:
+      dynamoNamespace: llama-deployment-b
+      componentType: frontend
+      replicas: 1
+      resources:
+        requests:
+          cpu: "2"
+          memory: "4Gi"
+        limits:
+          cpu: "4"
+          memory: "8Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: llama-deployment-b
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --migration-limit=3
+            - --max-model-len=8192
+          volumeMounts:
+            - name: cache-volume
+              mountPath: /root/.cache
+        volumes:
+          - name: cache-volume
+            persistentVolumeClaim:
+              claimName: cache-volume
+
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: llama-deployment-b
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --migration-limit=3
+            - --max-model-len=8192
+          volumeMounts:
+            - name: cache-volume
+              mountPath: /root/.cache
+        volumes:
+          - name: cache-volume
+            persistentVolumeClaim:
+              claimName: cache-volume
+
+    Planner:
+      dynamoNamespace: llama-deployment-b
+      componentType: planner
+      replicas: 1
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+          workingDir: /workspace
+          env:
+          - name: PLANNER_PRIORITY
+            value: "5"
+          - name: GLOBAL_PLANNER_SERVICE
+            value: "dynamo-global-planner"
+          - name: K8S_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: PROMETHEUS_ENDPOINT
+            value: "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+
+              echo "Checking for git..."
+              if ! command -v git &> /dev/null; then
+                  echo "Installing git..."
+                  apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+              fi
+
+              echo "Cloning repository..."
+              cd /workspace
+              git clone --branch darfeen/multi-dgd-planner https://github.com/ai-dynamo/dynamo.git dynamo
+
+              echo "Installing dynamo..."
+              cd /workspace/dynamo
+              uv pip install -e .
+
+              export PYTHONPATH="${PYTHONPATH}:/workspace/dynamo/components/src"
+
+              echo "Starting planner..."
+              exec python3 -m dynamo.planner.planner_sla \
+                --namespace llama-deployment-b \
+                --environment global \
+                --backend vllm \
+                --model-name nvidia/llama-3.1-8b-instruct-fp8 \
+                --adjustment-interval=60 \
+                --profile-results-dir=/workspace/dynamo/tests/planner/profiling_results/H200_TP1P_TP1D \
+                --ttft=__HIGH_TTFT__ \
+                --itl=__HIGH_ITL__ \
+                --load-predictor=constant \
+                --no-correction
+

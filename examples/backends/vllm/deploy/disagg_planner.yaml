@@ -8,41 +8,41 @@ metadata:
 spec:
   services:
     Frontend:
+      dynamoNamespace: vllm-disagg-planner
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:nightly-vllm-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     Planner:
+      dynamoNamespace: vllm-disagg-planner
       componentType: planner
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:nightly-vllm-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/components/src/dynamo/planner
           command:
-          - /bin/bash
-          - -c
-          - |
-            set -e
-            # Navigate to workspace root for git operations
-            cd /workspace
-            # Configure git safe directory (needed in containers)
-            git config --global --add safe.directory /workspace
-            # Check if it's already a git repo, if not initialize it
-            if [ ! -d .git ]; then
-              git init
-              git remote add origin https://github.com/ai-dynamo/dynamo.git
-            fi
-            # Ensure origin remote exists
-            git remote get-url origin || git remote add origin https://github.com/ai-dynamo/dynamo.git
-            # Fetch and checkout the branch (force to overwrite any local changes)
-            git fetch origin darfeen/migrate-planner-metrics
-            git checkout -f FETCH_HEAD
-            # Now run the planner
-            export PYTHONPATH=/workspace/components/src
-            cd /workspace/components/src/dynamo/planner
-            python3 -m planner_sla --environment=kubernetes --backend=vllm --adjustment-interval=60 --profile-results-dir=/workspace/tests/planner/profiling_results/H200_TP1P_TP1D
+          - python3
+          - -m
+          - planner_sla
+          args:
+            - --environment=kubernetes
+            - --backend=vllm
+            - --adjustment-interval=60
+            - --profile-results-dir=/workspace/profiling_results
+          volumeMounts:
+            - name: planner-profile-data
+              mountPath: /workspace/profiling_results
+              readOnly: true
+        volumes:
+          - name: planner-profile-data
+            configMap:
+              # Must be pre-created before deployment by the profiler
+              # See docs/planner/sla_planner_quickstart.md for more details
+              name: planner-profile-data
     VllmDecodeWorker:
+      dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -52,7 +52,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:nightly-vllm-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
@@ -62,6 +62,7 @@ spec:
             - --model
             - Qwen/Qwen3-0.6B
     VllmPrefillWorker:
+      dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
@@ -71,7 +72,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:nightly-vllm-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3

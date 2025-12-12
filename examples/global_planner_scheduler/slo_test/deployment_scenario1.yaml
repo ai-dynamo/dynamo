@@ -1,0 +1,166 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Scenario 1: Single DynamoGraphDeployment
+#
+# This deployment creates a single DynamoGraphDeployment with:
+# - 1 frontend
+# - 1 prefill worker
+# - 1 decode worker
+# - 1 local planner (no global planner)
+#
+# Two concurrent aiperf instances will send requests to the same frontend.
+
+---
+# Shared PVC for all cache (HuggingFace models, vLLM compilation, etc.)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cache-volume
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: nebius-shared-fs
+
+---
+# Single DynamoGraphDeployment
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: llama-single
+spec:
+  backendFramework: vllm
+  services:
+    Frontend:
+      dynamoNamespace: llama-single
+      componentType: frontend
+      replicas: 1
+      resources:
+        requests:
+          cpu: "2"
+          memory: "4Gi"
+        limits:
+          cpu: "4"
+          memory: "8Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: llama-single
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --migration-limit=3
+            - --max-model-len=8192
+          volumeMounts:
+            - name: cache-volume
+              mountPath: /root/.cache
+        volumes:
+          - name: cache-volume
+            persistentVolumeClaim:
+              claimName: cache-volume
+
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: llama-single
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --migration-limit=3
+            - --max-model-len=8192
+          volumeMounts:
+            - name: cache-volume
+              mountPath: /root/.cache
+        volumes:
+          - name: cache-volume
+            persistentVolumeClaim:
+              claimName: cache-volume
+
+    Planner:
+      dynamoNamespace: llama-single
+      componentType: planner
+      replicas: 1
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+          workingDir: /workspace
+          env:
+          - name: K8S_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: PROMETHEUS_ENDPOINT
+            value: "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+
+              echo "Checking for git..."
+              if ! command -v git &> /dev/null; then
+                  echo "Installing git..."
+                  apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+              fi
+
+              echo "Cloning repository..."
+              cd /workspace
+              git clone --branch darfeen/multi-dgd-planner https://github.com/ai-dynamo/dynamo.git dynamo
+
+              echo "Installing dynamo..."
+              cd /workspace/dynamo
+              uv pip install -e .
+
+              export PYTHONPATH="${PYTHONPATH}:/workspace/dynamo/components/src"
+
+              echo "Starting local planner with TTFT=__PLANNER_TTFT__, ITL=__PLANNER_ITL__..."
+              exec python3 -m dynamo.planner.planner_sla \
+                --namespace llama-single \
+                --environment kubernetes \
+                --backend vllm \
+                --model-name nvidia/llama-3.1-8b-instruct-fp8 \
+                --adjustment-interval=60 \
+                --profile-results-dir=/workspace/dynamo/tests/planner/profiling_results/H200_TP1P_TP1D \
+                --ttft=__PLANNER_TTFT__ \
+                --itl=__PLANNER_ITL__ \
+                --load-predictor=constant \
+                --no-correction
+
