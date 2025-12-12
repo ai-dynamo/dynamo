@@ -152,6 +152,7 @@ class CUDAFaultInjector:
         target_node: Optional[str] = None,
         xid_type: int = 79,
         passthrough_mode: bool = False,
+        soft_affinity: bool = True,
     ) -> bool:
         """
         Patch deployment to enable CUDA fault injection.
@@ -171,6 +172,9 @@ class CUDAFaultInjector:
             xid_type: XID error type to simulate (79, 48, 94, 95, 43, 74). Default: 79
             passthrough_mode: If True, set CUDA_FAULT_INJECTION_ENABLED=0
                             (library loaded but faults disabled for baseline)
+            soft_affinity: If True (default), use preferredDuringScheduling to allow pods
+                          to spill over to other nodes when target_node lacks capacity.
+                          If False, use requiredDuringScheduling which fails if node is full.
 
         Returns:
             True if patch succeeded
@@ -198,6 +202,7 @@ class CUDAFaultInjector:
                 target_node=target_node,
                 xid_type=xid_type,
                 passthrough_mode=passthrough_mode,
+                soft_affinity=soft_affinity,
             )
 
         except Exception as e:

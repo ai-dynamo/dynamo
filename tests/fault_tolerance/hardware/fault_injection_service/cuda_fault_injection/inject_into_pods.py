@@ -168,7 +168,7 @@ def delete_cuda_fault_configmap(namespace):
 
 
 def _patch_service_for_injection(
-    service, enable, new_envs, use_configmap, target_node, lib_path
+    service, enable, new_envs, use_configmap, target_node, lib_path, soft_affinity=True
 ):
     """Apply injection patches to a single service.
 
@@ -179,6 +179,9 @@ def _patch_service_for_injection(
         use_configmap: Whether to use ConfigMap for library distribution
         target_node: Node to pin pods to (or None)
         lib_path: Path to the library in the container
+        soft_affinity: If True (default), use preferredDuringScheduling to allow pods
+                      to spill over to other nodes when target_node lacks capacity.
+                      If False, use requiredDuringScheduling which fails if node is full.
     """
     # Ensure extraPodSpec exists
     if "extraPodSpec" not in service:
@@ -212,11 +215,21 @@ def _patch_service_for_injection(
         if "volumes" not in service["extraPodSpec"]:
             service["extraPodSpec"]["volumes"] = []
 
-        # Remove existing volumes if present
+        # Remove ALL existing CUDA fault volumes if present (for idempotent re-application)
         service["extraPodSpec"]["volumes"] = [
             v
             for v in service["extraPodSpec"]["volumes"]
-            if v.get("name") not in ["cuda-fault-lib-source", "cuda-fault-lib"]
+            if v.get("name") not in ["cuda-fault-lib-source", "cuda-fault-lib", "node-fault-marker"]
+        ]
+
+        # Remove existing CUDA fault volume mounts from mainContainer (for idempotent re-application)
+        if "volumeMounts" not in service["extraPodSpec"]["mainContainer"]:
+            service["extraPodSpec"]["mainContainer"]["volumeMounts"] = []
+        service["extraPodSpec"]["mainContainer"]["volumeMounts"] = [
+            vm
+            for vm in service["extraPodSpec"]["mainContainer"]["volumeMounts"]
+            if vm.get("name") not in ["cuda-fault-lib", "node-fault-marker"]
+            and vm.get("mountPath") not in ["/cuda-fault", "/host-fault"]
         ]
 
         # Add ConfigMap volume (source - base64 encoded)
@@ -286,16 +299,8 @@ def _patch_service_for_injection(
             }
         )
 
-        # Add volume mount to main container
-        if "volumeMounts" not in service["extraPodSpec"]["mainContainer"]:
-            service["extraPodSpec"]["mainContainer"]["volumeMounts"] = []
-
-        # Remove existing mount if present
-        service["extraPodSpec"]["mainContainer"]["volumeMounts"] = [
-            vm
-            for vm in service["extraPodSpec"]["mainContainer"]["volumeMounts"]
-            if vm.get("name") != "cuda-fault-lib"
-        ]
+        # Add volume mounts to main container
+        # (Note: existing mounts already removed earlier for idempotent re-application)
 
         # Add mount for compiled library
         service["extraPodSpec"]["mainContainer"]["volumeMounts"].append(
@@ -324,22 +329,46 @@ def _patch_service_for_injection(
         if "affinity" not in service["extraPodSpec"]:
             service["extraPodSpec"]["affinity"] = {}
 
-        service["extraPodSpec"]["affinity"]["nodeAffinity"] = {
-            "requiredDuringSchedulingIgnoredDuringExecution": {
-                "nodeSelectorTerms": [
+        if soft_affinity:
+            # Soft affinity: prefer target node but allow spillover to other nodes
+            # This is useful when target node has limited GPU capacity (e.g., 4 GPUs)
+            # but you want to deploy more pods (e.g., 8 replicas).
+            # Pods will fill target node first (up to capacity), then schedule elsewhere.
+            service["extraPodSpec"]["affinity"]["nodeAffinity"] = {
+                "preferredDuringSchedulingIgnoredDuringExecution": [
                     {
-                        "matchExpressions": [
-                            {
-                                "key": "kubernetes.io/hostname",
-                                "operator": "In",
-                                "values": [target_node],
-                            }
-                        ]
+                        "weight": 100,  # High weight = strong preference
+                        "preference": {
+                            "matchExpressions": [
+                                {
+                                    "key": "kubernetes.io/hostname",
+                                    "operator": "In",
+                                    "values": [target_node],
+                                }
+                            ]
+                        },
                     }
                 ]
             }
-        }
-        print(f"      ✓ Added node affinity to pin pods to {target_node}")
+            print(f"      ✓ Added SOFT node affinity (prefer {target_node}, allow spillover)")
+        else:
+            # Hard affinity: ALL pods MUST be scheduled on target node or fail
+            service["extraPodSpec"]["affinity"]["nodeAffinity"] = {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {
+                            "matchExpressions": [
+                                {
+                                    "key": "kubernetes.io/hostname",
+                                    "operator": "In",
+                                    "values": [target_node],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+            print(f"      ✓ Added HARD node affinity (ALL pods MUST be on {target_node})")
 
     elif not enable:
         # Remove ConfigMap volume and mount when disabling
@@ -385,6 +414,7 @@ def patch_deployment_env(
     target_node=None,
     xid_type=79,
     passthrough_mode=False,
+    soft_affinity=True,
 ):
     """Patch deployment to add/remove LD_PRELOAD environment variable.
 
@@ -398,6 +428,9 @@ def patch_deployment_env(
         xid_type: XID error type to simulate (79, 48, 94, 95, 43, 74). Default: 79
         passthrough_mode: If True, set CUDA_FAULT_INJECTION_ENABLED=0 (library loaded but disabled)
                          Allows baseline testing before enabling faults via toggle
+        soft_affinity: If True (default), use preferredDuringScheduling to allow pods
+                      to spill over to other nodes when target_node lacks capacity.
+                      If False, use requiredDuringScheduling which fails if node is full.
     """
     custom_api = client.CustomObjectsApi()
     apps_api = client.AppsV1Api()
@@ -508,7 +541,8 @@ def patch_deployment_env(
                     print(f"    → Patching service: {service_name}")
                     service = services[service_name]
                     _patch_service_for_injection(
-                        service, enable, new_envs, use_configmap, target_node, lib_path
+                        service, enable, new_envs, use_configmap, target_node, lib_path,
+                        soft_affinity=soft_affinity
                     )
                     patched_services.append(service_name)
 
@@ -541,6 +575,7 @@ def patch_deployment_env(
                                     use_configmap,
                                     target_node,
                                     lib_path,
+                                    soft_affinity=soft_affinity,
                                 )
 
                     with suppress_deprecation_warnings():
@@ -772,7 +807,8 @@ def inject_into_running_pods(deployment_name, namespace, node_name=None):
 
 
 def inject_via_deployment_patch(
-    deployment_name, namespace, target_node=None, xid_type=79, passthrough_mode=False
+    deployment_name, namespace, target_node=None, xid_type=79, passthrough_mode=False,
+    soft_affinity=True
 ):
     """Inject by patching deployment and rolling restart (persistent).
 
@@ -782,6 +818,9 @@ def inject_via_deployment_patch(
         target_node: Optional node to pin pods to (simulates real XID behavior)
         xid_type: XID error type to simulate (79, 48, 94, 95, 43, 74)
         passthrough_mode: If True, library loads but doesn't inject faults until toggled
+        soft_affinity: If True (default), use preferredDuringScheduling to allow pods
+                      to spill over to other nodes when target_node lacks capacity.
+                      If False, use requiredDuringScheduling which fails if node is full.
     """
     print("\n" + "=" * 80)
     print("Method 2: Patch Deployment (Persistent)")
@@ -827,6 +866,7 @@ def inject_via_deployment_patch(
         target_node=target_node,
         xid_type=xid_type,
         passthrough_mode=passthrough_mode,
+        soft_affinity=soft_affinity,
     ):
         return False
 
@@ -998,8 +1038,12 @@ Examples:
   python inject_into_pods.py --deployment vllm-v1-disagg-router --patch-deployment --xid-type 48
   python inject_into_pods.py --deployment vllm-v1-disagg-router --patch-deployment --xid-type 94
 
-  # Pin to specific node (simulates real XID behavior)
+  # Pin to specific node with SOFT affinity (DEFAULT - allows spillover)
+  # If node has 4 GPUs but 8 pods requested, 4 pods run on target node, 4 elsewhere
   python inject_into_pods.py --deployment vllm-v1-disagg-router --patch-deployment --node aks-a100a-36888584-vmss000003
+
+  # Pin to specific node with HARD affinity (ALL pods must fit or stay Pending)
+  python inject_into_pods.py --deployment vllm-v1-disagg-router --patch-deployment --node aks-a100a-36888584-vmss000003 --hard-affinity
 
   # Inject into running pods on specific node (temporary)
   python inject_into_pods.py --deployment vllm-v1-disagg-router --node aks-a100a-36888584-vmss000003
@@ -1039,6 +1083,14 @@ Examples:
         help="Load library in passthrough mode (CUDA_FAULT_INJECTION_ENABLED=0). "
         "Use toggle file or API to enable faults later.",
     )
+    parser.add_argument(
+        "--hard-affinity",
+        action="store_true",
+        help="Use HARD node affinity (requiredDuringScheduling). "
+        "All pods MUST be scheduled on target node or they will be Pending forever. "
+        "Default is SOFT affinity (preferredDuringScheduling) which allows pods "
+        "to spill over to other nodes when target node lacks GPU capacity.",
+    )
 
     args = parser.parse_args()
 
@@ -1056,6 +1108,8 @@ Examples:
     print(f"Namespace:  {args.namespace}")
     if args.node:
         print(f"Node:       {args.node}")
+        affinity_mode = "HARD (required)" if args.hard_affinity else "SOFT (preferred, allows spillover)"
+        print(f"Affinity:   {affinity_mode}")
     if not args.remove and not args.verify:
         print(f"XID Type:   {args.xid_type}")
     print()
@@ -1066,7 +1120,8 @@ Examples:
         remove_injection(args.deployment, args.namespace)
     elif args.patch_deployment:
         inject_via_deployment_patch(
-            args.deployment, args.namespace, args.node, args.xid_type, args.passthrough
+            args.deployment, args.namespace, args.node, args.xid_type, args.passthrough,
+            soft_affinity=not args.hard_affinity
         )
     else:
         inject_into_running_pods(args.deployment, args.namespace, args.node)

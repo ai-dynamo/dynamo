@@ -108,6 +108,11 @@ class HWFaultConfig:
         default_factory=lambda: ["VllmDecodeWorker", "VllmPrefillWorker"]
     )
 
+    # Node affinity mode
+    # True (default): preferredDuringScheduling - pods PREFER target node but can spill to others
+    # False: requiredDuringScheduling - ALL pods MUST fit on target node
+    soft_affinity: bool = True
+
     @classmethod
     def from_dict(cls, config: Optional[Dict]) -> "HWFaultConfig":
         """Create config from dictionary."""
@@ -124,6 +129,7 @@ class HWFaultConfig:
             service_names=config.get(
                 "service_names", ["VllmDecodeWorker", "VllmPrefillWorker"]
             ),
+            soft_affinity=config.get("soft_affinity", True),
         )
 
 
@@ -398,6 +404,7 @@ class HWFaultManager:
         self,
         xid_type: Optional[int] = None,
         target_node: Optional[str] = None,
+        soft_affinity: Optional[bool] = None,
     ) -> bool:
         """
         Setup CUDA library in passthrough mode (faults disabled).
@@ -409,6 +416,9 @@ class HWFaultManager:
         Args:
             xid_type: XID error type to configure (uses config default if None)
             target_node: Node to target (uses config/auto-detected if None)
+            soft_affinity: If True, use preferredDuringScheduling (allows spillover).
+                          If False, use requiredDuringScheduling.
+                          Uses config default if None.
 
         Returns:
             True if successful
@@ -419,6 +429,7 @@ class HWFaultManager:
 
         xid = xid_type or self.config.xid_type
         node = target_node or self._target_node or self.config.target_node
+        use_soft_affinity = soft_affinity if soft_affinity is not None else self.config.soft_affinity
 
         if xid not in self.VALID_XID_TYPES:
             self.logger.error(
@@ -433,7 +444,8 @@ class HWFaultManager:
             "[HW Faults] Library will load with faults DISABLED - use toggle_cuda_faults() to enable"
         )
         if node:
-            self.logger.info(f"[HW Faults] Target node: {node}")
+            affinity_mode = "SOFT (allows spillover)" if use_soft_affinity else "HARD (requires all pods on node)"
+            self.logger.info(f"[HW Faults] Target node: {node} ({affinity_mode})")
 
         try:
             cuda_injector = self._get_cuda_injector()
@@ -444,6 +456,7 @@ class HWFaultManager:
                 target_node=node,
                 xid_type=xid,
                 passthrough_mode=True,  # Library loaded but faults disabled
+                soft_affinity=use_soft_affinity,
             )
 
             if success:
@@ -572,6 +585,7 @@ class HWFaultManager:
         self,
         xid_type: Optional[int] = None,
         target_node: Optional[str] = None,
+        soft_affinity: Optional[bool] = None,
     ) -> bool:
         """
         Enable CUDA fault injection on deployment.
@@ -585,6 +599,9 @@ class HWFaultManager:
         Args:
             xid_type: XID error type (uses config default if None)
             target_node: Node to target (uses config/auto-detected if None)
+            soft_affinity: If True, use preferredDuringScheduling (allows spillover).
+                          If False, use requiredDuringScheduling.
+                          Uses config default if None.
 
         Returns:
             True if successful
@@ -595,6 +612,7 @@ class HWFaultManager:
 
         xid = xid_type or self.config.xid_type
         node = target_node or self._target_node or self.config.target_node
+        use_soft_affinity = soft_affinity if soft_affinity is not None else self.config.soft_affinity
 
         if xid not in self.VALID_XID_TYPES:
             self.logger.error(
@@ -609,7 +627,8 @@ class HWFaultManager:
             f"[HW Faults] Enabling CUDA faults (XID {xid}) on deployment..."
         )
         if node:
-            self.logger.info(f"[HW Faults] Target node: {node}")
+            affinity_mode = "SOFT (allows spillover)" if use_soft_affinity else "HARD (requires all pods on node)"
+            self.logger.info(f"[HW Faults] Target node: {node} ({affinity_mode})")
 
         try:
             cuda_injector = self._get_cuda_injector()
@@ -620,6 +639,7 @@ class HWFaultManager:
                 target_node=node,
                 xid_type=xid,
                 passthrough_mode=False,  # Faults enabled immediately
+                soft_affinity=use_soft_affinity,
             )
 
             if success:
