@@ -8,14 +8,18 @@
 //! # Usage
 //!
 //! ```bash
-//! # Run with default settings
-//! cargo run --bin registry-hub --features block-manager
+//! # Build and run from this directory
+//! cd examples/kvbm/distributed/object-registry
+//! cargo run --release
+//!
+//! # Or build from workspace root
+//! cargo build --release -p object-registry-example
 //!
 //! # Run with custom settings via environment variables
 //! DYN_REGISTRY_HUB_CAPACITY=10000000 \
 //! DYN_REGISTRY_HUB_QUERY_ADDR=tcp://*:6000 \
 //! DYN_REGISTRY_HUB_REGISTER_ADDR=tcp://*:6001 \
-//! cargo run --bin registry-hub --features block-manager
+//! cargo run --release
 //! ```
 //!
 //! # Environment Variables
@@ -30,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use dynamo_llm::block_manager::v2::logical::distributed::{
+use dynamo_llm::block_manager::distributed::registry::{
     RegistryHub, RegistryHubConfig, ZmqRegistryHub,
 };
 

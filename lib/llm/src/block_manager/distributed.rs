@@ -15,8 +15,8 @@ pub use g4_transfer::{
     G4TransferDirection, G4TransferHandler, G4TransferResult, RemoteDescriptor, RemoteStorageKind,
 };
 pub use registry::{
-    DistributedRegistry, ObjectKey, ObjectRegistry, OffloadResult, SequenceHash,
-    SequenceHashRegistry, create_registry_from_env,
+    DistributedRegistry, ObjectKey, ObjectRegistry, OffloadResult, RegistryHub,
+    RegistryHubConfig, SequenceHash, SequenceHashRegistry, ZmqRegistryHub, create_registry_from_env,
 };
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
 pub use transfer_object::ObjectTransferHandler;
