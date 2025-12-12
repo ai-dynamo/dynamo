@@ -515,21 +515,49 @@ func AppendUniqueImagePullSecrets(existing, additional []corev1.LocalObjectRefer
 }
 
 type Resource struct {
-	client.Object
-	isReady func() (bool, string)
+	object          client.Object
+	isReady         bool
+	readyReason     string
+	serviceStatuses map[string]v1alpha1.ServiceReplicaStatus
 }
 
-func WrapResource[T client.Object](resource T, isReady func() (bool, string)) *Resource {
-	return &Resource{
-		Object:  resource,
-		isReady: isReady,
+func NewResource[T client.Object](resource T, isReady func() (bool, string)) (*Resource, error) {
+	v := reflect.ValueOf(resource)
+	// handles untype nil and typed nil
+	if !v.IsValid() || v.IsNil() {
+		return nil, fmt.Errorf("resource is nil")
 	}
+	ready, reason := isReady()
+	return &Resource{
+		object:      resource,
+		isReady:     ready,
+		readyReason: reason,
+	}, nil
+}
+
+func NewResourceWithServiceStatuses[T client.Object](resource T, isReadyAndServiceStatuses func() (bool, string, map[string]v1alpha1.ServiceReplicaStatus)) (*Resource, error) {
+	v := reflect.ValueOf(resource)
+	// handles untype nil and typed nil
+	if !v.IsValid() || v.IsNil() {
+		return nil, fmt.Errorf("resource is nil")
+	}
+	ready, reason, serviceStatuses := isReadyAndServiceStatuses()
+	return &Resource{
+		object:          resource,
+		isReady:         ready,
+		readyReason:     reason,
+		serviceStatuses: serviceStatuses,
+	}, nil
 }
 
 func (r *Resource) IsReady() (bool, string) {
-	return r.isReady()
+	return r.isReady, r.readyReason
 }
 
 func (r *Resource) GetName() string {
-	return r.Object.GetName()
+	return r.object.GetName()
+}
+
+func (r *Resource) GetServiceStatuses() map[string]v1alpha1.ServiceReplicaStatus {
+	return r.serviceStatuses
 }

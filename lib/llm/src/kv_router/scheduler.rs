@@ -133,7 +133,7 @@ impl KvScheduler {
         let slots_monitor = slots.clone();
         let mut instance_ids_monitor_rx = instance_ids_rx.clone();
         let mut configs_monitor_rx = runtime_configs_rx.clone();
-        let monitor_cancel_token = component.drt().primary_token();
+        let monitor_cancel_token = component.drt().child_token();
         tokio::spawn(async move {
             tracing::trace!("workers monitoring task started");
             loop {
