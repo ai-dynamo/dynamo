@@ -3,8 +3,6 @@
 
 //! Shared test helpers for discovery system backends.
 
-#![cfg(test)]
-
 use anyhow::{Context, Result, anyhow};
 use std::future::Future;
 use std::sync::Arc;

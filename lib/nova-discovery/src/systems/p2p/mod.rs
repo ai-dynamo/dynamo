@@ -167,16 +167,12 @@ mod tests {
     use crate::test_fixtures::make_test_address;
     use std::sync::Arc;
 
-    fn system_factory(
-        cluster_id: String,
-    ) -> impl std::future::Future<Output = anyhow::Result<Arc<dyn DiscoverySystem>>> {
-        async move {
-            P2pConfigBuilder::default()
-                .cluster_id(cluster_id)
-                .listen_port(DEFAULT_LISTEN_PORT)
-                .build()
-                .await
-        }
+    async fn system_factory(cluster_id: String) -> anyhow::Result<Arc<dyn DiscoverySystem>> {
+        P2pConfigBuilder::default()
+            .cluster_id(cluster_id)
+            .listen_port(DEFAULT_LISTEN_PORT)
+            .build()
+            .await
     }
 
     #[tokio::test]

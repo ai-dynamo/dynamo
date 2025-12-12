@@ -6,8 +6,6 @@
 //! This module provides common test utilities for constructing WorkerAddress
 //! instances using the builder pattern.
 
-#![cfg(test)]
-
 use bytes::Bytes;
 
 use crate::peer::WorkerAddress;

@@ -662,6 +662,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::async_yields_async)]
     async fn test_manager_different_ids_independent() {
         let result = tokio::time::timeout(TEST_TIMEOUT, async {
             let local_instance = InstanceId::new_v4();
