@@ -781,6 +781,7 @@ RUN apt-get update -y && \
     bear \
     ccache \
     less \
+    pkg-config \
     # Language and development support
     clang \
     libclang-dev \

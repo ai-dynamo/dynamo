@@ -700,7 +700,8 @@ RUN apt-get update -y && \
     # Rust build dependencies
     clang \
     libclang-dev \
-    protobuf-compiler && \
+    protobuf-compiler \
+    pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
 # Set umask for group-writable files in dev stage (runs as root)
