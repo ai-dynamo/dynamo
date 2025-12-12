@@ -269,4 +269,3 @@ mod tests {
         assert_eq!(node2, node3);
     }
 }
-

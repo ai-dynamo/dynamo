@@ -13,17 +13,17 @@
 //! - First-touch page allocation ensures correct NUMA placement
 
 use super::get_current_cpu_numa_node;
+use cudarc::driver::CudaContext;
 use cudarc::driver::result::malloc_host;
 use cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED;
-use cudarc::driver::CudaContext;
 use nix::libc;
 use std::collections::HashMap;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use super::{get_device_numa_node, NumaNode};
+use super::{NumaNode, get_device_numa_node};
 
 /// Get or create a CUDA context for the given device.
 fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>, String> {
@@ -34,8 +34,12 @@ fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>, String> {
         return Ok(existing.clone());
     }
 
-    let ctx = CudaContext::new(device_id as usize)
-        .map_err(|e| format!("Failed to create CUDA context for device {}: {:?}", device_id, e))?;
+    let ctx = CudaContext::new(device_id as usize).map_err(|e| {
+        format!(
+            "Failed to create CUDA context for device {}: {:?}",
+            device_id, e
+        )
+    })?;
     map.insert(device_id, ctx.clone());
     Ok(ctx)
 }
@@ -573,4 +577,3 @@ mod tests {
         }
     }
 }
-

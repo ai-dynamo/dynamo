@@ -275,4 +275,3 @@ mod tests {
         assert_eq!(topology.node_for_cpu(999), None);
     }
 }
-
