@@ -40,6 +40,7 @@ ARG FRAMEWORK_IMAGE_TAG
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_MEDIA_NIXL
+ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
 ARG CUDA_VERSION
 
@@ -311,8 +312,15 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
+    FEATURES=""; \
     if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
-        maturin build --release --features dynamo-llm/media-nixl --out /opt/dynamo/dist; \
+        FEATURES="$FEATURES dynamo-llm/media-nixl"; \
+    fi; \
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+        FEATURES="$FEATURES media-ffmpeg"; \
+    fi; \
+    if [ -n "$FEATURES" ]; then \
+        maturin build --release --features "$FEATURES" --out /opt/dynamo/dist; \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
@@ -616,6 +624,7 @@ ${NIXL_PLUGIN_DIR}:\
 /usr/local/ucx/lib/ucx:\
 /usr/local/nvidia/lib64:\
 ${LD_LIBRARY_PATH}
+ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 
 # Copy NATS and ETCD from dynamo_base, and UCX/NIXL from wheel_builder
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
