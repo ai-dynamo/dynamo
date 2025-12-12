@@ -176,17 +176,40 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-      - name: Docker Tag and Push
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tags: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
-          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-vllm-{0}', matrix.platform.arch) || '' }}
-          aws_push: 'true'
-          azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      - name: Docker Tag and Push (Background)
+        env:
+          LOCAL_IMAGE: ${{ steps.build-image.outputs.image_tag }}
+          PUSH_TAGS: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
+          CONDITIONAL_TAG: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-vllm-{0}', matrix.platform.arch) || '' }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        run: |
+          # Run push in background
+          (
+            set -e
+            ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+
+            # Tag and push to ECR
+            docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${PUSH_TAGS}"
+            docker push "${ECR_HOSTNAME}/${PUSH_TAGS}"
+
+            # Tag and push to Azure ACR
+            docker tag "${LOCAL_IMAGE}" "${AZURE_ACR_HOSTNAME}/${PUSH_TAGS}"
+            docker push "${AZURE_ACR_HOSTNAME}/${PUSH_TAGS}"
+
+            # Push conditional tag if set
+            if [ -n "${CONDITIONAL_TAG}" ]; then
+              docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${CONDITIONAL_TAG}"
+              docker push "${ECR_HOSTNAME}/${CONDITIONAL_TAG}"
+              docker tag "${LOCAL_IMAGE}" "${AZURE_ACR_HOSTNAME}/${CONDITIONAL_TAG}"
+              docker push "${AZURE_ACR_HOSTNAME}/${CONDITIONAL_TAG}"
+            fi
+
+            echo "Push completed successfully"
+          ) > /tmp/push.log 2>&1 &
+          echo $! > /tmp/push.pid
+          echo "Started push in background with PID $(cat /tmp/push.pid)"
       - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
@@ -196,6 +219,23 @@ jobs:
           framework: "vllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+      - name: Wait for Push to Complete
+        if: always()
+        run: |
+          if [ -f /tmp/push.pid ]; then
+            PID=$(cat /tmp/push.pid)
+            echo "Waiting for push process (PID: $PID) to complete..."
+            if wait $PID; then
+              echo "✅ Push completed successfully"
+            else
+              echo "❌ Push failed with exit code $?"
+              echo "=== Push Log ==="
+              cat /tmp/push.log || true
+              exit 1
+            fi
+          else
+            echo "No push PID found, skipping wait"
+          fi
 
   sglang:
     needs: changed-files
@@ -237,17 +277,47 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      - name: Docker Tag and Push
-        uses: ./.github/actions/docker-tag-push
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
         with:
-          local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tags: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
-          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-sglang-{0}', matrix.platform.arch) || '' }}
-          aws_push: 'true'
-          azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+      - name: Docker Tag and Push (Background)
+        env:
+          LOCAL_IMAGE: ${{ steps.build-image.outputs.image_tag }}
+          PUSH_TAGS: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
+          CONDITIONAL_TAG: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-sglang-{0}', matrix.platform.arch) || '' }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        run: |
+          # Run push in background
+          (
+            set -e
+            ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+
+            # Tag and push to ECR
+            docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${PUSH_TAGS}"
+            docker push "${ECR_HOSTNAME}/${PUSH_TAGS}"
+
+            # Tag and push to Azure ACR
+            docker tag "${LOCAL_IMAGE}" "${AZURE_ACR_HOSTNAME}/${PUSH_TAGS}"
+            docker push "${AZURE_ACR_HOSTNAME}/${PUSH_TAGS}"
+
+            # Push conditional tag if set
+            if [ -n "${CONDITIONAL_TAG}" ]; then
+              docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${CONDITIONAL_TAG}"
+              docker push "${ECR_HOSTNAME}/${CONDITIONAL_TAG}"
+              docker tag "${LOCAL_IMAGE}" "${AZURE_ACR_HOSTNAME}/${CONDITIONAL_TAG}"
+              docker push "${AZURE_ACR_HOSTNAME}/${CONDITIONAL_TAG}"
+            fi
+
+            echo "Push completed successfully"
+          ) > /tmp/push.log 2>&1 &
+          echo $! > /tmp/push.pid
+          echo "Started push in background with PID $(cat /tmp/push.pid)"
       - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
@@ -257,6 +327,23 @@ jobs:
           framework: "sglang"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+      - name: Wait for Push to Complete
+        if: always()
+        run: |
+          if [ -f /tmp/push.pid ]; then
+            PID=$(cat /tmp/push.pid)
+            echo "Waiting for push process (PID: $PID) to complete..."
+            if wait $PID; then
+              echo "✅ Push completed successfully"
+            else
+              echo "❌ Push failed with exit code $?"
+              echo "=== Push Log ==="
+              cat /tmp/push.log || true
+              exit 1
+            fi
+          else
+            echo "No push PID found, skipping wait"
+          fi
 
   trtllm:
     needs: changed-files
@@ -298,17 +385,47 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      - name: Docker Tag and Push
-        uses: ./.github/actions/docker-tag-push
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
         with:
-          local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tags: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
-          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-trtllm-{0}', matrix.platform.arch) || '' }}
-          aws_push: 'true'
-          azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+      - name: Docker Tag and Push (Background)
+        env:
+          LOCAL_IMAGE: ${{ steps.build-image.outputs.image_tag }}
+          PUSH_TAGS: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
+          CONDITIONAL_TAG: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-trtllm-{0}', matrix.platform.arch) || '' }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        run: |
+          # Run push in background
+          (
+            set -e
+            ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+
+            # Tag and push to ECR
+            docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${PUSH_TAGS}"
+            docker push "${ECR_HOSTNAME}/${PUSH_TAGS}"
+
+            # Tag and push to Azure ACR
+            docker tag "${LOCAL_IMAGE}" "${AZURE_ACR_HOSTNAME}/${PUSH_TAGS}"
+            docker push "${AZURE_ACR_HOSTNAME}/${PUSH_TAGS}"
+
+            # Push conditional tag if set
+            if [ -n "${CONDITIONAL_TAG}" ]; then
+              docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${CONDITIONAL_TAG}"
+              docker push "${ECR_HOSTNAME}/${CONDITIONAL_TAG}"
+              docker tag "${LOCAL_IMAGE}" "${AZURE_ACR_HOSTNAME}/${CONDITIONAL_TAG}"
+              docker push "${AZURE_ACR_HOSTNAME}/${CONDITIONAL_TAG}"
+            fi
+
+            echo "Push completed successfully"
+          ) > /tmp/push.log 2>&1 &
+          echo $! > /tmp/push.pid
+          echo "Started push in background with PID $(cat /tmp/push.pid)"
       - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
@@ -318,6 +435,23 @@ jobs:
           framework: "trtllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+      - name: Wait for Push to Complete
+        if: always()
+        run: |
+          if [ -f /tmp/push.pid ]; then
+            PID=$(cat /tmp/push.pid)
+            echo "Waiting for push process (PID: $PID) to complete..."
+            if wait $PID; then
+              echo "✅ Push completed successfully"
+            else
+              echo "❌ Push failed with exit code $?"
+              echo "=== Push Log ==="
+              cat /tmp/push.log || true
+              exit 1
+            fi
+          else
+            echo "No push PID found, skipping wait"
+          fi
 
   deploy-test-fault-tolerance:
     runs-on: cpu-amd-m5-2xlarge
