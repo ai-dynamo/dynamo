@@ -6,6 +6,7 @@ name: Nightly CI pipeline
 on:
   schedule:
     - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
+  workflow_dispatch:  # Allow manual triggering for testing
 
 permissions:
   contents: read
@@ -653,12 +654,204 @@ jobs:
   #         test_type: component-${{ matrix.component }}
   #         platform_arch: ${{ matrix.arch.arch }}
 
+  fault-tolerance-tests:
+    name: ${{ matrix.framework.name }}-amd64-ft
+    needs: [build-amd64]
+    if: always()
+    runs-on: cpu-amd-m5-2xlarge
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      # Run matrix jobs sequentially to prevent a Helm race condition
+      # Parallel jobs conflict on ClusterRole ownership when installing the chart.
+      # Error: ClusterRole "...-operator" exists... cannot be imported... current value is "...-ft-vllm"
+      max-parallel: 1
+      matrix:
+        framework:
+          - { name: vllm, test_scenario: vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
+          - { name: trtllm, test_scenario: trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
+          - { name: sglang, test_scenario: sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
+    env:
+      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +x
+          echo "Checking build status for ${{ matrix.framework.name }} (amd64)"
+          BUILD_JOB_NAME="Build ${{ matrix.framework.name }} (amd64)"
+          JOBS=$(curl -s -S -L --fail-with-body \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to query GitHub API"
+            exit 1
+          fi
+          BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
+          echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo "Build failed or did not complete successfully. Failing tests."
+            exit 1
+          fi
+          echo "Build succeeded. Proceeding with tests."
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull nightly image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework.name }}-amd64
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Set namespace
+        run: |
+          export FRAMEWORK=${{ matrix.framework.name }}
+          echo "NAMESPACE=gh-nightly-${{ github.run_id }}-ft-${FRAMEWORK}" >> $GITHUB_ENV
+          set -x
+          # Setup kubeconfig
+          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+          chmod 600 .kubeconfig
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+          kubectl config current-context
+      - name: Deploy Operator
+        run: |
+          set -x
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          # Create a namespace for this job
+          echo "Creating an ephemeral namespace..."
+          kubectl delete namespace $NAMESPACE || true
+          kubectl create namespace $NAMESPACE || true
+          echo "Attaching the labels for secrets and cleanup"
+          kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
+          # Set the namespace as default
+          kubectl config set-context --current --namespace=$NAMESPACE
+          # Check if Istio is installed
+          kubectl get pods -n istio-system
+          # Check if default storage class exists
+          kubectl get storageclass
+          # Install Helm chart
+          export VIRTUAL_ENV=/opt/dynamo/venv
+          export KUBE_NS=$NAMESPACE
+          export ISTIO_ENABLED=true
+          export ISTIO_GATEWAY=istio-system/ingress-alb
+          export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
+          export DYNAMO_CLOUD=https://${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
+          # Install dynamo env secrets
+          kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
+          # Create docker pull secret for operator image
+          kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
+          # Pull operator image (using nightly tag for operator too)
+          export ECR_HOSTNAME=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-operator-amd64 || echo "Operator image not found, will use SHA-based tag"
+          # Install helm dependencies
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          cd deploy/cloud/helm/platform/
+          helm dep build .
+          # Install platform with namespace restriction
+          helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+            --set dynamo-operator.namespaceRestriction.enabled=true \
+            --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
+            --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
+            --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
+            --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
+            --timeout 10m --wait
+          # Wait for all deployments to be ready
+          timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+          cd -
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl config set-context --current --namespace=$NAMESPACE
+      - name: Run Fault Tolerance Tests
+        id: run-ft-tests
+        run: |
+          set -x
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          export NAMESPACE=$NAMESPACE
+          export FRAMEWORK=${{ matrix.framework.name }}
+          export ECR_HOSTNAME=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          export IMAGE="${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${FRAMEWORK}-amd64"
+          echo "Running fault tolerance test: ${{ matrix.framework.test_scenario }}"
+          echo "Using namespace: $NAMESPACE"
+          echo "Using image: $IMAGE"
+          # Install python3-venv package if not already installed
+          sudo apt-get update && sudo apt-get install -y python3-venv
+          # Set up Python virtual environment and install test dependencies
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r container/deps/requirements.test.txt
+          pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
+          # Create test-results directory
+          mkdir -p test-results
+          # Run the pytest command with JUnit XML output
+          set +e  # Don't exit on test failures
+          pytest tests/fault_tolerance/deploy/test_deployment.py \
+            -m 'k8s and fault_tolerance' \
+            -k '${{ matrix.framework.test_scenario }}' \
+            -s -v \
+            --namespace ${NAMESPACE} \
+            --image ${IMAGE} \
+            --client-type legacy \
+            --junitxml=test-results/pytest_ft_report.xml \
+            --tb=short
+          TEST_EXIT_CODE=$?
+          echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+          echo "🧪 Fault tolerance tests completed with exit code: ${TEST_EXIT_CODE}"
+          exit ${TEST_EXIT_CODE}
+        continue-on-error: true
+      - name: Process Fault Tolerance Test Results
+        if: always()
+        run: |
+          set -x
+          # Rename JUnit XML with unique naming if it exists
+          if [ -f "test-results/pytest_ft_report.xml" ]; then
+            mv "test-results/pytest_ft_report.xml" "test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml"
+            echo "✅ JUnit XML report renamed with unique identifier"
+          else
+            echo "⚠️  JUnit XML report not found"
+          fi
+      - name: Upload Fault Tolerance Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.framework.name }}-fault_tolerance-amd64-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml
+          retention-days: 7
+      - name: Cleanup
+        if: always()
+        timeout-minutes: 5
+        run: |
+          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+          chmod 600 .kubeconfig
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+          # For debugging purposes, list all the resources before we uninstall
+          kubectl get all
+          echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
+          kubectl delete dynamographdeployments --all -n $NAMESPACE || true
+          # Uninstall the helm chart
+          helm ls
+          helm uninstall dynamo-platform || true
+          echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
+          kubectl delete namespace $NAMESPACE || true
+          echo "Namespace $NAMESPACE completed."
+
   ############################## RESULTS SUMMARY ##############################
   results-summary:
     name: Results Summary
     runs-on: ubuntu-latest
     if: always()
-    needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests] # component-tests
+    needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
