@@ -1953,7 +1953,7 @@ def _test_router_decisions(
             f"but found {len(keys_with_events_dp)} with events: {keys_with_events_dp}"
         )
 
-        # Verify: The routing key with events should have exactly 8 events (one unique per block)
+        # Verify: The routing key with events should have exactly 8 events (one per unique block)
         active_key_dp = keys_with_events_dp[0]
         num_events = len(events_by_key_dp[active_key_dp])
 
@@ -2000,12 +2000,12 @@ def _test_router_decisions(
             f"but found {len(keys_with_events_single)} with events: {keys_with_events_single}"
         )
 
-        # Verify: The routing key with events should have exactly 4 events (one per request)
+        # Verify: The routing key with events should have exactly 8 events (one per unique block)
         active_worker_id = keys_with_events_single[0]
         num_events = len(events_by_key_single[active_worker_id])
 
-        assert num_events == 4, (
-            f"Expected worker_id {active_worker_id} to have exactly 4 events, "
+        assert num_events == 8, (
+            f"Expected worker_id {active_worker_id} to have exactly 8 events, "
             f"but found {num_events} events"
         )
 
