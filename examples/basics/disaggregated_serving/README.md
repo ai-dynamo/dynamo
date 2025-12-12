@@ -22,9 +22,9 @@ This separation allows for:
 
 > [NOTE] This example requires having at least 2 GPUs -- one for Prefill and one for Decode
 
-Before running this example, ensure you: 
+Before running this example, ensure you:
 - Have docker and docker compose installed on your system
-- Have cloned this repository to your system (`git clone https://github.com/ai-dynamo/dynamo.git`) and you are in the same working directory as this README and the docker-compose.yml (`cd examples/basics/disaggregated_serving/`) 
+- Have cloned this repository to your system (`git clone https://github.com/ai-dynamo/dynamo.git`) and you are in the same working directory as this README and the docker-compose.yml (`cd examples/basics/disaggregated_serving/`)
 
 ## Components
 
@@ -90,7 +90,7 @@ Once dynamo is running and has loaded your model (in this example, Qwen/Qwen3-0.
 
 > [NOTE] If the curl command above returns a `503 - Service Unavailable`, Dynamo is likely still starting up. Wait until you see the log output from the Dynamo services has slowed down (you will still see periodic stats_responses sent to the NATS server in the logs after the Dynamo services have started up)
 
-### Notes 
+### Notes
 - We set `DYN_LOG=debug` to increase log verbosity so we can see disaggregation
 - We set CUDA_VISIBLE_DEVICES=0 or CUDA_VISIBLE_DEVICES=1 to ensure that each worker has a specific, dedicated GPU for their portion of disaggregated prefill/decode serving.
 
