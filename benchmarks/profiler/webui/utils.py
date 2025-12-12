@@ -16,7 +16,12 @@ from aiconfigurator.webapp.components.profiling import (
     load_profiling_javascript,
 )
 
+from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from benchmarks.profiler.utils.defaults import GPU_COST_PER_HOUR
+from benchmarks.profiler.utils.dgd_generation import (
+    dump_yaml_multi_doc,
+    generate_dgd_config_with_planner,
+)
 from benchmarks.profiler.utils.pareto import compute_pareto
 
 logger = logging.getLogger(__name__)
@@ -45,6 +50,71 @@ CHART_COLORS = [
 
 # TODO: is this too long?
 WEB_UI_SELECTION_TIMEOUT = 3600
+
+
+def populate_show_config_yaml(data, prefill_data, decode_data, args) -> None:
+    """
+    Populate the bottom table "Action" column with the final generated DGD YAML config.
+
+    Notes:
+    - Prefill tab rows only provide a prefill mapping (decode mapping is None).
+    - Decode tab rows only provide a decode mapping (prefill mapping is None).
+    - Cost tab rows provide both prefill+decode via cost.index_mapping.
+    - Since WebUI selection happens before in-depth profiling, output_dir is None and ConfigMap is skipped.
+    """
+    data.setdefault("settings", {})["hide_show_config"] = False
+
+    config_modifier_cls = CONFIG_MODIFIERS[args.backend]
+    config_modifier = config_modifier_cls()
+    num_gpus_per_node = getattr(args, "num_gpus_per_node", 8)
+
+    # Prefill tab: only prefill mapping is defined for each point
+    for i, row in enumerate(data[PlotType.PREFILL]["table"]["data"]):
+        best_prefill_mapping = prefill_data.parallel_mappings[i]
+        dgd_config, _mocker_config = generate_dgd_config_with_planner(
+            config_path=args.config,
+            config_modifier=config_modifier,
+            output_dir=None,  # no in-depth profiling yet; skip ConfigMap
+            args=args,
+            best_prefill_mapping=best_prefill_mapping,
+            best_decode_mapping=None,
+            num_gpus_per_node=num_gpus_per_node,
+        )
+        row[-1] = dump_yaml_multi_doc(dgd_config)
+
+    # Decode tab: only decode mapping is defined for each point
+    for i, row in enumerate(data[PlotType.DECODE]["table"]["data"]):
+        best_decode_mapping = decode_data.parallel_mappings[i]
+        dgd_config, _mocker_config = generate_dgd_config_with_planner(
+            config_path=args.config,
+            config_modifier=config_modifier,
+            output_dir=None,  # no in-depth profiling yet; skip ConfigMap
+            args=args,
+            best_prefill_mapping=None,
+            best_decode_mapping=best_decode_mapping,
+            num_gpus_per_node=num_gpus_per_node,
+        )
+        row[-1] = dump_yaml_multi_doc(dgd_config)
+
+    # Cost tab: each point maps to a concrete (prefill_idx, decode_idx)
+    cost_index_mapping = data[PlotType.COST].get("index_mapping", {})
+    for table_idx, row in enumerate(data[PlotType.COST]["table"]["data"]):
+        mapping_entry = cost_index_mapping.get(str(table_idx))
+        if not mapping_entry or len(mapping_entry) != 2:
+            continue
+        prefill_idx, decode_idx = mapping_entry
+        best_prefill_mapping = prefill_data.parallel_mappings[prefill_idx]
+        best_decode_mapping = decode_data.parallel_mappings[decode_idx]
+        dgd_config, _mocker_config = generate_dgd_config_with_planner(
+            config_path=args.config,
+            config_modifier=config_modifier,
+            output_dir=None,  # no in-depth profiling yet; skip ConfigMap
+            args=args,
+            best_prefill_mapping=best_prefill_mapping,
+            best_decode_mapping=best_decode_mapping,
+            num_gpus_per_node=num_gpus_per_node,
+        )
+        row[-1] = dump_yaml_multi_doc(dgd_config)
 
 
 def populate_prefill_data(data, prefill_data):

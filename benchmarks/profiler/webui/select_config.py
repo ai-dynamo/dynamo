@@ -14,6 +14,7 @@ from benchmarks.profiler.webui.utils import (
     populate_cost_data,
     populate_decode_data,
     populate_prefill_data,
+    populate_show_config_yaml,
     wait_for_selection,
 )
 
@@ -67,6 +68,9 @@ def generate_config_data(prefill_data, decode_data, args):
     populate_prefill_data(data, prefill_data)
     populate_decode_data(data, decode_data)
     populate_cost_data(data, prefill_data, decode_data, args)
+
+    # Enable "show_config" in the bottom tables, and populate actual YAML configs.
+    populate_show_config_yaml(data, prefill_data, decode_data, args)
 
     # Save JSON file
     os.makedirs(os.path.dirname(output_path), exist_ok=True)

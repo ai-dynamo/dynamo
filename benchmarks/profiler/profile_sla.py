@@ -33,7 +33,10 @@ from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
     get_candidate_parallel_mappings,
 )
 from benchmarks.profiler.utils.defaults import EngineType
-from benchmarks.profiler.utils.dgd_generation import generate_dgd_config_with_planner
+from benchmarks.profiler.utils.dgd_generation import (
+    dump_yaml_multi_doc,
+    generate_dgd_config_with_planner,
+)
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.plot import (
     plot_decode_performance,
@@ -55,7 +58,7 @@ from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
 )
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
+from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SubComponentType
 
 
 @dataclass
@@ -232,7 +235,7 @@ async def run_profile(args):
                 prefill_config = apply_parallel_mapping_to_config(
                     base_prefill_config,
                     mapping,
-                    EngineType.PREFILL,
+                    SubComponentType.PREFILL,
                     config_modifier,
                     args.num_gpus_per_node,
                 )
@@ -337,7 +340,7 @@ async def run_profile(args):
                 decode_config = apply_parallel_mapping_to_config(
                     base_decode_config,
                     mapping,
-                    EngineType.DECODE,
+                    SubComponentType.DECODE,
                     config_modifier,
                     args.num_gpus_per_node,
                 )
@@ -554,7 +557,7 @@ async def run_profile(args):
         prefill_config = apply_parallel_mapping_to_config(
             prefill_config,
             best_prefill_mapping,
-            EngineType.PREFILL,
+            SubComponentType.PREFILL,
             config_modifier,
             args.num_gpus_per_node,
         )
@@ -638,7 +641,7 @@ async def run_profile(args):
         decode_config = apply_parallel_mapping_to_config(
             decode_config,
             best_decode_mapping,
-            EngineType.DECODE,
+            SubComponentType.DECODE,
             config_modifier,
             args.num_gpus_per_node,
         )
@@ -728,18 +731,12 @@ async def run_profile(args):
 
         # save DGD config with planner; support multi-document output when a ConfigMap is included
         with open(f"{args.output_dir}/config_with_planner.yaml", "w") as f:
-            if isinstance(config, list):
-                yaml.dump_all(config, f)
-            else:
-                yaml.dump(config, f)
+            dump_yaml_multi_doc(config, f)
 
         # save mocker config with planner for testing purposes
         logger.debug(f"Mocker config with planner: {mocker_config}")
         with open(f"{args.output_dir}/mocker_config_with_planner.yaml", "w") as f:
-            if isinstance(mocker_config, list):
-                yaml.dump_all(mocker_config, f)
-            else:
-                yaml.dump(mocker_config, f)
+            dump_yaml_multi_doc(mocker_config, f)
 
     except Exception as e:
         logger.error(f"Profile job failed with error: {e}")
