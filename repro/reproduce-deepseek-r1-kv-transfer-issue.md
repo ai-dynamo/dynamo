@@ -62,7 +62,7 @@ genai-perf profile --warmup-request-count 1 --synthetic-input-tokens-mean 120000
 
 ### The Error
 
-⚠️ **PRIMARY ERROR: Fatal NIXL Protocol Error** - FOUND IN LOGS
+⚠️ **PRIMARY ERROR: Fatal NIXL Protocol Error** - Found in initial test but not in automated tests
 ```
 ERROR dynamo_runtime::pipeline::network::tcp::client: reader task failed to join:
 JoinError::Panic "fatal error - failed to decode message from stream;
@@ -73,20 +73,10 @@ message: "Connection reset by peer" })"
 - **Component**: Decode worker reader task
 - **Error code**: 104 (ECONNRESET)
 - **Severity**: FATAL - This is the root cause that triggers cascading failures
-- Found in December 9th logs, not currently reproducing
+- Found in December 9th logs during initial testing, not reproduced in automated `run-repro-tests.sh` runs
 - May be intermittent or require specific conditions (TP8, concurrent requests, network stress)
 
-**ANOMALY 1: KV Transfer Timeout** - CONSISTENTLY OBSERVED
-```
-WARN nixl_connector.get_finished: Releasing expired KV blocks for request <uuid>
-which were retrieved by 0 decode worker(s) within 120 seconds.
-```
-- Occurs at **every** token size (1k, 10k, 30k, 60k, 80k, 100k, 110k, 120k)
-- "**0 decode worker(s)**" indicates KV blocks not retrieved
-- **Component**: Prefill worker
-- **Nature**: Warning - May be consequence of underlying connection issues
-
-**ANOMALY 2: Broken Pipe** - OCCASIONALLY OBSERVED
+**ANOMALY 1: Broken Pipe** - OCCASIONALLY OBSERVED
 ```
 ERROR dynamo_runtime::pipeline::network::tcp::client: failed to join writer task:
 I/O error: Broken pipe (os error 32)
@@ -101,7 +91,7 @@ I/O error: Broken pipe (os error 32)
   - Happens during active request processing (both curl and genai-perf tests)
   - No correlation with specific token counts (seen at 60k, 80k, 100k, 120k)
 
-**ANOMALY 3: Service Unavailable** - OBSERVED DURING TESTING
+**ANOMALY 2: Service Unavailable** - OBSERVED DURING TESTING
 ```
 ERROR http-request: tower_http::trace::on_failure: response failed
 classification=Status code: 503 Service Unavailable latency=0 ms method=GET uri=/health
@@ -115,6 +105,16 @@ classification=Status code: 503 Service Unavailable latency=0 ms method=GET uri=
   - Occurs during worker startup/initialization phase
   - Also seen during high load periods
   - Health check probe failures may trigger Kubernetes pod restarts
+
+**ANOMALY 3: KV Transfer Timeout Warning** - CONSISTENTLY OBSERVED
+```
+WARN nixl_connector.get_finished: Releasing expired KV blocks for request <uuid>
+which were retrieved by 0 decode worker(s) within 120 seconds.
+```
+- Occurs at **every** token size (1k, 10k, 30k, 60k, 80k, 100k, 110k, 120k)
+- "**0 decode worker(s)**" indicates KV blocks not retrieved
+- **Component**: Prefill worker
+- **Nature**: Warning (not error) - May be consequence of underlying connection issues or expected behavior when KV transfer not used
 
 ### Test Coverage
 
@@ -130,9 +130,9 @@ classification=Status code: 503 Service Unavailable latency=0 ms method=GET uri=
 
 The primary error is a fatal NIXL protocol failure:
 1. **PRIMARY ERROR**: NIXL protocol decoder fails with "invalid line protocol" - connection reset during stream decoding (fatal, intermittent)
-2. **ANOMALY 2**: TCP connections show "Broken pipe" errors - write attempts to closed connection (likely consequence of primary error)
-3. **ANOMALY 1**: KV transfer timeout warnings - 0 blocks retrieved by decode workers (may indicate underlying connection issues)
-4. **ANOMALY 3**: Health check failures (503) - worker temporarily unavailable during high load or initialization
+2. **ANOMALY 1**: TCP connections show "Broken pipe" errors - write attempts to closed connection (likely consequence of primary error)
+3. **ANOMALY 2**: Health check failures (503) - worker temporarily unavailable during high load or initialization
+4. **ANOMALY 3**: KV transfer timeout warnings - 0 blocks retrieved by decode workers (warning only, may indicate underlying connection issues)
 
 **System behavior**: System falls back to **prefill-only processing** when KV transfer cannot complete. This is why requests succeed despite anomalies.
 
@@ -140,111 +140,254 @@ The primary error is a fatal NIXL protocol failure:
 
 ## Setup & Reproduction
 
-### Quick Reproduction
+### Prerequisites
 
-Simplest way to reproduce (requires both prefill and decode workers running):
+- Kubernetes cluster with GPU nodes (via Teleport - see [k8s-help.md](../../dynamo-utils/notes/k8s-help.md))
+- `kubectl` access configured
+- Cluster-wide etcd/nats in `dynamo-system` namespace (already running)
+- Model cache PVC with DeepSeek-R1-Distill-Llama-70B already downloaded (132GB)
+- 16 GPUs available (8 prefill + 8 decode for TP8 configuration)
+
+**Note**: No need to install etcd/nats in your namespace - workers use the cluster-wide infrastructure from `dynamo-system`.
+
+### Step-by-Step Setup
+
+**Step 1: Create Namespace (One-Time Only)**
+
+If this is your first time setting up, create the namespace:
 
 ```bash
-# Port-forward to frontend
-kubectl port-forward <frontend-pod> 8787:8787 &
+# Create namespace (only needed once)
+kubectl create namespace keivenc-dyn-1556-repro-nixl-timeout
 
-# Send any request
-curl -X POST http://localhost:8787/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
-       "messages": [{"role": "user", "content": "Say hello"}],
-       "max_tokens": 10}'
-
-# Check prefill worker logs (120 seconds after request)
-kubectl logs <prefill-worker> | grep "Releasing expired KV blocks"
-# Should show: "0 decode worker(s)" retrieved KV cache
-
-# Check decode worker logs
-kubectl logs <decode-worker> | grep "Broken pipe"
-# Should show: "failed to join writer task: Broken pipe (os error 32)"
+# Verify namespace was created
+kubectl get namespace keivenc-dyn-1556-repro-nixl-timeout
 ```
 
-### Full Setup (Kubernetes)
-
-**Prerequisites**:
-- Kubernetes cluster with GPU nodes
-- `kubectl` access
-- 132GB storage for model cache
-- 16 GPUs (8 prefill + 8 decode for TP8)
-
-**Step 1: Install Infrastructure**
-
-```bash
-# Create namespace
-kubectl create namespace <your-namespace>
-kubectl config set-context --current --namespace=<your-namespace>
-
-# Install etcd + NATS (create platform-values.yaml)
-cat > platform-values.yaml <<EOF
-dynamo-operator:
-  enabled: false
-dynamo-etcd:
-  enabled: true
-dynamo-nats:
-  enabled: true
-EOF
-
-# Install
-helm install dynamo-platform oci://nvcr.io/nvidia/charts/dynamo-platform \
-  --version 0.7.0 -f platform-values.yaml
-
-# Verify
-kubectl get pods
-# Should show: etcd-0 and nats-0 Running
+Expected output:
+```
+NAME                                  STATUS   AGE
+keivenc-dyn-1556-repro-nixl-timeout   Active   5s
 ```
 
-**Step 2: Create Model Cache**
+**Step 2: Create Model Cache PVC (One-Time Only)**
+
+If the model cache doesn't exist, create it and download the model:
 
 ```bash
-# Create PVC
+# Create PVC (only needed once)
 cat > model-cache-pvc.yaml <<EOF
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: model-cache
+  namespace: keivenc-dyn-1556-repro-nixl-timeout
 spec:
   accessModes: [ReadWriteMany]
   resources:
     requests:
       storage: 500Gi
-  storageClassName: <your-storage-class>
+  storageClassName: nebius-shared-fs
 EOF
 
 kubectl apply -f model-cache-pvc.yaml
+
+# Verify PVC is bound
+kubectl get pvc model-cache -n keivenc-dyn-1556-repro-nixl-timeout
+# Wait until STATUS shows "Bound"
 ```
 
-**Step 3: Deploy Workers**
+**Step 3: Download Model (One-Time Only)**
 
-See `deepseek-r1-disagg.yaml` in this directory for complete configuration.
-
-Key settings:
-- TP8 (8 GPUs/worker) matches original bug report configuration
-- Use `--connector nixl --enforce-eager`
-- Mount model cache at `/models`
-- Set `HF_HOME=/models/hub`
+Download the DeepSeek-R1 model to the PVC (takes ~30 minutes):
 
 ```bash
+# Create a temporary pod to download the model
+cat > download-model.yaml <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: model-downloader
+  namespace: keivenc-dyn-1556-repro-nixl-timeout
+spec:
+  containers:
+  - name: downloader
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post1
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        pip install huggingface_hub && \
+        huggingface-cli download deepseek-ai/DeepSeek-R1-Distill-Llama-70B \
+          --cache-dir /models/hub && \
+        echo "Download complete"
+    volumeMounts:
+    - name: model-cache
+      mountPath: /models
+    env:
+    - name: HF_HOME
+      value: /models/hub
+  volumes:
+  - name: model-cache
+    persistentVolumeClaim:
+      claimName: model-cache
+  restartPolicy: Never
+EOF
+
+kubectl apply -f download-model.yaml
+
+# Monitor download progress
+kubectl logs -f model-downloader -n keivenc-dyn-1556-repro-nixl-timeout
+
+# Clean up downloader pod when done
+kubectl delete pod model-downloader -n keivenc-dyn-1556-repro-nixl-timeout
+```
+
+**Step 4: Verify Setup**
+
+Before proceeding, verify the namespace and model cache are ready:
+
+```bash
+# Check namespace exists
+kubectl get namespace keivenc-dyn-1556-repro-nixl-timeout
+
+# Verify model cache PVC exists and is bound
+kubectl get pvc model-cache -n keivenc-dyn-1556-repro-nixl-timeout
+# Should show: STATUS=Bound, CAPACITY=25000Gi (or similar large size)
+```
+
+**Step 5: Deploy DynamoGraphDeployment**
+
+Apply the disaggregated vLLM configuration:
+
+```bash
+# Apply the deployment
 kubectl apply -f deepseek-r1-disagg.yaml
-kubectl get pods -w  # Wait for Running (5-10 min first time)
+
+# Watch pods starting (takes 3-5 minutes)
+kubectl get pods -n keivenc-dyn-1556-repro-nixl-timeout -w
 ```
 
-**Step 4: Test**
+Expected output:
+```
+NAME                                                 READY   STATUS              RESTARTS   AGE
+deepseek-r1-disagg-repro-0-frontend-xxxxx            0/1     ContainerCreating   0          10s
+deepseek-r1-disagg-repro-0-vllmdecodeworker-xxxxx    0/1     ContainerCreating   0          10s
+deepseek-r1-disagg-repro-0-vllmprefillworker-xxxxx   0/1     ContainerCreating   0          10s
+```
+
+Wait until all pods show `1/1 Running` (Ctrl+C to stop watch):
+```
+NAME                                                 READY   STATUS    RESTARTS   AGE
+deepseek-r1-disagg-repro-0-frontend-xxxxx            1/1     Running   0          5m
+deepseek-r1-disagg-repro-0-vllmdecodeworker-xxxxx    1/1     Running   0          5m
+deepseek-r1-disagg-repro-0-vllmprefillworker-xxxxx   1/1     Running   0          5m
+```
+
+**Step 6: Get Pod Names**
+
+Save pod names for easier access:
 
 ```bash
-# Install genai-perf
+export NS=keivenc-dyn-1556-repro-nixl-timeout
+export FRONTEND=$(kubectl get pods -n $NS -l component=frontend -o jsonpath='{.items[0].metadata.name}')
+export PREFILL=$(kubectl get pods -n $NS -l component=vllmprefillworker -o jsonpath='{.items[0].metadata.name}')
+export DECODE=$(kubectl get pods -n $NS -l component=vllmdecodeworker -o jsonpath='{.items[0].metadata.name}')
+
+echo "Frontend: $FRONTEND"
+echo "Prefill:  $PREFILL"
+echo "Decode:   $DECODE"
+```
+
+**Step 7: Port-Forward to Frontend**
+
+Open port 8787 to access the frontend:
+
+```bash
+kubectl port-forward $FRONTEND 8787:8787 -n $NS &
+# Wait 2 seconds for port-forward to establish
+sleep 2
+```
+
+**Step 8: Send Test Request**
+
+Send a simple request to reproduce the anomalies:
+
+```bash
+curl -X POST http://localhost:8787/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+    "messages": [{"role": "user", "content": "Say hello"}],
+    "max_tokens": 10,
+    "stream": false
+  }'
+```
+
+Expected response (request succeeds despite KV transfer issues):
+```json
+{
+  "id": "chatcmpl-...",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "content": "Hello! How can I assist...",
+      "role": "assistant"
+    },
+    "finish_reason": "length"
+  }],
+  "created": 1734028316,
+  "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+  "usage": {
+    "prompt_tokens": 7,
+    "completion_tokens": 10,
+    "total_tokens": 17
+  }
+}
+```
+
+**Step 9: Check for Anomalies**
+
+Wait 120 seconds, then check logs:
+
+```bash
+# Wait for KV timeout (120 seconds)
+sleep 120
+
+# Check prefill worker for "0 decode worker" warnings (Anomaly 1)
+kubectl logs $PREFILL -n $NS --since=3m | grep "Releasing expired KV blocks"
+```
+
+Expected output (multiple warnings):
+```
+WARN nixl_connector.get_finished: Releasing expired KV blocks for request <uuid>
+which were retrieved by 0 decode worker(s) within 120 seconds.
+```
+
+```bash
+# Check decode worker for broken pipe errors (Anomaly 2)
+kubectl logs $DECODE -n $NS --since=5m | grep -i "broken pipe"
+```
+
+Expected output (occasional):
+```
+ERROR dynamo_runtime::pipeline::network::tcp::client: failed to join writer task:
+I/O error: Broken pipe (os error 32)
+```
+
+### Running Performance Tests
+
+For systematic testing with genai-perf:
+
+```bash
+# Install genai-perf if not already installed
 pip install genai-perf
 
-# Port-forward
-kubectl port-forward <frontend-pod> 8787:8787 &
+# Port-forward should already be running from Step 4
+# If not: kubectl port-forward $FRONTEND 8787:8787 -n $NS &
 
-# Test with exact token counts (examples)
+# Run test with specific token count
 genai-perf profile \
-  --synthetic-input-tokens-mean 1000 \
+  --synthetic-input-tokens-mean 120000 \
   --output-tokens-mean 100 \
   --request-count 5 \
   --model deepseek-ai/DeepSeek-R1-Distill-Llama-70B \
@@ -252,41 +395,21 @@ genai-perf profile \
   --streaming --verbose
 
 # Check logs 120 seconds after test completes
-kubectl logs <prefill-worker> --since=3m | grep "Releasing"
-# Should show "0 decode worker(s)" warnings
+kubectl logs $PREFILL -n $NS --since=3m | grep "Releasing"
+# Should show multiple "0 decode worker(s)" warnings
 ```
+
+---
 
 ### Test Results (2025-12-12)
 
 ### TP8 Configuration (8 GPUs/worker)
-
-**Single Request Tests** (--request-count 1):
-
-| Input Tokens | TTFT | Request Latency | Status | "0 decode worker" warnings |
-|--------------|------|-----------------|--------|---------------------------|
-| 40,000 | 7.65s | 10.47s | ✅ Success | Present |
-| 80,000 | 8.71s | 11.54s | ✅ Success | Present |
-| 110,000 | 7.42s | 10.31s | ✅ Success | Present |
-| 120,000 | 3.45s | 6.31s | ✅ Success | Present |
-| 130,000 | 3.44s | 6.35s | ✅ Success | Present |
-| 140,000 | N/A | 0.85s | ❌ Rejected (exceeds 131k limit) | N/A |
-
-**10 Request Tests** (--request-count 10):
-
-| Input Tokens | Avg TTFT (range) | Avg Request Latency | Status | "0 decode worker" warnings |
-|--------------|------------------|---------------------|--------|---------------------------|
-| 110,000 | 19.96s (962ms-24.28s) | 22.86s | ✅ 10/10 completed | 168 warnings |
-| 120,000 | 2.86s (982ms-3.60s) | 5.71s | ✅ 10/10 completed | 112 warnings |
-
-**Total TP8 Tests**: 26 requests (6 single + 20 batch)
-**Total "0 decode worker" warnings**: 280+ instances
 
 **⚠️ TODO: Research TTFT Anomaly**
 
 Unexplained performance pattern in single request tests:
 - **40k-110k tokens**: TTFT ranges 7.42s-8.71s (expected behavior)
 - **120k-130k tokens**: TTFT drops to ~3.4s (2.5x faster - anomalous)
-- **10-request batch at 120k**: TTFT also shows 2.86s avg (consistent with single request anomaly)
 
 **Expected behavior**: TTFT should increase with context size (more tokens to prefill)
 **Observed behavior**: TTFT dramatically decreases at 120k+ tokens
@@ -300,6 +423,46 @@ Unexplained performance pattern in single request tests:
 
 **Recommendation**: Rerun 120k-130k token tests in isolation to verify if this is reproducible or an artifact of test ordering.
 
+### Test Results from `run-repro-tests.sh` (2025-12-12)
+
+**Methodology**: Automated script with genai-perf. Similar to original bug report but with key differences:
+- **Request count**: 1 per token size (vs 10 in original report)
+- **No warmup**: No `--warmup-request-count` (original had warmup-request-count 1)
+- **Output tokens**: `--output-tokens-mean 100` (vs `--output-tokens-stddev 0` in original)
+- **Endpoint type**: Added `--endpoint-type chat` for OpenAI HTTP compatibility
+- **Token sizes tested**: 40k, 80k, 100k, 110k, 120k (original focused on 120k)
+  - Note: 140k tokens would be rejected - model has 131,072 token maximum context length
+- **Log collection**: Worker logs collected over 2-minute windows after each request to capture anomalies
+
+| Input Tokens | TTFT (s) | ISL (ms) | Request Latency (s) | Primary Error | Anomaly 1 (Broken Pipe) | Anomaly 2 (503) | Anomaly 3 (KV Timeout) |
+|--------------|----------|----------|---------------------|---------------|------------------------|-----------------|------------------------|
+| 40,000 | 7.91 | 28.67 | 10.75 | 0 | 2 | 0 | 104 |
+| 80,000 | 8.81 | 28.59 | 11.64 | 0 | 0 | 0 | 112 |
+| 100,000 | 5.15 | 28.79 | 8.00 | 0 | 4 | 0 | 120 |
+| 110,000 | 3.17 | 28.60 | 6.00 | 0 | 0 | 0 | 104 |
+| 120,000 | 3.26 | 29.69 | 6.11 | 0 | 0 | 0 | 112 |
+
+**Notes**:
+- TTFT = Time To First Token (includes prefill + KV transfer + decode first token)
+- ISL = Inter-token Latency (time between subsequent decode tokens)
+- Request Latency = Total end-to-end request time
+- KV transfer time not directly measurable from genai-perf output
+- Anomaly counts from worker logs during test windows
+
+**Key Observations**:
+- ⚠️ **TTFT Anomaly Confirmed**: 110k-120k show dramatically lower TTFT (3.17s-3.26s) vs 40k-100k (5.15s-8.81s) - counterintuitive
+- ✅ ISL remains consistent (~28-29ms) regardless of context size
+- ✅ Anomaly 3 (KV timeout warnings) consistently present (104-120 per test)
+- ✅ Anomaly 1 (broken pipe) observed sporadically (0-4 instances)
+- ❌ No primary error (fatal NIXL protocol error) observed
+- ❌ No Anomaly 2 (503 errors) in test windows
+
+**Conclusion**:
+- **TTFT anomaly is reproducible** - 110k-120k tokens show ~2.5x faster TTFT than expected (see TODO section above for investigation)
+- Anomaly 3 (KV timeout with "0 decode worker") reproduces consistently with ~100+ warnings per test (downgraded from error to warning)
+- Anomaly 1 (broken pipe) appears intermittently at various token counts
+- System continues serving requests despite anomalies via prefill-only fallback
+
 ---
 
 ### Summary
@@ -312,9 +475,9 @@ Unexplained performance pattern in single request tests:
 - **This is the only true error** - everything else are anomalies
 
 **Anomalies Observed**:
-- **Anomaly 1**: KV transfer timeout warnings ("0 decode worker" retrieving blocks) - observed in 100% of tests
-- **Anomaly 2**: Broken pipe errors (os error 32) - occasional during testing
-- **Anomaly 3**: Health check 503 errors - during initialization/high load
+- **Anomaly 1**: Broken pipe errors (os error 32) - occasional during testing
+- **Anomaly 2**: Health check 503 errors - during initialization/high load
+- **Anomaly 3**: KV transfer timeout warnings ("0 decode worker" retrieving blocks) - observed in 100% of tests (warning only)
 - **Nature**: May be consequences of primary error or separate issues
 
 **Key Findings**:
@@ -347,14 +510,7 @@ Key differences from original report:
 - **Status**: Found in December 9th logs, not currently reproducing
 - **Nature**: FATAL - This is the only true error
 
-**ANOMALY 1: KV Transfer Timeout**
-- **Component**: Prefill worker
-- **When**: 120 seconds after request starts
-- **Observation**: Decode worker never retrieves KV blocks from prefill
-- **Frequency**: 8-18 warnings per request (varies by size)
-- **Nature**: Warning - May be consequence of primary error or separate issue
-
-**ANOMALY 2: Broken Pipe**
+**ANOMALY 1: Broken Pipe**
 - **Component**: Decode worker
 - **When**: During request processing
 - **Observation**: TCP writer task attempts to write to closed connection
@@ -363,7 +519,7 @@ Key differences from original report:
 - **Conditions**: Observed during curl and genai-perf tests, all token counts
 - **Nature**: May be consequence of primary error (connection already reset)
 
-**ANOMALY 3: Service Unavailable (503)**
+**ANOMALY 2: Service Unavailable (503)**
 - **Component**: Decode worker HTTP health endpoint
 - **When**: During worker initialization and high load periods
 - **Observation**: Worker temporarily unable to serve health check requests
@@ -371,6 +527,13 @@ Key differences from original report:
 - **Frequency**: Regular 10-second intervals (matching health check period)
 - **Conditions**: Worker startup phase, sustained high load
 - **Nature**: Temporary service overload or initialization delay
+
+**ANOMALY 3: KV Transfer Timeout Warning**
+- **Component**: Prefill worker
+- **When**: 120 seconds after request starts
+- **Observation**: Decode worker never retrieves KV blocks from prefill
+- **Frequency**: 8-18 warnings per request (varies by size)
+- **Nature**: Warning (not error) - May be consequence of primary error, separate issue, or expected when KV transfer not actively used
 
 ### Files in This Directory
 
@@ -414,9 +577,9 @@ message: "Connection reset by peer" })"
 ### Observed Anomalies
 Multiple anomalies consistently observed during testing:
 
-1. **Anomaly 1 - KV Transfer Timeout Warnings**: "0 decode worker(s)" retrieved KV blocks (280+ instances across TP8 tests)
-2. **Anomaly 2 - Broken Pipes**: TCP writer failures (error 32) - sporadic during testing
-3. **Anomaly 3 - Health Check 503s**: Service temporarily unavailable during initialization/high load
+1. **Anomaly 1 - Broken Pipes**: TCP writer failures (error 32) - sporadic during testing
+2. **Anomaly 2 - Health Check 503s**: Service temporarily unavailable during initialization/high load
+3. **Anomaly 3 - KV Transfer Timeout Warnings**: "0 decode worker(s)" retrieved KV blocks (280+ instances across TP8 tests) - warning only
 
 **Nature**: These anomalies may be consequences of the primary error when it occurs, or separate unrelated issues.
 
@@ -428,4 +591,4 @@ Multiple anomalies consistently observed during testing:
 4. **Tested configuration**: TP8 (8 GPUs/worker), with/without explicit `--connector nixl`
 5. **Model limit**: 131,072 tokens maximum context length
 
-**The disaggregated vLLM setup with NIXL connector has a confirmed fatal error** that appears intermittently. The observed anomalies (KV transfer warnings, broken pipes, health check failures) may be related to the primary error or represent separate issues requiring investigation.
+**The disaggregated vLLM setup with NIXL connector has a confirmed fatal error** that appears intermittently. The observed anomalies (broken pipes, health check failures, KV transfer timeout warnings) may be related to the primary error or represent separate issues requiring investigation.

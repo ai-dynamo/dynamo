@@ -1,0 +1,26 @@
+[2m2025-12-12T18:35:06.193152Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:35:06.246570Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:35:17.776379Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:35:17.814384Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:35:27.816005Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:35:27.852308Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:35:37.853637Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:35:37.891179Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:35:47.892830Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:35:47.936818Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:35:57.937823Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:35:57.975175Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:36:07.977044Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:36:08.014903Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:36:18.015243Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:36:18.054478Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:36:28.055563Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:36:28.095396Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:36:38.096434Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:36:38.133159Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:36:48.134940Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:36:48.174454Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:36:58.175444Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:36:58.213517Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:37:08.214888Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:37:08.252474Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate

@@ -1,0 +1,32 @@
+[2m2025-12-12T18:19:41.132544Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:19:41.169470Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:19:51.170382Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:19:51.215408Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:20:03.875398Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:20:03.913489Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:20:13.914439Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:20:13.951405Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:20:23.952474Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:20:23.988490Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:20:33.989477Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:20:34.028070Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:20:44.029268Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:20:44.068210Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:20:44.068319Z[0m [31mERROR[0m [2mdynamo_runtime::pipeline::network::tcp::client[0m[2m:[0m failed to join writer task: I/O error: Broken pipe (os error 32)
+
+Caused by:
+    Broken pipe (os error 32)
+[2m2025-12-12T18:20:54.070363Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:20:54.107082Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:21:04.108227Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:21:04.146904Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:21:14.147617Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:21:14.186981Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:21:24.187916Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:21:24.224500Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:21:34.225286Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:21:34.263865Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:21:44.265138Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:21:44.303901Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate
+[2m2025-12-12T18:21:54.304204Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Canary timer expired for generate, sending health check
+[2m2025-12-12T18:21:54.341998Z[0m [32m INFO[0m [2mdynamo_runtime::health_check[0m[2m:[0m Health check successful for generate

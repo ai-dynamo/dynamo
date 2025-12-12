@@ -1,0 +1,48 @@
+Test Results Summary - Fri Dec 12 10:37:16 AM PST 2025
+===========================================
+
+Tokens     | TTFT (s)     | Req Latency (s)    | Primary Error   | KV Timeout      | Broken Pipe     | 503 Errors
+-----------+--------------+--------------------+-----------------+-----------------+-----------------+----------------
+100k       | N/A          | N/A                | 0
+0             | 120             | 4               | 0
+0
+110k       | N/A          | N/A                | 0
+0             | 104             | 0
+0             | 0
+0
+120k       | N/A          | N/A                | 0
+0             | 112             | 0
+0             | 0
+0
+
+===========================================
+
+Detailed Error Analysis:
+
+Total Primary Errors:       0
+Total KV Timeout Warnings:  0
+Total Broken Pipe Errors:   0
+Total 503 Errors:           0
+
+===========================================
+Summary saved to: /tmp/repro-dyn-1556/summary.txt
+All logs saved to: /tmp/repro-dyn-1556/
+
+Generated files:
+total 252K
+-rw-r--r-- 1 keivenc domain-users 4.2K Dec 12 10:22 040k_decode.log
+-rw-r--r-- 1 keivenc domain-users  11K Dec 12 10:19 040k_genai-perf.log
+-rw-r--r-- 1 keivenc domain-users  28K Dec 12 10:22 040k_prefill.log
+-rw-r--r-- 1 keivenc domain-users 4.0K Dec 12 10:24 080k_decode.log
+-rw-r--r-- 1 keivenc domain-users  11K Dec 12 10:22 080k_genai-perf.log
+-rw-r--r-- 1 keivenc domain-users  30K Dec 12 10:24 080k_prefill.log
+-rw-r--r-- 1 keivenc domain-users 4.6K Dec 12 10:31 100k_decode.log
+-rw-r--r-- 1 keivenc domain-users  11K Dec 12 10:29 100k_genai-perf.log
+-rw-r--r-- 1 keivenc domain-users  32K Dec 12 10:31 100k_prefill.log
+-rw-r--r-- 1 keivenc domain-users 4.3K Dec 12 10:34 110k_decode.log
+-rw-r--r-- 1 keivenc domain-users  11K Dec 12 10:32 110k_genai-perf.log
+-rw-r--r-- 1 keivenc domain-users  29K Dec 12 10:34 110k_prefill.log
+-rw-r--r-- 1 keivenc domain-users 3.7K Dec 12 10:37 120k_decode.log
+-rw-r--r-- 1 keivenc domain-users  11K Dec 12 10:35 120k_genai-perf.log
+-rw-r--r-- 1 keivenc domain-users  30K Dec 12 10:37 120k_prefill.log
+-rw-r--r-- 1 keivenc domain-users 1.1K Dec 12 10:37 summary.txt

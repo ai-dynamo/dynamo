@@ -1,0 +1,127 @@
+[2025-12-12 10:31:56] DEBUG    Inferred tokenizer from    config_tokenizer.py:79
+                               model name:
+                               deepseek-ai/DeepSeek-R1-Di
+                               still-Llama-70B
+[2025-12-12 10:31:56] INFO     Profiling these models:       create_config.py:58
+                               deepseek-ai/DeepSeek-R1-Disti
+                               ll-Llama-70B
+[2025-12-12 10:31:56] WARNING  Skipping unreachable metrics    subcommand.py:223
+                               URL:
+                               http://localhost:9400/metrics
+[2025-12-12 10:31:56] INFO     Model name            perf_analyzer_config.py:157
+                               'deepseek-ai/DeepSeek
+                               -R1-Distill-Llama-70B
+                               ' cannot be used to
+                               create artifact
+                               directory. Instead,
+                               'deepseek-ai_DeepSeek
+                               -R1-Distill-Llama-70B
+                               ' will be used.
+[2025-12-12 10:31:56] INFO     Creating tokenizer for:         subcommand.py:190
+                               deepseek-ai/DeepSeek-R1-Distill
+                               -Llama-70B
+[2025-12-12 10:31:59] INFO     Running Perf Analyzer :          subcommand.py:98
+                               'perf_analyzer -m
+                               deepseek-ai/DeepSeek-R1-Distill-
+                               Llama-70B --async
+                               --stability-percentage 999
+                               --request-count 1 -i http -u
+                               http://localhost:8787
+                               --concurrency-range 1
+                               --service-kind openai --endpoint
+                               v1/chat/completions --input-data
+                               artifacts/deepseek-ai_DeepSeek-R
+                               1-Distill-Llama-70B-openai-chat-
+                               concurrency1/inputs.json
+                               --profile-export-file
+                               artifacts/deepseek-ai_DeepSeek-R
+                               1-Distill-Llama-70B-openai-chat-
+                               concurrency1/profile_export.json
+                               '
+ Successfully read data for 1 stream/streams with 100 step/steps.
+*** Measurement Settings ***
+  Service Kind: OPENAI
+  Sending 1 benchmark request
+  Using asynchronous calls for inference
+
+Request concurrency: 1
+WARNING: Pass contained only one request, so sample latency standard deviation will be infinity (UINT64_MAX).
+WARNING: Pass contained only one request, so sample latency standard deviation will be infinity (UINT64_MAX).
+  Client:
+    Request count: 1
+    Throughput: 0.142844 infer/sec
+    Avg latency: 5998814 usec (standard deviation 18446744073709551615 usec)
+    p50 latency: 5998814 usec
+    p90 latency: 5998814 usec
+    p95 latency: 5998814 usec
+    p99 latency: 5998814 usec
+    Avg HTTP time: 0 usec (send/recv 0 usec + response wait 0 usec)
+Inferences/Second vs. Client Average Batch Latency
+Concurrency: 1, throughput: 0.142844 infer/sec, latency 5998814 usec
+[2025-12-12 10:32:06] INFO     Loading response data   profile_data_parser.py:66
+                               from
+                               'artifacts/deepseek-ai_
+                               DeepSeek-R1-Distill-Lla
+                               ma-70B-openai-chat-conc
+                               urrency1/profile_export
+                               .json'
+[2025-12-12 10:32:06] INFO     Parsing total 1    llm_profile_data_parser.py:124
+                               requests.
+
+Progress:   0%|          | 0/1 [00:00<?, ?requests/s]
+Progress: 100%|██████████| 1/1 [00:00<00:00,  8.87requests/s]
+Progress: 100%|██████████| 1/1 [00:00<00:00,  8.86requests/s]
+                        NVIDIA GenAI-Perf | LLM Metrics
+┏━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┓
+┃ Statist… ┃      avg ┃      min ┃      max ┃       p99 ┃      p90 ┃       p75 ┃
+┡━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━┩
+│  Time To │ 3,167.70 │ 3,167.70 │ 3,167.70 │  3,167.70 │ 3,167.70 │  3,167.70 │
+│    First │          │          │          │           │          │           │
+│    Token │          │          │          │           │          │           │
+│     (ms) │          │          │          │           │          │           │
+│  Time To │    29.67 │    29.67 │    29.67 │     29.67 │    29.67 │     29.67 │
+│   Second │          │          │          │           │          │           │
+│    Token │          │          │          │           │          │           │
+│     (ms) │          │          │          │           │          │           │
+│  Request │ 5,998.81 │ 5,998.81 │ 5,998.81 │  5,998.81 │ 5,998.81 │  5,998.81 │
+│  Latency │          │          │          │           │          │           │
+│     (ms) │          │          │          │           │          │           │
+│    Inter │    28.60 │    28.60 │    28.60 │     28.60 │    28.60 │     28.60 │
+│    Token │          │          │          │           │          │           │
+│  Latency │          │          │          │           │          │           │
+│     (ms) │          │          │          │           │          │           │
+│   Output │    34.97 │    34.97 │    34.97 │     34.97 │    34.97 │     34.97 │
+│    Token │          │          │          │           │          │           │
+│ Through… │          │          │          │           │          │           │
+│ Per User │          │          │          │           │          │           │
+│ (tokens… │          │          │          │           │          │           │
+│   Output │   100.00 │   100.00 │   100.00 │    100.00 │   100.00 │    100.00 │
+│ Sequence │          │          │          │           │          │           │
+│   Length │          │          │          │           │          │           │
+│ (tokens) │          │          │          │           │          │           │
+│    Input │ 110,000… │ 110,000… │ 110,000… │ 110,000.… │ 110,000… │ 110,000.… │
+│ Sequence │          │          │          │           │          │           │
+│   Length │          │          │          │           │          │           │
+│ (tokens) │          │          │          │           │          │           │
+│   Output │    16.67 │      N/A │      N/A │       N/A │      N/A │       N/A │
+│    Token │          │          │          │           │          │           │
+│ Through… │          │          │          │           │          │           │
+│ (tokens… │          │          │          │           │          │           │
+│  Request │     0.17 │      N/A │      N/A │       N/A │      N/A │       N/A │
+│ Through… │          │          │          │           │          │           │
+│     (per │          │          │          │           │          │           │
+│     sec) │          │          │          │           │          │           │
+│  Request │     1.00 │      N/A │      N/A │       N/A │      N/A │       N/A │
+│    Count │          │          │          │           │          │           │
+│  (count) │          │          │          │           │          │           │
+└──────────┴──────────┴──────────┴──────────┴───────────┴──────────┴───────────┘
+[2025-12-12 10:32:06] INFO     Generating                    json_exporter.py:64
+                               artifacts/deepseek-ai_DeepSee
+                               k-R1-Distill-Llama-70B-openai
+                               -chat-concurrency1/profile_ex
+                               port_genai_perf.json
+[2025-12-12 10:32:06] INFO     Generating                     csv_exporter.py:75
+                               artifacts/deepseek-ai_DeepSeek
+                               -R1-Distill-Llama-70B-openai-c
+                               hat-concurrency1/profile_expor
+                               t_genai_perf.csv
