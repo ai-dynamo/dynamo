@@ -1242,8 +1242,8 @@ impl Leader for InstanceLeader {
         //   - g3 is not empty, or
         //   - remote_search is true and there are remote leaders
         let has_remote_leaders = !self.remote_leaders.read().unwrap().is_empty();
-        let is_ready = matched_g3_blocks.is_empty()
-            && (!has_remote_leaders || (has_remote_leaders && !options.search_remote));
+        let is_ready =
+            matched_g3_blocks.is_empty() && !(has_remote_leaders && options.search_remote);
 
         if is_ready {
             // No session needed - blocks owned directly by ReadyResult (RAII)

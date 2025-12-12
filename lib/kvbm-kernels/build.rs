@@ -178,10 +178,7 @@ fn build_cuda_library(cu_files: &[PathBuf], out_dir: &str, target_arch: &str, us
         let ar_path = Path::new(out_dir).join("libkvbm_kernels.a");
 
         let mut ar_cmd = Command::new("ar");
-        ar_cmd
-            .arg("crus")
-            .arg(&ar_path)
-            .arg(&obj_path);
+        ar_cmd.arg("crus").arg(&ar_path).arg(&obj_path);
 
         println!("cargo:warning=Creating static archive libkvbm_kernels.a...");
         let status = ar_cmd
@@ -315,7 +312,7 @@ fn use_prebuilt_library(out_dir: &str, _target_arch: &str, use_static: bool) {
         for entry in fs::read_dir(&prebuilt_dir).expect("Failed to read prebuilt directory") {
             let entry = entry.expect("Failed to read entry");
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "fatbin") {
+            if path.extension().is_some_and(|ext| ext == "fatbin") {
                 let dest = Path::new(out_dir).join(path.file_name().unwrap());
                 fs::copy(&path, &dest).expect("Failed to copy fatbin");
             }
@@ -393,7 +390,7 @@ fn discover_cuda_files() -> Vec<PathBuf> {
     for entry in fs::read_dir(cuda_dir).expect("Failed to read cuda directory") {
         let entry = entry.expect("Failed to read entry");
         let path = entry.path();
-        if path.extension().map_or(false, |ext| ext == "cu") {
+        if path.extension().is_some_and(|ext| ext == "cu") {
             cu_files.push(path);
         }
     }
