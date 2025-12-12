@@ -34,6 +34,7 @@ pub struct State {
     store: kv::Manager,
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
+    cancel_token: CancellationToken,
 }
 
 #[derive(Default, Debug)]
@@ -73,12 +74,17 @@ impl StateFlags {
 }
 
 impl State {
-    pub fn new(manager: Arc<ModelManager>, store: kv::Manager) -> Self {
+    pub fn new(
+        manager: Arc<ModelManager>,
+        store: kv::Manager,
+        cancel_token: CancellationToken,
+    ) -> Self {
         // Initialize discovery backed by KV store
         // Create a cancellation token for the discovery's watch streams
         let discovery_client = {
-            let cancel_token = CancellationToken::new();
-            Arc::new(KVStoreDiscovery::new(store.clone(), cancel_token)) as Arc<dyn Discovery>
+            let discovery_cancel_token = cancel_token.child_token();
+            Arc::new(KVStoreDiscovery::new(store.clone(), discovery_cancel_token))
+                as Arc<dyn Discovery>
         };
 
         Self {
@@ -92,6 +98,7 @@ impl State {
                 embeddings_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
             },
+            cancel_token,
         }
     }
 
@@ -116,6 +123,16 @@ impl State {
         self.discovery_client.clone()
     }
 
+    /// Check if the service is shutting down
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_token.is_cancelled()
+    }
+
+    /// Get the cancellation token
+    pub fn cancel_token(&self) -> &CancellationToken {
+        &self.cancel_token
+    }
+
     // TODO
     pub fn sse_keep_alive(&self) -> Option<Duration> {
         None
@@ -126,6 +143,8 @@ impl State {
 pub struct HttpService {
     // The state we share with every request handler
     state: Arc<State>,
+    // Store the main cancel token separately for service lifecycle management
+    main_cancel_token: Option<CancellationToken>,
 
     router: axum::Router,
     port: u16,
@@ -205,8 +224,26 @@ impl HttpService {
         self.state().manager()
     }
 
+    /// Set the cancellation token for this service
+    pub fn with_cancel_token(&mut self, cancel_token: CancellationToken) {
+        // Create new state with the cancel token
+        let model_manager = self.state.manager_clone();
+        let store = self.state.store().clone();
+        let new_state = Arc::new(State::new(model_manager, store, cancel_token.clone()));
+
+        // Copy over the flags from the old state
+        for endpoint_type in crate::endpoint_type::EndpointType::all() {
+            let enabled = self.state.flags.get(&endpoint_type);
+            new_state.flags.set(&endpoint_type, enabled);
+        }
+
+        self.state = new_state;
+        self.main_cancel_token = Some(cancel_token);
+    }
+
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
-        let this = self.clone();
+        let mut this = self.clone();
+        this.with_cancel_token(cancel_token.clone());
         tokio::spawn(async move { this.run(cancel_token).await })
     }
 
@@ -332,7 +369,9 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = Arc::new(State::new(model_manager, config.store));
+        // Create a temporary cancel token for building - will be replaced in spawn/run
+        let temp_cancel_token = CancellationToken::new();
+        let state = Arc::new(State::new(model_manager, config.store, temp_cancel_token));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -398,6 +437,7 @@ impl HttpServiceConfigBuilder {
 
         Ok(HttpService {
             state,
+            main_cancel_token: None,
             router,
             port: config.port,
             host: config.host,
