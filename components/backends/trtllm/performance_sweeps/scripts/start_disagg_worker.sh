@@ -43,16 +43,19 @@ echo "  max_seq_len: ${max_seq_len}"
 export TLLM_LOG_LEVEL=INFO
 export TRTLLM_ENABLE_PDL=1
 
-if [ "$is_dep" = "true" ]; then
-    echo "Using DEP. Setting env vars."
-    export TRTLLM_MOE_ALLTOALL_BACKEND="mnnvlthroughput"
-    export TRTLLM_FORCE_ALLTOALL_METHOD="MNNVL"
-    export TRTLLM_MOE_A2A_WORKSPACE_MB="2048"
-fi 
+export TRTLLM_SERVER_DISABLE_GC=1
+export TRTLLM_WORKER_DISABLE_GC=1
+export NCCL_GRAPH_MIXING_SUPPORT=0
 
 if [[ "${model_path,,}" != *r1* ]]; then
     echo "Inferred gpt-oss style model. Setting OVERRIDE_QUANT_ALGO to W4A8_MXFP4_MXFP8"
     export OVERRIDE_QUANT_ALGO=W4A8_MXFP4_MXFP8
+    if [ "$is_dep" = "true" ]; then
+        echo "Using DEP with gpt-oss. Setting env vars."
+        export TRTLLM_MOE_ALLTOALL_BACKEND="mnnvlthroughput"
+        export TRTLLM_FORCE_ALLTOALL_METHOD="MNNVL"
+        export TRTLLM_MOE_A2A_WORKSPACE_MB="2048"
+    fi
 fi
 
 trtllm-llmapi-launch python3 -m dynamo.trtllm \

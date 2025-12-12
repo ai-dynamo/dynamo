@@ -72,7 +72,7 @@ def generate_dsr1_config(
         },
         "cache_transceiver_config": {
             "max_tokens_in_buffer": args.cache_transceiver_max_num_tokens,
-            "backend": "DEFAULT",
+            "backend": "UCX",
         },
     }
 
@@ -100,9 +100,9 @@ def generate_dsr1_config(
         },
         "cache_transceiver_config": {
             "max_tokens_in_buffer": args.cache_transceiver_max_num_tokens,
-            "backend": "DEFAULT",
+            "backend": "UCX",
         },
-        "stream_interval": 20,
+        "stream_interval": 100,
     }
 
     if args.gen_tp_size == 8 and not args.gen_enable_attention_dp:
