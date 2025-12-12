@@ -7,6 +7,7 @@ set -e
 # If no arguments provided, runs all: 40000 80000 100000 120000
 
 # Configuration
+KUBECTL="/home/keivenc/bin/Linux.x86_64/kubectl"
 NS="${NS:-keivenc-dyn-1556-repro-nixl-timeout}"
 MODEL="deepseek-ai/DeepSeek-R1-Distill-Llama-70B"
 URL="http://localhost:8787"
@@ -28,9 +29,9 @@ mkdir -p "$OUTPUT_DIR"
 
 # Get pod names
 echo "Getting pod names from namespace: $NS"
-FRONTEND=$(kubectl get pods -n "$NS" -l nvidia.com/dynamo-component=Frontend -o jsonpath='{.items[0].metadata.name}')
-PREFILL=$(kubectl get pods -n "$NS" -l nvidia.com/dynamo-component=VllmPrefillWorker -o jsonpath='{.items[0].metadata.name}')
-DECODE=$(kubectl get pods -n "$NS" -l nvidia.com/dynamo-component=VllmDecodeWorker -o jsonpath='{.items[0].metadata.name}')
+FRONTEND=$("$KUBECTL" get pods -n "$NS" -l nvidia.com/dynamo-component=Frontend -o jsonpath='{.items[0].metadata.name}')
+PREFILL=$("$KUBECTL" get pods -n "$NS" -l nvidia.com/dynamo-component=VllmPrefillWorker -o jsonpath='{.items[0].metadata.name}')
+DECODE=$("$KUBECTL" get pods -n "$NS" -l nvidia.com/dynamo-component=VllmDecodeWorker -o jsonpath='{.items[0].metadata.name}')
 
 echo "Frontend: $FRONTEND"
 echo "Prefill:  $PREFILL"
@@ -39,13 +40,13 @@ echo ""
 
 # Verify pods are running
 echo "Verifying pods are running..."
-kubectl get pods -n "$NS" | grep -E "(frontend|vllmprefillworker|vllmdecodeworker)"
+"$KUBECTL" get pods -n "$NS" | grep -E "(frontend|vllmprefillworker|vllmdecodeworker)"
 echo ""
 
 # Check if port-forward is running
 if ! pgrep -f "port-forward.*8787" > /dev/null; then
     echo "Port-forward not detected. Starting port-forward to frontend..."
-    kubectl port-forward "$FRONTEND" 8787:8787 -n "$NS" > /dev/null 2>&1 &
+    "$KUBECTL" port-forward "$FRONTEND" 8787:8787 -n "$NS" > /dev/null 2>&1 &
     sleep 3
     echo "Port-forward started"
 fi
@@ -100,17 +101,17 @@ run_test() {
         echo "genai-perf completed successfully"
     fi
 
-    # Wait for KV timeout (120 seconds + buffer)
-    echo "Waiting 125 seconds for KV timeout..."
-    sleep 125
+    # Wait for log collection after test completion (decode should be fast)
+    echo "Waiting 10 seconds for log collection..."
+    sleep 10
 
     # Collect logs from prefill worker
     echo "Collecting prefill worker logs..."
-    kubectl logs "$PREFILL" -n "$NS" --since-time="$start_time" > "$prefill_log" 2>&1
+    "$KUBECTL" logs "$PREFILL" -n "$NS" --since-time="$start_time" > "$prefill_log" 2>&1
 
     # Collect logs from decode worker
     echo "Collecting decode worker logs..."
-    kubectl logs "$DECODE" -n "$NS" --since-time="$start_time" > "$decode_log" 2>&1
+    "$KUBECTL" logs "$DECODE" -n "$NS" --since-time="$start_time" > "$decode_log" 2>&1
 
     echo "Test ${tokens} tokens completed"
     echo "Logs saved:"

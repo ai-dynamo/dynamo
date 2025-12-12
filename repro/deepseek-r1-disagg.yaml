@@ -32,9 +32,15 @@ spec:
         - name: model-cache
           mountPoint: /models
       extraPodSpec:
+        hostIPC: true
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post1
           workingDir: /workspace/examples/backends/vllm
+          securityContext:
+            capabilities:
+              add:
+                - SYS_PTRACE
+                - IPC_LOCK
           # NOTE: Recipe doesn't set explicit frontend command - uses image default
           command:
           - /bin/sh
@@ -71,8 +77,9 @@ spec:
         - name: model-cache
           mountPoint: /models
       sharedMemory:
-        size: 80Gi
+        size: 10Gi
       extraPodSpec:
+        hostIPC: true
         mainContainer:
           env:
             - name: HF_HOME
@@ -82,6 +89,11 @@ spec:
               value: "300"
             - name: VLLM_RPC_TIMEOUT
               value: "400000"
+          securityContext:
+            capabilities:
+              add:
+                - SYS_PTRACE
+                - IPC_LOCK
           # Liveness probe: Allow time for service discovery registration (working deployments use 240s delay)
           livenessProbe:
             failureThreshold: 3
@@ -114,8 +126,9 @@ spec:
         - name: model-cache
           mountPoint: /models
       sharedMemory:
-        size: 80Gi
+        size: 10Gi
       extraPodSpec:
+        hostIPC: true
         mainContainer:
           env:
             - name: HF_HOME
@@ -125,6 +138,11 @@ spec:
               value: "300"
             - name: VLLM_RPC_TIMEOUT
               value: "400000"
+          securityContext:
+            capabilities:
+              add:
+                - SYS_PTRACE
+                - IPC_LOCK
           # Liveness probe: Allow time for service discovery registration (working deployments use 240s delay)
           livenessProbe:
             failureThreshold: 3
