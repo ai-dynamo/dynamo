@@ -187,17 +187,9 @@ impl PrefillRouter {
         Ok(())
     }
 
-    /// Call the prefill router with optional query-only mode
-    ///
-    /// # Arguments
-    /// * `request` - The preprocessed request
-    /// * `request_id` - Request ID for context
-    /// * `query_only` - If true, only query worker selection without executing prefill. Used for GAIE.
-    /// * `engine_ctx` - Optional engine context for linking child contexts (required for full prefill)
-    ///
-    /// # Returns
-    /// * `PrefillCallResult::WorkerIdOnly` - When query_only=true, returns just worker ID
-    /// * `PrefillCallResult::Full` - When query_only=false, returns PrefillResult
+    /// Call the prefill router with optional query-only mode (GAIE)
+    /// Query - only mode: only get the prefill worker id for the
+    /// Default Dynamo mode  - extract structured prefill result in addition to getting the prefill worker
     async fn call_prefill(
         &self,
         request: SingleIn<PreprocessedRequest>,
@@ -244,7 +236,7 @@ impl PrefillRouter {
         }
 
         // Standard Dynamo prefill mode: call generate and extract PrefillResult
-        let mut response = match prefill_router {
+        let mut prefill_response = match prefill_router {
             InnerPrefillRouter::KvRouter(router) => router
                 .generate(request)
                 .await
@@ -255,8 +247,7 @@ impl PrefillRouter {
                 .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
         };
 
-        // Extract PrefillResult from LLMEngineOutput
-        let Some(first_output) = response.next().await else {
+        let Some(first_output) = prefill_response.next().await else {
             return Err(PrefillError::PrefillError(
                 "Prefill router returned no output (stream ended)".to_string(),
             ));
@@ -268,7 +259,7 @@ impl PrefillRouter {
             .and_then(|o| o.completion_usage.as_ref())
             .and_then(|u| u.prompt_tokens_details.clone());
 
-        while let Some(next) = response.next().await {
+        while let Some(next) = prefill_response.next().await {
             if let Some(o) = next.data.as_ref()
                 && prompt_tokens_details.is_none()
             {
@@ -335,7 +326,7 @@ impl
         if req.has_annotation("query_instance_id") {
             tracing::debug!(
                 request_id = %request_id,
-                "Stage 1 (query_instance_id): Querying prefill and decode worker selection"
+                "GAIE Stage 1 (query_instance_id): Querying prefill and decode worker selection"
             );
             return self
                 .select_prefill_decode_workers(req, context, next, &request_id, &engine_ctx)
