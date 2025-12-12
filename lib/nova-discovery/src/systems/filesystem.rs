@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::Mutex as AsyncMutex;
 
 #[cfg(feature = "filesystem")]
 use fs4::fs_std::FileExt;
@@ -88,6 +89,8 @@ impl SerializedPeerInfo {
 pub struct FilesystemPeerDiscovery {
     file_path: PathBuf,
     inner: Arc<RwLock<FilesystemPeerDiscoveryInner>>,
+    /// Mutex to serialize write operations (register/unregister) to prevent race conditions
+    write_mutex: Arc<AsyncMutex<()>>,
     #[cfg(feature = "filesystem")]
     _watcher: Arc<Option<RecommendedWatcher>>,
 }
@@ -165,6 +168,7 @@ impl FilesystemPeerDiscovery {
         let discovery = Self {
             file_path: file_path.clone(),
             inner,
+            write_mutex: Arc::new(AsyncMutex::new(())),
             _watcher: Arc::new(Some(watcher)),
         };
 
@@ -179,7 +183,11 @@ impl FilesystemPeerDiscovery {
         let file_path = file_path.into();
         let inner = Arc::new(RwLock::new(FilesystemPeerDiscoveryInner::new()));
 
-        let discovery = Self { file_path, inner };
+        let discovery = Self {
+            file_path,
+            inner,
+            write_mutex: Arc::new(AsyncMutex::new(())),
+        };
 
         Ok(discovery)
     }
@@ -418,6 +426,10 @@ impl FilesystemPeerDiscovery {
         instance_id: InstanceId,
         worker_address: WorkerAddress,
     ) -> Result<(), DiscoveryError> {
+        // Hold the write mutex across the entire load-modify-save cycle to prevent
+        // race conditions where concurrent registrations can overwrite each other
+        let _guard = self.write_mutex.lock().await;
+
         // Always reload from disk before registration to ensure consistency
         self.load_from_disk()
             .await
@@ -469,6 +481,10 @@ impl FilesystemPeerDiscovery {
         &self,
         instance_id: InstanceId,
     ) -> Result<(), DiscoveryError> {
+        // Hold the write mutex across the entire load-modify-save cycle to prevent
+        // race conditions where concurrent operations can overwrite each other
+        let _guard = self.write_mutex.lock().await;
+
         // Always reload from disk before unregistration to ensure consistency
         self.load_from_disk()
             .await

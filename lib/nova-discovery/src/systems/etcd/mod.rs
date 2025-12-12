@@ -130,20 +130,6 @@ impl EtcdConfigBuilder {
     ///
     /// * `Ok(Arc<dyn DiscoverySystem>)` - Successfully connected to etcd
     /// * `Err` - Failed to build config or connect to etcd cluster
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use dynamo_am_discovery::etcd::EtcdConfig;
-    /// # #[tokio::main]
-    /// # async fn main() -> anyhow::Result<()> {
-    /// let system = EtcdConfigBuilder::default()
-    ///     .cluster_id("my-cluster-peers")
-    ///     .build()
-    ///     .await?;
-    /// # Ok(())
-    /// # }
-    /// ```
     pub async fn build(self) -> Result<Arc<dyn DiscoverySystem>, anyhow::Error> {
         // Build the config using the private generated method
         let config = self
