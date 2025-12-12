@@ -366,8 +366,13 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Create the streaming response.
         let index = 0;
-        let mut stream_response =
-            self.create_choice(index, delta.text, finish_reason, logprobs, delta.stop_reason);
+        let mut stream_response = self.create_choice(
+            index,
+            delta.text,
+            finish_reason,
+            logprobs,
+            delta.stop_reason,
+        );
 
         // Extract worker_id from disaggregated_params and inject into nvext if present
         if let Some(worker_id_info) = delta
