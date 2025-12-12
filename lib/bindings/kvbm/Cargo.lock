@@ -1386,15 +1386,6 @@ dependencies = [
 
 [[package]]
 name = "cudarc"
-version = "0.17.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bf99ab37ee7072d64d906aa2dada9a3422f1d975cdf8c8055a573bc84897ed8"
-dependencies = [
- "libloading",
-]
-
-[[package]]
-name = "cudarc"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3aa12038120eb13347a6ae2ffab1d34efe78150125108627fd85044dd4d6ff1e"
@@ -1887,7 +1878,7 @@ dependencies = [
  "blake3",
  "bytes",
  "crossbeam-queue",
- "cudarc 0.18.2",
+ "cudarc",
  "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
@@ -1938,7 +1929,7 @@ name = "dynamo-kvbm-kernels"
 version = "0.7.0"
 dependencies = [
  "cc",
- "cudarc 0.18.2",
+ "cudarc",
  "dynamo-config",
  "md5",
  "once_cell",
@@ -1968,7 +1959,7 @@ dependencies = [
  "bytes",
  "candle-core",
  "chrono",
- "cudarc 0.18.2",
+ "cudarc",
  "dashmap 5.5.3",
  "derive-getters",
  "derive_builder",
@@ -2043,7 +2034,7 @@ name = "dynamo-memory"
 version = "0.7.0"
 dependencies = [
  "anyhow",
- "cudarc 0.18.2",
+ "cudarc",
  "dynamo-config",
  "libc",
  "nix 0.30.1",
@@ -4224,7 +4215,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
- "cudarc 0.17.8",
+ "cudarc",
  "derive-getters",
  "dlpark",
  "dynamo-kvbm",

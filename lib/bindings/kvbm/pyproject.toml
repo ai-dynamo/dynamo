@@ -51,6 +51,7 @@ test = [
     "pytest>=8.3.4",
     "pytest-mypy",
     "pytest-asyncio",
+    "pytest-benchmark",
 ]
 dev = [
     "kvbm[test]",

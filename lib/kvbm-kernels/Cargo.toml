@@ -3,11 +3,13 @@
 
 [package]
 name = "dynamo-kvbm-kernels"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
-repository.workspace = true
+# Note: Not using workspace = true so this crate can be built from standalone
+# workspaces (like lib/bindings/kvbm) that don't inherit main workspace metadata
+version = "0.7.0"
+edition = "2024"
+authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/ai-dynamo/dynamo.git"
 build = "build.rs"
 
 [lib]
@@ -16,6 +18,11 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = []
+# Build kernels as a static archive (.a) instead of shared library (.so).
+# When enabled, the kernel code is embedded directly into the consuming crate,
+# eliminating the runtime dependency on libkvbm_kernels.so.
+# Note: This only affects real CUDA builds; stubs always remain dynamic.
+static-kernels = []
 # Enable CUDA tests - only works when real CUDA kernels are built (not stubs)
 # Tests are gated with #[cfg(all(test, feature = "testing-cuda", not(stub_kernels)))]
 testing-cuda = []
@@ -27,10 +34,12 @@ prebuilt-kernels = []
 generate-prebuilt = []
 
 [dependencies]
-cudarc = { workspace = true }
+# Note: Not using workspace = true so this crate can be built from standalone
+# workspaces (like lib/bindings/kvbm) that don't inherit main workspace deps
+cudarc = { version = "0.18.2", features = ["cuda-12020"] }
 once_cell = "1.19"
 
 [build-dependencies]
-dynamo-config = { workspace = true }
+dynamo-config = { path = "../config" }
 cc = "1.0"
 md5 = "0.8.0"

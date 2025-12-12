@@ -5,14 +5,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 
 from kvbm._core import v2 as _v2
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
-KvbmSchedulerOutput = _v2.SchedulerOutput
+KvbmSchedulerOutput: TypeAlias = _v2.SchedulerOutput
 
 
 def process_scheduler_output(

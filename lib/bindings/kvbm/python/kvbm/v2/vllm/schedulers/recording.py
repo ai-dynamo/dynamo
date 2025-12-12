@@ -77,7 +77,7 @@ class RecordingScheduler(SchedulerInterface):
         self.enable_recording = enable_recording
         self.iteration = 0
         self.recordings: List[RecordedIteration] = []
-        self.current_schedule_output = None
+        self.current_schedule_output: Optional[Dict[str, Any]] = None
 
         if recording_path:
             self.recording_path = Path(recording_path)

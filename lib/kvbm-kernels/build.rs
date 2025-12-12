@@ -51,17 +51,32 @@ fn main() {
     // Determine build mode
     let build_mode = determine_build_mode(nvcc_available);
 
+    // Check if static linking is requested (only applies to CUDA builds, not stubs)
+    #[cfg(feature = "static-kernels")]
+    let use_static = true;
+    #[cfg(not(feature = "static-kernels"))]
+    let use_static = false;
+
     match build_mode {
         BuildMode::FromSource => {
-            println!("cargo:warning=Building CUDA kernels from source (dynamic linking)");
-            build_cuda_shared_library(&cu_files, &out_dir, &target_arch);
+            if use_static {
+                println!("cargo:warning=Building CUDA kernels from source (static linking)");
+            } else {
+                println!("cargo:warning=Building CUDA kernels from source (dynamic linking)");
+            }
+            build_cuda_library(&cu_files, &out_dir, &target_arch, use_static);
         }
         BuildMode::Prebuilt => {
-            println!("cargo:warning=Using prebuilt CUDA kernels (dynamic linking)");
-            use_prebuilt_shared_library(&out_dir, &target_arch);
+            if use_static {
+                println!("cargo:warning=Using prebuilt CUDA kernels (static linking)");
+            } else {
+                println!("cargo:warning=Using prebuilt CUDA kernels (dynamic linking)");
+            }
+            use_prebuilt_library(&out_dir, &target_arch, use_static);
         }
         BuildMode::Stubs => {
-            println!("cargo:warning=Building stub kernels (no CUDA available)");
+            // Stubs always use dynamic linking regardless of static-kernels feature
+            println!("cargo:warning=Building stub kernels (no CUDA available, dynamic linking)");
             build_stub_shared_library(&manifest_dir, &out_dir);
             // Set cfg flag so tests can be skipped
             println!("cargo:rustc-cfg=stub_kernels");
@@ -81,15 +96,15 @@ fn determine_build_mode(nvcc_available: bool) -> BuildMode {
     // Check feature flag first
     #[cfg(feature = "prebuilt-kernels")]
     {
-        if has_prebuilt_shared_library() {
+        if has_prebuilt_library() {
             return BuildMode::Prebuilt;
         }
-        println!("cargo:warning=prebuilt-kernels feature set but no prebuilt .so found");
+        println!("cargo:warning=prebuilt-kernels feature set but no prebuilt library found");
     }
 
     if nvcc_available {
         BuildMode::FromSource
-    } else if has_prebuilt_shared_library() {
+    } else if has_prebuilt_library() {
         BuildMode::Prebuilt
     } else {
         BuildMode::Stubs
@@ -100,25 +115,36 @@ fn is_nvcc_available() -> bool {
     Command::new("nvcc").arg("--version").output().is_ok()
 }
 
-fn has_prebuilt_shared_library() -> bool {
+/// Check if prebuilt library exists.
+/// When `static-kernels` feature is enabled, checks for .a; otherwise checks for .so.
+fn has_prebuilt_library() -> bool {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let so_path = Path::new(&manifest_dir).join("cuda/prebuilt/libkvbm_kernels.so");
-    so_path.exists()
+
+    #[cfg(feature = "static-kernels")]
+    {
+        let a_path = Path::new(&manifest_dir).join("cuda/prebuilt/libkvbm_kernels.a");
+        a_path.exists()
+    }
+
+    #[cfg(not(feature = "static-kernels"))]
+    {
+        let so_path = Path::new(&manifest_dir).join("cuda/prebuilt/libkvbm_kernels.so");
+        so_path.exists()
+    }
 }
 
-/// Build CUDA kernels into a shared library (.so) from source.
-fn build_cuda_shared_library(cu_files: &[PathBuf], out_dir: &str, target_arch: &str) {
+/// Build CUDA kernels from source.
+/// If `use_static` is true, builds a static archive (.a); otherwise builds a shared library (.so).
+fn build_cuda_library(cu_files: &[PathBuf], out_dir: &str, target_arch: &str, use_static: bool) {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let arch_flags = get_cuda_arch_flags();
 
-    // Only build tensor_kernels.cu into the shared library (it has the extern "C" functions)
+    // Only build tensor_kernels.cu into the library (it has the extern "C" functions)
     let tensor_kernels_path = cu_files
         .iter()
         .find(|p| p.file_stem().unwrap() == "tensor_kernels")
         .expect("tensor_kernels.cu not found");
 
-    let so_name = "libkvbm_kernels.so";
-    let so_path = Path::new(out_dir).join(so_name);
     let obj_path = Path::new(out_dir).join("kvbm_kernels.o");
 
     // Step 1: Compile to object file
@@ -147,106 +173,162 @@ fn build_cuda_shared_library(cu_files: &[PathBuf], out_dir: &str, target_arch: &
         panic!("nvcc failed to compile tensor_kernels.cu");
     }
 
-    // Step 2: Link into shared library
-    let mut link_cmd = Command::new("nvcc");
-    link_cmd
-        .arg("-shared")
-        .arg("-o")
-        .arg(&so_path)
-        .arg(&obj_path)
-        .arg("-lcudart");
+    if use_static {
+        // Step 2a: Create static archive
+        let ar_path = Path::new(out_dir).join("libkvbm_kernels.a");
 
-    println!("cargo:warning=Linking kvbm_kernels into shared library...");
-    let status = link_cmd
-        .status()
-        .expect("Failed to execute nvcc for linking");
+        let mut ar_cmd = Command::new("ar");
+        ar_cmd
+            .arg("crus")
+            .arg(&ar_path)
+            .arg(&obj_path);
 
-    if !status.success() {
-        panic!("nvcc failed to link shared library");
-    }
+        println!("cargo:warning=Creating static archive libkvbm_kernels.a...");
+        let status = ar_cmd
+            .status()
+            .expect("Failed to execute ar for static archive");
 
-    // Generate prebuilt artifacts only when the feature is enabled.
-    // The .so alone is sufficient for normal operation - fatbins are only needed
-    // for runtime kernel loading which we don't currently use.
-    #[cfg(feature = "generate-prebuilt")]
-    {
-        // Generate fatbin files for all .cu files
-        for cu_file in cu_files {
-            let kernel_name = cu_file.file_stem().unwrap().to_str().unwrap();
-            generate_fatbin(cu_file, &arch_flags, out_dir);
-
-            // Copy fatbin to prebuilt directory for future use
-            if target_arch == "x86_64" {
-                copy_to_prebuilt(cu_file, out_dir, &manifest_dir);
-            }
-
-            println!("cargo:warning=Generated fatbin for {}", kernel_name);
+        if !status.success() {
+            panic!("ar failed to create static archive");
         }
 
-        // Copy .so to prebuilt directory for future use (x86_64 only)
-        if target_arch == "x86_64" {
-            let prebuilt_dir = Path::new(&manifest_dir).join("cuda/prebuilt");
-            fs::create_dir_all(&prebuilt_dir).expect("Failed to create prebuilt directory");
-            let prebuilt_so = prebuilt_dir.join(so_name);
-            fs::copy(&so_path, &prebuilt_so).expect("Failed to copy .so to prebuilt");
-            println!(
-                "cargo:warning=Copied {} to prebuilt directory",
+        // Set up static linking
+        println!("cargo:rustc-link-search=native={}", out_dir);
+        println!("cargo:rustc-link-lib=static=kvbm_kernels");
+
+        // Add CUDA runtime library paths and link cudart dynamically
+        add_cuda_library_paths();
+        println!("cargo:rustc-link-lib=cudart");
+    } else {
+        // Step 2b: Link into shared library
+        let so_name = "libkvbm_kernels.so";
+        let so_path = Path::new(out_dir).join(so_name);
+
+        let mut link_cmd = Command::new("nvcc");
+        link_cmd
+            .arg("-shared")
+            .arg("-o")
+            .arg(&so_path)
+            .arg(&obj_path)
+            .arg("-lcudart");
+
+        println!("cargo:warning=Linking kvbm_kernels into shared library...");
+        let status = link_cmd
+            .status()
+            .expect("Failed to execute nvcc for linking");
+
+        if !status.success() {
+            panic!("nvcc failed to link shared library");
+        }
+
+        // Generate prebuilt artifacts only when the feature is enabled.
+        // The .so alone is sufficient for normal operation - fatbins are only needed
+        // for runtime kernel loading which we don't currently use.
+        #[cfg(feature = "generate-prebuilt")]
+        {
+            // Generate fatbin files for all .cu files
+            for cu_file in cu_files {
+                let kernel_name = cu_file.file_stem().unwrap().to_str().unwrap();
+                generate_fatbin(cu_file, &arch_flags, out_dir);
+
+                // Copy fatbin to prebuilt directory for future use
+                if target_arch == "x86_64" {
+                    copy_to_prebuilt(cu_file, out_dir, &manifest_dir);
+                }
+
+                println!("cargo:warning=Generated fatbin for {}", kernel_name);
+            }
+
+            // Copy .so to prebuilt directory for future use (x86_64 only)
+            if target_arch == "x86_64" {
+                let prebuilt_dir = Path::new(&manifest_dir).join("cuda/prebuilt");
+                fs::create_dir_all(&prebuilt_dir).expect("Failed to create prebuilt directory");
+                let prebuilt_so = prebuilt_dir.join(so_name);
+                fs::copy(&so_path, &prebuilt_so).expect("Failed to copy .so to prebuilt");
+                println!(
+                    "cargo:warning=Copied {} to prebuilt directory",
+                    prebuilt_so.display()
+                );
+            }
+        }
+
+        #[cfg(not(feature = "generate-prebuilt"))]
+        {
+            // Suppress unused variable warnings when feature is disabled
+            let _ = cu_files;
+            let _ = target_arch;
+            let _ = manifest_dir;
+        }
+
+        // Set up dynamic linking
+        println!("cargo:rustc-link-search=native={}", out_dir);
+        println!("cargo:rustc-link-lib=dylib=kvbm_kernels");
+
+        // Add CUDA runtime library paths
+        add_cuda_library_paths();
+        println!("cargo:rustc-link-lib=cudart");
+    }
+}
+
+/// Use prebuilt library.
+/// If `use_static` is true, looks for .a archive; otherwise uses .so shared library.
+fn use_prebuilt_library(out_dir: &str, _target_arch: &str, use_static: bool) {
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let prebuilt_dir = Path::new(&manifest_dir).join("cuda/prebuilt");
+
+    if use_static {
+        let prebuilt_a = prebuilt_dir.join("libkvbm_kernels.a");
+
+        if !prebuilt_a.exists() {
+            panic!(
+                "Prebuilt static library not found at {}",
+                prebuilt_a.display()
+            );
+        }
+
+        // Copy to OUT_DIR
+        let out_a = Path::new(out_dir).join("libkvbm_kernels.a");
+        fs::copy(&prebuilt_a, &out_a).expect("Failed to copy prebuilt .a");
+
+        // Set up static linking
+        println!("cargo:rustc-link-search=native={}", out_dir);
+        println!("cargo:rustc-link-lib=static=kvbm_kernels");
+
+        // Add CUDA runtime library paths and link cudart dynamically
+        add_cuda_library_paths();
+        println!("cargo:rustc-link-lib=cudart");
+    } else {
+        let prebuilt_so = prebuilt_dir.join("libkvbm_kernels.so");
+
+        if !prebuilt_so.exists() {
+            panic!(
+                "Prebuilt shared library not found at {}",
                 prebuilt_so.display()
             );
         }
-    }
 
-    #[cfg(not(feature = "generate-prebuilt"))]
-    {
-        // Suppress unused variable warnings when feature is disabled
-        let _ = cu_files;
-        let _ = target_arch;
-        let _ = manifest_dir;
-    }
+        // Copy to OUT_DIR
+        let out_so = Path::new(out_dir).join("libkvbm_kernels.so");
+        fs::copy(&prebuilt_so, &out_so).expect("Failed to copy prebuilt .so");
 
-    // Set up linking
-    println!("cargo:rustc-link-search=native={}", out_dir);
-    println!("cargo:rustc-link-lib=dylib=kvbm_kernels");
-
-    // Add CUDA runtime library paths
-    add_cuda_library_paths();
-    println!("cargo:rustc-link-lib=cudart");
-}
-
-/// Use prebuilt shared library.
-fn use_prebuilt_shared_library(out_dir: &str, _target_arch: &str) {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let prebuilt_so = Path::new(&manifest_dir).join("cuda/prebuilt/libkvbm_kernels.so");
-
-    if !prebuilt_so.exists() {
-        panic!(
-            "Prebuilt shared library not found at {}",
-            prebuilt_so.display()
-        );
-    }
-
-    // Copy to OUT_DIR
-    let out_so = Path::new(out_dir).join("libkvbm_kernels.so");
-    fs::copy(&prebuilt_so, &out_so).expect("Failed to copy prebuilt .so");
-
-    // Also copy fatbin files
-    let prebuilt_dir = Path::new(&manifest_dir).join("cuda/prebuilt");
-    for entry in fs::read_dir(&prebuilt_dir).expect("Failed to read prebuilt directory") {
-        let entry = entry.expect("Failed to read entry");
-        let path = entry.path();
-        if path.extension().map_or(false, |ext| ext == "fatbin") {
-            let dest = Path::new(out_dir).join(path.file_name().unwrap());
-            fs::copy(&path, &dest).expect("Failed to copy fatbin");
+        // Also copy fatbin files
+        for entry in fs::read_dir(&prebuilt_dir).expect("Failed to read prebuilt directory") {
+            let entry = entry.expect("Failed to read entry");
+            let path = entry.path();
+            if path.extension().map_or(false, |ext| ext == "fatbin") {
+                let dest = Path::new(out_dir).join(path.file_name().unwrap());
+                fs::copy(&path, &dest).expect("Failed to copy fatbin");
+            }
         }
+
+        // Set up dynamic linking
+        println!("cargo:rustc-link-search=native={}", out_dir);
+        println!("cargo:rustc-link-lib=dylib=kvbm_kernels");
+
+        // Add CUDA runtime library paths
+        add_cuda_library_paths();
+        println!("cargo:rustc-link-lib=cudart");
     }
-
-    // Set up linking
-    println!("cargo:rustc-link-search=native={}", out_dir);
-    println!("cargo:rustc-link-lib=dylib=kvbm_kernels");
-
-    // Add CUDA runtime library paths
-    add_cuda_library_paths();
-    println!("cargo:rustc-link-lib=cudart");
 }
 
 /// Build stub shared library from stubs.c when CUDA is not available.

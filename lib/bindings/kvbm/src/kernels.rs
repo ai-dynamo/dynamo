@@ -321,14 +321,15 @@ unsafe fn block_to_universal(
         })?;
 
     let universal_ptr_values: Vec<usize> = universal_infos.iter().map(|info| info.ptr).collect();
-    let universal_ptrs_device = stream
-        .clone_htod(universal_ptr_values.as_slice())
-        .map_err(|e| {
-            PyRuntimeError::new_err(format!(
-                "Failed to upload universal pointer buffer: {:?}",
-                e
-            ))
-        })?;
+    let universal_ptrs_device =
+        stream
+            .clone_htod(universal_ptr_values.as_slice())
+            .map_err(|e| {
+                PyRuntimeError::new_err(format!(
+                    "Failed to upload universal pointer buffer: {:?}",
+                    e
+                ))
+            })?;
 
     let (block_ptrs_device_raw, _block_guard) = block_ptrs_device.device_ptr(&stream);
     let block_ptrs_device_ptr = block_ptrs_device_raw as usize as *const *const c_void;
@@ -464,14 +465,15 @@ unsafe fn universal_to_block(
         })?;
 
     let universal_ptr_values: Vec<usize> = universal_infos.iter().map(|info| info.ptr).collect();
-    let universal_ptrs_device = stream
-        .clone_htod(universal_ptr_values.as_slice())
-        .map_err(|e| {
-            PyRuntimeError::new_err(format!(
-                "Failed to upload universal pointer buffer: {:?}",
-                e
-            ))
-        })?;
+    let universal_ptrs_device =
+        stream
+            .clone_htod(universal_ptr_values.as_slice())
+            .map_err(|e| {
+                PyRuntimeError::new_err(format!(
+                    "Failed to upload universal pointer buffer: {:?}",
+                    e
+                ))
+            })?;
 
     let (block_ptrs_device_raw, _block_guard) = block_ptrs_device.device_ptr(&stream);
     let block_ptrs_device_ptr = block_ptrs_device_raw as usize as *const *mut c_void;

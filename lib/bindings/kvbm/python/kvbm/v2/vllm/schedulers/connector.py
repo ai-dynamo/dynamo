@@ -59,6 +59,9 @@ class DynamoConnector(KVConnectorBase_V1):
     provides no actual KV transfer functionality.
     """
 
+    _scheduler: Optional[SchedulerConnectorLeader]
+    _worker: Optional[SchedulerConnectorWorker]
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
