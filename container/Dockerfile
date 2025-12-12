@@ -412,6 +412,7 @@ RUN apt-get update -y \
         clang \
         libclang-dev \
         protobuf-compiler \
+	pkg-config \
         # sudo for dev stage
         sudo \
     && apt-get clean \
