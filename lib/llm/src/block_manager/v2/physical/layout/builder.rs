@@ -50,9 +50,15 @@ enum AllocationKind {
     System,
     /// Pinned (page-locked) host memory. If `device_id` is Some, NUMA-aware
     /// allocation is used on the GPU's NUMA node (when NUMA is enabled).
-    Pinned { device_id: Option<u32> },
-    Device { device_id: u32 },
-    Disk { path: Option<PathBuf> },
+    Pinned {
+        device_id: Option<u32>,
+    },
+    Device {
+        device_id: u32,
+    },
+    Disk {
+        path: Option<PathBuf>,
+    },
 }
 
 /// Memory provisioning plan (either provided regions or an allocation request).

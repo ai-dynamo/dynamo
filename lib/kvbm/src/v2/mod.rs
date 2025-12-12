@@ -17,7 +17,6 @@ pub mod distributed;
 pub mod logical;
 pub mod physical;
 pub mod runtime;
-pub mod sessions;
 pub mod utils;
 
 pub mod config;
