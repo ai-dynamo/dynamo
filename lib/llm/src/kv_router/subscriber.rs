@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
-    indexer::{DumpRequest, GetWorkersRequest, RouterEvent},
+    indexer::{DumpRequest, GetWorkersRequest, RouterEvent, WorkerKvQueryResponse},
     protocols::WorkerId,
     router_discovery_query,
     worker_query::WorkerQueryClient,
@@ -131,8 +131,6 @@ pub async fn recover_from_worker(
     end_event_id: Option<u64>,
     event_tx: &mpsc::Sender<RouterEvent>,
 ) -> Result<usize> {
-    use crate::kv_router::indexer::WorkerKvQueryResponse;
-
     if worker_query_client.has_local_indexer(worker_id) {
         tracing::debug!(
             worker_id,
