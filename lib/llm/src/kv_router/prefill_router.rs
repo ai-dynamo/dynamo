@@ -234,7 +234,7 @@ impl PrefillRouter {
                 InnerPrefillRouter::SimpleRouter(router) => {
                     // SimpleRouter's generate() doesn't support query-only mode,
                     // so get available workers directly and pick first one
-                    let instance_ids = (*router).client.instance_ids();
+                    let instance_ids = router.client.instance_ids();
                     if instance_ids.is_empty() {
                         return Err(PrefillError::PrefillError(
                             "No prefill workers available".to_string(),
