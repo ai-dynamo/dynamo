@@ -1,6 +1,6 @@
 # P/D Disaggregated Serving Example
 
-This example demonstrates Dynamo's **Prefill/Decode Disaggregated Serving** architecture, where the prefill and decode phases of LLM inference are separated into specialized workers for enhanced performance, improved resource utilization, and better scalability.
+This example demonstrates Dynamo's **Prefill/Decode Disaggregated Serving** architecture, where the prefill and decode phases of LLM inference are separated into specialized workers for enhanced performance, improved resource utilization, and better scalability. It is intended to be the easiest way to deploy a single-node, non-production Dynamo deployment in its entirety (including supporting services) with either TensorRT-LLM or vLLM backends using a single `docker compose` command.
 
 ## What is P/D Disaggregated Serving?
 
@@ -20,25 +20,25 @@ This separation allows for:
 
 ## Prerequisites
 
-> [!NOTE]
-> This example requires having at least 2 GPUs -- one for Prefill and one for Decode
+> [NOTE] This example requires having at least 2 GPUs -- one for Prefill and one for Decode
 
-Before running this example, ensure you have the following services running:
+Before running this example, ensure you: 
+- Have docker and docker compose installed on your system
+- Have cloned this repository to your system (`git clone https://github.com/ai-dynamo/dynamo.git`) and you are in the same working directory as this README and the docker-compose.yml (`cd examples/basics/disaggregated_serving/`) 
+
+## Components
+
+etcd and NATS are used by Dynamo for discovery and communication. They will be started automatically alongside the Dynamo components
 
 - **etcd**: A distributed key-value store used for service discovery and metadata storage
 - **NATS**: A high-performance message broker for inter-component communication
 
-You can start these services using Docker Compose:
+Dynamo itself is composed of the three services below:
+- [Dynamo Frontend](/components/src/dynamo/frontend/README.md) - HTTP API endpoint that receives requests and forwards them to the decode worker. The frontend will automatically discover the prefill and decode workers through etcd service registry.
+- [Dynamo TRTLLM Decode Worker](/docs/backends/trtllm/README.md) - Specialized worker that handles requests and decides between local prefill for short inputs and and remote prefill for longer inputs
+- [Dynamo TRTLLM Prefill Worker](/docs/backends/trtllm/README.md) - Specialized worker for prefill phase execution, which 1) pulls prefill requests from the NATS queue, 2) executes prefill computation efficiently, and 3) transfers computed KV cache to decode workers via NIXL
 
-```bash
-docker compose -f deploy/metrics/docker-compose.yml up -d
-```
-
-## Components
-
-- [Frontend](/components/src/dynamo/frontend/README.md) - HTTP API endpoint that receives requests and forwards them to the decode worker
-- [vLLM Prefill Worker](/docs/backends/vllm/README.md) - Specialized worker for prefill phase execution
-- [vLLM Decode Worker](/docs/backends/vllm/README.md) - Specialized worker that handles requests and decides between local/remote prefill
+> [NOTE] This quickstart uses the TensorRT-LLM (TRTLLM) backend for the prefill and decode workers, but the configuration can be easily adapted for other backends like vLLM by using the appropriate Dynamo base docker image and modifying the startup command for your backend of choice. A working example for vllm is included in the `docker-compose-vllm.yml`.
 
 ```mermaid
 ---
@@ -58,87 +58,46 @@ flowchart TD
 
 ## Instructions
 
-There are four steps to deploy and use disaggregated serving with Dynamo.
+In order to run Dynamo, we must:
+1. Launch our supporting services, etcd and NATS
+2. Launch our Dynamo Frontend, Prefill, and Decode workers once the supporting services are up and running
 
-### 1. Launch Decode Worker
+We will launch all five services with a single command.
 
-**Open a new terminal** and start the decode worker:
+### Launch Steps
 
-```bash
-export DYN_LOG=debug # Increase log verbosity to see disaggregation
-CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --model Qwen/Qwen3-0.6B
-```
+> [NOTE] this will use the TensorRT-LLM backend by default. If you want to use the vLLM backend, either rename the `docker-compose-vllm.yml` to `docker-compose.yml` before running `docker compose up -d` or replace all `docker compose...` commands with `docker compose -f docker-compose-vllm.yml...`
 
-This starts a decode worker that can receive requests and decide whether to:
-- Handle short prefills locally (fast path)
-- Send long prefills to remote prefill workers (disaggregated path)
+- Run `docker compose up -d`, which will pull all the necessary docker images and start all services in the appropriate order
 
-Leave this terminal running - it will show Decode Worker logs.
+### Post-Launch Steps
 
-### 2. Launch Prefill Worker
+You can run `docker compose logs -f` to follow log outputs in your terminal (to follow logs for a specific worker, for example the decode worker, you can run `docker compose logs -f dynamo-decode`)
 
-**Open another terminal** and start the prefill worker:
+Once dynamo is running and has loaded your model (in this example, Qwen/Qwen3-0.6b), you can send requests to test the disaggregated serving setup. To do so, open a new terminal and run the curl command below:
+  ```bash
+  curl -X POST http://localhost:8000/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "model": "Qwen/Qwen3-0.6B",
+      "messages": [
+        { "role": "user", "content": "Tell me a story about a cowardly cat" }
+      ],
+      "stream": false,
+      "max_tokens": 1028
+    }'
+  ```
 
-```bash
-export DYN_LOG=debug # Increase log verbosity to see disaggregation
-DYN_VLLM_KV_EVENT_PORT=20081 \
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
-CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker
-```
+> [NOTE] If the curl command above returns a `503 - Service Unavailable`, Dynamo is likely still starting up. Wait until you see the log output from the Dynamo services has slowed down (you will still see periodic stats_responses sent to the NATS server in the logs after the Dynamo services have started up)
 
-This starts a specialized prefill worker that:
-- Pulls prefill requests from the NATS queue
-- Executes prefill computation efficiently
-- Transfers computed KV cache to decode workers via NIXL
-
-Leave this terminal running - it will show Prefill Worker logs.
-
-### 3. Launch Frontend
-
-**Open a third terminal** and start the frontend:
-
-```bash
-python -m dynamo.frontend --http-port 8000
-```
-
-The frontend will automatically discover the prefill and decode workers through etcd service registry.
-
-### 4. Send Requests
-
-Send requests to test the disaggregated serving setup:
-
-```bash
-curl -X POST http://localhost:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [
-      { "role": "user", "content": "Tell me a story about a cowardly cat" }
-    ],
-    "stream": false,
-    "max_tokens": 1028
-  }'
-```
-
+### Notes 
+- We set `DYN_LOG=debug` to increase log verbosity so we can see disaggregation
+- We set CUDA_VISIBLE_DEVICES=0 or CUDA_VISIBLE_DEVICES=1 to ensure that each worker has a specific, dedicated GPU for their portion of disaggregated prefill/decode serving.
 
 ## Cleanup
 
-When you're done with the disaggregated serving example:
-
-### 1. Stop Dynamo Components
-
-In each terminal, press `Ctrl+C` to stop:
-- Frontend (terminal from step 3)
-- Prefill Worker (terminal from step 2)
-- Decode Worker (terminal from step 1)
-
-### 2. Stop Infrastructure Services
-
-Stop the etcd and NATS services:
-
-```bash
-docker compose -f deploy/metrics/docker-compose.yml down
-```
+To stop all services when you're done with the disaggregated serving example, simply run:
+- `docker compose down`
 
 ## Understand
 

@@ -1,0 +1,99 @@
+# This is the image that will be used for the Dynamo Frontend, Prefill, and Decode services
+x-dynamo-image: &DYNAMO_IMAGE nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0.post1
+
+# The environment variables lifted to this top section are either ones that you may want to change or shared between multiple services
+#   Service-specific environment variables are included under their specific "environment:" sections
+x-shared-environ: &shared-environ
+  # (May want to change) Specify the model
+  MODEL_NAME: "Qwen/Qwen3-0.6B"
+
+  # (May want to change) If you have more than 2 gpus available, you can assign them to your prefill and decode workers below
+  PREFILL_CUDA_VISIBLE_DEVICES: 0
+  DECODE_CUDA_VISIBLE_DEVICES: 1
+
+  # (Shared between services) The ETCD/NATS variables below are set so that the other containers on the shared network can find them
+  ETCD_ENDPOINTS: "etcd-server:2379"
+  NATS_SERVER: "nats://nats-server:4222"
+
+  # (Shared between services) You can modify the prefill and decode worker log output verbosity below
+  DYN_LOG: debug  
+
+services:
+  dynamo-frontend:
+    image: *DYNAMO_IMAGE
+    command: python -m dynamo.frontend --http-port 8000
+    ports:
+      - 8000:8000
+    environment:
+      <<: *shared-environ
+    depends_on:
+      - nats-server
+      - etcd-server
+      
+  dynamo-prefill:
+    image: *DYNAMO_IMAGE
+    command: /bin/bash -c "python -m dynamo.vllm --model $$MODEL_NAME"
+    environment:
+      <<: *shared-environ
+      CUDA_VISIBLE_DEVICES: ${PREFILL_CUDA_VISIBLE_DEVICES:-0}
+      DYN_VLLM_KV_EVENT_PORT: 20081
+      VLLM_NIXL_SIDE_CHANNEL_PORT: 20097
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              count: all
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    ipc: host
+    depends_on:
+      - nats-server
+      - etcd-server
+
+  dynamo-decode:
+    image: *DYNAMO_IMAGE
+    command: /bin/bash -c "python -m dynamo.vllm --model $$MODEL_NAME --is-prefill-worker"
+    environment:
+      <<: *shared-environ
+      CUDA_VISIBLE_DEVICES: ${DECODE_CUDA_VISIBLE_DEVICES:-1}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              count: all
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    ipc: host
+    depends_on:
+      - nats-server
+      - etcd-server
+
+  nats-server:
+    image: nats:2.11.4
+    command: [ "-js", "--trace", "-m", "8222" ]
+    ports:
+      - 4222:4222
+      - 6222:6222
+      - 8222:8222  # the endpoints include /varz, /healthz, ...
+
+  etcd-server:
+    image: bitnamilegacy/etcd:3.6.1
+    environment:
+      ALLOW_NONE_AUTHENTICATION: "yes"
+      ETCD_NAME: "etcd-server"
+      ETCD_INITIAL_CLUSTER: "etcd-server=http://etcd-server:2380"
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: "http://etcd-server:2380"
+      ETCD_ADVERTISE_CLIENT_URLS: "http://etcd-server:2379"
+      ETCD_LISTEN_CLIENT_URLS: "http://0.0.0.0:2379"
+      ETCD_LISTEN_PEER_URLS: "http://0.0.0.0:2380"
+    ports:
+      - 2379:2379  # this port exposes the http /metrics endpoint
+      - 2380:2380
+  
