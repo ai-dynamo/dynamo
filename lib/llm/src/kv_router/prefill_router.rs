@@ -208,7 +208,42 @@ impl PrefillRouter {
             return Err(PrefillError::NotActivated);
         };
 
-        // Call the appropriate router
+        // GAIE Query-only mode: select worker without executing prefill
+        if query_only {
+            let (req, context) = request.into_parts();
+            let context_id = context.id().to_string();
+
+            match prefill_router {
+                InnerPrefillRouter::KvRouter(router) => {
+                    // Directly call find_best_match on the chooser without routing
+                    let (best_worker, _overlap) = router
+                        .chooser
+                        .find_best_match(
+                            Some(&context_id),
+                            &req.token_ids,
+                            req.router_config_override.as_ref(),
+                            false, // Don't update states for query-only
+                        )
+                        .await
+                        .map_err(|e| PrefillError::PrefillError(e.to_string()))?;
+
+                    return Ok(PrefillCallResult::WorkerIdOnly(best_worker.worker_id));
+                }
+                InnerPrefillRouter::SimpleRouter(router) => {
+                    // For simple router, get available workers and pick first one
+                    let instance_ids = (*router).client.instance_ids();
+                    if instance_ids.is_empty() {
+                        return Err(PrefillError::PrefillError(
+                            "No prefill workers available".to_string(),
+                        ));
+                    }
+                    // Pick first available worker (simple router doesn't expose selection logic)
+                    return Ok(PrefillCallResult::WorkerIdOnly(instance_ids[0]));
+                }
+            }
+        }
+
+        // Standard Dynamo prefill mode: call generate and extract PrefillResult
         let mut response = match prefill_router {
             InnerPrefillRouter::KvRouter(router) => router
                 .generate(request)
@@ -220,25 +255,7 @@ impl PrefillRouter {
                 .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
         };
 
-        // GAIE Query-only mode: extract worker_instance_id from annotation event
-        if query_only {
-            while let Some(item) = response.next().await {
-                if let Some(event) = item.event.as_ref()
-                    && event == "worker_instance_id"
-                    && let Some(comments) = item.comment.as_ref()
-                    && let Some(first_comment) = comments.first()
-                    && let Ok(id_str) = serde_json::from_str::<String>(first_comment)
-                    && let Ok(worker_id) = id_str.parse::<u64>()
-                {
-                    return Ok(PrefillCallResult::WorkerIdOnly(worker_id));
-                }
-            }
-            return Err(PrefillError::PrefillError(
-                "Failed to get prefill worker ID from query".to_string(),
-            ));
-        }
-
-        // Standard Dynamo prefill mode: extract PrefillResult from LLMEngineOutput
+        // Extract PrefillResult from LLMEngineOutput
         let Some(first_output) = response.next().await else {
             return Err(PrefillError::PrefillError(
                 "Prefill router returned no output (stream ended)".to_string(),
