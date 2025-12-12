@@ -142,6 +142,24 @@ impl ConnectorLeader {
         Ok(())
     }
 
+    /// Get the total number of tokens in a slot's sequence.
+    ///
+    /// This is used to compare with the vLLM Request's token count to detect
+    /// when new tokens have been generated during decoding.
+    pub fn get_slot_total_tokens(&self, request_id: &str) -> Result<usize> {
+        let slot = self.get_slot(request_id)?;
+        Ok(slot.lock().total_tokens())
+    }
+
+    /// Extend a slot's token sequence with new tokens.
+    ///
+    /// This is called during decoding when new tokens have been generated
+    /// and need to be synchronized to the slot.
+    pub fn extend_slot_tokens(&self, request_id: &str, tokens: Vec<u32>) -> Result<()> {
+        let slot = self.get_slot(request_id)?;
+        slot.lock().extend_tokens(tokens)
+    }
+
     /// Get the number of new tokens that can be loaded from external KV cache.
     ///
     /// This implements the vLLM KVConnector interface for `get_num_new_matched_tokens`:
@@ -166,7 +184,22 @@ impl ConnectorLeader {
         let mut slot = shared_slot.lock();
 
         if slot.match_requires_reset() {
-            todo!("reset the slot");
+            // Check for inflight offloads - potential race with block freeing
+            // vLLM preemption frees G1 blocks immediately, but we may still have
+            // offload transfers reading from those blocks.
+            if slot.has_inflight_offloads() {
+                tracing::error!(
+                    request_id,
+                    "Preemption detected while offloads inflight - deferring reset until transfers complete"
+                );
+                // Return (None, false) to signal "not ready" - vLLM will retry next cycle
+                return Ok((None, false));
+            }
+
+            // Safe to reset - no inflight offloads
+            tracing::debug!(request_id, "Resetting slot state after preemption");
+            slot.reset_for_preemption();
+            // Fall through to normal matching flow
         }
 
         // Determine the match outcome

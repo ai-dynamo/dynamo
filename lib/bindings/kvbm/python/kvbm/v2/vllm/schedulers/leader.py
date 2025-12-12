@@ -78,6 +78,7 @@ class SchedulerConnectorLeader:
         self.kvbm_config = kvbm_config
         self.vllm_kv_cache_config = kv_cache_config
         self.kvbm_override_config = kwargs.get("kvbm_override_config", None)
+        self.inflight_requests = {}
 
         self.iteration = 0
         self.block_size = vllm_config.cache_config.block_size
@@ -145,6 +146,10 @@ class SchedulerConnectorLeader:
         Returns:
             (False, None): Don't delay block freeing, no KV transfer params
         """
+        # we only use this to update the total tokens in the slot
+        # its safe to remove it if it exists
+        if request.request_id in self.inflight_requests:
+            del self.inflight_requests[request.request_id]
         delay = self.leader.request_finished(request.request_id)
         return (delay, None)
 
@@ -212,7 +217,11 @@ class SchedulerConnectorLeader:
 
     # note: creates a request slot for tracking state
     def _create_slot(self, request: "Request") -> None:
+        if request.request_id not in self.inflight_requests:
+            self.inflight_requests[request.request_id] = request
+
         if self.leader.has_slot(request.request_id):
+            self.update_slot(request.request_id)
             return
 
         if bool(getattr(request, "mm_features", None)) or bool(
@@ -242,3 +251,45 @@ class SchedulerConnectorLeader:
         )
 
         self.leader.create_slot(kv_request)
+
+        # Store the vLLM Request object for later token synchronization
+        self.inflight_requests[request.request_id] = request
+
+    def update_slot(self, request_id: str) -> None:
+        """
+        Synchronize new tokens from the vLLM Request to the slot.
+
+        This is called during decoding to detect when new tokens have been
+        generated and extend the slot's token sequence accordingly.
+
+        Only single-sequence (non-hybrid) requests are supported.
+
+        This is a *HACK* because vLLM does not provide us with updated token_ids
+        during generation. This method allows us to update our token sequence to
+        handle eviction/restarts and new tokens being generated.
+
+        Args:
+            request_id: The request ID to update
+        """
+        request = self.inflight_requests.get(request_id)
+        if request is None:
+            return  # Request not tracked
+
+        # Only support single-sequence (non-hybrid) case
+        if isinstance(request.all_token_ids[0], (list, tuple)):
+            return  # Hybrid not supported, skip update
+
+        # if the slot doesn't exist, we can't update it
+        if not self.leader.has_slot(request.request_id):
+            return
+
+        slot_token_count = self.leader.get_slot_total_tokens(request_id)
+        request_token_count = len(request.all_token_ids)
+
+        if slot_token_count < request_token_count:
+            print(
+                f"Updating slot {request_id} with {request_token_count - slot_token_count} new tokens",
+                flush=True,
+            )
+            new_tokens = [int(t) for t in request.all_token_ids[slot_token_count:]]
+            self.leader.extend_slot_tokens(request_id, new_tokens)

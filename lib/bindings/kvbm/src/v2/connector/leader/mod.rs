@@ -71,6 +71,42 @@ impl PyConnectorLeader {
             .map_err(to_pyerr)
     }
 
+    /// Get the total number of tokens in a slot's sequence.
+    ///
+    /// This is used to compare with the vLLM Request's token count to detect
+    /// when new tokens have been generated during decoding.
+    ///
+    /// Args:
+    ///     request_id: The request ID of the slot
+    ///
+    /// Returns:
+    ///     int: The total number of tokens in the slot
+    ///
+    /// Raises:
+    ///     RuntimeError: If the slot is not found
+    pub fn get_slot_total_tokens(&self, request_id: &str) -> PyResult<usize> {
+        self.inner
+            .get_slot_total_tokens(request_id)
+            .map_err(to_pyerr)
+    }
+
+    /// Extend a slot's token sequence with new tokens.
+    ///
+    /// This is called during decoding when new tokens have been generated
+    /// and need to be synchronized to the slot.
+    ///
+    /// Args:
+    ///     request_id: The request ID of the slot
+    ///     tokens: List of new token IDs to append
+    ///
+    /// Raises:
+    ///     RuntimeError: If the slot is not found or extension fails
+    pub fn extend_slot_tokens(&self, request_id: &str, tokens: Vec<u32>) -> PyResult<()> {
+        self.inner
+            .extend_slot_tokens(request_id, tokens)
+            .map_err(to_pyerr)
+    }
+
     pub fn get_num_new_matched_tokens(
         &self,
         request_id: &str,

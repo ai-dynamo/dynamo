@@ -728,6 +728,31 @@ impl RequestSlot {
         self.evaluated_tokens / self.block_size()
     }
 
+    /// Get the total number of tokens in the slot's sequence.
+    ///
+    /// This includes both completed blocks and any partial block tokens.
+    pub fn total_tokens(&self) -> usize {
+        self.sequence.total_tokens()
+    }
+
+    /// Extend the slot's token sequence with new tokens.
+    ///
+    /// This is used during decoding to add newly generated tokens to the slot.
+    ///
+    /// # Arguments
+    /// * `tokens` - The new tokens to append to the sequence
+    ///
+    /// # Returns
+    /// * `Ok(())` - If tokens were successfully added
+    /// * `Err` - If an error occurred during extension
+    pub fn extend_tokens(&mut self, tokens: Vec<u32>) -> Result<(), anyhow::Error> {
+        let tokens = dynamo_tokens::Tokens::from(tokens);
+        self.sequence
+            .extend(tokens)
+            .map_err(|e| anyhow::anyhow!("Failed to extend tokens: {}", e))?;
+        Ok(())
+    }
+
     // ------------------------------------------------------------------------
     // Transaction State Methods (txn_*)
     // ------------------------------------------------------------------------
@@ -836,6 +861,56 @@ impl RequestSlot {
         self.state
             .offloading_state_mut()
             .expect("offloading state must exist after creation")
+    }
+
+    /// Check if there are any inflight (non-terminal) offload transfers.
+    ///
+    /// This is used to detect if we can safely reset the slot after preemption.
+    /// If offloads are still inflight, the source blocks may have been freed
+    /// by vLLM, creating a potential race condition.
+    pub fn has_inflight_offloads(&self) -> bool {
+        if let Some(offloading_state) = self.offloading_state() {
+            offloading_state
+                .handles
+                .iter()
+                .any(|h| h.status().is_active())
+        } else {
+            false
+        }
+    }
+
+    /// Reset the slot for a fresh start after preemption.
+    ///
+    /// When vLLM preempts a request, it frees all G1 blocks and resets
+    /// `num_computed_tokens` to 0. This method clears our tracking state
+    /// to match, preparing for a fresh scheduling cycle.
+    ///
+    /// **Important**: This should only be called when no inflight offloads exist.
+    /// Use `has_inflight_offloads()` to check first.
+    ///
+    /// This method:
+    /// - Clears block assignments (BlockIds are now invalid after preemption)
+    /// - Resets evaluation tracking
+    /// - Transitions any active transaction to Inactive
+    /// - Clears the reset flag
+    ///
+    /// Note: The token sequence is intentionally NOT reset - the tokens themselves
+    /// are still valid, only the G1 block mappings are invalidated.
+    pub fn reset_for_preemption(&mut self) {
+        // Clear block assignments (BlockIds are now invalid - freed by vLLM)
+        self.block_matches.assigned_blocks.clear();
+        self.block_matches.unassigned_blocks.clear();
+
+        // Reset evaluation tracking
+        self.evaluated_tokens = 0;
+        self.finished_evaluating = false;
+
+        // Transition any active transaction to Inactive
+        // (this discards any onboarding/offloading state data)
+        self.state.txn_to_inactive();
+
+        // Clear the reset flag
+        self.match_requires_reset = false;
     }
 
     /// Finalize a match check by transitioning state and returning the vLLM-compatible tuple.
