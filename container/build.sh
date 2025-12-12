@@ -944,34 +944,6 @@ if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
     exit ${BUILD_EXIT_CODE}
 fi
 
-# Handle local-dev target
-if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
-    # Use the first tag name (TAG) if available, otherwise use latest
-    if [[ -n "$TAG" ]]; then
-        DEV_IMAGE=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
-    else
-        DEV_IMAGE="dynamo:latest-${FRAMEWORK,,}"
-    fi
-
-    # Build local-dev tags from existing tags
-    LOCAL_DEV_TAGS=""
-    if [[ -n "$TAG" ]]; then
-        # Extract tag name, remove any existing -local-dev suffix, then add -local-dev
-        TAG_NAME=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
-        LOCAL_DEV_TAGS+=" --tag ${TAG_NAME}-local-dev"
-    fi
-
-    if [[ -n "$LATEST_TAG" ]]; then
-        # Extract tag name, remove any existing -local-dev suffix, then add -local-dev
-        LATEST_TAG_NAME=$(echo "$LATEST_TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
-        LOCAL_DEV_TAGS+=" --tag ${LATEST_TAG_NAME}-local-dev"
-    fi
-
-    # Extract first tag for success message
-    FIRST_TAG=$(echo "$LOCAL_DEV_TAGS" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
-    build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built $FIRST_TAG" "Building Local-Dev Image"
-fi
-
 # Handle --make-efa flag: add AWS EFA layer on top of the built image
 # This runs BEFORE local-dev so the flow is: dev -> dev-aws -> local-dev-aws
 if [[ "${MAKE_EFA:-}" == "true" ]]; then
