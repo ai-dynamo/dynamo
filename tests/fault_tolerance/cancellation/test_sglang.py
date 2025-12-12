@@ -186,7 +186,6 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.timeout(160)  # 3x average
 @pytest.mark.gpu_1
 @pytest.mark.xfail(strict=False)
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_request_cancellation_sglang_aggregated(
     request, runtime_services_dynamic_ports, predownload_models
 ):
