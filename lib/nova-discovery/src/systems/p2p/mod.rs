@@ -27,7 +27,7 @@ const DEFAULT_RECORD_TTL_SECS: u64 = 600;
 /// # Example
 ///
 /// ```no_run
-/// use dynamo_am_discovery::systems::P2pConfig;
+/// use dynamo_nova_discovery::systems::P2pConfig;
 ///
 /// # async fn example() -> anyhow::Result<()> {
 /// let system = P2pConfig::builder()

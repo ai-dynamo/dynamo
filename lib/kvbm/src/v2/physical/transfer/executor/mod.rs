@@ -17,6 +17,7 @@ use anyhow::Result;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::Mutex;
 
 // pub(crate) struct G4OnboardContext {}
 // pub(crate) struct G4OffloadContext {}
@@ -214,21 +215,20 @@ fn execute_direct_transfer(
     }
 }
 
-/// Type alias for transfer group: (block_ids, bounce_buffer_group_index)
-type TransferGroup = (Vec<BlockId>, bool);
-
-/// Optimized bounce buffer transfer using double-buffering.
+/// Work-stealing bounce buffer transfer using two parallel tasks.
 ///
-/// This function implements a pipelined approach that splits the bounce buffer into two groups
-/// and overlaps transfers: while transferring src→bounce[0], it simultaneously transfers
-/// bounce[1]→dst. This significantly improves throughput compared to sequential staging.
+/// This function implements a work-stealing approach where two tasks each take
+/// batches from a shared iterator and execute complete two-hop transfers.
+/// This is simpler to maintain than double-buffering while still providing
+/// good throughput through task parallelism.
 ///
 /// # Algorithm
 /// 1. Split bounce buffer into two groups (group 0 and group 1)
-/// 2. Loop alternating between groups:
-///    - Stage src[i] → bounce_group[0] (parallel with bounce_group[1] → dst[i-1])
-///    - Stage src[i+1] → bounce_group[1] (parallel with bounce_group[0] → dst[i])
-/// 3. Continue until all blocks transferred
+/// 2. Create a shared iterator over (src_block_id, dst_block_id) pairs
+/// 3. Two parallel tasks each:
+///    - Lock the iterator, take a batch of pairs
+///    - Execute the complete two-hop transfer for that batch
+///    - Repeat until iterator is exhausted
 #[allow(clippy::too_many_arguments)]
 async fn handle_buffered_transfer(
     src: &PhysicalLayout,
@@ -242,85 +242,51 @@ async fn handle_buffered_transfer(
     layer_range: &Option<Range<usize>>,
     ctx: &TransferContext,
 ) -> Result<()> {
-    // Split bounce buffer into two groups for double-buffering
     let bounce_groups =
         &bounce_block_ids[0..std::cmp::min(src_block_ids.len(), bounce_block_ids.len())];
-    let bounce_groups = bounce_groups.split_at(bounce_groups.len() / 2);
-    let bounce_groups = [bounce_groups.0, bounce_groups.1];
+    let (bounce_group_0, bounce_group_1) = bounce_groups.split_at(bounce_groups.len() / 2);
+    let bounce_group_0 = bounce_group_0.to_vec();
+    let bounce_group_1 = bounce_group_1.to_vec();
 
-    let mut src_to_bounce: Option<TransferGroup> = None;
-    let mut bounce_to_dst: Option<TransferGroup>;
-    let mut src_iter = src_block_ids.iter();
-    let mut dst_iter = dst_block_ids.iter();
+    let src_dst_iter = Arc::new(Mutex::new(src_block_ids.iter().zip(dst_block_ids.iter())));
 
-    loop {
-        // Prepare bounce→dst transfer from previous iteration's staging
-        bounce_to_dst = src_to_bounce
-            .as_ref()
-            .map(|(src_ids, bounce_buffer_group)| {
-                (
-                    dst_iter
-                        .by_ref()
-                        .take(src_ids.len())
-                        .copied()
-                        .collect::<Vec<_>>(),
-                    *bounce_buffer_group,
-                )
-            });
+    let transfer_task = async move |bounce_group: &[BlockId]| -> Result<()> {
+        loop {
+            let (src_ids, dst_ids): (Vec<BlockId>, Vec<BlockId>);
+            {
+                let mut x = src_dst_iter.lock().await;
+                (src_ids, dst_ids) = x
+                    .by_ref()
+                    .take(bounce_group.len())
+                    .map(|(&s, &d)| (s, d))
+                    .unzip();
+                if src_ids.is_empty() {
+                    break;
+                }
+            }
 
-        // Determine which bounce group to use for next src→bounce transfer
-        let bounce_group = src_to_bounce
-            .map(|(_, bounce_buffer_group)| !bounce_buffer_group)
-            .unwrap_or(false);
-
-        // Prepare next src→bounce transfer
-        let new_src_ids = src_iter
-            .by_ref()
-            .take(bounce_groups[bounce_group as usize].len())
-            .copied()
-            .collect::<Vec<_>>();
-
-        src_to_bounce = if new_src_ids.is_empty() {
-            None
-        } else {
-            Some((new_src_ids, bounce_group))
-        };
-
-        // Exit when no more transfers to do
-        if src_to_bounce.is_none() && bounce_to_dst.is_none() {
-            break;
-        }
-
-        // Execute transfers in parallel (src→bounce and bounce→dst overlap)
-        let mut futures = Vec::new();
-        if let Some(src_to_bounce) = src_to_bounce.as_ref() {
-            let notification = execute_direct_transfer(
+            execute_two_hop_transfer_chunk(
                 src,
                 bounce_layout,
-                &src_to_bounce.0,
-                &bounce_groups[src_to_bounce.1 as usize][0..src_to_bounce.0.len()],
-                layer_range.clone(),
-                first_strategy,
-                ctx,
-            )?;
-            futures.push(notification.into_future());
-        }
-
-        if let Some(bounce_to_dst) = bounce_to_dst.as_ref() {
-            let notification = execute_direct_transfer(
-                bounce_layout,
                 dst,
-                &bounce_groups[bounce_to_dst.1 as usize][0..bounce_to_dst.0.len()],
-                &bounce_to_dst.0,
-                layer_range.clone(),
+                &src_ids,
+                &bounce_group[0..src_ids.len()],
+                &dst_ids,
+                first_strategy,
                 second_strategy,
+                layer_range,
                 ctx,
-            )?;
-            futures.push(notification.into_future());
+            )
+            .await?;
         }
 
-        futures::future::try_join_all(futures).await?;
-    }
+        Ok(())
+    };
+
+    let transfer_0 = transfer_task(&bounce_group_0);
+    let transfer_1 = transfer_task(&bounce_group_1);
+
+    futures::future::try_join(transfer_0, transfer_1).await?;
 
     Ok(())
 }
@@ -429,21 +395,17 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
 
         let num_bounce_blocks = bounce_buffer_spec.block_ids.len();
 
-        // Handle case where bounce buffer is smaller than transfer size
-        if num_bounce_blocks < src_block_ids.len() {
-            // Process in chunks that fit the bounce buffer
-            for (src_block_ids, dst_block_ids) in src_block_ids
-                .chunks(num_bounce_blocks)
-                .zip(dst_block_ids.chunks(num_bounce_blocks))
-            {
-                let bounce_block_ids_to_use = &bounce_buffer_spec.block_ids[..src_block_ids.len()];
+        if num_bounce_blocks == 1 {
+            // Single bounce block: use sequential processing for each block
+            let bounce_block = bounce_buffer_spec.block_ids[0];
+            for (src_block_id, dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
                 if let Err(e) = execute_two_hop_transfer_chunk(
                     &src_clone,
                     &bounce_buffer_spec.layout,
                     &dst_clone,
-                    src_block_ids,
-                    bounce_block_ids_to_use,
-                    dst_block_ids,
+                    &[*src_block_id],
+                    &[bounce_block],
+                    &[*dst_block_id],
                     first_strategy,
                     second_strategy,
                     &options.layer_range,
@@ -456,33 +418,8 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
                 }
             }
             let _ = system.trigger(handle);
-        } else if num_bounce_blocks == 1 {
-            // Single bounce block: use sequential chunk processing
-            let bounce_block_ids_to_use = &bounce_buffer_spec.block_ids[..src_block_ids.len()];
-            let result = execute_two_hop_transfer_chunk(
-                &src_clone,
-                &bounce_buffer_spec.layout,
-                &dst_clone,
-                src_block_ids.as_slice(),
-                bounce_block_ids_to_use,
-                dst_block_ids.as_slice(),
-                first_strategy,
-                second_strategy,
-                &options.layer_range,
-                &ctx_clone,
-            )
-            .await;
-
-            match result {
-                Ok(_) => {
-                    let _ = system.trigger(handle);
-                }
-                Err(e) => {
-                    let _ = system.poison(handle, e.to_string());
-                }
-            }
         } else {
-            // Multiple bounce blocks: use optimized double-buffering
+            // Multiple bounce blocks: use work-stealing parallel transfer
             if let Err(e) = handle_buffered_transfer(
                 &src_clone,
                 &bounce_buffer_spec.layout,

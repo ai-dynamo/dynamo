@@ -12,7 +12,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use dynamo_am_discovery::etcd::EtcdConfig;
+//! use dynamo_nova_discovery::systems::EtcdConfigBuilder;
 //!
 //! # async fn example() -> anyhow::Result<()> {
 //! let discovery = EtcdConfigBuilder::default()
@@ -67,7 +67,7 @@ fn validate_ttl(ttl: &Duration) -> Result<(), validator::ValidationError> {
 /// # Example
 ///
 /// ```no_run
-/// use dynamo_am_discovery::etcd::EtcdConfig;
+/// use dynamo_nova_discovery::systems::EtcdConfigBuilder;
 /// use std::time::Duration;
 ///
 /// # async fn example() -> anyhow::Result<()> {

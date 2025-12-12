@@ -48,11 +48,15 @@ oneshot = "0.1.11"
 
 dynamo-nova-backend = { workspace = true, optional = true }
 
+# kvbm-bench optional dependencies
+clap = { version = "4.5", features = ["derive"], optional = true }
+indicatif = { version = "0.18", optional = true }
+
 [features]
 default = ["testing"]
 console = []
 testing = ["dynamo-nova-backend"]
-
+kvbm-bench = ["testing", "dep:clap", "dep:indicatif"]
 
 [dev-dependencies]
 dynamo-memory = {workspace=true, features = ["unsafe-slices"]}
@@ -61,3 +65,8 @@ proptest = "1.5.0"
 tempfile = "3"
 rstest = "0.26"
 tracing-subscriber = { workspace = true }
+
+[[bin]]
+name = "bench_local_transfer"
+path = "bin/bench_local_transfer.rs"
+required-features = ["kvbm-bench"]
