@@ -45,6 +45,10 @@ spec:
             - Qwen/Qwen3-0.6B
             - --tensor-parallel-size
             - "2"
+            - --connector # needed for vllm v0.11.0
+            - none
+            - --distributed-executor-backend # needed for vllm v0.12.0 (backwards compatibility with v0.11.0)
+            - ray # addresses the following vllm Ray issue: https://github.com/vllm-project/vllm/pull/25775
     prefill:
       dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
