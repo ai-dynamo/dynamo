@@ -19,7 +19,7 @@ x-shared-environ: &shared-environ
   NATS_SERVER: "nats://nats-server:4222"
 
   # (Shared between services) You can modify the prefill and decode worker log output verbosity below
-  DYN_LOG: debug  
+  DYN_LOG: debug
 
 services:
   dynamo-frontend:
@@ -32,10 +32,10 @@ services:
     depends_on:
       - nats-server
       - etcd-server
-      
+
   dynamo-prefill:
     image: *DYNAMO_IMAGE
-    command: /bin/bash -c "python -m dynamo.vllm --model $$MODEL_NAME"
+    command: /bin/bash -c "python -m dynamo.vllm --model $$MODEL_NAME --is-prefill-worker"
     environment:
       <<: *shared-environ
       CUDA_VISIBLE_DEVICES: ${PREFILL_CUDA_VISIBLE_DEVICES:-0}
@@ -58,7 +58,7 @@ services:
 
   dynamo-decode:
     image: *DYNAMO_IMAGE
-    command: /bin/bash -c "python -m dynamo.vllm --model $$MODEL_NAME --is-prefill-worker"
+    command: /bin/bash -c "python -m dynamo.vllm --model $$MODEL_NAME"
     environment:
       <<: *shared-environ
       CUDA_VISIBLE_DEVICES: ${DECODE_CUDA_VISIBLE_DEVICES:-1}

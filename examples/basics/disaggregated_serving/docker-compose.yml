@@ -28,7 +28,6 @@ x-shared-environ: &shared-environ
 
 # This volume will mount the available trtllm engine_configs (available at dynamo/examples/backends/trtllm/engine_configs) into the dynamo containers at /workspace/engine_configs (assumes you are running your `docker compose` commands from the same directory as this docker-compose.yml file)
 x-shared-dynamo-engine-config-volume: &shared-config-volume ../../backends/trtllm/engine_configs/:/workspace/engine_configs/
-  
 
 services:
   dynamo-frontend:
@@ -41,11 +40,11 @@ services:
     depends_on:
       - nats-server
       - etcd-server
-      
+
   dynamo-prefill:
     image: *DYNAMO_IMAGE
     command: >
-      /bin/bash -c "python -m dynamo.trtllm 
+      /bin/bash -c "python -m dynamo.trtllm
       --model-path $$MODEL_NAME
       --served-model-name $$MODEL_NAME
       --extra-engine-args $$PREFILL_ENGINE_ARGS
@@ -74,8 +73,8 @@ services:
   dynamo-decode:
     image: *DYNAMO_IMAGE
     command: >
-      /bin/bash -c "python -m dynamo.trtllm 
-      --model-path $$MODEL_NAME 
+      /bin/bash -c "python -m dynamo.trtllm
+      --model-path $$MODEL_NAME
       --served-model-name $$MODEL_NAME
       --extra-engine-args $$DECODE_ENGINE_ARGS
       --modality $$MODALITY
