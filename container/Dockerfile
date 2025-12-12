@@ -27,6 +27,7 @@ ARG BASE_IMAGE_TAG
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_MEDIA_NIXL
+ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -154,6 +155,12 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         libibumad-devel \
         librdmacm-devel \
         numactl-devel
+
+RUN if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
+    dnf install -y epel-release && \
+    dnf install -y --nogpgcheck https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-8.noarch.rpm && \
+    dnf install -y ffmpeg-devel; \
+fi
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
@@ -307,8 +314,15 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
+    FEATURES=""; \
     if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
-        maturin build --release --features dynamo-llm/media-nixl --out /opt/dynamo/dist; \
+        FEATURES="$FEATURES dynamo-llm/media-nixl"; \
+    fi; \
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+        FEATURES="$FEATURES media-ffmpeg"; \
+    fi; \
+    if [ -n "$FEATURES" ]; then \
+        maturin build --release --features "$FEATURES" --out /opt/dynamo/dist; \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \

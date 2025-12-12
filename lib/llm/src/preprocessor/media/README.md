@@ -25,7 +25,7 @@ Set media decoding options:
 from dynamo.llm import MediaDecoder
 decoder = MediaDecoder()
 decoder.image_decoder({"max_image_width": 4096, "max_image_height": 4096, "max_alloc": 16*1024*1024})
-decoder.video_decoder({"strict": True, "fps": 2.0, "max_frames": 128, "max_pixels": 1024*1024*128})
+decoder.video_decoder({"strict": True, "fps": 2.0, "max_frames": 128, "max_alloc": 1024*1024*128*3})
 ```
 
 And register the LLM as usual, adding the media configuration:
@@ -63,7 +63,7 @@ There are two ways to configure video sampling: either with a fixed number of fr
 ### Others
 - **strict** (bool): if strict mode is enabled, any failure to decode a requested frame will abort the whole video decoding and error out. When strict mode is disabled, it is possible that the decoding of some requested frame fails, and the resulting set of decoded frames might container fewer frames than expected.
 
-- **max_pixels** (usize, > 0): If the total number of pixels in all the decoded frames would exceed this value, abort the decoding.
+- **max_alloc** (usize, > 0): If the total number of bytes in the decoded frames would exceed this value, abort the decoding.
 
 
 
