@@ -29,8 +29,8 @@ use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
     WORKER_KV_INDEXER_QUERY_SUBJECT,
     indexer::{
-        KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer, RouterEvent, WorkerKvQueryRequest,
-        WorkerKvQueryResponse, compute_block_hash_for_seq,
+        KvIndexerMetrics, LocalKvIndexer, RouterEvent, WorkerKvQueryRequest,
+        compute_block_hash_for_seq,
     },
     protocols::*,
 };
@@ -179,35 +179,55 @@ impl KvEventPublisher {
                 ))
         });
 
-        let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
-            .to_string()
-            .replace("_", "-");
-        let nats_server = std::env::var(env_nats::NATS_SERVER)
-            .unwrap_or_else(|_| "nats://localhost:4222".to_string());
-        // Create NatsQueue without consumer since we're only publishing
-        let mut nats_queue = NatsQueue::new_without_consumer(
-            stream_name,
-            nats_server,
-            std::time::Duration::from_secs(60), // 1 minute timeout
-        );
-
         // Connect the NatsQueue before passing it to the event processor
         let cancellation_token_clone = cancellation_token.clone();
         let local_indexer_clone = local_indexer.clone();
-        component.drt().runtime().secondary().spawn(async move {
-            if let Err(e) = nats_queue.connect().await {
-                tracing::error!("Failed to connect NatsQueue: {}", e);
-                return;
-            }
-            start_event_processor(
-                nats_queue,
-                worker_id,
-                cancellation_token_clone,
-                rx,
-                local_indexer_clone,
-            )
-            .await
-        });
+
+        if enable_local_indexer {
+            // When local indexer is enabled, use NATS Core (Component) for publishing.
+            // This is simpler and doesn't require JetStream durability since recovery
+            // is handled via the local indexer's event buffer.
+            tracing::info!("Using NATS Core for KV event publishing (local_indexer mode)");
+            let component_clone = component.clone();
+            component.drt().runtime().secondary().spawn(async move {
+                start_event_processor(
+                    component_clone,
+                    worker_id,
+                    cancellation_token_clone,
+                    rx,
+                    local_indexer_clone,
+                )
+                .await
+            });
+        } else {
+            // When local indexer is disabled, use JetStream (NatsQueue) for durability.
+            let stream_name =
+                Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
+                    .to_string()
+                    .replace("_", "-");
+            let nats_server = std::env::var(env_nats::NATS_SERVER)
+                .unwrap_or_else(|_| "nats://localhost:4222".to_string());
+            let mut nats_queue = NatsQueue::new_without_consumer(
+                stream_name,
+                nats_server,
+                std::time::Duration::from_secs(60), // 1 minute timeout
+            );
+
+            component.drt().runtime().secondary().spawn(async move {
+                if let Err(e) = nats_queue.connect().await {
+                    tracing::error!("Failed to connect NatsQueue: {e}");
+                    return;
+                }
+                start_event_processor(
+                    nats_queue,
+                    worker_id,
+                    cancellation_token_clone,
+                    rx,
+                    local_indexer_clone,
+                )
+                .await
+            });
+        }
 
         Ok(Self {
             kv_block_size,
@@ -332,31 +352,12 @@ async fn start_worker_kv_query_service(
                     }
                 };
 
-                // TODO extract request event id range. For now, just debug print
                 tracing::debug!("Received WorkerKvQueryRequest: {:?}", request);
 
-                // Resolve which events to return based on optional start/end ids
-                let events = match (request.start_event_id, request.end_event_id) {
-                    (None, None) => {
-                        match local_indexer.dump_events().await {
-                            Ok(events) => events,
-                            Err(err) => {
-                                tracing::error!(
-                                    error = %err,
-                                    worker_id,
-                                    "Failed to dump events for WorkerKvQueryRequest; returning buffered events instead"
-                                );
-                                local_indexer.get_all_events_in_buffer()
-                            }
-                        }
-                    }
-                    _ => {
-                            local_indexer.get_events_in_id_range(request.start_event_id, request.end_event_id).await
-                    }
-                };
-
-                // Build WorkerKvQueryResponse
-                let response = WorkerKvQueryResponse { events };
+                // Query events based on optional start/end ids
+                let response = local_indexer
+                    .get_events_in_id_range(request.start_event_id, request.end_event_id)
+                    .await;
 
                 // Send reply back (if reply subject exists)
                 if let Some(reply_subject) = msg.reply {
@@ -1828,9 +1829,14 @@ mod tests_startup_helpers {
         );
 
         // Step 4b: Query worker's local indexer for events after last_known_id
-        let missed_events = local_indexer_1
+        let response = local_indexer_1
             .get_events_in_id_range(Some(last_known_id + 1), None)
             .await;
+        let missed_events = match response {
+            crate::kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
+            crate::kv_router::indexer::WorkerKvQueryResponse::TreeDump(e) => e,
+            other => panic!("Unexpected response: {:?}", other),
+        };
         assert_eq!(
             missed_events.len(),
             1,
