@@ -2301,11 +2301,16 @@ mod test_integration_publisher_with_kvindexer {
             let response = kv_router
                 .query_worker_local_kv(worker_id, None, None)
                 .await?;
-            if response.events.is_empty() {
+            let events = match response {
+                crate::kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
+                crate::kv_router::indexer::WorkerKvQueryResponse::TreeDump(e) => e,
+                _ => vec![],
+            };
+            if events.is_empty() {
                 continue;
             }
 
-            let event_count = response.events.len();
+            let event_count = events.len();
             tracing::info!(
                 worker_id,
                 events = event_count,
@@ -2331,8 +2336,13 @@ mod test_integration_publisher_with_kvindexer {
             let response = kv_router
                 .query_worker_local_kv(worker_id, None, None)
                 .await?;
+            let events = match response {
+                crate::kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
+                crate::kv_router::indexer::WorkerKvQueryResponse::TreeDump(e) => e,
+                _ => vec![],
+            };
             assert!(
-                response.events.is_empty(),
+                events.is_empty(),
                 "Worker {worker_id} should not report buffered KV events; best worker {best_worker_id} reported {best_worker_event_count}"
             );
         }
