@@ -1026,6 +1026,7 @@ pub struct ChatChoice {
     pub finish_reason: Option<FinishReason>,
     /// Which stop string matched (if any).
     /// This is only set when `finish_reason` is `"stop"` because a user-provided stop sequence was hit.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<StopReason>,
     /// Log probability information for the choice.
     #[serde(skip_serializing_if = "Option::is_none")]
