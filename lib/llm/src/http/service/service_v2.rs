@@ -281,7 +281,13 @@ impl HttpService {
             })?;
 
             axum::serve(listener, router)
-                .with_graceful_shutdown(observer.cancelled_owned())
+                .with_graceful_shutdown(async {
+                    observer.cancelled_owned().await;
+                    tracing::info!("HTTP server shutdown requested");
+                    // accepting requests for 5 more seconds, to allow incorrectly routed requests to arrive
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    // no longer accepting requests, draining all existing connections
+                })
                 .await
                 .inspect_err(|_| cancel_token.cancel())?;
         }
