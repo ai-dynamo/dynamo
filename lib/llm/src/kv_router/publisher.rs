@@ -21,7 +21,7 @@ use dynamo_runtime::traits::{
 };
 use dynamo_runtime::{
     component::{Component, Namespace},
-    transports::nats::{NatsQueue, QUEUE_NAME, Slug},
+    transports::nats::{NatsQueue, Slug},
 };
 use futures::StreamExt;
 
@@ -298,7 +298,9 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
                 }
 
                 // Then publish to NATS for global distribution
-                if let Err(e) = publisher.publish(QUEUE_NAME, &router_event).await {
+                // Use KV_EVENT_SUBJECT so both JetStream and NATS Core subscribers
+                // can receive events on the expected subject.
+                if let Err(e) = publisher.publish(KV_EVENT_SUBJECT, &router_event).await {
                     tracing::error!("Failed to publish event to NATS: {}", e);
                 }
 
@@ -1282,7 +1284,7 @@ mod tests_startup_helpers {
         let published = published.lock().unwrap();
         assert_eq!(published.len(), 1);
         let (subject, _) = &published[0];
-        assert_eq!(subject, QUEUE_NAME);
+        assert_eq!(subject, KV_EVENT_SUBJECT);
     }
 
     //--------------------------------------------------------------------
@@ -1340,7 +1342,7 @@ mod tests_startup_helpers {
             let published_events = published.lock().unwrap();
             assert_eq!(published_events.len(), 1);
             let (subject, _) = &published_events[0];
-            assert_eq!(subject, QUEUE_NAME);
+            assert_eq!(subject, KV_EVENT_SUBJECT);
         } // drop lock
 
         // Verify event was applied to local indexer
@@ -1727,7 +1729,7 @@ mod tests_startup_helpers {
             assert_eq!(published.len(), 1, "Worker should have published 1 event");
             (published[0].0.clone(), published[0].1.clone())
         }; // drop worker_published before await
-        assert_eq!(subject, QUEUE_NAME);
+        assert_eq!(subject, KV_EVENT_SUBJECT);
 
         let router_event: RouterEvent = rmp_serde::from_slice(&bytes).unwrap();
         router_indexer

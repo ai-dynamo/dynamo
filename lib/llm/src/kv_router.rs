@@ -69,7 +69,7 @@ use crate::{
 pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
 // for metric publishing (push-based)
-pub const KV_EVENT_SUBJECT: &str = "kv_events";
+pub const KV_EVENT_SUBJECT: &str = "kv-events";
 pub const KV_HIT_RATE_SUBJECT: &str = "kv-hit-rate";
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
 

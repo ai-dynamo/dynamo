@@ -930,6 +930,9 @@ pub struct KvIndexer {
     last_event_ids_tx: mpsc::Sender<GetLastReceivedEventIdsRequest>,
     /// The size of the KV block this indexer can handle.
     kv_block_size: u32,
+    /// Reference counter for Clone-aware Drop.
+    /// Only the last clone should cancel the token on drop.
+    _ref_count: Arc<()>,
 }
 
 impl KvIndexer {
@@ -1199,6 +1202,7 @@ impl KvIndexer {
             routing_tx,
             last_event_ids_tx,
             kv_block_size,
+            _ref_count: Arc::new(()),
         }
     }
 
@@ -1396,7 +1400,11 @@ impl KvIndexerInterface for KvIndexer {
 
 impl Drop for KvIndexer {
     fn drop(&mut self) {
-        self.shutdown();
+        // Only cancel the token if we're the last reference.
+        // This allows clones to be dropped without killing the background task.
+        if Arc::strong_count(&self._ref_count) == 1 {
+            self.shutdown();
+        }
     }
 }
 
