@@ -390,7 +390,7 @@ impl PrefillRouter {
 
         // Attempt prefill
         let prefill_context = Context::with_id(prefill_req, request_id.to_string());
-        // Link context for cancellation propagation
+        // Link the prefill context as a child so that kill signals propagate
         engine_ctx.link_child(prefill_context.context());
         let prefill_result = self.call_prefill(prefill_context, false).await;
 
@@ -469,6 +469,7 @@ impl PrefillRouter {
 
         // Update request with prefill result
         decode_req.prefill_result = Some(prefill_result);
+        // Restore original max_tokens for decode
         decode_req.stop_conditions.max_tokens = original_max_tokens;
 
         // If target decode worker is specified, route directly to it
@@ -488,7 +489,7 @@ impl PrefillRouter {
             context.insert("prefill_worker_id", worker_id);
         }
 
-        // Route to decode
+        // Map the modified request through with preserved context
         let decode_request = context.map(|_| decode_req);
         next.generate(decode_request).await
     }
