@@ -3,13 +3,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 config_file=$1
-enable_pdl=$2
-ctx_gpus=$3
-model_name=$4
-model_path=$5
-disaggregation_mode=$6
+ctx_gpus=$2
+model_name=$3
+model_path=$4
+disaggregation_mode=$5
+is_dep=$6
+
 unset UCX_TLS
-echo "config_file: ${config_file}, enable_pdl: ${enable_pdl}, ctx_gpus: ${ctx_gpus}, disaggregation_mode: ${disaggregation_mode}"
+echo "config_file: ${config_file}, ctx_gpus: ${ctx_gpus}, disaggregation_mode: ${disaggregation_mode}, is_dep: ${is_dep}"
 
 # Read configuration values from the YAML config file
 if [ ! -f "${config_file}" ]; then
@@ -40,21 +41,22 @@ echo "  max_batch_size: ${max_batch_size}"
 echo "  max_seq_len: ${max_seq_len}"
 
 export TLLM_LOG_LEVEL=INFO
-# NOTE: This var is default behavior in recent trtllm commits, and can
-# be removed. Keeping it here in case the script is ran with older commits.
-export TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER=1
-# NOTE: This var was replaced with an LLM API / yaml engine config field
-# "moe_backend.use_low_precision_combine: true" in recent trtllm commits, and
-# can be removed. Keeping it here in case the script is ran with older commits.
-export TRTLLM_MOE_USE_LOW_PRECISION_COMBINE=1
+export TRTLLM_ENABLE_PDL=1
 
-if [ "${enable_pdl}" = "true" ]; then
-    export TRTLLM_ENABLE_PDL=1
+export TRTLLM_SERVER_DISABLE_GC=1
+export TRTLLM_WORKER_DISABLE_GC=1
+export NCCL_GRAPH_MIXING_SUPPORT=0
+
+if [[ "${model_path,,}" != *r1* ]]; then
+    echo "Inferred gpt-oss style model. Setting OVERRIDE_QUANT_ALGO to W4A8_MXFP4_MXFP8"
+    export OVERRIDE_QUANT_ALGO=W4A8_MXFP4_MXFP8
+    if [ "$is_dep" = "true" ]; then
+        echo "Using DEP with gpt-oss. Setting env vars."
+        export TRTLLM_MOE_ALLTOALL_BACKEND="mnnvlthroughput"
+        export TRTLLM_FORCE_ALLTOALL_METHOD="MNNVL"
+        export TRTLLM_MOE_A2A_WORKSPACE_MB="2048"
+    fi
 fi
-
-# NOTE: Set (or unset) these depending on what cluster you're using
-export TRTLLM_UCX_INTERFACE=enP6p9s0np0
-export UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_3:1,mlx5_4:1,enP6p9s0np0
 
 trtllm-llmapi-launch python3 -m dynamo.trtllm \
     --model-path ${model_path} \

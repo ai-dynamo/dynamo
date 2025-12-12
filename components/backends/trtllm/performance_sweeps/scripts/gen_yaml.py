@@ -2,12 +2,262 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+from enum import Enum
 import os
 import re
 from typing import Any, Dict, List
 
 import yaml
 
+class ModelType(Enum):
+    """
+    Model type.
+    """
+    GPT_OSS = "gpt_oss"
+    DSR1 = "dsr1"
+    
+def get_model_type(model_path: str) -> str:
+    if "r1" in model_path.lower():
+        print("Inferring DSR1-type model")
+        return ModelType.DSR1
+    else:
+        print("Inferring GPT-oss-type model")
+        return ModelType.GPT_OSS
+
+def generate_dsr1_config(    
+    config_path: str,
+    decode_config_path: str,
+    instance_config_path: str,
+    args: argparse.Namespace
+):
+    gen_cuda_graph_batch_sizes = [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        384,
+        512,
+        768,
+        1024,
+        2048,
+        args.gen_batch_size,
+    ]
+
+    gen_moe_backend = "CUTLASS"
+    if args.gen_tp_size >= 16 and args.gen_enable_attention_dp:
+        gen_moe_backend = "WIDEEP"
+    if not args.gen_enable_attention_dp:
+        gen_moe_backend = "TRTLLM"
+
+    prefill_config: Dict[str, Any] = {
+        "max_batch_size": args.ctx_batch_size,
+        "max_num_tokens": args.ctx_max_num_tokens,
+        "max_seq_len": args.ctx_max_seq_len,
+        "tensor_parallel_size": args.ctx_tp_size,
+        "moe_expert_parallel_size": args.ctx_ep_size,
+        "enable_attention_dp": args.ctx_enable_attention_dp,
+        "pipeline_parallel_size": 1,
+        "cuda_graph_config": None,
+        "print_iter_log": True,
+        "disable_overlap_scheduler": True,
+        "kv_cache_config": {
+            "enable_block_reuse": False,
+            "free_gpu_memory_fraction": args.ctx_free_gpu_memory_fraction,
+            "dtype": "fp8",
+        },
+        "cache_transceiver_config": {
+            "max_tokens_in_buffer": args.cache_transceiver_max_num_tokens,
+            "backend": "UCX",
+        },
+    }
+
+    decode_config: Dict[str, Any] = {
+        "tensor_parallel_size": args.gen_tp_size,
+        "moe_expert_parallel_size": args.gen_tp_size,
+        "enable_attention_dp": args.gen_enable_attention_dp,
+        "pipeline_parallel_size": 1,
+        "max_batch_size": args.gen_batch_size,
+        "max_num_tokens": args.gen_max_num_tokens,
+        "max_seq_len": args.gen_max_seq_len,
+        "cuda_graph_config": {
+            "enable_padding": True,
+            "batch_sizes": gen_cuda_graph_batch_sizes,
+        },
+        "print_iter_log": True,
+        "kv_cache_config": {
+            "enable_block_reuse": False,
+            "free_gpu_memory_fraction": args.gen_gpu_memory_fraction,
+            "dtype": "fp8",
+        },
+        "moe_config": {
+            "backend": gen_moe_backend,
+            "use_low_precision_moe_combine": True,
+        },
+        "cache_transceiver_config": {
+            "max_tokens_in_buffer": args.cache_transceiver_max_num_tokens,
+            "backend": "UCX",
+        },
+        "stream_interval": 100,
+    }
+
+    if args.gen_tp_size == 8 and not args.gen_enable_attention_dp:
+        decode_config["allreduce_strategy"] = "MNNVL"
+
+    if args.eplb_num_slots > 0:
+        moe_load_balancer_file = os.path.join(
+            os.path.dirname(config_path), "moe_load_balancer.yaml"
+        )
+        # Ensure the directory exists before writing the file
+        os.makedirs(os.path.dirname(moe_load_balancer_file), exist_ok=True)
+        moe_load_balancer_config = {
+            "num_slots": args.eplb_num_slots,
+            "layer_updates_per_iter": 1,
+        }
+        with open(moe_load_balancer_file, "w") as f:
+            yaml.dump(
+                moe_load_balancer_config, f, default_flow_style=False, sort_keys=False
+            )
+        decode_config["moe_config"]["load_balancer"] = moe_load_balancer_file
+
+    if args.mtp_size > 0:
+        prefill_config["speculative_config"] = {
+            "decoding_type": "MTP",
+            "num_nextn_predict_layers": args.mtp_size,
+        }
+        decode_config["speculative_config"] = {
+            "decoding_type": "MTP",
+            "num_nextn_predict_layers": args.mtp_size,
+        }
+    
+    return prefill_config, decode_config
+
+def generate_gpt_oss_config(
+    config_path: str,
+    decode_config_path: str,
+    instance_config_path: str,
+    args: argparse.Namespace
+):
+    gen_cuda_graph_batch_sizes = [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        384,
+        512,
+        768,
+        1024,
+        2048,
+        args.gen_batch_size,
+    ]
+
+    gen_moe_backend = "TRTLLM"
+
+    prefill_config: Dict[str, Any] = {
+        "max_batch_size": args.ctx_batch_size,
+        "max_num_tokens": args.ctx_max_num_tokens,
+        "max_seq_len": args.ctx_max_seq_len,
+        "tensor_parallel_size": args.ctx_tp_size,
+        "moe_expert_parallel_size": args.ctx_ep_size,
+        "enable_attention_dp": args.ctx_enable_attention_dp,
+        "pipeline_parallel_size": 1,
+        "cuda_graph_config": None,
+        "print_iter_log": True,
+        "disable_overlap_scheduler": True,
+        "kv_cache_config": {
+            "enable_block_reuse": False,
+            "free_gpu_memory_fraction": args.ctx_free_gpu_memory_fraction,
+            "dtype": "fp8",
+        },
+        "cuda_graph_config": {
+            "enable_padding": True,
+            "max_batch_size": 30,
+        },
+        "num_postprocess_workers": 4,
+        "cache_transceiver_config": {
+            "max_tokens_in_buffer": args.cache_transceiver_max_num_tokens,
+            "backend": "UCX",
+        },
+        "moe_config": {
+            "backend": "TRTLLM"
+        }
+    }
+
+    decode_config: Dict[str, Any] = {
+        "allreduce_strategy": "AUTO",
+        "attention_dp_config": {
+            "enable_balance": True
+        },
+        "disable_overlap_scheduler": False,
+        "tensor_parallel_size": args.gen_tp_size,
+        "moe_expert_parallel_size": args.gen_ep_size,
+        "enable_attention_dp": args.gen_enable_attention_dp,
+        "pipeline_parallel_size": 1,
+        "max_batch_size": args.gen_batch_size,
+        "max_num_tokens": args.gen_max_num_tokens,
+        "max_seq_len": args.gen_max_seq_len,
+        "cuda_graph_config": {
+            "enable_padding": True,
+            "batch_sizes": gen_cuda_graph_batch_sizes,
+        },
+        "print_iter_log": True,
+        "kv_cache_config": {
+            "enable_block_reuse": False,
+            "free_gpu_memory_fraction": args.gen_gpu_memory_fraction,
+            "dtype": "fp8",
+        },
+        "moe_config": {
+            "backend": gen_moe_backend,
+        },
+        "cache_transceiver_config": {
+            "max_tokens_in_buffer": args.cache_transceiver_max_num_tokens,
+            "backend": "UCX",
+        },
+        "stream_interval": 20,
+        "num_postprocess_workers": 4
+    }
+
+    if args.eplb_num_slots > 0:
+        moe_load_balancer_file = os.path.join(
+            os.path.dirname(config_path), "moe_load_balancer.yaml"
+        )
+        # Ensure the directory exists before writing the file
+        os.makedirs(os.path.dirname(moe_load_balancer_file), exist_ok=True)
+        moe_load_balancer_config = {
+            "num_slots": args.eplb_num_slots,
+            "layer_updates_per_iter": 1,
+        }
+        with open(moe_load_balancer_file, "w") as f:
+            yaml.dump(
+                moe_load_balancer_config, f, default_flow_style=False, sort_keys=False
+            )
+        decode_config["moe_config"]["load_balancer"] = moe_load_balancer_file
+
+    if args.mtp_size > 0:
+        prefill_config["speculative_config"] = {
+            "decoding_type": "MTP",
+            "num_nextn_predict_layers": args.mtp_size,
+        }
+        decode_config["speculative_config"] = {
+            "decoding_type": "MTP",
+            "num_nextn_predict_layers": args.mtp_size,
+        }
+    
+    return prefill_config, decode_config
+
+CONFIG_MAPPING = {
+    ModelType.GPT_OSS: generate_gpt_oss_config,
+    ModelType.DSR1: generate_dsr1_config,
+}
 
 def process_node_and_task() -> tuple[int, List[str], List[str]]:
     """
@@ -144,6 +394,7 @@ def gen_config_file(
     ctx_enable_attention_dp: bool,
     num_gen_servers: int,
     gen_tp_size: int,
+    gen_ep_size: int,
     gen_batch_size: int,
     gen_max_num_tokens: int,
     gen_max_seq_len: int,
@@ -153,7 +404,7 @@ def gen_config_file(
     mtp_size: int = 0,
     worker_start_port: int = 8001,
     server_port: int = 8000,
-    cache_transceiver_max_num_tokens: int = 4608,
+    cache_transceiver_max_num_tokens: int = 9216,
 ) -> None:
     """
     Generate configuration YAML file for disaggregated inference.
@@ -170,6 +421,7 @@ def gen_config_file(
         ctx_enable_attention_dp: Enable attention DP for context servers
         num_gen_servers: Number of generation servers
         gen_tp_size: Tensor parallel size for generation servers
+        gen_ep_size: Expert parallel size for generation servers
         gen_batch_size: Batch size for generation servers
         gen_max_num_tokens: Max number of tokens for generation servers
         gen_enable_attention_dp: Enable attention DP for generation servers
@@ -178,109 +430,15 @@ def gen_config_file(
         worker_start_port: Start port for workers
         server_port: Server port
     """
-    gen_cuda_graph_batch_sizes = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        384,
-        512,
-        768,
-        1024,
-        2048,
-        gen_batch_size,
-    ]
 
-    gen_moe_backend = "CUTLASS"
-    if gen_tp_size >= 16 and gen_enable_attention_dp:
-        gen_moe_backend = "WIDEEP"
-    if not gen_enable_attention_dp:
-        gen_moe_backend = "TRTLLM"
+    model_type = get_model_type(model_path)
 
-    prefill_config: Dict[str, Any] = {
-        "max_batch_size": ctx_batch_size,
-        "max_num_tokens": ctx_max_num_tokens,
-        "max_seq_len": ctx_max_seq_len,
-        "tensor_parallel_size": ctx_tp_size,
-        "moe_expert_parallel_size": ctx_tp_size,
-        "enable_attention_dp": ctx_enable_attention_dp,
-        "pipeline_parallel_size": 1,
-        "cuda_graph_config": None,
-        "print_iter_log": True,
-        "disable_overlap_scheduler": True,
-        "kv_cache_config": {
-            "enable_block_reuse": False,
-            "free_gpu_memory_fraction": ctx_free_gpu_memory_fraction,
-            "dtype": "fp8",
-        },
-        "cache_transceiver_config": {
-            "max_tokens_in_buffer": cache_transceiver_max_num_tokens,
-            "backend": "DEFAULT",
-        },
-    }
-
-    decode_config: Dict[str, Any] = {
-        "tensor_parallel_size": gen_tp_size,
-        "moe_expert_parallel_size": gen_tp_size,
-        "enable_attention_dp": gen_enable_attention_dp,
-        "pipeline_parallel_size": 1,
-        "max_batch_size": gen_batch_size,
-        "max_num_tokens": gen_max_num_tokens,
-        "max_seq_len": gen_max_seq_len,
-        "cuda_graph_config": {
-            "enable_padding": True,
-            "batch_sizes": gen_cuda_graph_batch_sizes,
-        },
-        "print_iter_log": True,
-        "kv_cache_config": {
-            "enable_block_reuse": False,
-            "free_gpu_memory_fraction": gen_gpu_memory_fraction,
-            "dtype": "fp8",
-        },
-        "moe_config": {
-            "backend": gen_moe_backend,
-            "use_low_precision_moe_combine": True,
-        },
-        "cache_transceiver_config": {
-            "max_tokens_in_buffer": cache_transceiver_max_num_tokens,
-            "backend": "DEFAULT",
-        },
-        "stream_interval": 20,
-    }
-
-    if gen_tp_size == 8 and not gen_enable_attention_dp:
-        decode_config["allreduce_strategy"] = "MNNVL"
-
-    if eplb_num_slots > 0:
-        moe_load_balancer_file = os.path.join(
-            os.path.dirname(config_path), "moe_load_balancer.yaml"
-        )
-        # Ensure the directory exists before writing the file
-        os.makedirs(os.path.dirname(moe_load_balancer_file), exist_ok=True)
-        moe_load_balancer_config = {
-            "num_slots": eplb_num_slots,
-            "layer_updates_per_iter": 1,
-        }
-        with open(moe_load_balancer_file, "w") as f:
-            yaml.dump(
-                moe_load_balancer_config, f, default_flow_style=False, sort_keys=False
-            )
-        decode_config["moe_config"]["load_balancer"] = moe_load_balancer_file
-
-    if mtp_size > 0:
-        prefill_config["speculative_config"] = {
-            "decoding_type": "MTP",
-            "num_nextn_predict_layers": mtp_size,
-        }
-        decode_config["speculative_config"] = {
-            "decoding_type": "MTP",
-            "num_nextn_predict_layers": mtp_size,
-        }
+    prefill_config, decode_config = CONFIG_MAPPING[model_type](
+        config_path,
+        decode_config_path,
+        instance_config_path,
+        args
+    )
 
     counts = {"prefill_count": num_ctx_servers, "decode_count": num_gen_servers}
 
@@ -308,6 +466,12 @@ if __name__ == "__main__":
         type=int,
         required=True,
         help="Tensor parallel size for context servers",
+    )
+    parser.add_argument(
+        "--ctx_ep_size",
+        type=int,
+        required=True,
+        help="Expert parallel size for context servers",
     )
     parser.add_argument(
         "--ctx_batch_size",
@@ -350,6 +514,12 @@ if __name__ == "__main__":
         type=int,
         required=True,
         help="Tensor parallel size for generation servers",
+    )
+    parser.add_argument(
+        "--gen_ep_size",
+        type=int,
+        required=True,
+        help="Expert parallel size for generation servers",
     )
     parser.add_argument(
         "--gen_batch_size",
