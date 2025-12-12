@@ -903,10 +903,10 @@ func GenerateBasePodSpec(
 
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
-	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
+	podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(podSpec.ImagePullSecrets, imagePullSecrets)
 
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName)
-	return controller_common.CanonicalizePodSpec(&podSpec), nil
+	return &podSpec, nil
 }
 
 func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.DynamoGraphDeployment) {
@@ -1068,7 +1068,7 @@ func GenerateGrovePodCliqueSet(
 		gangSet.Spec.Template.PodCliqueScalingGroupConfigs = scalingGroups
 	}
 
-	return controller_common.CanonicalizePodCliqueSet(gangSet), nil
+	return gangSet, nil
 }
 
 func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dynamoDeployment *v1alpha1.DynamoGraphDeployment, componentName string) (map[string]string, error) {

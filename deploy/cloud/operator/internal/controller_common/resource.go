@@ -496,22 +496,68 @@ func getGPUResourceName(resourceItem *v1alpha1.ResourceItem) corev1.ResourceName
 	return corev1.ResourceName(consts.KubeResourceGPUNvidia)
 }
 
-type Resource struct {
-	client.Object
-	isReady func() (bool, string)
+// AppendUniqueImagePullSecrets appends secrets to existing, skipping any that already exist by name.
+func AppendUniqueImagePullSecrets(existing, additional []corev1.LocalObjectReference) []corev1.LocalObjectReference {
+	if len(additional) == 0 {
+		return existing
+	}
+	seen := make(map[string]bool, len(existing))
+	for _, s := range existing {
+		seen[s.Name] = true
+	}
+	for _, s := range additional {
+		if !seen[s.Name] {
+			existing = append(existing, s)
+			seen[s.Name] = true
+		}
+	}
+	return existing
 }
 
-func WrapResource[T client.Object](resource T, isReady func() (bool, string)) *Resource {
-	return &Resource{
-		Object:  resource,
-		isReady: isReady,
+type Resource struct {
+	object          client.Object
+	isReady         bool
+	readyReason     string
+	serviceStatuses map[string]v1alpha1.ServiceReplicaStatus
+}
+
+func NewResource[T client.Object](resource T, isReady func() (bool, string)) (*Resource, error) {
+	v := reflect.ValueOf(resource)
+	// handles untype nil and typed nil
+	if !v.IsValid() || v.IsNil() {
+		return nil, fmt.Errorf("resource is nil")
 	}
+	ready, reason := isReady()
+	return &Resource{
+		object:      resource,
+		isReady:     ready,
+		readyReason: reason,
+	}, nil
+}
+
+func NewResourceWithServiceStatuses[T client.Object](resource T, isReadyAndServiceStatuses func() (bool, string, map[string]v1alpha1.ServiceReplicaStatus)) (*Resource, error) {
+	v := reflect.ValueOf(resource)
+	// handles untype nil and typed nil
+	if !v.IsValid() || v.IsNil() {
+		return nil, fmt.Errorf("resource is nil")
+	}
+	ready, reason, serviceStatuses := isReadyAndServiceStatuses()
+	return &Resource{
+		object:          resource,
+		isReady:         ready,
+		readyReason:     reason,
+		serviceStatuses: serviceStatuses,
+	}, nil
 }
 
 func (r *Resource) IsReady() (bool, string) {
-	return r.isReady()
+	return r.isReady, r.readyReason
 }
 
 func (r *Resource) GetName() string {
-	return r.Object.GetName()
+	return r.object.GetName()
+}
+
+func (r *Resource) GetServiceStatuses() map[string]v1alpha1.ServiceReplicaStatus {
+	return r.serviceStatuses
 }

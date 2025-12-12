@@ -404,10 +404,28 @@ impl ModelWatcher {
 
             // Get or create the worker monitor for this model
             // This allows dynamic threshold updates via the ModelManager
-            let worker_monitor = self.router_config.busy_threshold.map(|threshold| {
-                self.manager
-                    .get_or_create_worker_monitor(card.name(), client.clone(), threshold)
-            });
+            // Create monitor if either threshold is configured
+            let worker_monitor = if self.router_config.active_decode_blocks_threshold.is_some()
+                || self.router_config.active_prefill_tokens_threshold.is_some()
+            {
+                // Default thresholds: active_decode_blocks=1.0 (disabled), active_prefill_tokens=1000000 (effectively disabled)
+                let active_decode_blocks = self
+                    .router_config
+                    .active_decode_blocks_threshold
+                    .unwrap_or(1.0);
+                let active_prefill_tokens = self
+                    .router_config
+                    .active_prefill_tokens_threshold
+                    .unwrap_or(1000000);
+                Some(self.manager.get_or_create_worker_monitor(
+                    card.name(),
+                    client.clone(),
+                    active_decode_blocks,
+                    active_prefill_tokens,
+                ))
+            } else {
+                None
+            };
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {

@@ -153,6 +153,10 @@ def chat_payload(
     }
     if temperature is not None:
         body["temperature"] = temperature
+    if logprobs is not None:
+        body["logprobs"] = logprobs
+    if top_logprobs is not None:
+        body["top_logprobs"] = top_logprobs
 
     if top_logprobs is not None:
         body["top_logprobs"] = top_logprobs
@@ -307,3 +311,83 @@ def make_completions_health_check(port: int, model: str):
             return False
 
     return _check_completions_endpoint
+
+
+def chat_payload_with_logprobs(
+    content: Union[str, List[Dict[str, Any]]] = TEXT_PROMPT,
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    max_tokens: int = 50,
+    temperature: float = 0.0,
+    top_logprobs: int = 3,
+) -> ChatPayloadWithLogprobs:
+    """
+    Create a chat payload that requests and validates logprobs in the response.
+
+    Args:
+        content: Message content (text or structured content list)
+        repeat_count: Number of times to repeat the request
+        expected_response: List of strings expected in the response text
+        max_tokens: Maximum tokens to generate
+        temperature: Sampling temperature
+        top_logprobs: Number of top logprobs to return per token
+
+    Returns:
+        ChatPayloadWithLogprobs that validates logprobs in response
+    """
+    body: Dict[str, Any] = {
+        "messages": [
+            {
+                "role": "user",
+                "content": content,
+            }
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "logprobs": True,
+        "top_logprobs": top_logprobs,
+    }
+
+    return ChatPayloadWithLogprobs(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=[],
+        expected_response=expected_response or ["AI", "knock", "joke"],
+    )
+
+
+def completion_payload_with_logprobs(
+    prompt: str = TEXT_PROMPT,
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    max_tokens: int = 50,
+    temperature: float = 0.0,
+    logprobs: int = 5,
+) -> CompletionPayloadWithLogprobs:
+    """
+    Create a completion payload that requests and validates logprobs in the response.
+
+    Args:
+        prompt: Text prompt
+        repeat_count: Number of times to repeat the request
+        expected_response: List of strings expected in the response text
+        max_tokens: Maximum tokens to generate
+        temperature: Sampling temperature
+        logprobs: Number of logprobs to return per token
+
+    Returns:
+        CompletionPayloadWithLogprobs that validates logprobs in response
+    """
+    body: Dict[str, Any] = {
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "logprobs": logprobs,
+    }
+
+    return CompletionPayloadWithLogprobs(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=[],
+        expected_response=expected_response or ["AI", "knock", "joke"],
+    )
