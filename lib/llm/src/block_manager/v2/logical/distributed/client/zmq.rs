@@ -20,7 +20,7 @@ use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use tmq::{dealer::dealer, publish::publish, Context, Message, Multipart};
 use tokio::sync::Mutex as TokioMutex;
-use tracing::{debug, trace, warn};
+use tracing::{debug,warn};
 
 use super::super::config::RegistryClientConfig;
 use super::super::protocol::{

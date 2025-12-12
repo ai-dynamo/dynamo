@@ -104,6 +104,7 @@ impl MokaStorage {
     /// Moka's entry_count() is eventually consistent. This method forces
     /// processing of pending tasks to ensure accurate counts.
     /// Primarily useful for tests.
+    #[allow(dead_code)]
     pub fn sync(&self) {
         self.cache.run_pending_tasks();
     }
@@ -125,6 +126,7 @@ impl MokaStorage {
     }
 
     /// Check if hash exists in specific bucket.
+    #[allow(dead_code)]
     pub fn contains(&self, bucket_id: BucketId, hash: SequenceHash) -> bool {
         let rkey = RegistryKey::new(bucket_id, hash);
         self.cache.contains_key(&rkey)
@@ -234,6 +236,7 @@ impl MokaStorage {
     }
 
     /// Clean up expired leases.
+    #[allow(dead_code)]
     pub fn cleanup_expired_leases(&self) -> usize {
         let before = self.leases.len();
         self.leases.retain(|_, lease| !lease.is_expired());
@@ -241,6 +244,7 @@ impl MokaStorage {
     }
 
     /// Get the number of active leases.
+    #[allow(dead_code)]
     pub fn lease_count(&self) -> usize {
         self.leases.iter().filter(|e| !e.value().is_expired()).count()
     }

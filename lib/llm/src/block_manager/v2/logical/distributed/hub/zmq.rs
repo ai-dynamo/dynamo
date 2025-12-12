@@ -20,7 +20,7 @@ use tmq::{
     Context, Message, Multipart,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use super::super::config::RegistryHubConfig;
 use super::super::protocol::{

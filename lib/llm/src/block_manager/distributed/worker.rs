@@ -412,6 +412,7 @@ async fn perform_allocation_and_build_handler(
                     device_list.clone(),
                     transfer_context.clone(),
                     worker_id as u64,
+                    None, // TODO: wire up KvbmMetrics for object storage tracking
                 ) {
                     Ok(obj_handler) => {
                         handler.set_object_handler(Arc::new(obj_handler));

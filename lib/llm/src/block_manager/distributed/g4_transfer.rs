@@ -24,6 +24,7 @@ use nixl_sys::{Agent as NixlAgent, MemType, XferDescList, XferOp};
 use crate::block_manager::block::data::local::LocalBlockData;
 use crate::block_manager::block::transfer::{TransferContext, WriteTo};
 use crate::block_manager::config::ObjectStorageConfig;
+use crate::block_manager::metrics_kvbm::KvbmMetrics;
 use crate::block_manager::storage::{DeviceStorage, ObjectStorage, PinnedStorage};
 
 use super::registry::{DistributedRegistry, SequenceHashRegistry};
@@ -63,10 +64,9 @@ pub enum RemoteDescriptor {
         key: u64,
         bucket: String,
     },
-    /// Disk/file storage - path + key
+    /// Disk/file storage - key only
     Disk {
         key: u64,
-        path: String,
     },
 }
 
@@ -77,8 +77,8 @@ impl RemoteDescriptor {
     }
 
     /// Create a new remote descriptor for disk storage.
-    pub fn disk(key: u64, path: String) -> Self {
-        Self::Disk { key, path }
+    pub fn disk(key: u64) -> Self {
+        Self::Disk { key }
     }
 
     /// Get the key regardless of storage type.
@@ -122,6 +122,9 @@ pub struct G4TransferHandler {
 
     /// Worker ID for bucket resolution
     worker_id: u64,
+
+    /// Optional KVBM metrics for tracking offload/onboard stats
+    kvbm_metrics: Option<KvbmMetrics>,
 }
 
 impl G4TransferHandler {
@@ -134,6 +137,7 @@ impl G4TransferHandler {
     /// * `device_blocks` - Device blocks
     /// * `context` - transfer context
     /// * `worker_id` - Worker ID
+    /// * `kvbm_metrics` - Optional KVBM metrics for tracking offload/onboard stats
     pub fn new(
         agent: Arc<Option<NixlAgent>>,
         local_registry: SequenceHashRegistry,
@@ -143,6 +147,7 @@ impl G4TransferHandler {
         device_blocks: Vec<LocalBlockData<DeviceStorage>>,
         context: Arc<TransferContext>,
         worker_id: u64,
+        kvbm_metrics: Option<KvbmMetrics>,
     ) -> Result<Self> {
         // Verify agent is available
         if agent.is_none() {
@@ -168,6 +173,7 @@ impl G4TransferHandler {
             device_blocks: Arc::new(device_blocks),
             context,
             worker_id,
+            kvbm_metrics,
         })
     }
 
@@ -804,6 +810,13 @@ impl G4TransferHandler {
                         e
                     );
                 }
+            }
+        }
+
+        // Track offload metric
+        if result.transferred > 0 {
+            if let Some(metrics) = &self.kvbm_metrics {
+                metrics.offload_blocks_d2o.inc_by(result.transferred as u64);
             }
         }
 

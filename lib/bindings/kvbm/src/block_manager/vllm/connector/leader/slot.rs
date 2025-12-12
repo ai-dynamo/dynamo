@@ -185,6 +185,7 @@ pub struct ConnectorSlotManager<R: RequestKey> {
     /// Cache statistics tracker
     cache_stats: Arc<CacheStatsTracker>,
     /// KVBM metrics for exposing cache hit rates
+    #[allow(dead_code)]
     kvbm_metrics: KvbmMetrics,
     /// Reference to the leader for G4 operations
     leader: Arc<KvbmLeader>,
