@@ -202,34 +202,44 @@ impl PrefillRouter {
 
         // GAIE Query-only mode: select worker without executing prefill
         if query_only {
-            let (req, context) = request.into_parts();
-            let context_id = context.id().to_string();
-
             match prefill_router {
                 InnerPrefillRouter::KvRouter(router) => {
-                    // Directly call find_best_match on the chooser without routing
-                    let (best_worker, _overlap) = router
-                        .chooser
-                        .find_best_match(
-                            Some(&context_id),
-                            &req.token_ids,
-                            req.router_config_override.as_ref(),
-                            false, // Don't update states for query-only
-                        )
+                    // Add query_instance_id annotation to get worker ID without routing
+                    let (mut req, ctx) = request.into_parts();
+                    req.annotations.push("query_instance_id".to_string());
+                    let query_request = ctx.map(|_| req);
+
+                    let mut response = router
+                        .generate(query_request)
                         .await
                         .map_err(|e| PrefillError::PrefillError(e.to_string()))?;
 
-                    return Ok(PrefillCallResult::WorkerIdOnly(best_worker.worker_id));
+                    // Parse worker_instance_id from annotation response
+                    while let Some(item) = response.next().await {
+                        if let Some(event) = item.event.as_ref()
+                            && event == "worker_instance_id"
+                            && let Some(comments) = item.comment.as_ref()
+                            && let Some(first_comment) = comments.first()
+                            && let Ok(id_str) = serde_json::from_str::<String>(first_comment)
+                            && let Ok(worker_id) = id_str.parse::<u64>()
+                        {
+                            return Ok(PrefillCallResult::WorkerIdOnly(worker_id));
+                        }
+                    }
+                    return Err(PrefillError::PrefillError(
+                        "Failed to get prefill worker ID from query_instance_id response"
+                            .to_string(),
+                    ));
                 }
                 InnerPrefillRouter::SimpleRouter(router) => {
-                    // For simple router, get available workers and pick first one
+                    // SimpleRouter's generate() doesn't support query-only mode,
+                    // so get available workers directly and pick first one
                     let instance_ids = (*router).client.instance_ids();
                     if instance_ids.is_empty() {
                         return Err(PrefillError::PrefillError(
                             "No prefill workers available".to_string(),
                         ));
                     }
-                    // Pick first available worker (simple router doesn't expose selection logic)
                     return Ok(PrefillCallResult::WorkerIdOnly(instance_ids[0]));
                 }
             }
