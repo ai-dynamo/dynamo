@@ -60,9 +60,13 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/etcd"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/modelendpoint"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/rbac"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secrets"
+	internalwebhook "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook"
+	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook/validation"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	//+kubebuilder:scaffold:imports
 )
@@ -140,8 +144,12 @@ func main() {
 	var mpiRunSecretName string
 	var mpiRunSecretNamespace string
 	var plannerClusterRoleName string
-	var profilerImage string
 	var dgdrProfilingClusterRoleName string
+	var namespaceScopeLeaseDuration time.Duration
+	var namespaceScopeLeaseRenewInterval time.Duration
+	var operatorVersion string
+	var discoveryBackend string
+	var enableWebhooks bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -151,6 +159,9 @@ func main() {
 		"If set the metrics endpoint is served securely")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.BoolVar(&enableWebhooks, "enable-webhooks", false,
+		"Enable admission webhooks for validation. When enabled, controllers skip validation "+
+			"(webhooks handle it). When disabled, controllers perform validation.")
 	flag.StringVar(&restrictedNamespace, "restrictedNamespace", "",
 		"Enable resources filtering, only the resources belonging to the given namespace will be handled.")
 	flag.StringVar(&leaderElectionID, "leader-election-id", "", "Leader election id"+
@@ -182,10 +193,16 @@ func main() {
 		"Namespace where the MPI SSH secret is located (required)")
 	flag.StringVar(&plannerClusterRoleName, "planner-cluster-role-name", "",
 		"Name of the ClusterRole for planner (cluster-wide mode only)")
-	flag.StringVar(&profilerImage, "profiler-image", "",
-		"Container image to use for profiling jobs (both online and offline/AIC) (for DynamoGraphDeploymentRequest)")
 	flag.StringVar(&dgdrProfilingClusterRoleName, "dgdr-profiling-cluster-role-name", "",
 		"Name of the ClusterRole for DGDR profiling jobs (cluster-wide mode only)")
+	flag.DurationVar(&namespaceScopeLeaseDuration, "namespace-scope-lease-duration", 30*time.Second,
+		"Duration of namespace scope marker lease before expiration (namespace-restricted mode only)")
+	flag.DurationVar(&namespaceScopeLeaseRenewInterval, "namespace-scope-lease-renew-interval", 10*time.Second,
+		"Interval for renewing namespace scope marker lease (namespace-restricted mode only)")
+	flag.StringVar(&operatorVersion, "operator-version", "unknown",
+		"Version of the operator (used in lease holder identity)")
+	flag.StringVar(&discoveryBackend, "discovery-backend", "",
+		"Discovery backend to use: empty string (default, uses ETCD) or 'kubernetes' (uses Kubernetes API)")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -196,6 +213,17 @@ func main() {
 	if restrictedNamespace == "" && plannerClusterRoleName == "" {
 		setupLog.Error(nil, "planner-cluster-role-name is required in cluster-wide mode")
 		os.Exit(1)
+	}
+
+	// Validate discoverBackend value
+	if discoveryBackend != "" && discoveryBackend != "kubernetes" {
+		setupLog.Error(nil, "invalid discover-backend value, must be empty string or 'kubernetes'", "value", discoveryBackend)
+		os.Exit(1)
+	}
+	if discoveryBackend != "" {
+		setupLog.Info("Discovery backend configured", "backend", discoveryBackend)
+	} else {
+		setupLog.Info("Discovery backend configured", "backend", "etcd (default)")
 	}
 
 	// Validate modelExpressURL if provided
@@ -246,6 +274,7 @@ func main() {
 			PlannerClusterRoleName:       plannerClusterRoleName,
 			DGDRProfilingClusterRoleName: dgdrProfilingClusterRoleName,
 		},
+		DiscoveryBackend: discoveryBackend,
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()
@@ -267,6 +296,12 @@ func main() {
 	}
 
 	webhookServer := webhook.NewServer(webhook.Options{
+		// Bind to all interfaces so the Service can reach the webhook server
+		Host: "0.0.0.0",
+		// Must match the port exposed by the manager container and targeted by the Service.
+		Port: 9443,
+		// Must match the mountPath of the webhook certificate secret in the Deployment.
+		CertDir: "/tmp/k8s-webhook-server/serving-certs",
 		TLSOpts: tlsOpts,
 	})
 
@@ -298,6 +333,9 @@ func main() {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
 		}
+		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
+	} else {
+		setupLog.Info("No restricted namespace configured, launching in cluster-wide mode")
 	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
 	if err != nil {
@@ -305,18 +343,101 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Initialize namespace scope mechanism
+	var leaseManager *namespace_scope.LeaseManager
+	var leaseWatcher *namespace_scope.LeaseWatcher
+
+	if restrictedNamespace != "" {
+		// Namespace-restricted mode: Create and maintain namespace scope marker lease
+		setupLog.Info("Creating namespace scope marker lease manager",
+			"namespace", restrictedNamespace,
+			"leaseDuration", namespaceScopeLeaseDuration,
+			"renewInterval", namespaceScopeLeaseRenewInterval)
+
+		leaseManager, err = namespace_scope.NewLeaseManager(
+			mgr.GetConfig(),
+			restrictedNamespace,
+			operatorVersion,
+			namespaceScopeLeaseDuration,
+			namespaceScopeLeaseRenewInterval,
+		)
+		if err != nil {
+			setupLog.Error(err, "unable to create namespace scope marker lease manager")
+			os.Exit(1)
+		}
+
+		// Start the lease manager
+		if err = leaseManager.Start(mainCtx); err != nil {
+			setupLog.Error(err, "unable to start namespace scope marker lease manager")
+			os.Exit(1)
+		}
+
+		// Monitor for fatal lease errors
+		// If lease renewal fails repeatedly, we must exit to prevent split-brain
+		go func() {
+			select {
+			case err := <-leaseManager.Errors():
+				setupLog.Error(err, "FATAL: Lease manager encountered unrecoverable error, shutting down to prevent split-brain")
+				os.Exit(1)
+			case <-mainCtx.Done():
+				// Normal shutdown, error channel monitoring no longer needed
+				return
+			}
+		}()
+
+		// Ensure lease is released on shutdown
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := leaseManager.Stop(shutdownCtx); err != nil {
+				setupLog.Error(err, "failed to stop lease manager cleanly")
+			}
+		}()
+
+		setupLog.Info("Namespace scope marker lease manager started successfully")
+	} else {
+		// Cluster-wide mode: Watch for namespace scope marker leases
+		setupLog.Info("Setting up namespace scope marker lease watcher for cluster-wide mode")
+
+		leaseWatcher, err = namespace_scope.NewLeaseWatcher(mgr.GetConfig())
+		if err != nil {
+			setupLog.Error(err, "unable to create namespace scope marker lease watcher")
+			os.Exit(1)
+		}
+
+		// Start the lease watcher
+		if err = leaseWatcher.Start(mainCtx); err != nil {
+			setupLog.Error(err, "unable to start namespace scope marker lease watcher")
+			os.Exit(1)
+		}
+
+		setupLog.Info("Namespace scope marker lease watcher started successfully")
+	}
+
+	// Pass leaseWatcher to controller config for namespace exclusion filtering
+	ctrlConfig.ExcludedNamespaces = leaseWatcher
+
 	// Detect orchestrators availability using discovery client
 	setupLog.Info("Detecting Grove availability...")
 	groveEnabled := commonController.DetectGroveAvailability(mainCtx, mgr)
 	ctrlConfig.Grove.Enabled = groveEnabled
 	setupLog.Info("Detecting LWS availability...")
 	lwsEnabled := commonController.DetectLWSAvailability(mainCtx, mgr)
-	ctrlConfig.LWS.Enabled = lwsEnabled
-
+	setupLog.Info("Detecting Volcano availability...")
+	volcanoEnabled := commonController.DetectVolcanoAvailability(mainCtx, mgr)
+	// LWS for multinode deployment usage depends on both LWS and Volcano availability
+	ctrlConfig.LWS.Enabled = lwsEnabled && volcanoEnabled
 	// Detect Kai-scheduler availability using discovery client
 	setupLog.Info("Detecting Kai-scheduler availability...")
 	kaiSchedulerEnabled := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
 	ctrlConfig.KaiScheduler.Enabled = kaiSchedulerEnabled
+
+	setupLog.Info("Detected orchestrators availability",
+		"grove", groveEnabled,
+		"lws", lwsEnabled,
+		"volcano", volcanoEnabled,
+		"kai-scheduler", kaiSchedulerEnabled,
+	)
 
 	// Create etcd client
 	cli, err := clientv3.New(clientv3.Config{
@@ -457,15 +578,90 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err = (&controller.DynamoGraphDeploymentScalingAdapterReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("dgdscalingadapter"),
+		Config:   ctrlConfig,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DGDScalingAdapter")
+		os.Exit(1)
+	}
+
 	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
-		Client:        mgr.GetClient(),
-		Recorder:      mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
-		ProfilerImage: profilerImage,
-		Config:        ctrlConfig,
-		RBACManager:   rbacManager,
+		Client:      mgr.GetClient(),
+		Recorder:    mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
+		Config:      ctrlConfig,
+		RBACManager: rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeploymentRequest")
 		os.Exit(1)
+	}
+
+	if err = (&controller.DynamoModelReconciler{
+		Client:         mgr.GetClient(),
+		Recorder:       mgr.GetEventRecorderFor("dynamomodel"),
+		EndpointClient: modelendpoint.NewClient(),
+		Config:         ctrlConfig,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoModel")
+		os.Exit(1)
+	}
+
+	// Set webhooks enabled flag in config
+	ctrlConfig.WebhooksEnabled = enableWebhooks
+
+	if enableWebhooks {
+		setupLog.Info("Webhooks are enabled - webhooks will validate, controllers will skip validation")
+	} else {
+		setupLog.Info("Webhooks are disabled - controllers will validate (defense in depth)")
+	}
+
+	// Configure webhooks with lease-based namespace exclusion (only if enabled)
+	// In cluster-wide mode, inject ctrlConfig.ExcludedNamespaces (leaseWatcher) so webhooks can defer
+	// to namespace-restricted operators. In namespace-restricted mode, webhooks validate without checking
+	// leases (ExcludedNamespaces is nil). The webhooks use LeaseAwareValidator wrapper to add coordination.
+	if enableWebhooks {
+		if ctrlConfig.RestrictedNamespace == "" {
+			// Cluster-wide mode: inject the same ExcludedNamespaces used by controllers
+			setupLog.Info("Configuring webhooks with lease-based namespace exclusion for cluster-wide mode")
+			internalwebhook.SetExcludedNamespaces(ctrlConfig.ExcludedNamespaces)
+		} else {
+			// Namespace-restricted mode: no exclusion checking needed (validators not wrapped)
+			setupLog.Info("Configuring webhooks for namespace-restricted mode (no lease checking)",
+				"restrictedNamespace", ctrlConfig.RestrictedNamespace)
+			internalwebhook.SetExcludedNamespaces(nil)
+		}
+
+		// Register validation webhook handlers
+		setupLog.Info("Registering validation webhooks")
+
+		dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler()
+		if err = dcdHandler.RegisterWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoComponentDeployment")
+			os.Exit(1)
+		}
+
+		dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler()
+		if err = dgdHandler.RegisterWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment")
+			os.Exit(1)
+		}
+
+		dmHandler := webhookvalidation.NewDynamoModelHandler()
+		if err = dmHandler.RegisterWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoModel")
+			os.Exit(1)
+		}
+
+		isClusterWide := ctrlConfig.RestrictedNamespace == ""
+		dgdrHandler := webhookvalidation.NewDynamoGraphDeploymentRequestHandler(isClusterWide)
+		if err = dgdrHandler.RegisterWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeploymentRequest")
+			os.Exit(1)
+		}
+
+		setupLog.Info("Validation webhooks registered successfully")
 	}
 	//+kubebuilder:scaffold:builder
 

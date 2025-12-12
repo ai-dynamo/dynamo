@@ -20,7 +20,7 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import AsyncGenerator, Optional, Union
+from typing import Any, AsyncGenerator, Optional, Union
 
 import torch
 from tensorrt_llm.executor.result import GenerationResult
@@ -52,11 +52,6 @@ class DisaggregationMode(Enum):
     ENCODE = "encode"
 
 
-class DisaggregationStrategy(Enum):
-    PREFILL_FIRST = "prefill_first"
-    DECODE_FIRST = "decode_first"
-
-
 @dataclass
 class RequestHandlerConfig:
     """
@@ -68,9 +63,6 @@ class RequestHandlerConfig:
     default_sampling_params: SamplingParams
     publisher: Publisher
     disaggregation_mode: DisaggregationMode
-    disaggregation_strategy: DisaggregationStrategy
-    next_client: object
-    next_router_client: Optional[object] = None
     encode_client: Optional[object] = None
     multimodal_processor: Optional[
         MultimodalRequestProcessor
@@ -79,6 +71,8 @@ class RequestHandlerConfig:
     runtime: Optional[
         DistributedRuntime
     ] = None  # DistributedRuntime reference for graceful shutdown
+    metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
+    kv_block_size: int = 32
 
 
 class HandlerBase:
@@ -91,16 +85,15 @@ class HandlerBase:
         self.component = config.component
         self.default_sampling_params = config.default_sampling_params
         self.publisher = config.publisher
+        self.metrics_collector = config.metrics_collector
         self.disaggregation_mode = config.disaggregation_mode
-        self.disaggregation_strategy = config.disaggregation_strategy
-        self.next_client = config.next_client
-        self.next_router_client = config.next_router_client
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
         self.connector = config.connector
         # Store runtime reference for graceful shutdown
         self.runtime = config.runtime
+        self.kv_block_size: int = config.kv_block_size
 
     def check_error(self, result: dict):
         """
@@ -112,6 +105,76 @@ class HandlerBase:
             return (
                 result["finish_reason"] == "stop" or result["finish_reason"] == "error"
             )
+
+    @staticmethod
+    def _extract_logprobs(
+        output, num_output_tokens_so_far: int
+    ) -> tuple[list[float] | None, list[list[dict]] | None]:
+        """
+        Extract logprobs from the TRTLLM output for new tokens.
+
+        Args:
+            output: TRTLLM CompletionOutput object
+            num_output_tokens_so_far: Number of tokens already processed
+        Returns:
+            Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
+            - log_probs: List of log probabilities for each new token
+            - top_logprobs: List of top logprobs dicts for each new token
+        """
+        if output.logprobs is None:
+            return None, None
+
+        # Get logprobs for new tokens only
+        new_logprobs = output.logprobs[num_output_tokens_so_far:]
+        if not new_logprobs:
+            return None, None
+
+        # From TRTLLM CompletionOutput API, logprobs: (TokenLogprobs | List[float], optional)
+        # Expect TokenLogprobs output when logprobs is set, check edge case where list[float] is returned instead
+        if isinstance(new_logprobs[0], float):
+            return [float(lp) for lp in new_logprobs], None
+
+        log_probs = []
+        top_logprobs = []
+
+        for token_idx, token_logprobs_dict in enumerate(new_logprobs):
+            if token_logprobs_dict is None:
+                continue
+
+            # Get the actual token_id that was generated at this position
+            actual_token_id = output.token_ids[num_output_tokens_so_far + token_idx]
+
+            # Extract log probability for the selected token
+            if actual_token_id in token_logprobs_dict:
+                selected_logprob = token_logprobs_dict[actual_token_id]
+                log_probs.append(float(selected_logprob.logprob))
+            else:
+                # Fallback: use the first logprob if selected token not found
+                first_logprob = next(iter(token_logprobs_dict.values()), None)
+                if first_logprob:
+                    log_probs.append(float(first_logprob.logprob))
+
+            # Build top_logprobs list for this token position
+            # NOTE: TRTLLM LogProb API doesn't have decoded_token, will default to None
+            token_top_logprobs = []
+            for tok_id, logprob_info in token_logprobs_dict.items():
+                token_top_logprobs.append(
+                    {
+                        "rank": logprob_info.rank
+                        if hasattr(logprob_info, "rank")
+                        else 0,
+                        "token_id": tok_id,
+                        "token": (
+                            logprob_info.decoded_token
+                            if hasattr(logprob_info, "decoded_token")
+                            else None
+                        ),
+                        "logprob": float(logprob_info.logprob),
+                    }
+                )
+            top_logprobs.append(token_top_logprobs)
+
+        return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
     async def _handle_cancellation(
         self, generation_result: GenerationResult, context: Context
@@ -217,11 +280,13 @@ class HandlerBase:
             request["stop_conditions"]["max_tokens"] = 1
             disaggregated_params = LlmDisaggregatedParams(request_type="context_only")
 
-        if "disaggregated_params" in request:
+        if "prefill_result" in request:
             if self.disaggregation_mode == DisaggregationMode.PREFILL:
                 raise ValueError("Cannot provide disaggregated_params in prefill mode")
             disaggregated_params = DisaggregatedParamsCodec.decode(
-                DisaggregatedParams(**request["disaggregated_params"])
+                DisaggregatedParams(
+                    **request["prefill_result"].get("disaggregated_params")
+                )
             )
             disaggregated_params.request_type = "generation_only"
 
@@ -241,6 +306,26 @@ class HandlerBase:
             if hasattr(sampling_params, key):
                 setattr(sampling_params, key, value)
 
+        # Additional sampling params in output options
+        output_options = request.get("output_options", {})
+        if output_options:
+            logprobs_value = output_options.get("logprobs")
+
+            # Handle logprobs
+            if logprobs_value is not None:
+                if hasattr(sampling_params, "logprobs"):
+                    setattr(
+                        sampling_params, "logprobs", max(1, int(logprobs_value))
+                    )  # If top_logprobs = 0, still want to see chosen token logprob
+
+            # Handle prompt_logprobs
+            prompt_logprobs_value = output_options.get("prompt_logprobs")
+            if prompt_logprobs_value:
+                if hasattr(sampling_params, "prompt_logprobs"):
+                    setattr(
+                        sampling_params, "prompt_logprobs", int(prompt_logprobs_value)
+                    )
+
         max_tokens = request["stop_conditions"]["max_tokens"]
         if max_tokens:
             sampling_params.max_tokens = max_tokens
@@ -253,6 +338,11 @@ class HandlerBase:
         if min_tokens:
             sampling_params.min_tokens = min_tokens
 
+        stop_token_ids = request["stop_conditions"].get("stop_token_ids_hidden")
+        if stop_token_ids:
+            existing = sampling_params.stop_token_ids or []
+            sampling_params.stop_token_ids = list(set(existing).union(stop_token_ids))
+
         # TODO: Instead of True, we should use streaming from the request.
         # However, currently dynamo run does not send streaming in the request.
         streaming = (
@@ -260,13 +350,17 @@ class HandlerBase:
         )
 
         request_id = request.get("id") or request.get("request_id", "unknown-id")
-        model_name = request.get("model", "unknown_model")
 
         # Optional test-only logits processing (enable with DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1)
         if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
             processors = [HelloWorldLogitsProcessor(self.engine.llm.tokenizer)]
             adapters = create_trtllm_adapters(processors)
             sampling_params.logits_processor = adapters
+
+        prefill_result = request.get("prefill_result")
+        prefill_prompt_tokens_details = (
+            prefill_result.get("prompt_tokens_details") if prefill_result else None
+        )
 
         try:
             # NEW: Updated engine call to include multimodal data
@@ -286,18 +380,6 @@ class HandlerBase:
                         self.publisher.start()
                         self.first_generation = False
 
-                    # Upon completion, send a final chunk with "stop" as the finish reason.
-                    # This signals to the client that the stream has ended.
-                    if (
-                        res.finished
-                        and self.disaggregation_mode != DisaggregationMode.PREFILL
-                    ):
-                        if self.multimodal_processor:
-                            final_out = self.multimodal_processor.get_stop_response(
-                                request_id, model_name
-                            )
-                            yield final_out
-
                     # If we are not done generating, but there are no outputs, return an error
                     if not res.outputs and not res.finished:
                         yield {"finish_reason": "error", "token_ids": []}
@@ -307,12 +389,18 @@ class HandlerBase:
                     # The engine returns all tokens generated so far. We must calculate the new
                     # tokens generated in this iteration to create the "delta".
                     next_total_toks = len(output.token_ids)
-                    if self.multimodal_processor:
-                        out = self.multimodal_processor.create_response_chunk(
-                            output, num_output_tokens_so_far, request_id, model_name
-                        )
-                    else:
-                        out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+
+                    out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+
+                    # Extract logprobs from the output
+                    log_probs, top_logprobs = self._extract_logprobs(
+                        output, num_output_tokens_so_far
+                    )
+                    if log_probs:
+                        out["log_probs"] = log_probs
+                    if top_logprobs:
+                        out["top_logprobs"] = top_logprobs
+
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
                     if output.stop_reason:
@@ -323,11 +411,50 @@ class HandlerBase:
                             DisaggregatedParamsCodec.encode(output.disaggregated_params)
                         )
 
+                    if out.get("finish_reason"):
+                        num_input_tokens = len(request.get("token_ids", []))
+
+                        prompt_tokens_details = None
+                        if prefill_prompt_tokens_details:
+                            prompt_tokens_details = prefill_prompt_tokens_details
+                        else:
+                            if output.request_perf_metrics is not None:
+                                kv_cache_metrics = (
+                                    output.request_perf_metrics.kv_cache_metrics
+                                )
+                                cached_tokens = min(
+                                    num_input_tokens,
+                                    kv_cache_metrics.num_reused_blocks
+                                    * self.kv_block_size,
+                                )
+                                if cached_tokens > 0:
+                                    prompt_tokens_details = {
+                                        "cached_tokens": int(cached_tokens),
+                                    }
+
+                        out["completion_usage"] = {
+                            "prompt_tokens": int(num_input_tokens),
+                            "completion_tokens": int(next_total_toks),
+                            "total_tokens": int(num_input_tokens + next_total_toks),
+                            "prompt_tokens_details": prompt_tokens_details,
+                        }
+
                     if res.finished and not out.get("finish_reason"):
                         out["finish_reason"] = "unknown"
                         logging.warning(
                             "Request finished with no finish reason set - this indicates a possible bug"
                         )
+
+                    # Log metrics to TensorRT-LLM MetricsCollector when request finishes
+                    if (
+                        res.finished
+                        and self.metrics_collector
+                        and hasattr(res, "metrics_dict")
+                    ):
+                        try:
+                            self.metrics_collector.log_metrics_dict(res.metrics_dict)
+                        except Exception as e:
+                            logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
 
                     # Yield the chunk to the client and update the token count for the next iteration.
                     yield out
@@ -341,8 +468,12 @@ class HandlerBase:
 
         # 2. Per-request errors - send to client, don't shutdown
         except RequestError as e:
-            logging.warning(f"Request {request_id} error: {e}")
-            yield {"finish_reason": "error", "token_ids": []}
+            error_msg = str(e)
+            logging.warning(f"Request {request_id} error: {error_msg}")
+            yield {
+                "finish_reason": {"error": error_msg},
+                "token_ids": [],
+            }
 
         # 3. ALL OTHER ERRORS - graceful shutdown
         except Exception as e:
@@ -356,7 +487,7 @@ class HandlerBase:
             # Try to send error to client before shutdown
             try:
                 yield {
-                    "finish_reason": "error",
+                    "finish_reason": {"error": error_msg},
                     "token_ids": [],
                 }
             except Exception:

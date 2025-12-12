@@ -5,9 +5,36 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
+pub use crate::protocols::common::timing::TimingInfo;
+
 pub trait NvExtProvider {
     fn nvext(&self) -> Option<&NvExt>;
     fn raw_prompt(&self) -> Option<String>;
+}
+
+/// Worker ID information for disaggregated serving
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct WorkerIdInfo {
+    /// The prefill worker ID that processed this request
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_id: Option<u64>,
+
+    /// The decode worker ID that processed this request
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_worker_id: Option<u64>,
+}
+
+/// NVIDIA LLM response extensions
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NvExtResponse {
+    /// Worker ID information (prefill and decode worker IDs)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<WorkerIdInfo>,
+
+    /// Per-request timing information
+    /// Populated when client requests `extra_fields: ["timing"]`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timing: Option<TimingInfo>,
 }
 
 /// NVIDIA LLM extensions to the OpenAI API
@@ -39,7 +66,7 @@ pub struct NvExt {
     /// If not set, the request will be routed to the best matching instance.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend_instance_id: Option<i64>,
+    pub backend_instance_id: Option<u64>,
 
     /// Pre-tokenized data to use instead of tokenizing the prompt
     /// If provided along with backend_instance_id, these tokens will be used directly
@@ -53,6 +80,13 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub max_thinking_tokens: Option<u32>,
+
+    /// Extra fields to be included in the response's nvext
+    /// This is a list of field names that should be populated in the response
+    /// Supported fields: "worker_id", "timing", which has a 1:1 mapping with the NvExtResponse names
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub extra_fields: Option<Vec<String>>,
 }
 
 impl Default for NvExt {
@@ -98,6 +132,7 @@ mod tests {
         assert_eq!(nv_ext.backend_instance_id, None);
         assert_eq!(nv_ext.token_data, None);
         assert_eq!(nv_ext.max_thinking_tokens, None);
+        assert_eq!(nv_ext.extra_fields, None);
     }
 
     // Test valid builder configurations
@@ -109,6 +144,7 @@ mod tests {
             .backend_instance_id(42)
             .token_data(vec![1, 2, 3, 4])
             .max_thinking_tokens(1024)
+            .extra_fields(vec!["worker_id".to_string()])
             .build()
             .unwrap();
 
@@ -117,6 +153,7 @@ mod tests {
         assert_eq!(nv_ext.backend_instance_id, Some(42));
         assert_eq!(nv_ext.token_data, Some(vec![1, 2, 3, 4]));
         assert_eq!(nv_ext.max_thinking_tokens, Some(1024));
+        assert_eq!(nv_ext.extra_fields, Some(vec!["worker_id".to_string()]));
         // Validate the built struct
         assert!(nv_ext.validate().is_ok());
     }

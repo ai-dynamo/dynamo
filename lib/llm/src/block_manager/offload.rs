@@ -693,7 +693,7 @@ impl OffloadFiltersBuilder {
     }
 }
 
-#[cfg(all(test, feature = "testing-cuda"))]
+#[cfg(all(test, feature = "testing-cuda", feature = "testing-nixl"))]
 mod tests {
     use super::*;
 
@@ -713,8 +713,7 @@ mod tests {
     use nixl_sys::{MemoryRegion, NixlDescriptor};
 
     use aligned_vec::avec;
-    use cudarc::runtime::sys::{cudaMemcpy, cudaMemcpyKind, cudaMemset};
-    use prometheus::Registry;
+    use cudarc::runtime::sys::{cudaDeviceSynchronize, cudaMemcpy, cudaMemcpyKind, cudaMemset};
     use rstest::*;
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -1285,6 +1284,8 @@ mod tests {
 
         // Check that this is the same block.
         check_block_contents(&immutable_host_block, &device_blocks[0], 42)?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         Ok(())
     }

@@ -16,9 +16,11 @@
 //! - `NATS_AUTH_CREDENTIALS_FILE`: the path to the credentials file
 //!
 //! Note: `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD` must be used together.
+use crate::metrics::MetricsHierarchy;
+use crate::protocols::EndpointId;
 use crate::traits::events::EventPublisher;
-use crate::{Result, metrics::MetricsRegistry};
 
+use anyhow::Result;
 use async_nats::connection::State;
 use async_nats::{Subscriber, client, jetstream};
 use async_trait::async_trait;
@@ -36,7 +38,7 @@ use tokio::time;
 use url::Url;
 use validator::{Validate, ValidationError};
 
-use crate::metrics::prometheus_names::nats_client as nats_metrics;
+use crate::config::environment_names::nats as env_nats;
 pub use crate::slug::Slug;
 use tracing as log;
 
@@ -282,7 +284,7 @@ pub struct ClientOptions {
 }
 
 fn default_server() -> String {
-    if let Ok(server) = std::env::var("NATS_SERVER") {
+    if let Ok(server) = std::env::var(env_nats::NATS_SERVER) {
         return server;
     }
 
@@ -377,32 +379,26 @@ impl std::fmt::Debug for NatsAuth {
 impl Default for NatsAuth {
     fn default() -> Self {
         if let (Ok(username), Ok(password)) = (
-            std::env::var("NATS_AUTH_USERNAME"),
-            std::env::var("NATS_AUTH_PASSWORD"),
+            std::env::var(env_nats::auth::NATS_AUTH_USERNAME),
+            std::env::var(env_nats::auth::NATS_AUTH_PASSWORD),
         ) {
             return NatsAuth::UserPass(username, password);
         }
 
-        if let Ok(token) = std::env::var("NATS_AUTH_TOKEN") {
+        if let Ok(token) = std::env::var(env_nats::auth::NATS_AUTH_TOKEN) {
             return NatsAuth::Token(token);
         }
 
-        if let Ok(nkey) = std::env::var("NATS_AUTH_NKEY") {
+        if let Ok(nkey) = std::env::var(env_nats::auth::NATS_AUTH_NKEY) {
             return NatsAuth::NKey(nkey);
         }
 
-        if let Ok(path) = std::env::var("NATS_AUTH_CREDENTIALS_FILE") {
+        if let Ok(path) = std::env::var(env_nats::auth::NATS_AUTH_CREDENTIALS_FILE) {
             return NatsAuth::CredentialsFile(PathBuf::from(path));
         }
 
         NatsAuth::UserPass("user".to_string(), "user".to_string())
     }
-}
-
-/// Is this file name / url in the NATS object store?
-/// Checks the name only, does not go to the store.
-pub fn is_nats_url(s: &str) -> bool {
-    s.starts_with(URL_PREFIX)
 }
 
 /// Extract NATS bucket and key from a nats URL of the form:
@@ -439,6 +435,8 @@ pub struct NatsQueue {
     subscriber: Option<jetstream::consumer::PullConsumer>,
     /// Optional consumer name for broadcast pattern (if None, uses "worker-group")
     consumer_name: Option<String>,
+    /// Message stream for efficient message consumption
+    message_stream: Option<jetstream::consumer::pull::Stream>,
 }
 
 impl NatsQueue {
@@ -457,6 +455,7 @@ impl NatsQueue {
             subject,
             subscriber: None,
             consumer_name: Some("worker-group".to_string()),
+            message_stream: None,
         }
     }
 
@@ -477,6 +476,7 @@ impl NatsQueue {
             subject,
             subscriber: None,
             consumer_name: None,
+            message_stream: None,
         }
     }
 
@@ -499,6 +499,7 @@ impl NatsQueue {
             subject,
             subscriber: None,
             consumer_name: Some(consumer_name),
+            message_stream: None,
         }
     }
 
@@ -516,7 +517,7 @@ impl NatsQueue {
             let client = client_options.connect().await?;
 
             // messages older than a hour in the stream will be automatically purged
-            let max_age = std::env::var("DYN_NATS_STREAM_MAX_AGE")
+            let max_age = std::env::var(env_nats::stream::DYN_NATS_STREAM_MAX_AGE)
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(time::Duration::from_secs)
@@ -562,7 +563,12 @@ impl NatsQueue {
                 };
 
                 let subscriber = stream.create_consumer(consumer_config).await?;
+
+                // Create the message stream for efficient consumption
+                let message_stream = subscriber.messages().await?;
+
                 self.subscriber = Some(subscriber);
+                self.message_stream = Some(message_stream);
             }
 
             self.client = Some(client);
@@ -581,6 +587,7 @@ impl NatsQueue {
 
     /// Close the connection when done
     pub async fn close(&mut self) -> Result<()> {
+        self.message_stream = None;
         self.subscriber = None;
         self.client = None;
         Ok(())
@@ -677,28 +684,29 @@ impl NatsQueue {
     pub async fn dequeue_task(&mut self, timeout: Option<time::Duration>) -> Result<Option<Bytes>> {
         self.ensure_connection().await?;
 
-        if let Some(subscriber) = &self.subscriber {
-            let timeout_duration = timeout.unwrap_or(self.dequeue_timeout);
-            let mut batch = subscriber
-                .fetch()
-                .expires(timeout_duration)
-                .max_messages(1)
-                .messages()
-                .await?;
+        let Some(ref mut stream) = self.message_stream else {
+            return Err(anyhow::anyhow!("Message stream not initialized"));
+        };
 
-            if let Some(message) = batch.next().await {
-                let message =
-                    message.map_err(|e| anyhow::anyhow!("Failed to get message: {}", e))?;
-                message
-                    .ack()
+        let timeout_duration = timeout.unwrap_or(self.dequeue_timeout);
+
+        // Try to get next message from the stream with timeout
+        let message = tokio::time::timeout(timeout_duration, stream.next()).await;
+
+        match message {
+            Ok(Some(Ok(msg))) => {
+                msg.ack()
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to ack message: {}", e))?;
-                Ok(Some(message.payload.clone()))
-            } else {
-                Ok(None)
+                Ok(Some(msg.payload.clone()))
             }
-        } else {
-            Err(anyhow::anyhow!("Subscriber not initialized"))
+
+            Ok(Some(Err(e))) => Err(anyhow::anyhow!("Failed to get message from stream: {}", e)),
+
+            Ok(None) => Err(anyhow::anyhow!("Message stream ended unexpectedly")),
+
+            // Timeout - no messages available
+            Err(_) => Ok(None),
         }
     }
 
@@ -878,107 +886,13 @@ impl EventPublisher for NatsQueue {
     }
 }
 
-/// Prometheus metrics that mirror the NATS client statistics (in primitive types)
-/// to be used for the System Status Server.
-///
-/// ⚠️  IMPORTANT: These Prometheus Gauges are COPIES of NATS client data, not live references!
-///
-/// How it works:
-/// 1. NATS client provides source data via client.statistics() and connection_state()
-/// 2. set_from_client_stats() reads current NATS values and updates these Prometheus Gauges
-/// 3. Prometheus scrapes these Gauge values (snapshots, not live data)
-///
-/// Flow: NATS Client → Client Statistics → set_from_client_stats() → Prometheus Gauge
-/// Note: These are snapshots updated when set_from_client_stats() is called.
-#[derive(Debug, Clone)]
-pub struct DRTNatsClientPrometheusMetrics {
-    nats_client: client::Client,
-    /// Number of bytes received (excluding protocol overhead)
-    pub in_bytes: IntGauge,
-    /// Number of bytes sent (excluding protocol overhead)
-    pub out_bytes: IntGauge,
-    /// Number of messages received
-    pub in_messages: IntGauge,
-    /// Number of messages sent
-    pub out_messages: IntGauge,
-    /// Number of times connection was established
-    pub connects: IntGauge,
-    /// Current connection state (0 = disconnected, 1 = connected, 2 = reconnecting)
-    pub connection_state: IntGauge,
-}
-
-impl DRTNatsClientPrometheusMetrics {
-    /// Create a new instance of NATS client metrics using a DistributedRuntime's Prometheus constructors
-    pub fn new(drt: &crate::DistributedRuntime, nats_client: client::Client) -> Result<Self> {
-        let in_bytes = drt.create_intgauge(
-            nats_metrics::IN_TOTAL_BYTES,
-            "Total number of bytes received by NATS client",
-            &[],
-        )?;
-        let out_bytes = drt.create_intgauge(
-            nats_metrics::OUT_OVERHEAD_BYTES,
-            "Total number of bytes sent by NATS client",
-            &[],
-        )?;
-        let in_messages = drt.create_intgauge(
-            nats_metrics::IN_MESSAGES,
-            "Total number of messages received by NATS client",
-            &[],
-        )?;
-        let out_messages = drt.create_intgauge(
-            nats_metrics::OUT_MESSAGES,
-            "Total number of messages sent by NATS client",
-            &[],
-        )?;
-        let connects = drt.create_intgauge(
-            nats_metrics::CURRENT_CONNECTIONS,
-            "Current number of active connections for NATS client",
-            &[],
-        )?;
-        let connection_state = drt.create_intgauge(
-            nats_metrics::CONNECTION_STATE,
-            "Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)",
-            &[],
-        )?;
-
-        Ok(Self {
-            nats_client,
-            in_bytes,
-            out_bytes,
-            in_messages,
-            out_messages,
-            connects,
-            connection_state,
-        })
-    }
-
-    /// Copy statistics from the stored NATS client to these Prometheus metrics
-    pub fn set_from_client_stats(&self) {
-        let stats = self.nats_client.statistics();
-
-        // Get current values from the client statistics
-        let in_bytes = stats.in_bytes.load(Ordering::Relaxed);
-        let out_bytes = stats.out_bytes.load(Ordering::Relaxed);
-        let in_messages = stats.in_messages.load(Ordering::Relaxed);
-        let out_messages = stats.out_messages.load(Ordering::Relaxed);
-        let connects = stats.connects.load(Ordering::Relaxed);
-
-        // Get connection state
-        let connection_state = match self.nats_client.connection_state() {
-            State::Connected => 1,
-            // treat Disconnected and Pending as "down"
-            State::Disconnected | State::Pending => 0,
-        };
-
-        // Update Prometheus metrics
-        // Using gauges allows us to set absolute values directly
-        self.in_bytes.set(in_bytes as i64);
-        self.out_bytes.set(out_bytes as i64);
-        self.in_messages.set(in_messages as i64);
-        self.out_messages.set(out_messages as i64);
-        self.connects.set(connects as i64);
-        self.connection_state.set(connection_state);
-    }
+/// The NATS subject / inbox to talk to an instance on.
+/// TODO: Do we need to sanitize the names?
+pub fn instance_subject(endpoint_id: &EndpointId, instance_id: u64) -> String {
+    format!(
+        "{}_{}.{}-{:x}",
+        endpoint_id.namespace, endpoint_id.component, endpoint_id.name, instance_id,
+    )
 }
 
 #[cfg(test)]
@@ -1004,9 +918,9 @@ mod tests {
         });
 
         Jail::expect_with(|jail| {
-            jail.set_env("NATS_SERVER", "nats://localhost:5222");
-            jail.set_env("NATS_AUTH_USERNAME", "user");
-            jail.set_env("NATS_AUTH_PASSWORD", "pass");
+            jail.set_env(env_nats::NATS_SERVER, "nats://localhost:5222");
+            jail.set_env(env_nats::auth::NATS_AUTH_USERNAME, "user");
+            jail.set_env(env_nats::auth::NATS_AUTH_PASSWORD, "pass");
 
             let opts = ClientOptions::builder().build();
             assert!(opts.is_ok());
@@ -1022,9 +936,9 @@ mod tests {
         });
 
         Jail::expect_with(|jail| {
-            jail.set_env("NATS_SERVER", "nats://localhost:5222");
-            jail.set_env("NATS_AUTH_USERNAME", "user");
-            jail.set_env("NATS_AUTH_PASSWORD", "pass");
+            jail.set_env(env_nats::NATS_SERVER, "nats://localhost:5222");
+            jail.set_env(env_nats::auth::NATS_AUTH_USERNAME, "user");
+            jail.set_env(env_nats::auth::NATS_AUTH_PASSWORD, "pass");
 
             let opts = ClientOptions::builder()
                 .server("nats://localhost:6222")

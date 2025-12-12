@@ -6,41 +6,39 @@
 //! This module provides an AsyncEngine implementation that wraps the Scheduler
 //! to provide streaming token generation with realistic timing simulation.
 
-use crate::kv_router::publisher::WorkerMetricsPublisher;
-use crate::mocker::protocols::DirectRequest;
-use crate::mocker::protocols::{MockEngineArgs, OutputSignal};
-use crate::mocker::scheduler::Scheduler;
-use crate::protocols::TokenIdType;
-use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Result;
+use futures::StreamExt;
+use rand::Rng;
+use tokio::sync::{Mutex, OnceCell, mpsc};
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::protocols::annotated::Annotated;
-use tokio_util::sync::CancellationToken;
-
 use dynamo_runtime::{
-    Result,
     component::Component,
     engine::AsyncEngineContextProvider,
     pipeline::{AsyncEngine, Error, ManyOut, ResponseStream, SingleIn, async_trait},
     traits::DistributedRuntimeProvider,
 };
 
-use crate::kv_router::protocols::{KvCacheEvent, KvCacheEventData};
-use crate::kv_router::publisher::KvEventPublisher;
-use futures::StreamExt;
-use rand::Rng;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{Mutex, OnceCell, mpsc};
-use tokio_stream::wrappers::UnboundedReceiverStream;
-use uuid::Uuid;
+use crate::kv_router::publisher::WorkerMetricsPublisher;
+use crate::mocker::protocols::DirectRequest;
+use crate::mocker::protocols::{MockEngineArgs, OutputSignal, WorkerType};
+use crate::mocker::scheduler::Scheduler;
+use crate::protocols::TokenIdType;
+use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 
 pub const MOCKER_COMPONENT: &str = "mocker";
 
-/// Generate a random token ID from 1k to 5k
 fn generate_random_token() -> TokenIdType {
     let mut rng = rand::rng();
-    rng.random_range(1000..5000)
+    rng.random_range(1000..2000)
 }
 
 /// AsyncEngine wrapper around the Scheduler that generates random character tokens
@@ -62,7 +60,11 @@ impl MockVllmEngine {
     }
 
     pub async fn start(&self, component: Component) -> Result<()> {
-        let cancel_token = component.drt().runtime().child_token();
+        // Use primary_token() instead of child_token() so the mocker continues running
+        // during graceful shutdown (Phase 1/2) and only stops in Phase 3.
+        // child_token() is a child of endpoint_shutdown_token which is cancelled in Phase 1.
+        // primary_token() is only cancelled in Phase 3, after waiting for inflight requests.
+        let cancel_token = component.drt().primary_token();
 
         // Simulate engine startup time if configured
         if let Some(startup_time_secs) = self.engine_args.startup_time {
@@ -71,25 +73,24 @@ impl MockVllmEngine {
             tracing::info!("Engine startup simulation completed");
         }
 
-        let (schedulers, kv_event_receiver) = self.start_schedulers(
+        // Pass component to schedulers only if prefix caching is enabled and not a decode worker
+        let scheduler_component = if self.engine_args.enable_prefix_caching
+            && self.engine_args.worker_type != WorkerType::Decode
+        {
+            Some(component.clone())
+        } else {
+            None
+        };
+
+        let schedulers = self.start_schedulers(
             self.engine_args.clone(),
             self.active_requests.clone(),
+            scheduler_component,
             cancel_token.clone(),
         );
 
         Self::start_metrics_publishing(&schedulers, Some(component.clone()), cancel_token.clone())
             .await?;
-
-        // Start KV events publishing with the actual receivers from schedulers
-        if self.engine_args.enable_prefix_caching {
-            Self::start_kv_events_publishing(
-                kv_event_receiver,
-                Some(component.clone()),
-                self.engine_args.block_size,
-                cancel_token.clone(),
-            )
-            .await?;
-        }
 
         Ok(())
     }
@@ -100,18 +101,14 @@ impl MockVllmEngine {
     }
 
     /// Create schedulers and spawn their background tasks for distributing token notifications
-    /// Returns schedulers and their corresponding KV event receivers
     fn start_schedulers(
         &self,
         args: MockEngineArgs,
         active_requests: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>>,
+        component: Option<Component>,
         cancel_token: CancellationToken,
-    ) -> (
-        Vec<Scheduler>,
-        Vec<mpsc::UnboundedReceiver<KvCacheEventData>>,
-    ) {
+    ) -> Vec<Scheduler> {
         let mut schedulers = Vec::<Scheduler>::new();
-        let mut kv_event_receivers = Vec::new();
         let mut senders = Vec::with_capacity(args.dp_size as usize);
 
         // Create multiple schedulers and their background tasks
@@ -119,20 +116,16 @@ impl MockVllmEngine {
             // Create a shared output channel that this scheduler will use
             let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
 
-            // Create a channel for KV events from this scheduler
-            let (kv_events_tx, kv_events_rx) = mpsc::unbounded_channel::<KvCacheEventData>();
-
             let scheduler = Scheduler::new(
                 args.clone(),
                 dp_rank,
                 Some(output_tx),
-                Some(kv_events_tx), // Pass the KV events sender to scheduler
+                component.clone(),
                 Some(cancel_token.clone()),
             );
 
             senders.push(scheduler.request_sender());
             schedulers.push(scheduler);
-            kv_event_receivers.push(kv_events_rx);
 
             // Spawn a background task for this scheduler to distribute token notifications to active requests
             // let output_rx = Arc::new(Mutex::new(output_rx));
@@ -154,6 +147,11 @@ impl MockVllmEngine {
                             }
                         }
                         _ = cancel_token_cloned.cancelled() => {
+                            tracing::info!("Scheduler output task cancelled, clearing active requests");
+                            // Clear all active requests to unblock waiting request handlers
+                            // This will cause their request_rx.recv() to return None
+                            let mut active = active_requests_clone.lock().await;
+                            active.clear();
                             break;
                         }
                     }
@@ -166,7 +164,7 @@ impl MockVllmEngine {
             .set(senders)
             .expect("Already initialized");
 
-        (schedulers, kv_event_receivers)
+        schedulers
     }
 
     /// Start background tasks to publish metrics on change
@@ -228,83 +226,6 @@ impl MockVllmEngine {
         tracing::info!("Metrics background tasks started");
         Ok(())
     }
-
-    /// Start background tasks to collect and publish KV events from schedulers
-    async fn start_kv_events_publishing(
-        kv_event_receivers: Vec<mpsc::UnboundedReceiver<KvCacheEventData>>,
-        component: Option<Component>,
-        block_size: usize,
-        cancel_token: CancellationToken,
-    ) -> Result<()> {
-        tracing::debug!("Starting KV events publishing");
-
-        // Only start KV events publishing if we have a component
-        let Some(comp) = component else {
-            tracing::warn!("No component provided, skipping KV events publishing");
-            return Ok(());
-        };
-        tracing::debug!("Component found for KV events publishing");
-
-        tracing::debug!("Getting worker_id");
-        let worker_id = comp
-            .drt()
-            .primary_lease()
-            .expect("Cannot publish KV events without lease") // ← This will PANIC on static!
-            .id();
-        // let worker_id = 0;
-        tracing::debug!("Worker_id set to: {worker_id}");
-
-        tracing::debug!("Creating KV event publisher");
-        let kv_event_publisher = Arc::new(KvEventPublisher::new(
-            comp.clone(),
-            worker_id,
-            block_size as u32,
-            None,
-        )?);
-        tracing::debug!("KV event publisher created");
-
-        tracing::debug!(
-            "Starting KV event background tasks for {} receivers",
-            kv_event_receivers.len()
-        );
-        for (dp_rank, mut kv_events_rx) in kv_event_receivers.into_iter().enumerate() {
-            tracing::debug!("Starting background task for DP rank {dp_rank}");
-            let publisher = kv_event_publisher.clone();
-            let dp_rank = dp_rank as u32;
-            let cancel_token = cancel_token.clone();
-
-            tokio::spawn(async move {
-                tracing::debug!("Background task started for DP rank {dp_rank}");
-                loop {
-                    tokio::select! {
-                        // Receive actual KV events from the scheduler
-                        Some(event_data) = kv_events_rx.recv() => {
-                            // Convert KvCacheEventData to KvCacheEvent with random UUID as event_id
-                            let event = KvCacheEvent {
-                                event_id: Uuid::new_v4().as_u128() as u64,
-                                data: event_data,
-                                dp_rank,
-                            };
-
-                            // Publish the event
-                            if let Err(e) = publisher.publish(event) {
-                                tracing::warn!("Failed to publish KV event for DP rank {dp_rank}: {e}");
-                            } else {
-                                tracing::trace!("Published KV event for DP rank {dp_rank}");
-                            }
-                        }
-                        _ = cancel_token.cancelled() => {
-                            tracing::debug!("KV events publishing cancelled for DP rank {dp_rank}");
-                            break;
-                        }
-                    }
-                }
-            });
-        }
-        tracing::info!("All KV event background tasks started");
-
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -330,14 +251,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
         let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
 
+        // For prefill workers, override max_tokens to 1
+        let is_prefill = self.engine_args.worker_type == WorkerType::Prefill;
+        let max_output_tokens = if is_prefill {
+            1
+        } else {
+            request
+                .stop_conditions
+                .max_tokens
+                .expect("max_output_tokens must be specified for mocker") as usize
+        };
+
         // Convert PreprocessedRequest to DirectRequest for scheduler
         let direct_request = DirectRequest {
             tokens: request.token_ids.clone(),
-            max_output_tokens: request
-                .stop_conditions
-                .max_tokens
-                .expect("max_output_tokens must be specified for mocker")
-                as usize,
+            max_output_tokens,
             uuid: Some(request_uuid),
             dp_rank,
         };
@@ -356,7 +284,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
-        let max_tokens = request.stop_conditions.max_tokens.unwrap_or(100) as usize;
 
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
@@ -383,11 +310,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             top_logprobs: None,
                             finish_reason: None,
                             index: None,
-                            disaggregated_params: None,
+                            // Add dummy disaggregated_params for prefill workers
+                            disaggregated_params: if is_prefill {
+                                Some(serde_json::json!("dummy"))
+                            } else {
+                                None
+                            },
                             extra_args: None,
+                            completion_usage: None,
                         };
 
-                        if signal.completed && token_count < max_tokens {
+                        if signal.completed && token_count < max_output_tokens {
                             let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string()));
                             break;
                         }
@@ -508,215 +441,4 @@ pub async fn make_mocker_engine(
         AnnotatedMockEngine::new(MockVllmEngine::new(args), distributed_runtime, endpoint_id);
 
     Ok(Arc::new(annotated_engine))
-}
-
-#[cfg(test)]
-mod integration_tests {
-    use super::*;
-    use crate::kv_router::KV_EVENT_SUBJECT;
-    use crate::kv_router::indexer::RouterEvent;
-    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-    use dynamo_runtime::{
-        DistributedRuntime, Worker,
-        pipeline::Context,
-        pipeline::{PushRouter, network::Ingress},
-        traits::events::EventSubscriber,
-    };
-    use futures::StreamExt;
-    use tokio::time::timeout;
-
-    #[tokio::test]
-    #[ignore] // Run with: cargo test -- --ignored
-    async fn test_mock_vllm_engine_full_integration() -> Result<()> {
-        const DP_SIZE: u32 = 2;
-        const TOKENS_PER_REQUEST: usize = 20;
-        const BLOCK_SIZE: usize = 2;
-
-        // Create runtime and distributed runtime
-        let worker = Worker::from_settings()?;
-        let runtime = worker.runtime();
-        let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
-        tracing::info!("✓ Runtime and distributed runtime created");
-
-        // Create component for MockVllmEngine (needed for publishers)
-        let mut test_component = distributed.namespace("test")?.component(MOCKER_COMPONENT)?;
-        test_component.add_stats_service().await?;
-        tracing::info!("✓ Test component created");
-
-        // Create MockVllmEngine WITH component (enables publishers)
-        let args = MockEngineArgs::builder()
-            .speedup_ratio(10.0)
-            .dp_size(DP_SIZE)
-            .block_size(BLOCK_SIZE)
-            .build()
-            .unwrap();
-
-        let engine = MockVllmEngine::new(args);
-        engine.start(test_component.clone()).await?;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let engine = Arc::new(engine);
-        tracing::info!("✓ MockVllmEngine created with DP_SIZE: {DP_SIZE}");
-
-        // Set up KV events subscriber
-        let mut kv_events_subscriber = test_component.subscribe(KV_EVENT_SUBJECT).await?;
-        tracing::info!("✓ KV events subscriber created");
-
-        // Wrap with Ingress and register with component/endpoint
-        let ingress = Ingress::for_engine(engine)?;
-        tracing::info!("✓ Ingress wrapper created");
-
-        // Start the server in background
-        let server_handle = tokio::spawn({
-            let test_component = test_component.clone();
-            async move {
-                if let Err(e) = test_component
-                    .endpoint("generate")
-                    .endpoint_builder()
-                    .handler(ingress)
-                    .start()
-                    .await
-                {
-                    eprintln!("❌ Generate endpoint failed: {e}");
-                }
-            }
-        });
-        tracing::info!("✓ Server started in background");
-
-        // Give server time to start
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        tracing::info!("✓ Server startup delay completed");
-
-        // Print all registered instances from etcd
-        match test_component.list_instances().await {
-            Ok(instances) => {
-                tracing::info!("📋 Found {} registered instances:", instances.len());
-                for instance in instances {
-                    tracing::info!(
-                        "  • {}/{}/{} (ID: {})",
-                        instance.namespace,
-                        instance.component,
-                        instance.endpoint,
-                        instance.instance_id
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::error!("❌ Failed to list instances: {e}");
-            }
-        }
-
-        // Create client
-        let client = distributed
-            .namespace("test")?
-            .component(MOCKER_COMPONENT)?
-            .endpoint("generate")
-            .client()
-            .await?;
-        tracing::info!("✓ Client created");
-
-        let router = PushRouter::from_client(client, Default::default()).await?;
-        tracing::info!("✓ Router created");
-
-        // Create test requests for both DP workers
-        let create_request = |tokens: Vec<TokenIdType>, dp_rank: u32| {
-            PreprocessedRequest::builder()
-                .model("mock".to_string())
-                .token_ids(tokens)
-                .stop_conditions(StopConditions {
-                    max_tokens: Some(TOKENS_PER_REQUEST as u32),
-                    ..Default::default()
-                })
-                .sampling_options(SamplingOptions::default())
-                .output_options(OutputOptions::default())
-                .eos_token_ids(vec![])
-                .annotations(vec![format!("dp_rank:{dp_rank}")])
-                .build()
-                .unwrap()
-        };
-
-        let requests = vec![
-            create_request(vec![1, 2, 3, 4, 5], 0),
-            create_request(vec![1, 2, 3, 4, 5], 0),
-            create_request(vec![1, 2, 3, 4, 5], 1),
-            create_request(vec![1, 2, 3, 4, 5], 1),
-        ];
-        tracing::info!(
-            "✓ Test requests created ({} requests total)",
-            requests.len()
-        );
-
-        // Test each request
-        for (i, request) in requests.into_iter().enumerate() {
-            tracing::info!("Testing request {}", i + 1);
-
-            let response_stream = router.generate(Context::new(request)).await?;
-            let responses: Vec<LLMEngineOutput> = response_stream.collect().await;
-
-            // Should have at least one response
-            assert!(
-                !responses.is_empty(),
-                "Request {} should produce at least one response",
-                i + 1
-            );
-
-            // Count total tokens generated (excluding final message)
-            let mut total_tokens = 0;
-            let mut has_finish_reason = false;
-
-            for response in &responses {
-                total_tokens += response.token_ids.len();
-                if response.finish_reason.is_some() {
-                    has_finish_reason = true;
-                }
-            }
-
-            // Should have a finish reason in the last response
-            assert!(
-                has_finish_reason,
-                "Request {} should have a finish reason",
-                i + 1
-            );
-
-            // Verify we got approximately the expected number of tokens
-            assert!(
-                total_tokens <= TOKENS_PER_REQUEST + 1, // +1 for potential final empty response
-                "Request {} generated {} tokens, expected at most {}",
-                i + 1,
-                total_tokens,
-                TOKENS_PER_REQUEST + 1
-            );
-
-            tracing::info!(
-                "✓ Request {} completed successfully with {} tokens",
-                i + 1,
-                total_tokens
-            );
-        }
-
-        tracing::info!("🎉 All requests completed successfully!");
-
-        // Try to receive at least one KV event with 100ms timeout
-        tracing::info!("Waiting for KV event with 100ms timeout...");
-        let msg = timeout(Duration::from_millis(100), kv_events_subscriber.next())
-            .await
-            .map_err(|_| Error::msg("Timeout waiting for KV event"))?
-            .ok_or_else(|| Error::msg("KV events stream ended unexpectedly"))?;
-
-        match serde_json::from_slice::<RouterEvent>(&msg.payload) {
-            Ok(event) => {
-                tracing::info!("✓ Received KV event: {event:?}");
-            }
-            Err(e) => {
-                return Err(Error::msg(format!("Failed to deserialize KV event: {e}")));
-            }
-        }
-
-        tracing::info!("🎉 Event verification completed!");
-
-        // Cleanup
-        distributed.shutdown();
-        server_handle.await?;
-
-        Ok(())
-    }
 }

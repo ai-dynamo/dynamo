@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import sys
 from pathlib import Path
 
 import uvloop
 from transformers import AutoTokenizer
 
+from dynamo.common.utils.paths import WORKSPACE_DIR
 from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
-SERVE_TEST_DIR = "/workspace/tests/serve"
+SERVE_TEST_DIR = os.path.join(WORKSPACE_DIR, "tests/serve")
 
 
 class TemplateVerificationHandler:
@@ -36,13 +38,12 @@ class TemplateVerificationHandler:
         yield {"token_ids": response_tokens}
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def main(runtime: DistributedRuntime):
     """Main worker function for template verification."""
 
     # Create service
     component = runtime.namespace("test").component("backend")
-    await component.create_service()
     endpoint = component.endpoint("generate")
 
     # Use the existing custom template from fixtures

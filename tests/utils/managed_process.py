@@ -448,9 +448,16 @@ class ManagedProcess:
             elapsed = time.time() - start_time
 
         self._logger.error(
-            "FAILED: Check URL: %s (attempts=%d, elapsed=%.1fs)", url, attempt, elapsed
+            "TIMEOUT: Check URL: %s failed after %.1fs (attempts=%d, timeout=%.1fs)",
+            url,
+            elapsed,
+            attempt,
+            timeout,
         )
-        raise RuntimeError("FAILED: Check URL: %s" % url)
+        raise RuntimeError(
+            "TIMEOUT: Check URL: %s failed after %.1fs (timeout=%.1fs)"
+            % (url, elapsed, timeout)
+        )
 
     def _check_funcs(self, timeout):
         elapsed = 0.0
@@ -552,6 +559,10 @@ class ManagedProcess:
             hasattr(self, "proc") and self.proc is not None and self.proc.poll() is None
         )
 
+    def get_pid(self) -> int | None:
+        """Get the PID of the managed process."""
+        return self.proc.pid if self.proc else None
+
     def subprocesses(self) -> list[psutil.Process]:
         """Find child processes of the current process."""
         if (
@@ -566,6 +577,37 @@ class ManagedProcess:
             return parent.children(recursive=True)
         except psutil.NoSuchProcess:
             return []
+
+
+class DynamoFrontendProcess(ManagedProcess):
+    """Process manager for Dynamo frontend"""
+
+    _logger = logging.getLogger()
+
+    def __init__(self, request):
+        command = ["python", "-m", "dynamo.frontend", "--router-mode", "round-robin"]
+
+        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
+        env = os.environ.copy()
+        env.pop("DYN_SYSTEM_PORT", None)
+
+        log_dir = f"{request.node.name}_frontend"
+
+        # Clean up any existing log directory from previous runs
+        try:
+            shutil.rmtree(log_dir)
+            self._logger.info(f"Cleaned up existing log directory: {log_dir}")
+        except FileNotFoundError:
+            # Directory doesn't exist, which is fine
+            pass
+
+        super().__init__(
+            command=command,
+            env=env,
+            display_output=True,
+            terminate_existing=True,
+            log_dir=log_dir,
+        )
 
 
 def main():

@@ -27,12 +27,9 @@
 use super::*;
 
 pub mod backend;
-pub mod disagg_router;
 pub mod entrypoint;
 pub mod kv;
 pub mod local_model;
+pub mod lora;
 pub mod model_card;
 pub mod preprocessor;
-
-#[cfg(feature = "block-manager")]
-pub mod block_manager;

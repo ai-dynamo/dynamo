@@ -25,7 +25,7 @@ import (
 	"reflect"
 	"sort"
 
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
@@ -248,17 +248,26 @@ func getSpec(obj client.Object) (any, error) {
 }
 
 // IsSpecChanged returns the new hash if the spec has changed between the existing one
+// It compares the actual current spec hash with the desired spec hash to detect manual edits
 func IsSpecChanged(current client.Object, desired client.Object) (*string, error) {
-	hashStr, err := GetSpecHash(desired)
+	desiredHash, err := GetSpecHash(desired)
 	if err != nil {
 		return nil, err
 	}
-	if currentHash, ok := current.GetAnnotations()[NvidiaAnnotationHashKey]; ok {
-		if currentHash == hashStr {
-			return nil, nil
-		}
+
+	// Compute hash of the actual current spec (not just the annotation)
+	// This ensures we detect manual edits even if the annotation is stale
+	currentHash, err := GetSpecHash(current)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current spec hash: %w", err)
 	}
-	return &hashStr, nil
+
+	// Compare actual spec hashes
+	if currentHash == desiredHash {
+		return nil, nil
+	}
+
+	return &desiredHash, nil
 }
 
 // generateSpecDiff creates a unified diff showing changes between old and new resource specs
@@ -386,7 +395,7 @@ func firstKey(m map[string]interface{}) string {
 	return keys[0]
 }
 
-func GetResourcesConfig(resources *common.Resources) (*corev1.ResourceRequirements, error) {
+func GetResourcesConfig(resources *v1alpha1.Resources) (*corev1.ResourceRequirements, error) {
 
 	if resources == nil {
 		return nil, nil
@@ -423,7 +432,7 @@ func GetResourcesConfig(resources *common.Resources) (*corev1.ResourceRequiremen
 			if currentResources.Limits == nil {
 				currentResources.Limits = make(corev1.ResourceList)
 			}
-			currentResources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)] = q
+			currentResources.Limits[getGPUResourceName(resources.Limits)] = q
 		}
 		for k, v := range resources.Limits.Custom {
 			q, err := resource.ParseQuantity(v)
@@ -468,25 +477,87 @@ func GetResourcesConfig(resources *common.Resources) (*corev1.ResourceRequiremen
 			currentResources.Requests[corev1.ResourceName(k)] = q
 		}
 	}
+	if resources.Claims != nil {
+		if currentResources.Claims == nil {
+			currentResources.Claims = make([]corev1.ResourceClaim, 0)
+		}
+		currentResources.Claims = append(currentResources.Claims, resources.Claims...)
+	}
 	return currentResources, nil
 }
 
-type Resource struct {
-	client.Object
-	isReady func() (bool, string)
+func getGPUResourceName(resourceItem *v1alpha1.ResourceItem) corev1.ResourceName {
+	if resourceItem == nil {
+		return corev1.ResourceName(consts.KubeResourceGPUNvidia)
+	}
+	if resourceItem.GPUType != "" {
+		return corev1.ResourceName(resourceItem.GPUType)
+	}
+	return corev1.ResourceName(consts.KubeResourceGPUNvidia)
 }
 
-func WrapResource[T client.Object](resource T, isReady func() (bool, string)) *Resource {
-	return &Resource{
-		Object:  resource,
-		isReady: isReady,
+// AppendUniqueImagePullSecrets appends secrets to existing, skipping any that already exist by name.
+func AppendUniqueImagePullSecrets(existing, additional []corev1.LocalObjectReference) []corev1.LocalObjectReference {
+	if len(additional) == 0 {
+		return existing
 	}
+	seen := make(map[string]bool, len(existing))
+	for _, s := range existing {
+		seen[s.Name] = true
+	}
+	for _, s := range additional {
+		if !seen[s.Name] {
+			existing = append(existing, s)
+			seen[s.Name] = true
+		}
+	}
+	return existing
+}
+
+type Resource struct {
+	object          client.Object
+	isReady         bool
+	readyReason     string
+	serviceStatuses map[string]v1alpha1.ServiceReplicaStatus
+}
+
+func NewResource[T client.Object](resource T, isReady func() (bool, string)) (*Resource, error) {
+	v := reflect.ValueOf(resource)
+	// handles untype nil and typed nil
+	if !v.IsValid() || v.IsNil() {
+		return nil, fmt.Errorf("resource is nil")
+	}
+	ready, reason := isReady()
+	return &Resource{
+		object:      resource,
+		isReady:     ready,
+		readyReason: reason,
+	}, nil
+}
+
+func NewResourceWithServiceStatuses[T client.Object](resource T, isReadyAndServiceStatuses func() (bool, string, map[string]v1alpha1.ServiceReplicaStatus)) (*Resource, error) {
+	v := reflect.ValueOf(resource)
+	// handles untype nil and typed nil
+	if !v.IsValid() || v.IsNil() {
+		return nil, fmt.Errorf("resource is nil")
+	}
+	ready, reason, serviceStatuses := isReadyAndServiceStatuses()
+	return &Resource{
+		object:          resource,
+		isReady:         ready,
+		readyReason:     reason,
+		serviceStatuses: serviceStatuses,
+	}, nil
 }
 
 func (r *Resource) IsReady() (bool, string) {
-	return r.isReady()
+	return r.isReady, r.readyReason
 }
 
 func (r *Resource) GetName() string {
-	return r.Object.GetName()
+	return r.object.GetName()
+}
+
+func (r *Resource) GetServiceStatuses() map[string]v1alpha1.ServiceReplicaStatus {
+	return r.serviceStatuses
 }

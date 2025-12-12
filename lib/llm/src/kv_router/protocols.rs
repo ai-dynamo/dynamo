@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// A worker identifier.
-pub type WorkerId = i64;
+pub type WorkerId = u64;
 
 /// A data parallel rank identifier.
 pub type DpRank = u32;
@@ -143,6 +143,21 @@ pub struct SpecDecodeStats {
     pub num_accepted_tokens_per_pos: Option<Vec<u32>>,
 }
 
+/// Active load metrics for a worker, used for busy detection.
+///
+/// Published by workers (with only `active_decode_blocks`) and by the scheduler
+/// (with both `active_decode_blocks` and `active_prefill_tokens`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ActiveLoad {
+    pub worker_id: WorkerId,
+    #[serde(default)]
+    pub dp_rank: DpRank,
+    /// Number of active KV cache blocks on the worker (decode phase).
+    pub active_decode_blocks: Option<u64>,
+    /// Number of active prefill tokens (from scheduler's view).
+    pub active_prefill_tokens: Option<u64>,
+}
+
 /// A [`LocalBlockHash`] is a hash computed from the tokens_ids, extra_token_ids and the optional
 /// lora_id of a block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -230,7 +245,7 @@ pub struct KvCacheEvents {
 }
 
 /// Represents a single cache event with an ID and associated data.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct KvCacheEvent {
     /// The unique identifier of the event.
     pub event_id: u64,
@@ -244,7 +259,7 @@ pub struct KvCacheEvent {
 /// Represents the data associated with a cache event.
 ///
 /// Data is either stored or removed.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum KvCacheEventData {
     Stored(KvCacheStoreData),
@@ -253,7 +268,7 @@ pub enum KvCacheEventData {
 }
 
 /// Represents the data associated with a stored cache event.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct KvCacheStoreData {
     /// The optional hash of the parent block.
     pub parent_hash: Option<ExternalSequenceBlockHash>,
@@ -262,7 +277,7 @@ pub struct KvCacheStoreData {
 }
 
 /// Represents data for a stored block.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct KvCacheStoredBlockData {
     /// The hash of the block.
     pub block_hash: ExternalSequenceBlockHash,
@@ -271,7 +286,7 @@ pub struct KvCacheStoredBlockData {
 }
 
 /// Represents the data associated with a removed cache event.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct KvCacheRemoveData {
     /// A list of block hashes to remove.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
@@ -315,6 +330,9 @@ impl<'de> Deserialize<'de> for ExternalSequenceBlockHash {
     }
 }
 
+// ------
+// Tests
+// ------
 #[cfg(test)]
 mod tests {
     use super::*;

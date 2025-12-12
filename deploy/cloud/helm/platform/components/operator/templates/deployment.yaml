@@ -16,6 +16,7 @@
 {{/* Validate installation to prevent conflicts */}}
 {{- include "dynamo-operator.validateClusterWideInstallation" . -}}
 {{- include "dynamo-operator.validateConfiguration" . -}}
+{{- include "dynamo-operator.validateDiscoveryBackend" . -}}
 
 ---
 apiVersion: apps/v1
@@ -30,6 +31,8 @@ metadata:
   {{- include "dynamo-operator.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.controllerManager.replicas }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       control-plane: controller-manager
@@ -76,23 +79,24 @@ spec:
         {{- range .Values.controllerManager.manager.args }}
           - {{ . }}
         {{- end }}
-        {{- if .Values.namespaceRestriction.enabled }}
-          - --restrictedNamespace={{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace }}
-          - --leader-elect=false
-        {{- else }}
           - --leader-elect
           - --leader-election-id={{ default "dynamo.nvidia.com" .Values.controllerManager.leaderElection.id }}
+        {{- if .Values.namespaceRestriction.enabled }}
+          {{- $restrictedNs := default .Release.Namespace .Values.namespaceRestriction.targetNamespace }}
+          - --restrictedNamespace={{ $restrictedNs }}
+          - --leader-election-namespace={{ $restrictedNs }}
+        {{- else }}
           - --leader-election-namespace={{ default "kube-system" .Values.controllerManager.leaderElection.namespace }}
         {{- end }}
         {{- if .Values.natsAddr }}
           - --natsAddr={{ .Values.natsAddr }}
         {{- else }}
-          - --natsAddr=nats://{{ .Release.Name }}-nats.{{ .Release.Namespace }}:4222
+          - --natsAddr=nats://{{ .Release.Name }}-nats.{{ .Release.Namespace }}.svc.cluster.local:4222
         {{- end }}
         {{- if .Values.etcdAddr }}
           - --etcdAddr={{ .Values.etcdAddr }}
         {{- else }}
-          - --etcdAddr={{ .Release.Name }}-etcd.{{ .Release.Namespace }}:2379
+          - --etcdAddr={{ .Release.Name }}-etcd.{{ .Release.Namespace }}.svc.cluster.local:2379
         {{- end }}
         {{- if and .Values.dynamo.istio.enabled .Values.dynamo.istio.gateway }}
           - --istio-virtual-service-gateway={{ .Values.dynamo.istio.gateway }}
@@ -124,12 +128,22 @@ spec:
           - --mpi-run-ssh-secret-name={{ .Values.dynamo.mpiRun.secretName }}
           - --mpi-run-ssh-secret-namespace={{ .Release.Namespace }}
         {{- end }}
-        {{- if .Values.dynamo.dgdr.profilerImage }}
-          - --profiler-image={{ .Values.dynamo.dgdr.profilerImage }}
-        {{- end }}
         {{- if not .Values.namespaceRestriction.enabled }}
           - --dgdr-profiling-cluster-role-name={{ include "dynamo-operator.fullname" . }}-dgdr-profiling
           - --planner-cluster-role-name={{ include "dynamo-operator.fullname" . }}-planner
+        {{- end }}
+        {{- if .Values.discoveryBackend }}
+          - --discovery-backend={{ .Values.discoveryBackend }}
+        {{- end }}
+        {{- if .Values.namespaceRestriction.enabled }}
+        {{- if .Values.namespaceRestriction.lease }}
+          - --namespace-scope-lease-duration={{ .Values.namespaceRestriction.lease.duration }}
+          - --namespace-scope-lease-renew-interval={{ .Values.namespaceRestriction.lease.renewInterval }}
+        {{- end }}
+        {{- end }}
+          - --operator-version={{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
+        {{- if .Values.webhook.enabled }}
+          - --enable-webhooks=true
         {{- end }}
         command:
         - /manager
@@ -148,6 +162,12 @@ spec:
           initialDelaySeconds: 15
           periodSeconds: 20
         name: manager
+        {{- if .Values.webhook.enabled }}
+        ports:
+        - containerPort: 9443
+          name: webhook-server
+          protocol: TCP
+        {{- end }}
         readinessProbe:
           httpGet:
             path: /readyz
@@ -158,7 +178,20 @@ spec:
           10 }}
         securityContext: {{- toYaml .Values.controllerManager.manager.containerSecurityContext
           | nindent 10 }}
+        {{- if .Values.webhook.enabled }}
+        volumeMounts:
+        - mountPath: /tmp/k8s-webhook-server/serving-certs
+          name: cert
+          readOnly: true
+        {{- end }}
       securityContext:
         runAsNonRoot: true
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-controller-manager
-      terminationGracePeriodSeconds: 10
+      terminationGracePeriodSeconds: 30
+      {{- if .Values.webhook.enabled }}
+      volumes:
+      - name: cert
+        secret:
+          defaultMode: 420
+          secretName: {{ .Values.webhook.certificateSecret.name }}
+      {{- end }}

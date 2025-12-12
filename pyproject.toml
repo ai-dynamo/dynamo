@@ -3,7 +3,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.6.0"
+version = "0.7.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -13,7 +13,8 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "ai-dynamo-runtime==0.6.0",
+    "ai-dynamo-runtime==0.7.0",
+    "transformers>=4.56.0,<=4.57.1",
     "pytest>=8.3.4",
     "types-psutil>=7.0.0.20250218",
     "kubernetes>=32.0.1,<33.0.0",
@@ -49,20 +50,25 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.1.0rc5",
+    "tensorrt-llm==1.2.0rc5",
 ]
 
 vllm = [
     "uvloop",
-    "nixl<=0.6.0",
-    "vllm[flashinfer]==0.10.2",
+    "nixl[cu12]<=0.7.1",
+    "vllm[flashinfer,runai]==0.12.0",
 ]
 
 sglang = [
     "uvloop",
-    "nixl<=0.6.0",
-    "sglang[all]==0.5.3.post2",
+    "nixl[cu12]<=0.7.1",
+    "sglang==0.5.6",
 ]
+
+[project.entry-points.pytest11]
+vllm_tests = "dynamo.vllm.tests.conftest"
+trtllm_tests = "dynamo.trtllm.tests.conftest"
+sglang_tests = "dynamo.sglang.tests.conftest"
 
 [dependency-groups]
 docs = [
@@ -79,6 +85,7 @@ docs = [
     "sphinx-book-theme>=1.1",
     "sphinxcontrib-mermaid>=1.0",
     "sphinxcontrib-bibtex>=2.6",
+    "sphinx-reredirects>=1.0.0",
     # Markdown and notebook support
     "myst-parser>=4.0",
     "myst-nb>=1.2",
@@ -133,9 +140,10 @@ known_first_party = ["dynamo"]
 [tool.pytest.ini_options]
 minversion = "8.0"
 tmp_path_retention_policy = "failed"
+timeout_func_only = true
 
 # NOTE
-# We ignore model.py explcitly here to avoid mypy errors with duplicate modules
+# We ignore model.py explicitly here to avoid mypy errors with duplicate modules
 # pytest overrides the default mypy exclude configuration and so we exclude here as well
 addopts = [
     "-ra",
@@ -146,12 +154,15 @@ addopts = [
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
+    "--ignore-glob=*kvbm/python/kvbm*",
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
     "--ignore-glob=components/src/dynamo/sglang/request_handlers/*",
     "--ignore-glob=components/src/dynamo/sglang/multimodal_utils/*",
-    "--ignore-glob=components/backends/sglang/slurm_jobs/*",
+    "--ignore-glob=components/src/dynamo/vllm/multimodal_utils/*",
+    "--ignore-glob=components/src/dynamo/vllm/multimodal_handlers/*",
+    "--ignore-glob=examples/backends/sglang/slurm_jobs/*",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true
@@ -171,15 +182,25 @@ filterwarnings = [
     "ignore:Support for class-based `config`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:Using extra keyword arguments on `Field`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:The `schema` method is deprecated.*:pydantic.warnings.PydanticDeprecatedSince20",
+    # Pydantic warning about field shadowing in tensorrt_llm.serve.openai_protocol.ResponseFormat
+    'ignore:Field name "schema" in "ResponseFormat" shadows an attribute in parent:UserWarning',
+    # pytest-benchmark automatically disables when xdist is active, ignore the warning
+    "ignore:.*Benchmarks are automatically disabled.*:pytest_benchmark.logger.PytestBenchmarkWarning",
 ]
 
 
 # NOTE: Can also manually mark tests with @pytest.mark.asyncio
 asyncio_mode = "auto"
+# IMPORTANT: tests/conftest.py also registers a subset of these markers for
+# environments where pyproject.toml is not available (e.g. some CI containers).
+# Keep the marker definitions here and in tests/conftest.py synchronized.
 markers = [
     "pre_merge: marks tests to run before merging",
+    "post_merge: marks tests to run after merge",
+    "parallel: marks tests that can run in parallel with pytest-xdist",
     "nightly: marks tests to run nightly",
     "weekly: marks tests to run weekly",
+    "gpu_0: marks tests that don't require GPU",
     "gpu_1: marks tests to run on GPU",
     "gpu_2: marks tests to run on 2GPUs",
     "gpu_4: marks tests to run on 4GPUs",
@@ -188,14 +209,21 @@ markers = [
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "stress: marks tests as stress tests",
+    "performance: marks tests as performance tests",
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
-    "trtllm_marker: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
+    "multimodal: marks tests as multimodal (image/video) tests",
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
+    "router: marks tests for router component",
+    "planner: marks tests for planner component",
     "kvbm: marks tests for KV behavior and model determinism",
-    "model: model id used by a test or parameter"
+    "kvbm_v2: marks tests using KVBM V2",
+    "model: model id used by a test or parameter",
+    "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
+    "k8s: marks tests as requiring Kubernetes",
+    "fault_tolerance: marks tests as fault tolerance tests"
 ]
 
 # Linting/formatting

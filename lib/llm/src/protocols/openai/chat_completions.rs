@@ -12,7 +12,7 @@ use super::{
     common_ext::{CommonExt, CommonExtProvider},
     nvext::NvExt,
     nvext::NvExtProvider,
-    validate,
+    tools, validate,
 };
 
 pub mod aggregator;
@@ -44,6 +44,10 @@ pub struct NvCreateChatCompletionRequest {
     /// Extra args to pass to the chat template rendering context
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
+
+    /// Catch-all for unsupported fields - checked during validation
+    #[serde(flatten, default, skip_serializing)]
+    pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
@@ -155,8 +159,24 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
     }
 
     /// Guided Decoding Options
-    fn get_guided_json(&self) -> Option<&serde_json::Value> {
-        self.common.guided_json.as_ref()
+    fn get_guided_json(&self) -> Option<serde_json::Value> {
+        if let Some(value) = self.common.guided_json.clone() {
+            return Some(value);
+        }
+
+        let tool_choice = self.inner.tool_choice.as_ref()?;
+        let tools = self.inner.tools.as_deref()?;
+
+        match tools::get_json_schema_from_tools(Some(tool_choice), Some(tools)) {
+            Ok(schema) => schema,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "failed to derive guided_json from tool_choice"
+                );
+                None
+            }
+        }
     }
 
     fn get_guided_regex(&self) -> Option<String> {
@@ -193,6 +213,10 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
 
     fn get_include_stop_str_in_output(&self) -> Option<bool> {
         self.common.include_stop_str_in_output
+    }
+
+    fn get_skip_special_tokens(&self) -> Option<bool> {
+        self.common.skip_special_tokens
     }
 }
 
@@ -259,7 +283,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
     }
 
     fn get_skip_special_tokens(&self) -> Option<bool> {
-        None
+        CommonExtProvider::get_skip_special_tokens(self)
     }
 
     fn get_formatted_prompt(&self) -> Option<bool> {
@@ -271,6 +295,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 /// allowing us to validate the data.
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
+        validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_messages(&self.inner.messages)?;
         validate::validate_model(&self.inner.model)?;
         // none for store
@@ -305,7 +330,59 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_repetition_penalty(self.get_repetition_penalty())?;
         validate::validate_min_p(self.get_min_p())?;
         validate::validate_top_k(self.get_top_k())?;
+        // Cross-field validation
+        validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::common::OutputOptionsProvider;
+    use serde_json::json;
+
+    #[test]
+    fn test_skip_special_tokens_none() {
+        let json_str = json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        assert_eq!(request.common.skip_special_tokens, None);
+
+        let output_options = request
+            .extract_output_options()
+            .expect("Failed to extract output options");
+
+        assert_eq!(output_options.skip_special_tokens, None);
+    }
+
+    #[test]
+    fn test_skip_special_tokens_propagates() {
+        for skip_value in [true, false] {
+            let json_str = json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "Hello"}
+                ],
+                "skip_special_tokens": skip_value
+            });
+
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+            let output_options = request
+                .extract_output_options()
+                .expect("Failed to extract output options");
+
+            assert_eq!(output_options.skip_special_tokens, Some(skip_value));
+        }
     }
 }

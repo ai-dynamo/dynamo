@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"testing"
 
-	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -43,6 +42,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -703,18 +703,18 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
-								Resources: &dynamoCommon.Resources{
-									Requests: &dynamoCommon.ResourceItem{
+								Resources: &v1alpha1.Resources{
+									Requests: &v1alpha1.ResourceItem{
 										CPU:    "300m",
 										Memory: "500Mi",
 									},
-									Limits: &dynamoCommon.ResourceItem{
+									Limits: &v1alpha1.ResourceItem{
 										GPU:    "1",
 										Memory: "20Gi",
 										CPU:    "10",
 									},
 								},
-								ExtraPodMetadata: &dynamoCommon.ExtraPodMetadata{
+								ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
 									Annotations: map[string]string{
 										"nvidia.com/annotation1": "annotation1",
 									},
@@ -722,7 +722,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										"nvidia.com/label1": "label1",
 									},
 								},
-								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
+								ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 									PodSpec: &corev1.PodSpec{
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
 										Containers: []corev1.Container{
@@ -734,11 +734,15 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									MainContainer: &corev1.Container{
 										Image: "test-image:latest",
 										Command: []string{
-											"sh",
-											"-c",
+											"some",
+											"dynamo",
+											"command",
 										},
 										Args: []string{
-											"some dynamo command",
+											"--tensor-parallel-size",
+											"4",
+											"--pipeline-parallel-size",
+											"1",
 										},
 										Env: []corev1.EnvVar{
 											{
@@ -798,6 +802,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							Spec: corev1.PodSpec{
 								SchedulerName:                 "volcano",
 								TerminationGracePeriodSeconds: ptr.To(int64(10)),
+								SecurityContext: &corev1.PodSecurityContext{
+									FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+								},
 								Volumes: []corev1.Volume{
 									{
 										Name: "shared-memory",
@@ -817,15 +824,27 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									{
 										Name:    commonconsts.MainContainerName,
 										Image:   "test-image:latest",
-										Command: []string{"sh", "-c"},
-										Args:    []string{"ray start --head --port=6379 && some dynamo command"},
+										Command: []string{"/bin/sh", "-c"},
+										Args:    []string{"ray start --head --port=6379 && some dynamo command --tensor-parallel-size 4 --pipeline-parallel-size 1"},
 										Env: []corev1.EnvVar{
-											{Name: "DYN_NAMESPACE", Value: "default"},
+											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
+											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
+											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 											{Name: "DYN_SYSTEM_PORT", Value: "9090"},
 											{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
+											{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{
+												FieldRef: &corev1.ObjectFieldSelector{
+													FieldPath: "metadata.name",
+												},
+											}},
+											{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
+												FieldRef: &corev1.ObjectFieldSelector{
+													FieldPath: "metadata.namespace",
+												},
+											}},
 											{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"},
 											{Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"},
 										},
@@ -848,7 +867,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											Limits: corev1.ResourceList{
 												corev1.ResourceMemory: resource.MustParse("20Gi"),
 												corev1.ResourceCPU:    resource.MustParse("10"),
-												"nvidia.com/gpu":      resource.MustParse("1"),
+												corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
 											},
 										},
 										LivenessProbe: &corev1.Probe{
@@ -858,7 +877,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 													Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 												},
 											},
-											TimeoutSeconds:   30,
+											TimeoutSeconds:   4,
 											PeriodSeconds:    5,
 											SuccessThreshold: 0,
 											FailureThreshold: 1,
@@ -870,10 +889,10 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 													Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 												},
 											},
-											TimeoutSeconds:   30,
+											TimeoutSeconds:   4,
 											PeriodSeconds:    10,
 											SuccessThreshold: 0,
-											FailureThreshold: 60,
+											FailureThreshold: 3,
 										},
 										StartupProbe: &corev1.Probe{
 											ProbeHandler: corev1.ProbeHandler{
@@ -912,6 +931,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							Spec: corev1.PodSpec{
 								TerminationGracePeriodSeconds: ptr.To(int64(10)),
 								SchedulerName:                 "volcano",
+								SecurityContext: &corev1.PodSecurityContext{
+									FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+								},
 								Volumes: []corev1.Volume{
 									{
 										Name: "shared-memory",
@@ -931,15 +953,27 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									{
 										Name:    commonconsts.MainContainerName,
 										Image:   "test-image:latest",
-										Command: []string{"sh", "-c"},
-										Args:    []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
+										Command: []string{"/bin/sh", "-c"},
+										Args:    []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
 										Env: []corev1.EnvVar{
-											{Name: "DYN_NAMESPACE", Value: "default"},
+											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
+											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
+											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 											{Name: "DYN_SYSTEM_PORT", Value: "9090"},
 											{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
+											{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{
+												FieldRef: &corev1.ObjectFieldSelector{
+													FieldPath: "metadata.name",
+												},
+											}},
+											{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
+												FieldRef: &corev1.ObjectFieldSelector{
+													FieldPath: "metadata.namespace",
+												},
+											}},
 											{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"},
 											{Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"},
 										},
@@ -992,12 +1026,12 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
-								Resources: &dynamoCommon.Resources{
-									Limits: &dynamoCommon.ResourceItem{
+								Resources: &v1alpha1.Resources{
+									Limits: &v1alpha1.ResourceItem{
 										GPU: "1",
 									},
 								},
-								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
+								ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 									MainContainer: &corev1.Container{
 										Image: "test-image:latest",
 									},
@@ -1035,12 +1069,12 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
-								Resources: &dynamoCommon.Resources{
-									Limits: &dynamoCommon.ResourceItem{
+								Resources: &v1alpha1.Resources{
+									Limits: &v1alpha1.ResourceItem{
 										GPU: "1",
 									},
 								},
-								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
+								ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 									MainContainer: &corev1.Container{
 										Image: "", // Image is missing, will cause error in generatePodTemplateSpec
 									},
@@ -1117,6 +1151,769 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 			// Use gomega.Equal for deep comparison of complex structs
 			g.Expect(got).To(gomega.BeEquivalentTo(tt.want))
 			g.Expect(got1).To(gomega.BeEquivalentTo(tt.want1))
+		})
+	}
+}
+
+func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_ReplicaReconciliation(t *testing.T) {
+	ctx := context.Background()
+	g := gomega.NewGomegaWithT(t)
+
+	// Create a scheme with necessary types
+	s := scheme.Scheme
+	err := v1alpha1.AddToScheme(s)
+	if err != nil {
+		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+	}
+	err = appsv1.AddToScheme(s)
+	if err != nil {
+		t.Fatalf("Failed to add appsv1 to scheme: %v", err)
+	}
+	err = corev1.AddToScheme(s)
+	if err != nil {
+		t.Fatalf("Failed to add corev1 to scheme: %v", err)
+	}
+
+	// Create DynamoComponentDeployment with 1 replica
+	replicaCount := int32(1)
+	dcd := &v1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-component",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:     "test-service",
+				DynamoNamespace: ptr.To("default"),
+				ComponentType:   string(commonconsts.ComponentTypeDecode),
+				Replicas:        &replicaCount,
+			},
+		},
+	}
+
+	// Set up fake client with the DCD
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dcd).
+		Build()
+
+	// Set up reconciler
+	recorder := record.NewFakeRecorder(100)
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:      fakeKubeClient,
+		Recorder:    recorder,
+		Config:      controller_common.Config{},
+		EtcdStorage: nil,
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return []string{}, nil
+			},
+		},
+	}
+
+	opt := generateResourceOption{
+		dynamoComponentDeployment: dcd,
+	}
+
+	// Step 1: Create the deployment with 1 replica
+	modified, deployment, err := reconciler.createOrUpdateOrDeleteDeployments(ctx, opt)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(modified).To(gomega.BeTrue(), "Deployment should have been created")
+	g.Expect(deployment).NotTo(gomega.BeNil())
+
+	// Verify deployment was created with 1 replica
+	deploymentName := "test-component"
+	createdDeployment := &appsv1.Deployment{}
+	err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: deploymentName, Namespace: "default"}, createdDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(createdDeployment.Spec.Replicas).NotTo(gomega.BeNil())
+	g.Expect(*createdDeployment.Spec.Replicas).To(gomega.Equal(int32(1)), "Initial deployment should have 1 replica")
+
+	// Step 2: Manually update the deployment to 2 replicas (simulating manual edit)
+	manualReplicaCount := int32(2)
+	createdDeployment.Spec.Replicas = &manualReplicaCount
+	err = fakeKubeClient.Update(ctx, createdDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Verify the manual update
+	updatedDeployment := &appsv1.Deployment{}
+	err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: deploymentName, Namespace: "default"}, updatedDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(updatedDeployment.Spec.Replicas).NotTo(gomega.BeNil())
+	g.Expect(*updatedDeployment.Spec.Replicas).To(gomega.Equal(int32(2)), "Deployment should have been manually updated to 2 replicas")
+
+	// Step 3: Call createOrUpdateOrDeleteDeployments again - it should reconcile back to 1 replica
+	modified2, deployment2, err := reconciler.createOrUpdateOrDeleteDeployments(ctx, opt)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(modified2).To(gomega.BeTrue(), "Deployment should have been updated to reconcile replica count")
+	g.Expect(deployment2).NotTo(gomega.BeNil())
+
+	// Step 4: Verify the deployment was reconciled back to 1 replica
+	reconciledDeployment := &appsv1.Deployment{}
+	err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: deploymentName, Namespace: "default"}, reconciledDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(reconciledDeployment.Spec.Replicas).NotTo(gomega.BeNil())
+	g.Expect(*reconciledDeployment.Spec.Replicas).To(gomega.Equal(int32(1)), "Deployment should have been reconciled back to 1 replica")
+}
+
+func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name                         string
+		replicas                     int32
+		existingLeaderWorkerSets     []*leaderworkersetv1.LeaderWorkerSet
+		wantComponentReconcileResult ComponentReconcileResult
+	}{
+		{
+			name:     "singular LWS replica ready",
+			replicas: 1,
+			existingLeaderWorkerSets: []*leaderworkersetv1.LeaderWorkerSet{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component-0",
+						Namespace: "default",
+					},
+					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+						Replicas: ptr.To(int32(1)),
+					},
+					Status: leaderworkersetv1.LeaderWorkerSetStatus{
+						ReadyReplicas:   1,
+						UpdatedReplicas: 1,
+						Replicas:        1,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			wantComponentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionTrue,
+				reason:   "AllLeaderWorkerSetsReady",
+				message:  "All LeaderWorkerSets are ready",
+				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
+					ComponentName:   "test-component-0",
+					ReadyReplicas:   ptr.To(int32(1)),
+					UpdatedReplicas: 1,
+					Replicas:        1,
+				},
+			},
+		},
+		{
+			name:     "multiple LWS replicas - at least one is unready",
+			replicas: 3,
+			existingLeaderWorkerSets: []*leaderworkersetv1.LeaderWorkerSet{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component-0",
+						Namespace: "default",
+					},
+					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+						Replicas: ptr.To(int32(1)),
+					},
+					Status: leaderworkersetv1.LeaderWorkerSetStatus{
+						ReadyReplicas:   1,
+						Replicas:        1,
+						UpdatedReplicas: 1,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component-1",
+						Namespace: "default",
+					},
+					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+						Replicas: ptr.To(int32(1)),
+					},
+					Status: leaderworkersetv1.LeaderWorkerSetStatus{
+						ReadyReplicas:   0, // Not ready
+						Replicas:        1,
+						UpdatedReplicas: 0,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
+								Status: metav1.ConditionFalse,
+							},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component-2",
+						Namespace: "default",
+					},
+					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+						Replicas: ptr.To(int32(1)),
+					},
+					Status: leaderworkersetv1.LeaderWorkerSetStatus{
+						ReadyReplicas:   1,
+						Replicas:        1,
+						UpdatedReplicas: 1,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			wantComponentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionFalse,
+				reason:   "SomeLeaderWorkerSetsNotReady",
+				message:  "Some LeaderWorkerSets are not ready",
+				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
+					ComponentName:   "test-component-0",
+					ReadyReplicas:   ptr.To(int32(2)),
+					UpdatedReplicas: 2,
+					Replicas:        3,
+				},
+			},
+		},
+		{
+			name:     "multiple LWS replicas - all ready",
+			replicas: 3,
+			existingLeaderWorkerSets: []*leaderworkersetv1.LeaderWorkerSet{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component-0",
+						Namespace: "default",
+					},
+					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+						Replicas: ptr.To(int32(1)),
+					},
+					Status: leaderworkersetv1.LeaderWorkerSetStatus{
+						ReadyReplicas:   1,
+						Replicas:        1,
+						UpdatedReplicas: 1,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component-1",
+						Namespace: "default",
+					},
+					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+						Replicas: ptr.To(int32(1)),
+					},
+					Status: leaderworkersetv1.LeaderWorkerSetStatus{
+						ReadyReplicas:   1,
+						Replicas:        1,
+						UpdatedReplicas: 1,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component-2",
+						Namespace: "default",
+					},
+					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+						Replicas: ptr.To(int32(1)),
+					},
+					Status: leaderworkersetv1.LeaderWorkerSetStatus{
+						ReadyReplicas:   1,
+						Replicas:        1,
+						UpdatedReplicas: 1,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			wantComponentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionTrue,
+				reason:   "AllLeaderWorkerSetsReady",
+				message:  "All LeaderWorkerSets are ready",
+				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
+					ComponentName:   "test-component-0",
+					ReadyReplicas:   ptr.To(int32(3)),
+					UpdatedReplicas: 3,
+					Replicas:        3,
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			// Create a scheme with necessary types
+			s := scheme.Scheme
+			err := v1alpha1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			err = leaderworkersetv1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			err = volcanov1beta1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			// Create DynamoComponentDeployment
+			dcd := &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-component",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: string(dynamo.BackendFrameworkVLLM),
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						ServiceName:     "test-service",
+						DynamoNamespace: ptr.To("default"),
+						ComponentType:   string(commonconsts.ComponentTypeDecode),
+						Replicas:        &tt.replicas,
+						Multinode: &v1alpha1.MultinodeSpec{
+							NodeCount: 2,
+						},
+						Resources: &v1alpha1.Resources{
+							Limits: &v1alpha1.ResourceItem{
+								GPU: "1",
+							},
+						},
+						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+							MainContainer: &corev1.Container{
+								Image: "test-image:latest",
+								Args: []string{
+									"--test-arg",
+								},
+							},
+						},
+					},
+				},
+			}
+
+			// Prepare objects for fake client
+			var objects []client.Object
+			objects = append(objects, dcd)
+			for _, lws := range tt.existingLeaderWorkerSets {
+				objects = append(objects, lws)
+			}
+			// Add a mock ServiceAccount that the generateLeaderWorkerSet function needs
+			objects = append(objects, &corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "default-test-sa",
+					Namespace: "default",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
+					},
+				},
+			})
+
+			// Set up fake client with the DCD and existing LWS objects
+			fakeKubeClient := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(objects...).
+				WithStatusSubresource(objects...).
+				Build()
+
+			// Set up reconciler
+			recorder := record.NewFakeRecorder(100)
+			reconciler := &DynamoComponentDeploymentReconciler{
+				Client:      fakeKubeClient,
+				Recorder:    recorder,
+				Config:      controller_common.Config{},
+				EtcdStorage: nil,
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+						return []string{}, nil
+					},
+				},
+			}
+
+			// Call the function under test
+			result, err := reconciler.reconcileLeaderWorkerSetResources(ctx, dcd)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			// Assert the ComponentReconcileResult
+			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
+		})
+	}
+}
+
+func Test_reconcileDeploymentResources(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name                         string
+		replicas                     int32
+		existingDeployment           *appsv1.Deployment
+		wantComponentReconcileResult ComponentReconcileResult
+	}{
+		{
+			name:     "ready deployment",
+			replicas: 2,
+			existingDeployment: &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-component",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: ptr.To(int32(2)),
+				},
+				Status: appsv1.DeploymentStatus{
+					ObservedGeneration: 1,
+					Replicas:           2,
+					UpdatedReplicas:    2,
+					ReadyReplicas:      2,
+					AvailableReplicas:  2,
+					Conditions: []appsv1.DeploymentCondition{
+						{
+							Type:   appsv1.DeploymentAvailable,
+							Status: corev1.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantComponentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionTrue,
+				reason:   "DeploymentReady",
+				message:  "Deployment is ready",
+				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+					ComponentKind:     v1alpha1.ComponentKindDeployment,
+					ComponentName:     "test-component",
+					Replicas:          2,
+					UpdatedReplicas:   2,
+					ReadyReplicas:     ptr.To(int32(2)),
+					AvailableReplicas: ptr.To(int32(2)),
+				},
+			},
+		},
+		{
+			name:     "unready deployment",
+			replicas: 1,
+			existingDeployment: &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-component",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: ptr.To(int32(1)),
+				},
+				Status: appsv1.DeploymentStatus{
+					ObservedGeneration: 1,
+					Replicas:           1,
+					UpdatedReplicas:    1,
+					ReadyReplicas:      1,
+					AvailableReplicas:  0, // Not available
+					Conditions: []appsv1.DeploymentCondition{
+						{
+							Type:   appsv1.DeploymentAvailable,
+							Status: corev1.ConditionFalse,
+						},
+					},
+				},
+			},
+			wantComponentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionFalse,
+				reason:   "DeploymentNotReady",
+				message:  "Deployment is not ready",
+				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+					ComponentKind:     v1alpha1.ComponentKindDeployment,
+					ComponentName:     "test-component",
+					Replicas:          1,
+					UpdatedReplicas:   1,
+					ReadyReplicas:     ptr.To(int32(1)),
+					AvailableReplicas: ptr.To(int32(0)),
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			// Create a scheme with necessary types
+			s := scheme.Scheme
+			err := v1alpha1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			err = appsv1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			err = corev1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			// Create DynamoComponentDeployment
+			dcd := &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-component",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: string(dynamo.BackendFrameworkVLLM),
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						ServiceName:     "test-service",
+						DynamoNamespace: ptr.To("default"),
+						ComponentType:   string(commonconsts.ComponentTypeDecode),
+						Replicas:        &tt.replicas,
+						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+							MainContainer: &corev1.Container{
+								Image: "test-image:latest",
+								Args: []string{
+									"--test-arg",
+								},
+							},
+						},
+					},
+				},
+			}
+
+			// Prepare objects for fake client
+			var objects []client.Object
+			objects = append(objects, dcd)
+			if tt.existingDeployment != nil {
+				objects = append(objects, tt.existingDeployment)
+			}
+
+			// Set up fake client with the DCD and existing Deployment
+			fakeKubeClient := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(objects...).
+				WithStatusSubresource(objects...).
+				Build()
+
+			// Set up reconciler
+			recorder := record.NewFakeRecorder(100)
+			reconciler := &DynamoComponentDeploymentReconciler{
+				Client:      fakeKubeClient,
+				Recorder:    recorder,
+				Config:      controller_common.Config{},
+				EtcdStorage: nil,
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+						return []string{}, nil
+					},
+				},
+			}
+
+			// Call the function under test
+			result, err := reconciler.reconcileDeploymentResources(ctx, dcd)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			// Assert the ComponentReconcileResult
+			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
+		})
+	}
+}
+
+func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name                     string
+		componentReconcileResult ComponentReconcileResult
+		wantConditionStatus      metav1.ConditionStatus
+		wantConditionReason      string
+		wantConditionMessage     string
+		wantServiceReplicaStatus v1alpha1.ServiceReplicaStatus
+	}{
+		{
+			name: "deployment backed DCD that is unready",
+			componentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionFalse,
+				reason:   "DeploymentNotReady",
+				message:  "Deployment is not ready",
+				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+					ComponentKind:     v1alpha1.ComponentKindDeployment,
+					ComponentName:     "test-component",
+					Replicas:          1,
+					UpdatedReplicas:   1,
+					ReadyReplicas:     ptr.To(int32(1)),
+					AvailableReplicas: ptr.To(int32(0)),
+				},
+			},
+			wantConditionStatus:  metav1.ConditionFalse,
+			wantConditionReason:  "DeploymentNotReady",
+			wantConditionMessage: "Deployment is not ready",
+			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:     v1alpha1.ComponentKindDeployment,
+				ComponentName:     "test-component",
+				Replicas:          1,
+				UpdatedReplicas:   1,
+				ReadyReplicas:     ptr.To(int32(1)),
+				AvailableReplicas: ptr.To(int32(0)),
+			},
+		},
+		{
+			name: "deployment backed DCD that is ready",
+			componentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionTrue,
+				reason:   "DeploymentReady",
+				message:  "Deployment is ready",
+				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+					ComponentKind:     v1alpha1.ComponentKindDeployment,
+					ComponentName:     "test-component",
+					Replicas:          2,
+					UpdatedReplicas:   2,
+					ReadyReplicas:     ptr.To(int32(2)),
+					AvailableReplicas: ptr.To(int32(2)),
+				},
+			},
+			wantConditionStatus:  metav1.ConditionTrue,
+			wantConditionReason:  "DeploymentReady",
+			wantConditionMessage: "Deployment is ready",
+			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:     v1alpha1.ComponentKindDeployment,
+				ComponentName:     "test-component",
+				Replicas:          2,
+				UpdatedReplicas:   2,
+				ReadyReplicas:     ptr.To(int32(2)),
+				AvailableReplicas: ptr.To(int32(2)),
+			},
+		},
+		{
+			name: "LWS backed DCD that is unready",
+			componentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionFalse,
+				reason:   "SomeLeaderWorkerSetsNotReady",
+				message:  "Some LeaderWorkerSets are not ready",
+				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
+					ComponentName:   "test-component-0",
+					Replicas:        3,
+					UpdatedReplicas: 2,
+					ReadyReplicas:   ptr.To(int32(2)),
+				},
+			},
+			wantConditionStatus:  metav1.ConditionFalse,
+			wantConditionReason:  "SomeLeaderWorkerSetsNotReady",
+			wantConditionMessage: "Some LeaderWorkerSets are not ready",
+			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
+				ComponentName:   "test-component-0",
+				Replicas:        3,
+				UpdatedReplicas: 2,
+				ReadyReplicas:   ptr.To(int32(2)),
+			},
+		},
+		{
+			name: "LWS backed DCD that is ready",
+			componentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionTrue,
+				reason:   "AllLeaderWorkerSetsReady",
+				message:  "All LeaderWorkerSets are ready",
+				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
+					ComponentName:   "test-component-0",
+					Replicas:        3,
+					UpdatedReplicas: 3,
+					ReadyReplicas:   ptr.To(int32(3)),
+				},
+			},
+			wantConditionStatus:  metav1.ConditionTrue,
+			wantConditionReason:  "AllLeaderWorkerSetsReady",
+			wantConditionMessage: "All LeaderWorkerSets are ready",
+			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
+				ComponentName:   "test-component-0",
+				Replicas:        3,
+				UpdatedReplicas: 3,
+				ReadyReplicas:   ptr.To(int32(3)),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			// Create a scheme with necessary types
+			s := scheme.Scheme
+			err := v1alpha1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			// Create DynamoComponentDeployment
+			dcd := &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-component",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: string(dynamo.BackendFrameworkVLLM),
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						ServiceName:     "test-service",
+						DynamoNamespace: ptr.To("default"),
+						ComponentType:   string(commonconsts.ComponentTypeDecode),
+					},
+				},
+			}
+
+			// Set up fake client with the DCD
+			fakeKubeClient := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(dcd).
+				WithStatusSubresource(dcd).
+				Build()
+
+			// Set up reconciler
+			recorder := record.NewFakeRecorder(100)
+			reconciler := &DynamoComponentDeploymentReconciler{
+				Client:   fakeKubeClient,
+				Recorder: recorder,
+			}
+
+			// Create the request
+			req := ctrl.Request{
+				NamespacedName: client.ObjectKey{
+					Name:      "test-component",
+					Namespace: "default",
+				},
+			}
+
+			err = reconciler.setStatusConditionAndServiceReplicaStatus(ctx, dcd, tt.componentReconcileResult)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			// Fetch the updated DCD to verify status was set
+			updatedDCD := &v1alpha1.DynamoComponentDeployment{}
+			err = fakeKubeClient.Get(ctx, req.NamespacedName, updatedDCD)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			// Assert the status condition
+			g.Expect(updatedDCD.Status.Conditions).To(gomega.HaveLen(1))
+			condition := updatedDCD.Status.Conditions[0]
+			g.Expect(condition.Type).To(gomega.Equal(v1alpha1.DynamoGraphDeploymentConditionTypeAvailable))
+			g.Expect(condition.Status).To(gomega.Equal(tt.wantConditionStatus))
+			g.Expect(condition.Reason).To(gomega.Equal(tt.wantConditionReason))
+			g.Expect(condition.Message).To(gomega.Equal(tt.wantConditionMessage))
+
+			// Assert the service replica status
+			g.Expect(updatedDCD.Status.Service).To(gomega.Equal(tt.wantServiceReplicaStatus))
 		})
 	}
 }

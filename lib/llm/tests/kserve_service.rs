@@ -1,7 +1,26 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "common/ports.rs"]
+mod ports;
+
 pub mod kserve_test {
+    // [gluo NOTE] Tests may run in parallel, use this enum to keep track of
+    // port used for different test cases
+    enum TestPort {
+        InferFailure = 8988,
+        InferSuccess = 8989,
+        StreamInferFailure = 8990,
+        StreamInferSuccess = 8991,
+        InferCancellation = 8992,
+        StreamInferCancellation = 8993,
+        ModelInfo = 8994,
+        TensorModel = 8995,
+        TensorModelTypes = 8996,
+        TritonModelConfig = 8997,
+        LiveReady = 8998,
+    }
+
     // For using gRPC client for test
     pub mod inference {
         tonic::include_proto!("inference");
@@ -13,11 +32,13 @@ pub mod kserve_test {
     use inference::grpc_inference_service_client::GrpcInferenceServiceClient;
     use inference::{
         DataType, ModelConfigRequest, ModelInferRequest, ModelInferResponse, ModelMetadataRequest,
+        ModelReadyRequest, ServerLiveRequest, ServerReadyRequest,
     };
 
     use anyhow::Error;
     use async_stream::stream;
     use dynamo_llm::grpc::service::kserve::KserveService;
+    use dynamo_llm::grpc::service::kserve::inference as kserve_inference;
     use dynamo_llm::protocols::{
         Annotated,
         openai::{
@@ -40,7 +61,9 @@ pub mod kserve_test {
     use tokio::time::timeout;
     use tonic::{Request, Response, transport::Channel};
 
+    use crate::ports::get_random_port;
     use dynamo_async_openai::types::Prompt;
+    use prost::Message;
 
     struct SplitEngine {}
 
@@ -224,6 +247,7 @@ pub mod kserve_test {
                         id: request.id.clone(),
                         model: request.model.clone(),
                         tensors: request.tensors.clone(),
+                        parameters: Default::default(),
                     });
                 }
             };
@@ -345,20 +369,6 @@ pub mod kserve_test {
         fn drop(&mut self) {
             self.token.cancel();
         }
-    }
-
-    // Tests may run in parallel, use this enum to keep track of port used for different
-    // test cases
-    enum TestPort {
-        InferFailure = 8988,
-        InferSuccess = 8989,
-        StreamInferFailure = 8990,
-        StreamInferSuccess = 8991,
-        InferCancellation = 8992,
-        StreamInferCancellation = 8993,
-        ModelInfo = 8994,
-        TensorModel = 8995,
-        TensorModelTypes = 8996,
     }
 
     #[rstest]
@@ -1163,12 +1173,15 @@ pub mod kserve_test {
                     name: "input".to_string(),
                     data_type: tensor::DataType::Int32,
                     shape: vec![1],
+                    parameters: Default::default(),
                 }],
                 outputs: vec![tensor::TensorMetadata {
                     name: "output".to_string(),
                     data_type: tensor::DataType::Bool,
                     shape: vec![-1],
+                    parameters: Default::default(),
                 }],
+                triton_model_config: None,
             }),
             ..Default::default()
         };
@@ -1199,6 +1212,193 @@ pub mod kserve_test {
             model_name,
             inputs,
             std::collections::HashMap::new(),
+        );
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_triton_model_config(
+        #[with(TestPort::TritonModelConfig as u16)] service_with_engines: (
+            KserveService,
+            Arc<SplitEngine>,
+            Arc<AlwaysFailEngine>,
+            Arc<LongRunningEngine>,
+        ),
+    ) {
+        // start server
+        let _running = RunningService::spawn(service_with_engines.0.clone());
+
+        let mut client = get_ready_client(TestPort::TritonModelConfig as u16, 5).await;
+
+        let model_name = "tensor";
+        let expected_model_config = inference::ModelConfig {
+            name: model_name.to_string(),
+            platform: "custom".to_string(),
+            backend: "custom".to_string(),
+            input: vec![
+                inference::ModelInput {
+                    name: "input".to_string(),
+                    data_type: DataType::TypeInt32 as i32,
+                    dims: vec![1],
+                    optional: false,
+                    ..Default::default()
+                },
+                inference::ModelInput {
+                    name: "optional_input".to_string(),
+                    data_type: DataType::TypeInt32 as i32,
+                    dims: vec![1],
+                    optional: true,
+                    ..Default::default()
+                },
+            ],
+            output: vec![inference::ModelOutput {
+                name: "output".to_string(),
+                data_type: DataType::TypeBool as i32,
+                dims: vec![-1],
+                ..Default::default()
+            }],
+            model_transaction_policy: Some(inference::ModelTransactionPolicy { decoupled: true }),
+            ..Default::default()
+        };
+
+        let mut buf = vec![];
+        expected_model_config.encode(&mut buf).unwrap();
+
+        // Register a tensor model
+        let mut card = ModelDeploymentCard::with_name_only(model_name);
+        card.model_type = ModelType::TensorBased;
+        card.model_input = ModelInput::Tensor;
+        card.runtime_config = ModelRuntimeConfig {
+            tensor_model_config: Some(tensor::TensorModelConfig {
+                triton_model_config: Some(buf.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let tensor = Arc::new(TensorEngine {});
+        service_with_engines
+            .0
+            .model_manager()
+            .add_tensor_model("tensor", card.mdcsum(), tensor.clone())
+            .unwrap();
+        let _ = service_with_engines
+            .0
+            .model_manager()
+            .save_model_card("key", card);
+
+        // success config
+        let request = tonic::Request::new(ModelConfigRequest {
+            name: model_name.into(),
+            version: "".into(),
+        });
+
+        let response = client
+            .model_config(request)
+            .await
+            .unwrap()
+            .into_inner()
+            .config;
+        let Some(config) = response else {
+            panic!("Expected Some(config), got None");
+        };
+        assert_eq!(
+            config, expected_model_config,
+            "Expected same model config to be returned",
+        );
+
+        // Pass config with both TensorModelConfig and triton_model_config,
+        // check if the Triton model config is used.
+        let _ = service_with_engines
+            .0
+            .model_manager()
+            .remove_model_card("key");
+        let mut card = ModelDeploymentCard::with_name_only(model_name);
+        card.model_type = ModelType::TensorBased;
+        card.model_input = ModelInput::Tensor;
+        let mut card = ModelDeploymentCard::with_name_only("tensor");
+        card.model_type = ModelType::TensorBased;
+        card.model_input = ModelInput::Tensor;
+        card.runtime_config = ModelRuntimeConfig {
+            tensor_model_config: Some(tensor::TensorModelConfig {
+                name: "tensor".to_string(),
+                inputs: vec![tensor::TensorMetadata {
+                    name: "input".to_string(),
+                    data_type: tensor::DataType::Int32,
+                    shape: vec![1],
+                    parameters: Default::default(),
+                }],
+                outputs: vec![tensor::TensorMetadata {
+                    name: "output".to_string(),
+                    data_type: tensor::DataType::Bool,
+                    shape: vec![-1],
+                    parameters: Default::default(),
+                }],
+                triton_model_config: Some(buf.clone()),
+            }),
+            ..Default::default()
+        };
+        let _ = service_with_engines
+            .0
+            .model_manager()
+            .save_model_card("key", card);
+        let request = tonic::Request::new(ModelConfigRequest {
+            name: model_name.into(),
+            version: "".into(),
+        });
+
+        let response = client
+            .model_config(request)
+            .await
+            .unwrap()
+            .into_inner()
+            .config;
+        let Some(config) = response else {
+            panic!("Expected Some(config), got None");
+        };
+        assert_eq!(
+            config, expected_model_config,
+            "Expected same model config to be returned",
+        );
+
+        // Test invalid triton model config
+        let _ = service_with_engines
+            .0
+            .model_manager()
+            .remove_model_card("key");
+        let mut card = ModelDeploymentCard::with_name_only(model_name);
+        card.model_type = ModelType::TensorBased;
+        card.model_input = ModelInput::Tensor;
+        card.runtime_config = ModelRuntimeConfig {
+            tensor_model_config: Some(tensor::TensorModelConfig {
+                triton_model_config: Some(vec![1, 2, 3, 4, 5]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let _ = service_with_engines
+            .0
+            .model_manager()
+            .save_model_card("key", card);
+
+        // success config
+        let request = tonic::Request::new(ModelConfigRequest {
+            name: model_name.into(),
+            version: "".into(),
+        });
+
+        let response = client.model_config(request).await;
+        assert!(response.is_err());
+        let err = response.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::InvalidArgument,
+            "Expected InvalidArgument error, get {}",
+            err
+        );
+        assert!(
+            err.message().contains("failed to decode Protobuf message"),
+            "Expected error message to contain 'failed to decode Protobuf message', got: {}",
+            err.message()
         );
     }
 
@@ -1251,9 +1451,8 @@ pub mod kserve_test {
             err
         );
         assert!(
-            err.message()
-                .contains("has type Tensor but no model config is provided"),
-            "Expected error message to contain 'has type Tensor but no model config is provided', got: {}",
+            err.message().contains("no model config is provided"),
+            "Expected error message to contain 'no model config is provided', got: {}",
             err.message()
         );
 
@@ -1272,9 +1471,8 @@ pub mod kserve_test {
             err
         );
         assert!(
-            err.message()
-                .contains("has type Tensor but no model config is provided"),
-            "Expected error message to contain 'has type Tensor but no model config is provided', got: {}",
+            err.message().contains("no model config is provided"),
+            "Expected error message to contain 'no model config is provided', got: {}",
             err.message()
         );
 
@@ -1293,12 +1491,15 @@ pub mod kserve_test {
                     name: "input".to_string(),
                     data_type: tensor::DataType::Bytes,
                     shape: vec![1],
+                    parameters: Default::default(),
                 }],
                 outputs: vec![tensor::TensorMetadata {
                     name: "output".to_string(),
                     data_type: tensor::DataType::Bool,
                     shape: vec![-1],
+                    parameters: Default::default(),
                 }],
+                triton_model_config: None,
             }),
             ..Default::default()
         };
@@ -1540,5 +1741,318 @@ pub mod kserve_test {
                 panic!("Unexpected output name: {}", output.name);
             }
         }
+    }
+
+    #[test]
+    fn test_parameter_conversion_round_trip() {
+        use kserve_inference::infer_parameter::ParameterChoice;
+
+        // Test all 5 parameter types for round-trip conversion
+        let test_cases = vec![
+            ("bool_param", ParameterChoice::BoolParam(true)),
+            ("int64_param", ParameterChoice::Int64Param(42)),
+            (
+                "string_param",
+                ParameterChoice::StringParam("test_value".to_string()),
+            ),
+            ("double_param", ParameterChoice::DoubleParam(2.5)),
+            ("uint64_param", ParameterChoice::Uint64Param(9999)),
+        ];
+
+        for (name, choice) in test_cases {
+            let kserve_param = kserve_inference::InferParameter {
+                parameter_choice: Some(choice.clone()),
+            };
+
+            // Convert KServe -> Dynamo -> KServe
+            let dynamo_param =
+                dynamo_llm::grpc::service::tensor::kserve_param_to_dynamo(name, &kserve_param)
+                    .expect("Conversion to Dynamo should succeed");
+
+            let back_to_kserve =
+                dynamo_llm::grpc::service::tensor::dynamo_param_to_kserve(&dynamo_param);
+
+            // Verify round-trip preserves the value
+            assert_eq!(
+                kserve_param.parameter_choice, back_to_kserve.parameter_choice,
+                "Parameter '{}' failed round-trip conversion",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_parameter_conversion_error_cases() {
+        // Test conversion of parameter with no value
+        let empty_param = kserve_inference::InferParameter {
+            parameter_choice: None,
+        };
+
+        let result =
+            dynamo_llm::grpc::service::tensor::kserve_param_to_dynamo("empty_param", &empty_param);
+
+        assert!(
+            result.is_err(),
+            "Expected error for parameter with no value"
+        );
+        assert!(
+            result.unwrap_err().message().contains("has no value"),
+            "Expected error message about missing value"
+        );
+    }
+
+    async fn wait_for_http_ready(port: u16, timeout_secs: u64) {
+        let client = reqwest::Client::new();
+        let start = tokio::time::Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+        let url = format!("http://localhost:{}/metrics", port);
+
+        loop {
+            match client.get(&url).send().await {
+                Ok(_) => return,
+                Err(_) if start.elapsed() < timeout => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("HTTP service failed to start within timeout: {}", e),
+            }
+        }
+    }
+
+    fn assert_metric_value(metrics: &str, model_name: &str, endpoint: &str, expected_count: u32) {
+        // Find the metric line that contains both the model and endpoint labels
+        let metric_line = metrics
+            .lines()
+            .find(|line| {
+                line.starts_with("dynamo_frontend_requests_total{")
+                    && line.contains(&format!("model=\"{}\"", model_name))
+                    && line.contains(&format!("endpoint=\"{}\"", endpoint))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "Could not find metric for model='{}' endpoint='{}' in metrics:\n{}",
+                    model_name, endpoint, metrics
+                )
+            });
+
+        let value_str = metric_line.split_whitespace().last().unwrap_or("0");
+        let actual_count: u32 = value_str.parse().unwrap_or(0);
+
+        assert_eq!(
+            actual_count, expected_count,
+            "Expected {} requests for model='{}' endpoint='{}', but found {}",
+            expected_count, model_name, endpoint, actual_count
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kserve_grpc_metrics_endpoint() {
+        let grpc_port = get_random_port().await;
+        let http_metrics_port = get_random_port().await;
+
+        let service = KserveService::builder()
+            .port(grpc_port)
+            .http_metrics_port(http_metrics_port)
+            .build()
+            .unwrap();
+
+        let state = service.state_clone();
+        let manager = state.manager();
+
+        // Register completion model
+        let mut card = ModelDeploymentCard::with_name_only("test_model");
+        card.model_type = ModelType::Completions;
+        card.model_input = ModelInput::Text;
+        manager
+            .add_completions_model("test_model", card.mdcsum(), Arc::new(SplitEngine {}))
+            .unwrap();
+        manager.save_model_card("test_model", card).unwrap();
+
+        // Register tensor model
+        let mut tensor_card = ModelDeploymentCard::with_name_only("test_tensor_model");
+        tensor_card.model_type = ModelType::TensorBased;
+        tensor_card.model_input = ModelInput::Tensor;
+        tensor_card.runtime_config = ModelRuntimeConfig {
+            tensor_model_config: Some(tensor::TensorModelConfig {
+                name: "test_tensor_model".to_string(),
+                inputs: vec![tensor::TensorMetadata {
+                    name: "input".to_string(),
+                    data_type: tensor::DataType::Int32,
+                    shape: vec![1],
+                    parameters: Default::default(),
+                }],
+                outputs: vec![tensor::TensorMetadata {
+                    name: "output".to_string(),
+                    data_type: tensor::DataType::Int32,
+                    shape: vec![1],
+                    parameters: Default::default(),
+                }],
+                triton_model_config: None,
+            }),
+            ..Default::default()
+        };
+        manager
+            .add_tensor_model(
+                "test_tensor_model",
+                tensor_card.mdcsum(),
+                Arc::new(TensorEngine {}),
+            )
+            .unwrap();
+        manager
+            .save_model_card("test_tensor_model", tensor_card)
+            .unwrap();
+
+        // Start services
+        let cancel_token = CancellationToken::new();
+        let grpc_task = service.spawn(cancel_token.clone()).await;
+        let http_task = service.http_service().spawn(cancel_token.clone()).await;
+
+        // Wait for services to be ready
+        let mut grpc_client = get_ready_client(grpc_port, 10).await;
+        wait_for_http_ready(http_metrics_port, 10).await;
+
+        // Test completion model
+        grpc_client
+            .model_infer(Request::new(ModelInferRequest {
+                model_name: "test_model".into(),
+                model_version: "1".into(),
+                id: "test-metrics".into(),
+                inputs: vec![inference::model_infer_request::InferInputTensor {
+                    name: "text_input".into(),
+                    datatype: "BYTES".into(),
+                    shape: vec![1],
+                    contents: Some(inference::InferTensorContents {
+                        bytes_contents: vec!["test input".into()],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }))
+            .await
+            .expect("Inference request failed");
+
+        // Test tensor model
+        grpc_client
+            .model_infer(Request::new(ModelInferRequest {
+                model_name: "test_tensor_model".into(),
+                model_version: "1".into(),
+                id: "test-tensor-metrics".into(),
+                inputs: vec![inference::model_infer_request::InferInputTensor {
+                    name: "input".into(),
+                    datatype: "INT32".into(),
+                    shape: vec![1],
+                    contents: Some(inference::InferTensorContents {
+                        int_contents: vec![42],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }))
+            .await
+            .expect("Tensor inference request failed");
+
+        // Verify metrics are exposed via HTTP endpoint
+        let metrics_url = format!("http://localhost:{}/metrics", http_metrics_port);
+        let metrics_body = reqwest::get(&metrics_url)
+            .await
+            .expect("Failed to fetch metrics")
+            .text()
+            .await
+            .unwrap();
+
+        // Verify metrics are present and have correct values
+        assert!(
+            metrics_body.contains("dynamo_frontend_inflight_requests"),
+            "Metrics should contain inflight gauge"
+        );
+        assert_metric_value(&metrics_body, "test_model", "completions", 1);
+        assert_metric_value(&metrics_body, "test_tensor_model", "tensor", 1);
+
+        // Clean up
+        cancel_token.cancel();
+        let _ = tokio::join!(grpc_task, http_task);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_live_ready() {
+        let grpc_port = TestPort::LiveReady as u16;
+        let service = KserveService::builder().port(grpc_port).build().unwrap();
+
+        // start server
+        let _running = RunningService::spawn(service.clone());
+
+        let mut client = get_ready_client(grpc_port, 5).await;
+
+        // Check server liveness
+        let server_live_request = tonic::Request::new(ServerLiveRequest {});
+        let server_live_response = client.server_live(server_live_request).await.unwrap();
+        let server_live = server_live_response.get_ref().live;
+        assert!(server_live, "Server should be live");
+
+        // Check server readiness
+        let server_ready_request = tonic::Request::new(ServerReadyRequest {});
+        let server_ready_response = client.server_ready(server_ready_request).await.unwrap();
+        let server_ready = server_ready_response.get_ref().ready;
+        assert!(
+            !server_ready,
+            "Server should not be ready without model registered"
+        );
+
+        // Check model readiness for unregistered model
+        let model_ready_request = tonic::Request::new(ModelReadyRequest {
+            name: "tensor".into(),
+            version: "".into(),
+        });
+        let model_ready_response = client.model_ready(model_ready_request).await.unwrap();
+        let model_ready = model_ready_response.get_ref().ready;
+        assert!(!model_ready, "Unregistered model should not be ready");
+
+        // Register a tensor model
+        let mut card = ModelDeploymentCard::with_name_only("tensor");
+        card.model_type = ModelType::TensorBased;
+        card.model_input = ModelInput::Tensor;
+        card.runtime_config = ModelRuntimeConfig {
+            tensor_model_config: Some(tensor::TensorModelConfig {
+                name: "tensor".to_string(),
+                inputs: vec![tensor::TensorMetadata {
+                    name: "input".to_string(),
+                    data_type: tensor::DataType::Int32,
+                    shape: vec![1],
+                    parameters: Default::default(),
+                }],
+                outputs: vec![tensor::TensorMetadata {
+                    name: "output".to_string(),
+                    data_type: tensor::DataType::Bool,
+                    shape: vec![-1],
+                    parameters: Default::default(),
+                }],
+                triton_model_config: None,
+            }),
+            ..Default::default()
+        };
+        let tensor = Arc::new(TensorEngine {});
+        service
+            .model_manager()
+            .add_tensor_model("tensor", card.mdcsum(), tensor.clone())
+            .unwrap();
+        let _ = service.model_manager().save_model_card("key", card);
+
+        // Re-check readiness
+        // Check server readiness
+        let server_ready_request = tonic::Request::new(ServerReadyRequest {});
+        let server_ready_response = client.server_ready(server_ready_request).await.unwrap();
+        let server_ready = server_ready_response.get_ref().ready;
+        assert!(server_ready, "Server should be ready with model registered");
+
+        // Check model readiness for unregistered model
+        let model_ready_request = tonic::Request::new(ModelReadyRequest {
+            name: "tensor".into(),
+            version: "".into(),
+        });
+        let model_ready_response = client.model_ready(model_ready_request).await.unwrap();
+        let model_ready = model_ready_response.get_ref().ready;
+        assert!(model_ready, "Registered model should be ready");
     }
 }

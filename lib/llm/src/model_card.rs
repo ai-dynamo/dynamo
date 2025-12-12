@@ -21,14 +21,11 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_type::{ModelInput, ModelType};
 use anyhow::{Context, Result};
 use derive_builder::Builder;
-use dynamo_runtime::DistributedRuntime;
-use dynamo_runtime::storage::key_value_store::{
-    EtcdStore, Key, KeyValueStore, KeyValueStoreManager,
-};
-use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned};
+use dynamo_runtime::{slug::Slug, storage::kv};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 
+use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
 /// Identify model deployment cards in the key-value store
@@ -221,6 +218,14 @@ pub struct ModelDeploymentCard {
     #[serde(default)]
     pub runtime_config: ModelRuntimeConfig,
 
+    /// Media decoding configuration
+    #[serde(default)]
+    pub media_decoder: Option<MediaDecoder>,
+
+    /// Media fetching configuration
+    #[serde(default)]
+    pub media_fetcher: Option<MediaFetcher>,
+
     #[serde(skip, default)]
     checksum: OnceLock<String>,
 }
@@ -373,34 +378,19 @@ impl ModelDeploymentCard {
         matches!(self.model_input, ModelInput::Tokens)
     }
 
-    /// Load a ModelDeploymentCard from storage the DistributedRuntime is configured to use.
-    /// Card should be fully local and ready to use when the call returns.
-    pub async fn load_from_store(
-        mdc_key: &Key,
-        drt: &DistributedRuntime,
-    ) -> anyhow::Result<Option<Self>> {
-        let Some(etcd_client) = drt.etcd_client() else {
-            // Should be impossible because we only get here on an etcd event
-            anyhow::bail!("Missing etcd_client");
-        };
-        let store: Box<dyn KeyValueStore> = Box::new(EtcdStore::new(etcd_client));
-        let card_store = Arc::new(KeyValueStoreManager::new(store));
-        let Some(mut card) = card_store
-            .load::<ModelDeploymentCard>(ROOT_PATH, mdc_key)
-            .await?
-        else {
-            return Ok(None);
-        };
-
-        card.download_config().await?;
-
-        Ok(Some(card))
-    }
-
     /// Download the files this card needs to work: config.json, tokenizer.json, etc.
     pub async fn download_config(&mut self) -> anyhow::Result<()> {
         if self.has_local_files() {
             tracing::trace!("All model config is local, not downloading");
+            return Ok(());
+        }
+
+        // For TensorBased models, config files are not used - they handle everything in the backend
+        if self.model_type.supports_tensor() {
+            tracing::debug!(
+                display_name = %self.display_name,
+                "Skipping config download for TensorBased model"
+            );
             return Ok(());
         }
 
@@ -548,6 +538,8 @@ impl ModelDeploymentCard {
             model_input: Default::default(), // set later
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
+            media_decoder: None,
+            media_fetcher: None,
             checksum: OnceLock::new(),
         })
     }
@@ -560,7 +552,7 @@ impl PartialEq for ModelDeploymentCard {
 }
 
 /// A ModelDeploymentCard is published a single time per instance and never updated.
-impl Versioned for ModelDeploymentCard {
+impl kv::Versioned for ModelDeploymentCard {
     fn revision(&self) -> u64 {
         0
     }
@@ -638,7 +630,8 @@ struct HFTextConfig {
     max_position_embeddings: Option<usize>,
 
     /// number of layers in the model
-    num_hidden_layers: usize,
+    /// Optional because some multimodal models (e.g., LLaVA) don't include this in text_config
+    num_hidden_layers: Option<usize>,
 
     /// number of attention heads in the model
     num_attention_heads: Option<usize>,
@@ -686,43 +679,62 @@ impl HFConfig {
         text_config.final_bos_token_id = final_bos_token_id;
 
         // TODO: refactor this when we switch to per-architecture tokenization
-        let final_eos_token_ids: Vec<TokenIdType> = config
-            .eos_token_id
-            .as_ref()
-            .or(text_config.eos_token_id.as_ref())
-            .and_then(|v| {
-                if v.is_number() {
-                    v.as_number()
-                        .and_then(|n| n.as_u64())
-                        .map(|n| vec![n as TokenIdType])
-                } else if v.is_array() {
-                    let arr = v.as_array().unwrap(); // Safety: We just checked
-                    Some(
-                        arr.iter()
-                            .filter_map(|inner_v| {
-                                inner_v
-                                    .as_number()
-                                    .and_then(|n| n.as_u64())
-                                    .map(|n| n as TokenIdType)
-                            })
-                            .collect(),
-                    )
-                } else {
-                    tracing::error!(
-                        ?v,
-                        path = %file_path.display(),
-                        "eos_token_id is not a number or an array, cannot use"
-                    );
-                    None
-                }
-            })
-            .or_else(|| {
-                // Maybe it's in generation_config.json
-                crate::file_json_field(&gencfg_path, "eos_token_id")
+        // eos_token_id can appear in multiple places, and as suggested by HuggingFace
+        // community that the priority should be:
+        // 1. generation_config.json;
+        // 2. config.json, or text_config field in config.json.
+        // https://github.com/huggingface/transformers/issues/25395#issuecomment-1671863257
+        let final_eos_token_ids: Vec<TokenIdType> = {
+                // Firstly check the generation_config.json
+                crate::file_json_field::<serde_json::Value>(&gencfg_path, "eos_token_id")
                 .inspect_err(
                     |err| tracing::warn!(%err, "Missing eos_token_id in generation_config.json"),
                 )
-                .ok()
+                .ok().and_then(|v| {
+                    if v.is_number() {
+                        v.as_number()
+                            .and_then(|n| n.as_u64())
+                            .map(|n| vec![n as TokenIdType])
+                    } else if v.is_array() {
+                        let arr = v.as_array().unwrap();
+                        Some(
+                            arr.iter()
+                                .filter_map(|inner_v| {
+                                    inner_v
+                                        .as_number()
+                                        .and_then(|n| n.as_u64())
+                                        .map(|n| n as TokenIdType)
+                                })
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    }
+                })
+            }.or_else(|| {
+                // Check config.json and text_config
+                config
+                .eos_token_id
+                .as_ref()
+                .or(text_config.eos_token_id.as_ref())
+                .and_then(|v| {
+                    if v.is_number() {
+                        v.as_number()
+                            .and_then(|n| n.as_u64())
+                            .map(|n| vec![n as TokenIdType])
+                    } else {
+                        serde_json::from_value(v.clone())
+                            .map(Some)
+                            .unwrap_or_else(|err| {
+                                tracing::error!(
+                                    ?v,
+                                    path = %file_path.display(),
+                                    "eos_token_id is not a number or an array, cannot deserialize: {err}",
+                                );
+                                None
+                            })
+                    }
+                })
             })
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -845,6 +857,7 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::HFConfig;
+    use std::collections::HashSet;
     use std::path::Path;
 
     #[test]
@@ -853,6 +866,9 @@ mod tests {
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct/config.json");
         let config = HFConfig::from_json_file(&config_file)?;
         assert_eq!(config.bos_token_id(), 128000);
+        // eos_token_ids can be in any order as long as the set is correct
+        let eos_token_id_set: HashSet<_> = config.eos_token_ids().iter().cloned().collect();
+        assert_eq!(eos_token_id_set, vec![128001, 128009].into_iter().collect());
         Ok(())
     }
 

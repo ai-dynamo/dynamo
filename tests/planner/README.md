@@ -10,7 +10,7 @@ This directory contains comprehensive testing tools for validating the SLA plann
 The SLA planner monitors metrics every 60 seconds (default adjustment interval) and scales
 prefill/decode workers based on TTFT, ITL, and request patterns.
 
-To setup the environment, simply use the released docker images for any backends, or build your own docker image following the READMEs in `./components/backends/<vllm/sglang/trtllm>/README.md`, or follow the `Developing Locally` section in [README.md](../../README.md) to setup the environment locally. If using the local environment, make sure to install dependencies by running `UV_GIT_LFS=1 uv pip install --no-cache -r container/deps/requirements.txt`
+To setup the environment, simply use the released docker images for any backends, or build your own docker image following the READMEs in `./examples/backends/<vllm/sglang/trtllm>/README.md`, or follow the `Developing Locally` section in [README.md](../../README.md) to setup the environment locally. If using the local environment, make sure to install dependencies by running `UV_GIT_LFS=1 uv pip install --no-cache -r container/deps/requirements.txt`
 
 ## Pre-Requisite: Pre-Deployment Profiling Data
 
@@ -23,7 +23,7 @@ Use the pre-configured test deployment with sample profiling data, we provide th
 
 ### Option B: Use Your Own Profiling Results
 
-1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../docs/benchmarks/pre_deployment_profiling.md) for detailed instructions.
+1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../docs/benchmarks/sla_driven_profiling.md) for detailed instructions.
 
 ## Interpolator Testing
 
@@ -160,20 +160,80 @@ PYTHONPATH=../../components/src python -m pytest test_replica_calculation.py -v
 **Note**: The unit tests automatically mock external dependencies (prometheus_client, runtime modules) to ensure they can run in isolation without requiring the full Dynamo environment.
 
 #### Run Full End-to-End Test
-Test complete scaling behavior including Kubernetes deployment and load generation:
+
+Test complete scaling behavior including Kubernetes deployment and load generation.
+
+**Prerequisites:**
+
+- **[kube-prometheus-stack](../../docs/kubernetes/observability/metrics.md) installed and running.** The SLA planner requires Prometheus to observe metrics and make scaling decisions.
+- Ensure the Dynamo operator was installed with the Prometheus endpoint configured (see [SLA Planner Quickstart Guide](../../docs/planner/sla_planner_quickstart.md#prerequisites) for details).
+
+**Prepare the test deployment manifest:**
+
+The test requires modifying `examples/backends/vllm/deploy/disagg_planner.yaml` with test-specific planner arguments:
+
+1. Copy the base deployment:
 
 ```bash
-./scaling/run_scaling_test.sh
+cp examples/backends/vllm/deploy/disagg_planner.yaml tests/planner/scaling/disagg_planner.yaml
 ```
 
-With custom namespace:
+2. Edit `tests/planner/scaling/disagg_planner.yaml`. Ensure all services use the correct image. Modify the Planner service args:
+
+```yaml
+spec:
+  services:
+    Planner:
+      extraPodSpec:
+        mainContainer:
+          args:
+            - --environment=kubernetes
+            - --backend=vllm
+            - --adjustment-interval=60
+            - --profile-results-dir=/workspace/tests/planner/profiling_results/H200_TP1P_TP1D
+            - --ttft=100
+            - --itl=10
+            - --load-predictor=constant
+            - --no-correction
+```
+
+Remove `volumes` and `volumeMounts`:
+
+```
+# Remove these lines or any similar lines
+          volumeMounts:
+            - name: planner-profile-data
+              mountPath: /workspace/profiling_results
+              readOnly: true
+        volumes:
+          - name: planner-profile-data
+            configMap:
+              # Must be pre-created before deployment by the profiler
+              # See docs/planner/sla_planner_quickstart.md for more details
+              name: planner-profile-data
+```
+
+3. Update the model in VllmPrefillWorker and VllmDecodeWorker services:
+
+```yaml
+args:
+  - -m
+  - dynamo.vllm
+  - --model
+  - nvidia/Llama-3.1-8B-Instruct-FP8
+  - --migration-limit=3
+  - --max-model-len=8192
+```
+
+**Run the test:**
+
 ```bash
 ./scaling/run_scaling_test.sh --namespace <namespace>
 ```
 
 To save results to `tests/planner/e2e_scaling_results` instead of `/tmp`:
 ```bash
-./scaling/run_scaling_test.sh --save-results
+./scaling/run_scaling_test.sh --namespace <namespace> --save-results
 ```
 
 **E2E Test Deployment Management:**

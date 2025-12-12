@@ -20,7 +20,6 @@
 package v1alpha1
 
 import (
-	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -64,13 +63,20 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// SubComponentType indicates the sub-role of this component (for example, "prefill").
 	SubComponentType string `json:"subComponentType,omitempty"`
 
-	// Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
+	// DynamoNamespace is deprecated and will be removed in a future version.
+	// The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
+	// +kubebuilder:validation:Optional
 	DynamoNamespace *string `json:"dynamoNamespace,omitempty"`
+
+	// GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
 	// Resources requested and limits for this component, including CPU, memory,
 	// GPUs/devices, and any runtime-specific resources.
-	Resources *dynamoCommon.Resources `json:"resources,omitempty"`
-	// Autoscaling config for this component (replica range, target utilization, etc.).
+	Resources *Resources `json:"resources,omitempty"`
+	// Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
+	// with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+	// for migration guidance. This field will be removed in a future API version.
 	Autoscaling *Autoscaling `json:"autoscaling,omitempty"`
 	// Envs defines additional environment variables to inject into the component containers.
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
@@ -83,26 +89,39 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Ingress config to expose the component outside the cluster (or through a service mesh).
 	Ingress *IngressSpec `json:"ingress,omitempty"`
 
+	// ModelRef references a model that this component serves
+	// When specified, a headless service will be created for endpoint discovery
+	// +optional
+	ModelRef *ModelReference `json:"modelRef,omitempty"`
+
 	// SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size).
 	SharedMemory *SharedMemorySpec `json:"sharedMemory,omitempty"`
 
 	// +optional
 	// ExtraPodMetadata adds labels/annotations to the created Pods.
-	ExtraPodMetadata *dynamoCommon.ExtraPodMetadata `json:"extraPodMetadata,omitempty"`
+	ExtraPodMetadata *ExtraPodMetadata `json:"extraPodMetadata,omitempty"`
 	// +optional
 	// ExtraPodSpec allows to override the main pod spec configuration.
 	// It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field
 	// that allows overriding the main container configuration.
-	ExtraPodSpec *dynamoCommon.ExtraPodSpec `json:"extraPodSpec,omitempty"`
+	ExtraPodSpec *ExtraPodSpec `json:"extraPodSpec,omitempty"`
 
 	// LivenessProbe to detect and restart unhealthy containers.
 	LivenessProbe *corev1.Probe `json:"livenessProbe,omitempty"`
 	// ReadinessProbe to signal when the container is ready to receive traffic.
 	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
-	// Replicas is the desired number of Pods for this component when autoscaling is not used.
+	// Replicas is the desired number of Pods for this component.
+	// When scalingAdapter is enabled (default), this field is managed by the
+	// DynamoGraphDeploymentScalingAdapter and should not be modified directly.
+	// +kubebuilder:validation:Minimum=0
 	Replicas *int32 `json:"replicas,omitempty"`
 	// Multinode is the configuration for multinode components.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
+	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
+	// When enabled (default), replicas are managed via DGDSA and external autoscalers can scale
+	// the service using the Scale subresource. When disabled, replicas can be modified directly.
+	// +optional
+	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 }
 
 type MultinodeSpec struct {
@@ -160,6 +179,10 @@ type DynamoComponentDeploymentStatus struct {
 	// PodSelector contains the labels that can be used to select Pods belonging to
 	// this component deployment.
 	PodSelector map[string]string `json:"podSelector,omitempty"`
+
+	// Service contains replica status information for this service.
+	// +optional
+	Service ServiceReplicaStatus `json:"service,omitempty"`
 }
 
 // +genclient
@@ -197,6 +220,10 @@ func init() {
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {
 	ready, reason := s.Status.IsReady()
 	return ready, reason
+}
+
+func (s *DynamoComponentDeployment) GetServiceStatuses() map[string]ServiceReplicaStatus {
+	return map[string]ServiceReplicaStatus{s.Spec.ServiceName: s.Status.Service}
 }
 
 func (s *DynamoComponentDeploymentStatus) IsReady() (bool, string) {
@@ -268,4 +295,15 @@ func (s *DynamoComponentDeployment) GetParentGraphDeploymentName() string {
 
 func (s *DynamoComponentDeployment) GetParentGraphDeploymentNamespace() string {
 	return s.GetNamespace()
+}
+
+// ModelReference identifies a model served by this component
+type ModelReference struct {
+	// Name is the base model identifier (e.g., "llama-3-70b-instruct-v1")
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Revision is the model revision/version (optional)
+	// +optional
+	Revision string `json:"revision,omitempty"`
 }

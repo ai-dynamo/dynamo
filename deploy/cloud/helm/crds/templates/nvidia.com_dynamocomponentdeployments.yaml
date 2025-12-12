@@ -77,12 +77,13 @@ spec:
                     (such as Pod, Service, and Ingress when applicable).
                   type: object
                 autoscaling:
-                  description: Autoscaling config for this component (replica range, target utilization, etc.).
+                  description: |-
+                    Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
+                    with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+                    for migration guidance. This field will be removed in a future API version.
                   properties:
                     behavior:
-                      description: |-
-                        HorizontalPodAutoscalerBehavior configures the scaling behavior of the target
-                        in both Up and Down directions (scaleUp and scaleDown fields respectively).
+                      description: 'Deprecated: This field is ignored.'
                       properties:
                         scaleDown:
                           description: |-
@@ -231,10 +232,13 @@ spec:
                           type: object
                       type: object
                     enabled:
+                      description: 'Deprecated: This field is ignored.'
                       type: boolean
                     maxReplicas:
+                      description: 'Deprecated: This field is ignored.'
                       type: integer
                     metrics:
+                      description: 'Deprecated: This field is ignored.'
                       items:
                         description: |-
                           MetricSpec specifies how to scale based on a single metric
@@ -665,6 +669,7 @@ spec:
                         type: object
                       type: array
                     minReplicas:
+                      description: 'Deprecated: This field is ignored.'
                       type: integer
                   type: object
                 backendFramework:
@@ -678,7 +683,9 @@ spec:
                   description: ComponentType indicates the role of this component (for example, "main").
                   type: string
                 dynamoNamespace:
-                  description: Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
+                  description: |-
+                    DynamoNamespace is deprecated and will be removed in a future version.
+                    The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
                   type: string
                 envFromSecret:
                   description: |-
@@ -9808,6 +9815,9 @@ spec:
                       x-kubernetes-list-type: map
                   required: []
                   type: object
+                globalDynamoNamespace:
+                  description: GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+                  type: boolean
                 ingress:
                   description: Ingress config to expose the component outside the cluster (or through a service mesh).
                   properties:
@@ -10002,6 +10012,20 @@ spec:
                       format: int32
                       type: integer
                   type: object
+                modelRef:
+                  description: |-
+                    ModelRef references a model that this component serves
+                    When specified, a headless service will be created for endpoint discovery
+                  properties:
+                    name:
+                      description: Name is the base model identifier (e.g., "llama-3-70b-instruct-v1")
+                      type: string
+                    revision:
+                      description: Revision is the model revision/version (optional)
+                      type: string
+                  required:
+                    - name
+                  type: object
                 multinode:
                   description: Multinode is the configuration for multinode components.
                   properties:
@@ -10165,46 +10189,103 @@ spec:
                       type: integer
                   type: object
                 replicas:
-                  description: Replicas is the desired number of Pods for this component when autoscaling is not used.
+                  description: |-
+                    Replicas is the desired number of Pods for this component.
+                    When scalingAdapter is enabled (default), this field is managed by the
+                    DynamoGraphDeploymentScalingAdapter and should not be modified directly.
                   format: int32
+                  minimum: 0
                   type: integer
                 resources:
                   description: |-
                     Resources requested and limits for this component, including CPU, memory,
                     GPUs/devices, and any runtime-specific resources.
                   properties:
+                    claims:
+                      description: Claims specifies resource claims for dynamic resource allocation
+                      items:
+                        description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                        properties:
+                          name:
+                            description: |-
+                              Name must match the name of one entry in pod.spec.resourceClaims of
+                              the Pod where this field is used. It makes that resource available
+                              inside a container.
+                            type: string
+                          request:
+                            description: |-
+                              Request is the name chosen for a request in the referenced claim.
+                              If empty, everything from the claim is made available, otherwise
+                              only the result of this request.
+                            type: string
+                        required:
+                          - name
+                        type: object
+                      type: array
                     limits:
+                      description: Limits specifies the maximum resources allowed for the component
                       properties:
                         cpu:
+                          description: CPU specifies the CPU resource request/limit (e.g., "1000m", "2")
                           type: string
                         custom:
                           additionalProperties:
                             type: string
+                          description: Custom specifies additional custom resource requests/limits
                           type: object
                         gpu:
                           description: |-
-                            Indicates the number of GPUs to request.
-                            total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+                            GPU indicates the number of GPUs to request.
+                            Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+                          type: string
+                        gpuType:
+                          description: |-
+                            GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe"
+                            By default if not specified, the GPU type is "nvidia.com/gpu"
                           type: string
                         memory:
+                          description: Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi")
                           type: string
                       type: object
                     requests:
+                      description: Requests specifies the minimum resources required by the component
                       properties:
                         cpu:
+                          description: CPU specifies the CPU resource request/limit (e.g., "1000m", "2")
                           type: string
                         custom:
                           additionalProperties:
                             type: string
+                          description: Custom specifies additional custom resource requests/limits
                           type: object
                         gpu:
                           description: |-
-                            Indicates the number of GPUs to request.
-                            total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+                            GPU indicates the number of GPUs to request.
+                            Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+                          type: string
+                        gpuType:
+                          description: |-
+                            GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe"
+                            By default if not specified, the GPU type is "nvidia.com/gpu"
                           type: string
                         memory:
+                          description: Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi")
                           type: string
                       type: object
+                  type: object
+                scalingAdapter:
+                  description: |-
+                    ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
+                    When enabled (default), replicas are managed via DGDSA and external autoscalers can scale
+                    the service using the Scale subresource. When disabled, replicas can be modified directly.
+                  properties:
+                    disable:
+                      default: false
+                      description: |-
+                        Disable indicates whether the ScalingAdapter should be disabled for this service.
+                        When false (default), a DGDSA is created and owns the replicas field.
+                        When true, no DGDSA is created and replicas can be modified directly in the DGD.
+                      type: boolean
                   type: object
                 serviceName:
                   description: The name of the component
@@ -10318,6 +10399,59 @@ spec:
                   description: |-
                     PodSelector contains the labels that can be used to select Pods belonging to
                     this component deployment.
+                  type: object
+                service:
+                  description: Service contains replica status information for this service.
+                  properties:
+                    availableReplicas:
+                      description: |-
+                        AvailableReplicas is the number of available replicas.
+                        For Deployment: replicas ready for >= minReadySeconds.
+                        For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.
+                        Not available for PodClique or LeaderWorkerSet.
+                        When nil, the field is omitted from the API response.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    componentKind:
+                      description: ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet").
+                      enum:
+                        - PodClique
+                        - PodCliqueScalingGroup
+                        - Deployment
+                        - LeaderWorkerSet
+                      type: string
+                    componentName:
+                      description: ComponentName is the name of the underlying resource.
+                      type: string
+                    readyReplicas:
+                      description: |-
+                        ReadyReplicas is the number of ready replicas.
+                        Populated for PodClique, Deployment, and LeaderWorkerSet.
+                        Not available for PodCliqueScalingGroup.
+                        When nil, the field is omitted from the API response.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    replicas:
+                      description: |-
+                        Replicas is the total number of non-terminated replicas.
+                        Required for all component kinds.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    updatedReplicas:
+                      description: |-
+                        UpdatedReplicas is the number of replicas at the current/desired revision.
+                        Required for all component kinds.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                  required:
+                    - componentKind
+                    - componentName
+                    - replicas
+                    - updatedReplicas
                   type: object
               required:
                 - conditions

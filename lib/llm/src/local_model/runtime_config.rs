@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::protocols::tensor;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelRuntimeConfig {
     pub total_kv_blocks: Option<u64>,
 
@@ -22,6 +22,10 @@ pub struct ModelRuntimeConfig {
     /// Total number of data parallel ranks for this worker (1 if DP not enabled)
     #[serde(default = "default_data_parallel_size")]
     pub data_parallel_size: u32,
+
+    /// Enable worker-local KV indexer for tracking this worker's own KV cache state
+    #[serde(default)]
+    pub enable_local_indexer: bool,
 
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -51,6 +55,7 @@ impl Default for ModelRuntimeConfig {
             tool_call_parser: None,
             reasoning_parser: None,
             data_parallel_size: default_data_parallel_size(),
+            enable_local_indexer: false,
             runtime_data: HashMap::new(),
             tensor_model_config: None,
         }

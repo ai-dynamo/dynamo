@@ -18,12 +18,10 @@ use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::discovery::{Discovery, KVStoreDiscovery};
 use dynamo_runtime::logging::make_request_span;
 use dynamo_runtime::metrics::prometheus_names::name_prefix;
-use dynamo_runtime::storage::key_value_store::EtcdStore;
-use dynamo_runtime::storage::key_value_store::KeyValueStore;
-use dynamo_runtime::storage::key_value_store::MemoryStore;
-use dynamo_runtime::transports::etcd;
+use dynamo_runtime::storage::kv;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -33,8 +31,8 @@ use tower_http::trace::TraceLayer;
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
-    etcd_client: Option<etcd::Client>,
-    store: Arc<dyn KeyValueStore>,
+    store: kv::Manager,
+    discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
 }
 
@@ -75,12 +73,19 @@ impl StateFlags {
 }
 
 impl State {
-    pub fn new(manager: Arc<ModelManager>) -> Self {
+    pub fn new(manager: Arc<ModelManager>, store: kv::Manager) -> Self {
+        // Initialize discovery backed by KV store
+        // Create a cancellation token for the discovery's watch streams
+        let discovery_client = {
+            let cancel_token = CancellationToken::new();
+            Arc::new(KVStoreDiscovery::new(store.clone(), cancel_token)) as Arc<dyn Discovery>
+        };
+
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            etcd_client: None,
-            store: Arc::new(MemoryStore::new()),
+            store,
+            discovery_client,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -90,20 +95,6 @@ impl State {
         }
     }
 
-    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: etcd::Client) -> Self {
-        Self {
-            manager,
-            metrics: Arc::new(Metrics::default()),
-            store: Arc::new(EtcdStore::new(etcd_client.clone())),
-            etcd_client: Some(etcd_client),
-            flags: StateFlags {
-                chat_endpoints_enabled: AtomicBool::new(false),
-                cmpl_endpoints_enabled: AtomicBool::new(false),
-                embeddings_endpoints_enabled: AtomicBool::new(false),
-                responses_endpoints_enabled: AtomicBool::new(false),
-            },
-        }
-    }
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
     pub fn metrics_clone(&self) -> Arc<Metrics> {
         self.metrics.clone()
@@ -117,12 +108,12 @@ impl State {
         self.manager.clone()
     }
 
-    pub fn etcd_client(&self) -> Option<&etcd::Client> {
-        self.etcd_client.as_ref()
+    pub fn store(&self) -> &kv::Manager {
+        &self.store
     }
 
-    pub fn store(&self) -> Arc<dyn KeyValueStore> {
-        self.store.clone()
+    pub fn discovery(&self) -> Arc<dyn Discovery> {
+        self.discovery_client.clone()
     }
 
     // TODO
@@ -186,8 +177,8 @@ pub struct HttpServiceConfig {
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
 
-    #[builder(default = "None")]
-    etcd_client: Option<etcd::Client>,
+    #[builder(default)]
+    store: kv::Manager,
 
     // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
     #[builder(default = "None")]
@@ -335,10 +326,7 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = match config.etcd_client {
-            Some(etcd_client) => Arc::new(State::new_with_etcd(model_manager, etcd_client)),
-            None => Arc::new(State::new(model_manager)),
-        };
+        let state = Arc::new(State::new(model_manager, config.store));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -381,6 +369,7 @@ impl HttpServiceConfigBuilder {
             super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok()),
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
+            super::busy_threshold::busy_threshold_router(state.clone(), None),
         ];
 
         let endpoint_routes =
@@ -419,11 +408,6 @@ impl HttpServiceConfigBuilder {
 
     pub fn with_request_template(mut self, request_template: Option<RequestTemplate>) -> Self {
         self.request_template = Some(request_template);
-        self
-    }
-
-    pub fn with_etcd_client(mut self, etcd_client: Option<etcd::Client>) -> Self {
-        self.etcd_client = Some(etcd_client);
         self
     }
 

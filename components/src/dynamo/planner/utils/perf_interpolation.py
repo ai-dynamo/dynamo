@@ -14,11 +14,12 @@
 # limitations under the License.
 
 
+import json
 import logging
+import os
 from typing import Optional
 
 import numpy as np
-import scipy
 
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 MISSING_PROFILING_DATA_ERROR_MESSAGE = (
     "SLA-Planner requires pre-deployment profiling results to run.\n"
-    "Please follow /docs/benchmarks/pre_deployment_profiling.md to run the profiling first,\n"
+    "Please follow /docs/benchmarks/sla_driven_profiling.md to run the profiling first,\n"
     "and make sure the profiling results are present in --profile-results-dir."
 )
 
@@ -54,11 +55,19 @@ class PrefillInterpolator:
                     self.prefill_ttft = raw_data["prefill_ttft"]  # in milliseconds
                     self.prefill_thpt_per_gpu = raw_data["prefill_thpt_per_gpu"]
             except FileNotFoundError:
-                logger.error(
-                    f"Prefill interpolation file not found: {prefill_npz_fn}\n"
-                    f"{MISSING_PROFILING_DATA_ERROR_MESSAGE}"
-                )
-                exit(1)
+                # Fallback to JSON provided via ConfigMap mounted at profile_results_dir
+                json_fn = os.path.join(profile_results_dir, "prefill_raw_data.json")
+                try:
+                    with open(json_fn, "r") as f:
+                        data = json.load(f)
+                        self.prefill_isl = np.array(data["prefill_isl"])  # type: ignore[index]
+                        self.prefill_ttft = np.array(data["prefill_ttft"])  # type: ignore[index]
+                        self.prefill_thpt_per_gpu = np.array(data["prefill_thpt_per_gpu"])  # type: ignore[index]
+                except FileNotFoundError:
+                    raise FileNotFoundError(
+                        f"Prefill interpolation files not found: {prefill_npz_fn} and {json_fn}\n"
+                        f"{MISSING_PROFILING_DATA_ERROR_MESSAGE}"
+                    )
 
         elif raw_data:
             self.prefill_isl = raw_data["prefill_isl"]
@@ -69,6 +78,9 @@ class PrefillInterpolator:
 
         self.min_isl = min(self.prefill_isl)
         self.max_isl = max(self.prefill_isl)
+
+        # Lazy import scipy only when interpolation is actually needed
+        import scipy.interpolate
 
         # perform 1d interpolation
         self.ttft_interpolator = scipy.interpolate.interp1d(
@@ -111,11 +123,21 @@ class DecodeInterpolator:
                     self.z_thpt_per_gpu = raw_data["z_thpt_per_gpu"]
                     self.max_kv_tokens = raw_data["max_kv_tokens"][0]
             except FileNotFoundError:
-                logger.error(
-                    f"Decode interpolation file not found: {decode_npz_fn}\n"
-                    f"{MISSING_PROFILING_DATA_ERROR_MESSAGE}"
-                )
-                exit(1)
+                # Fallback to JSON provided via ConfigMap mounted at profile_results_dir
+                json_fn = os.path.join(profile_results_dir, "decode_raw_data.json")
+                try:
+                    with open(json_fn, "r") as f:
+                        data = json.load(f)
+                        self.x_kv_usage = np.array(data["x_kv_usage"])  # type: ignore[index]
+                        self.y_context_length = np.array(data["y_context_length"])  # type: ignore[index]
+                        self.z_itl = np.array(data["z_itl"])  # type: ignore[index]
+                        self.z_thpt_per_gpu = np.array(data["z_thpt_per_gpu"])  # type: ignore[index]
+                        self.max_kv_tokens = int(data["max_kv_tokens"])  # type: ignore[index]
+                except FileNotFoundError:
+                    raise FileNotFoundError(
+                        f"Decode interpolation files not found: {decode_npz_fn} and {json_fn}\n"
+                        f"{MISSING_PROFILING_DATA_ERROR_MESSAGE}"
+                    )
         elif raw_data:
             self.x_kv_usage = raw_data["x_kv_usage"]
             self.y_context_length = raw_data["y_context_length"]
@@ -130,6 +152,9 @@ class DecodeInterpolator:
         self.xi = np.linspace(0, 1, resolution)
         self.yi = np.linspace(0, max(self.y_context_length), resolution)
         self.X, self.Y = np.meshgrid(self.xi, self.yi)
+
+        # Lazy import scipy only when interpolation is actually needed
+        import scipy.interpolate
 
         # perform 2d interpolation with fallback for NaN values
         self.itl_interpolator = scipy.interpolate.griddata(
@@ -225,7 +250,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profile_results_dir", type=str, required=True)
+    parser.add_argument("--profile-results-dir", type=str, required=True)
     parser.add_argument("--isl", type=int, default=3000)
     parser.add_argument("--osl", type=int, default=150)
     parser.add_argument("--ttft", type=float, default=100.0, help="in milliseconds")

@@ -23,7 +23,6 @@ To learn what KVBM is, please check [here](kvbm_architecture.md)
 
 > [!Note]
 > - Ensure that `etcd` and `nats` are running before starting.
-> - KVBM does not currently support CUDA graphs in TensorRT-LLM.
 > - KVBM only supports TensorRT-LLM’s PyTorch backend.
 > - Disable partial reuse `enable_partial_reuse: false` in the LLM API config’s `kv_connector_config` to increase offloading cache hits.
 > - KVBM requires TensorRT-LLM v1.1.0rc5 or newer.
@@ -55,21 +54,12 @@ export DYN_KVBM_CPU_CACHE_GB=4
 export DYN_KVBM_DISK_CACHE_GB=8
 
 # [Experimental] Option 3: Disk cache only (GPU -> Disk direct offloading, bypassing CPU)
-# NOTE: this option is only experimental and it might give out the best performance.
-# NOTE: disk offload filtering is not support when using this option.
+# NOTE: this option is only experimental and it might not give out the best performance.
+# NOTE: disk offload filtering is not supported when using this option.
 export DYN_KVBM_DISK_CACHE_GB=8
 
 # Note: You can also use DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS or
 # DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS to specify exact block counts instead of GB
-
-# Allocating memory and disk storage can take some time.
-# We recommend setting a higher timeout for leader–worker initialization.
-# 1200 means 1200 seconds timeout
-export DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS=1200
-
-# Enable disk zerofill fallback for KVBM
-# Set to true to enable fallback behavior when disk operations fail
-export DYN_KVBM_DISK_ZEROFILL_FALLBACK=true
 ```
 
 > [!NOTE]
@@ -87,7 +77,7 @@ kv_cache_config:
   enable_partial_reuse: false
   free_gpu_memory_fraction: 0.80
 kv_connector_config:
-  connector_module: dynamo.llm.trtllm_integration.connector
+  connector_module: kvbm.trtllm_integration.connector
   connector_scheduler_class: DynamoKVBMConnectorLeader
   connector_worker_class: DynamoKVBMConnectorWorker
 EOF
@@ -126,11 +116,12 @@ trtllm-serve Qwen/Qwen3-0.6B --host localhost --port 8000 --backend pytorch --ex
 Follow below steps to enable metrics collection and view via Grafana dashboard:
 ```bash
 # Start the basic services (etcd & natsd), along with Prometheus and Grafana
-docker compose -f deploy/docker-compose.yml --profile metrics up -d
+docker compose -f deploy/docker-observability.yml up -d
 
 # Set env var DYN_KVBM_METRICS to true, when launch via dynamo
 # Optionally set DYN_KVBM_METRICS_PORT to choose the /metrics port (default: 6880).
 DYN_KVBM_METRICS=true \
+DYN_KVBM_CPU_CACHE_GB=20 \
 python3 -m dynamo.trtllm \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
@@ -140,7 +131,40 @@ python3 -m dynamo.trtllm \
 sudo ufw allow 6880/tcp
 ```
 
-View grafana metrics via http://localhost:3001 (default login: dynamo/dynamo) and look for KVBM Dashboard
+View grafana metrics via http://localhost:3000 (default login: dynamo/dynamo) and look for KVBM Dashboard
+
+KVBM currently provides following types of metrics out of the box:
+- `kvbm_matched_tokens`: The number of matched tokens
+- `kvbm_offload_blocks_d2h`: The number of offload blocks from device to host
+- `kvbm_offload_blocks_h2d`: The number of offload blocks from host to disk
+- `kvbm_offload_blocks_d2d`: The number of offload blocks from device to disk (bypassing host memory)
+- `kvbm_onboard_blocks_d2d`: The number of onboard blocks from disk to device
+- `kvbm_onboard_blocks_h2d`: The number of onboard blocks from host to device
+- `kvbm_host_cache_hit_rate`: Host cache hit rate (0.0-1.0) from sliding window
+- `kvbm_disk_cache_hit_rate`: Disk cache hit rate (0.0-1.0) from sliding window
+
+## Troubleshooting
+
+1. If enabling KVBM does not show any TTFT perf gain or even perf degradation, one potential reason is not enough prefix cache hit on KVBM to reuse offloaded KV blocks.
+To confirm, please enable KVBM metrics as mentioned above and check the grafana dashboard `Onboard Blocks - Host to Device` and `Onboard Blocks - Disk to Device`.
+If observed large number of onboarded KV blocks as the example below, we can rule out this cause:
+![Grafana Example](kvbm_metrics_grafana.png)
+
+2. Allocating large memory and disk storage can take some time and lead to KVBM worker initialization timeout.
+To avoid it, please set a longer timeout (default 1800 seconds) for leader–worker initialization.
+
+```bash
+# 3600 means 3600 seconds timeout
+export DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS=3600
+```
+
+3. When offloading to disk is enabled, KVBM could fail to start up if fallocate is not supported to create the files.
+To bypass the issue, please use disk zerofill fallback.
+
+```bash
+# Set to true to enable fallback behavior when disk operations fail (e.g. fallocate not available)
+export DYN_KVBM_DISK_ZEROFILL_FALLBACK=true
+```
 
 ## Benchmark KVBM
 
@@ -175,4 +199,14 @@ EOF
 
 # Run trtllm-serve for the baseline for comparison
 trtllm-serve Qwen/Qwen3-0.6B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/llm_api_config.yaml &
+```
+
+## Developing Locally
+
+Inside the Dynamo container, after changing KVBM related code (Rust and/or Python), to test or use it:
+```bash
+cd /workspace/lib/bindings/kvbm
+uv pip install maturin[patchelf]
+maturin build --release --out /workspace/dist
+uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/kvbm*.whl
 ```

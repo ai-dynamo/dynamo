@@ -17,6 +17,13 @@ This directory contains scripts for benchmarking the Dynamo router with prefix c
   - `matplotlib` for plotting results
   - `data-generator` package (install with `pip install -e ./benchmarks` from repo root)
 
+> [!Note]
+> If running outside a container, set `DYNAMO_HOME` to the root path of your Dynamo repository:
+> ```bash
+> export DYNAMO_HOME=/path/to/dynamo
+> ```
+> When running in a container, this defaults to `/workspace`.
+
 ### Setting up etcd and NATS
 
 This benchmark requires etcd and NATS. To quickly set them up, run:
@@ -116,25 +123,29 @@ To see all available router arguments, run:
 python -m dynamo.frontend --help
 ```
 
-For detailed explanations of router arguments (especially KV cache routing parameters), see the [KV Cache Routing documentation](../../docs/architecture/kv_cache_routing.md).
+For detailed explanations of router arguments (especially KV cache routing parameters), see the [KV Cache Routing documentation](../../docs/router/kv_cache_routing.md).
+
+> [!Note]
+> If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
+>
+> ```bash
+> python -m dynamo.frontend \
+>     --router-mode kv \
+>     --http-port 8000 \
+>     --no-kv-events
+> ```
 
 #### Disaggregated Serving with Automatic Prefill Routing
 
 When you launch prefill workers using `run_engines.sh --prefill`, the frontend automatically detects them and activates an internal prefill router. This prefill router:
 - Automatically routes initial token processing to dedicated prefill workers
-- Uses KV-aware routing regardless of the frontend's `--router-mode` setting
+- Uses the same routing mode as the frontend's `--router-mode` setting
 - Seamlessly integrates with your decode workers for token generation
 
-No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [KV Cache Routing documentation](../../docs/architecture/kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for more details.
+No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [KV Cache Routing documentation](../../docs/router/kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for more details.
 
-**Note**: If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
-
-```bash
-python -m dynamo.frontend \
-    --router-mode kv \
-    --http-port 8000 \
-    --no-kv-events
-```
+> [!Note]
+> The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh)
 
 ### Step 3: Verify Setup
 
@@ -184,7 +195,15 @@ python prefix_ratio_benchmark.py --output-dir results/experiment1
 
 ### Step 4 (Alternative): Run Benchmarks with Real Trace Data
 
-Instead of synthetic benchmarks with controlled prefix ratios, you can benchmark using real trace data in [mooncake-style format](https://github.com/kvcache-ai/Mooncake/blob/d21da178bae8db9651cf18a76824c084145fc725/mooncake_trace.jsonl). This approach uses actual request patterns from production traces, potentially modified with synthesis parameters.
+Instead of synthetic benchmarks with controlled prefix ratios, you can benchmark using real trace data. This approach uses actual request patterns from production traces, potentially modified with synthesis parameters.
+
+First, download the mooncake trace dataset:
+
+```bash
+wget https://raw.githubusercontent.com/kvcache-ai/Mooncake/d21da178bae8db9651cf18a76824c084145fc725/mooncake_trace.jsonl
+```
+
+Then run the benchmark:
 
 ```bash
 python real_data_benchmark.py --input-dataset mooncake_trace.jsonl
@@ -222,6 +241,19 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 > pip install git+https://github.com/ai-dynamo/aiperf.git
 > ```
 > However, by the time of release, the aiperf version included in the vLLM runtime container should be up to date enough to use as-is.
+
+## Benchmarking Results
+
+We benchmarked the Dynamo KV Router against a baseline round-robin routing strategy to evaluate the performance benefits of cache-aware routing. The experiments were conducted using deepseek-ai/DeepSeek-R1-Distill-Llama-8B on 8 L40S GPUs under aggregated serving, with the following configuration:
+
+- **ISL/OSL**: 14000/200
+- **Prefix Ratios**: 0.1, 0.3, 0.5, 0.7, 0.9
+- **Workload**: 200 requests organized into 20 prefix groups
+- **Concurrency**: 20 concurrent requests
+
+![Router Performance Comparison](results.png)
+
+The results demonstrate that the Dynamo KV Router consistently outperforms round-robin routing across all prefix ratio settings, with performance gains increasing as the prefix ratio grows. This highlights the importance of cache-aware routing for workloads with significant prefix sharing such as multi-turn conversations, document Q&A, and prompt engineering iterations.
 
 ## Troubleshooting
 

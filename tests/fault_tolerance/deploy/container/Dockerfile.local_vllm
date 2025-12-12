@@ -9,7 +9,7 @@
 ARG LOCAL_VLLM_IMAGE="vllm-elastic-ep:latest_all2all_buffer_input"
 ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
+ARG RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
 
 # Other build arguments
 ARG PYTHON_VERSION=3.12
@@ -57,7 +57,7 @@ RUN apt-get update && \
         # prometheus dependencies
         ca-certificates \
         # DeepGemm uses 'cuobjdump' which does not come with CUDA image
-        cuda-command-line-tools-12-8 && \
+        cuda-command-line-tools-12-9 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy CUDA development tools from vLLM image (for JIT compilation)
@@ -105,11 +105,12 @@ COPY --from=vllm_source /usr/local/lib/python3.12/dist-packages ${VIRTUAL_ENV}/l
 RUN if [ -f ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/__editable__.pplx_kernels-0.0.1.pth ]; then \
         echo "/opt/vllm/ep_kernels_workspace/pplx-kernels/src" > ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/__editable__.pplx_kernels-0.0.1.pth; \
     fi && \
-    if [ -f ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/__editable__.deep_ep-0.0.1.pth ]; then \
-        echo "/opt/vllm/ep_kernels_workspace/DeepEP" > ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/__editable__.deep_ep-0.0.1.pth; \
-    fi && \
-    # Also check for any other .pth files that might reference /vllm-workspace
-    find ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages -name "*.pth" -exec sed -i 's|/vllm-workspace|/opt/vllm|g' {} \;
+    # Fix ALL editable install paths (DeepEP .pth files and finder modules for both DeepEP and vLLM)
+    find ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages \
+        \( -name "__editable__.deep_ep*.pth" -o \
+           -name "__editable___deep_ep*_finder.py" -o \
+           -name "__editable___vllm*_finder.py" \) \
+        -exec sed -i "s|/vllm-workspace|/opt/vllm|g" {} \; && \
 
 # Set LD_LIBRARY_PATH for all components
 ENV LD_LIBRARY_PATH=\
@@ -132,7 +133,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install \
-    /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && rm -rf /opt/dynamo/wheelhouse

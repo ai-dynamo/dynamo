@@ -38,6 +38,10 @@ CMakeCache.txt
 *pytest_report.md
 *pytest_report.xml
 
+# Test artifacts and output directories
+*.shakespeare.txt
+test_determinism_*/
+
 **/__pycache__
 **/venv
 **/.venv
@@ -72,6 +76,9 @@ llm_engine.h
 
 ### Ruff ###
 .ruff_cache/
+
+### MyPy ###
+.mypy_cache/
 
 ### Python ###
 __pycache__/

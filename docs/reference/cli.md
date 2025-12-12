@@ -130,7 +130,7 @@ Example 4: Multiple component in a pipeline.
 
 In the P/D disaggregated setup you would have `deepseek-distill-llama8b.prefill.generate` (possibly multiple instances of this) and `deepseek-distill-llama8b.decode.generate`.
 
-For output it is always only `out=auto`. This tells Dynamo to auto-discover the instances, group them by model, and load balance appropriately (depending on `--router-mode` flag). The exception is static workers, see that section.
+For output it is always only `out=auto`. This tells Dynamo to auto-discover the instances, group them by model, and load balance appropriately (depending on `--router-mode` flag).
 
 ### KV-aware routing
 
@@ -148,23 +148,23 @@ The KV-aware routing arguments:
 
 - `--router-temperature`: Sets the temperature when randomly selecting workers to route to via softmax sampling on the router cost logits. Setting it to 0 recovers the deterministic behavior where the min logit is picked.
 
-- `--use-kv-events`: Sets whether to listen to KV events for maintaining the global view of cached blocks. If true, then we use the `KvIndexer` to listen to the block creation and deletion events. If false, `ApproxKvIndexer`, which assumes the kv cache of historical prompts exists for fixed time durations (hard-coded to 120s), is used to predict the kv cache hit ratio in each engine. Set false if your backend engine does not emit KV events.
+- `--use-kv-events`: Sets whether to listen to KV events for maintaining the global view of cached blocks. If true, the router uses KV events to track block creation and deletion from workers. If false, the router predicts cache state based on routing decisions with TTL-based expiration (default 120s) and pruning. Set false if your backend engine does not emit KV events.
 
 ### Request Migration
 
-In a [Distributed System](#distributed-system), you can enable [request migration](../architecture/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
+In a [Distributed System](#distributed-system), you can enable [request migration](../fault_tolerance/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
 
 ```bash
 dynamo-run in=dyn://... out=<engine> ... --migration-limit=3
 ```
 
-This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../architecture/request_migration.md) documentation for details on how this works.
+This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../fault_tolerance/request_migration.md) documentation for details on how this works.
 
 ### Request Cancellation
 
 When using the HTTP interface (`in=http`), if the HTTP request connection is dropped by the client, Dynamo automatically cancels the downstream request to the worker. This ensures that computational resources are not wasted on generating responses that are no longer needed.
 
-For detailed information about how request cancellation works across the system, see the [Request Cancellation Architecture](../architecture/request_cancellation.md) documentation.
+For detailed information about how request cancellation works across the system, see the [Request Cancellation Architecture](../fault_tolerance/request_cancellation.md) documentation.
 
 ## Development
 
@@ -293,7 +293,7 @@ The default delay is 10ms, which produces approximately 100 tokens per second.
 
 ### Other engines, multi-node, production
 
-`vllm`, `sglang` and `trtllm` production grade engines are available in `components/backends`. They run as Python components, using the Rust bindings. See the main README.
+`vllm`, `sglang` and `trtllm` production grade engines are available in `examples/backends`. They run as Python components, using the Rust bindings. See the main README.
 
 `dynamo-run` is an exploration, development and prototyping tool, as well as an example of using the Rust API. Multi-node and production setups should be using the main engine components.
 
@@ -320,7 +320,7 @@ The output looks like this:
 
 ## Writing your own engine in Python
 
-The [dynamo](https://pypi.org/project/ai-dynamo/) Python library allows you to build your own engine and attach it to Dynamo. All of the main backend components in `components/backends/` work like this.
+The [dynamo](https://pypi.org/project/ai-dynamo/) Python library allows you to build your own engine and attach it to Dynamo. All of the main backend components in `examples/backends/` work like this.
 
 The Python file must do three things:
 1. Decorate a function to get the runtime
@@ -333,13 +333,12 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 
    # 1. Decorate a function to get the runtime
    #
-   @dynamo_worker(static=False)
+   @dynamo_worker()
    async def worker(runtime: DistributedRuntime):
 
     # 2. Register ourselves on the network
     #
     component = runtime.namespace("namespace").component("component")
-    await component.create_service()
     model_path = "Qwen/Qwen3-0.6B" # or "/data/models/Qwen3-0.6B"
     model_input = ModelInput.Tokens # or ModelInput.Text if engine handles pre-processing
     model_type = ModelType.Chat # or ModelType.Chat | ModelType.Completions if model can be deployed on chat and completions endpoints
@@ -396,7 +395,7 @@ Here are some example engines:
 - Chat:
     * [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_sglang_tok.py)
 
-More fully-featured Python engines are in `components/backends`.
+More fully-featured Python engines are in `examples/backends`.
 
 ## Debugging
 

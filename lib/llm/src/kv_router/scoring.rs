@@ -3,15 +3,9 @@
 
 //! Scoring functions for the KV router.
 
-use super::protocols::{ForwardPassMetrics, LoadMetrics};
+use super::protocols::LoadMetrics;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LoadEvent {
-    pub worker_id: i64,
-    pub data: ForwardPassMetrics,
-}
 
 /// [gluo FIXME] exactly the same as EndpointInfo except that 'data'
 /// is cleaned (not optional)
@@ -23,8 +17,8 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    pub fn worker_id(&self) -> i64 {
-        i64::from_str_radix(
+    pub fn worker_id(&self) -> u64 {
+        u64::from_str_radix(
             self.subject
                 .split("-")
                 .last()
@@ -39,7 +33,7 @@ impl Endpoint {
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ProcessedEndpoints {
-    pub endpoints: HashMap<i64, Endpoint>,
+    pub endpoints: HashMap<u64, Endpoint>,
     pub load_avg: f64,
     pub load_std: f64,
 }
@@ -68,11 +62,11 @@ impl ProcessedEndpoints {
         }
     }
 
-    pub fn worker_ids(&self) -> Vec<i64> {
+    pub fn worker_ids(&self) -> Vec<u64> {
         self.endpoints.keys().copied().collect()
     }
 
-    pub fn active_blocks(&self) -> HashMap<i64, usize> {
+    pub fn active_blocks(&self) -> HashMap<u64, usize> {
         self.endpoints
             .iter()
             .map(|(&worker_id, endpoint)| (worker_id, endpoint.data.kv_active_blocks() as usize))

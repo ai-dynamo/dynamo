@@ -21,8 +21,8 @@ use std::collections::HashMap;
 
 // Import commonly used items to avoid verbose prefixes
 use prometheus_names::{
-    COMPONENT_NATS_METRICS, DRT_NATS_METRICS, build_component_metric_name, labels, name_prefix,
-    nats_client, nats_service, sanitize_prometheus_label, sanitize_prometheus_name, work_handler,
+    build_component_metric_name, labels, name_prefix, sanitize_prometheus_label,
+    sanitize_prometheus_name, work_handler,
 };
 
 // Pipeline imports for endpoint creation
@@ -56,6 +56,9 @@ fn validate_no_duplicate_label_keys(labels: &[(&str, &str)]) -> anyhow::Result<(
     Ok(())
 }
 
+/// ==============================
+/// Prometheus section
+/// ==============================
 /// Trait that defines common behavior for Prometheus metric types
 pub trait PrometheusMetric: prometheus::core::Collector + Clone + Send + Sync + 'static {
     /// Create a new metric with the given options
@@ -192,9 +195,12 @@ impl PrometheusMetric for prometheus::CounterVec {
     }
 }
 
-/// Private helper function to create metrics - not accessible to trait implementors
-fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
-    registry: &R,
+/// ==============================
+/// Metrics section
+/// ==============================
+/// Public helper function to create metrics - accessible for Python bindings
+pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
+    hierarchy: &H,
     metric_name: &str,
     metric_desc: &str,
     labels: &[(&str, &str)],
@@ -205,11 +211,13 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     validate_no_duplicate_label_keys(labels)?;
     // Note: stored labels functionality has been removed
 
-    let basename = registry.basename();
-    let parent_hierarchy = registry.parent_hierarchy();
+    let basename = hierarchy.basename();
+    let parent_hierarchies = hierarchy.parent_hierarchies();
 
-    // Build hierarchy: parent_hierarchy + [basename]
-    let hierarchy = [parent_hierarchy.clone(), vec![basename.clone()]].concat();
+    // Build hierarchy path as vector of strings: parent names + [basename]
+    let mut hierarchy_names: Vec<String> =
+        parent_hierarchies.iter().map(|p| p.basename()).collect();
+    hierarchy_names.push(basename.clone());
 
     let metric_name = build_component_metric_name(metric_name);
 
@@ -228,8 +236,8 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         }
 
         // Add auto-generated labels with sanitized values
-        if hierarchy.len() > 1 {
-            let namespace = &hierarchy[1];
+        if hierarchy_names.len() > 1 {
+            let namespace = &hierarchy_names[1];
             if !namespace.is_empty() {
                 let valid_namespace = sanitize_prometheus_label(namespace)?;
                 if !valid_namespace.is_empty() {
@@ -237,8 +245,8 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
                 }
             }
         }
-        if hierarchy.len() > 2 {
-            let component = &hierarchy[2];
+        if hierarchy_names.len() > 2 {
+            let component = &hierarchy_names[2];
             if !component.is_empty() {
                 let valid_component = sanitize_prometheus_label(component)?;
                 if !valid_component.is_empty() {
@@ -246,8 +254,8 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
                 }
             }
         }
-        if hierarchy.len() > 3 {
-            let endpoint = &hierarchy[3];
+        if hierarchy_names.len() > 3 {
+            let endpoint = &hierarchy_names[3];
             if !endpoint.is_empty() {
                 let valid_endpoint = sanitize_prometheus_label(endpoint)?;
                 if !valid_endpoint.is_empty() {
@@ -361,59 +369,36 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         T::with_opts(opts)?
     };
 
-    // Iterate over the DRT's registry and register this metric across all hierarchical levels.
-    // The accumulated hierarchy is structured as: ["", "testnamespace", "testnamespace_testcomponent", "testnamespace_testcomponent_testendpoint"]
-    // This accumulation is essential to differentiate between the names of children and grandchildren.
-    // Build accumulated hierarchy and register metrics in a single loop
-    // current_prefix accumulates the hierarchical path as we iterate through hierarchy
-    // For example, if hierarchy = ["", "testnamespace", "testcomponent"], then:
-    // - Iteration 1: current_prefix = "" (empty string from DRT)
-    // - Iteration 2: current_prefix = "testnamespace"
-    // - Iteration 3: current_prefix = "testnamespace_testcomponent"
-    let mut current_hierarchy = String::new();
-    for name in &hierarchy {
-        if !current_hierarchy.is_empty() && !name.is_empty() {
-            current_hierarchy.push('_');
-        }
-        current_hierarchy.push_str(name);
-
-        // Register metric at this hierarchical level using the new helper function
+    // Register the metric at all hierarchy levels (parents + self)
+    // First register at all parent levels
+    for parent in parent_hierarchies {
         let collector: Box<dyn prometheus::core::Collector> = Box::new(prometheus_metric.clone());
-        registry
-            .drt()
-            .add_prometheus_metric(&current_hierarchy, collector)?;
+        parent.get_metrics_registry().add_metric(collector)?;
     }
+
+    // Then register at this level
+    let collector: Box<dyn prometheus::core::Collector> = Box::new(prometheus_metric.clone());
+    hierarchy.get_metrics_registry().add_metric(collector)?;
 
     Ok(prometheus_metric)
 }
 
-/// This trait should be implemented by all metric registries, including Prometheus, Envy, OpenTelemetry, and others.
-/// It offers a unified interface for creating and managing metrics, organizing sub-registries, and
-/// generating output in Prometheus text format.
-use crate::traits::DistributedRuntimeProvider;
+/// Wrapper struct that provides access to metrics functionality
+/// This struct is accessed via the `.metrics()` method on DistributedRuntime, Namespace, Component, and Endpoint
+pub struct Metrics<H: MetricsHierarchy> {
+    hierarchy: H,
+}
 
-pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
-    // Get the name of this registry (without any hierarchy prefix)
-    fn basename(&self) -> String;
-
-    /// Retrieve the complete hierarchy and basename for this registry. Currently, the hierarchy for drt is an empty string,
-    /// so we must account for the leading underscore. The existing code remains unchanged to accommodate any future
-    /// scenarios where drt's prefix might be assigned a value.
-    fn hierarchy(&self) -> String {
-        [self.parent_hierarchy(), vec![self.basename()]]
-            .concat()
-            .join("_")
-            .trim_start_matches('_')
-            .to_string()
+impl<H: MetricsHierarchy> Metrics<H> {
+    pub fn new(hierarchy: H) -> Self {
+        Self { hierarchy }
     }
-
-    // Get the parent hierarchy for this registry (just the base names, NOT the flattened hierarchy key)
-    fn parent_hierarchy(&self) -> Vec<String>;
 
     // TODO: Add support for additional Prometheus metric types:
     // - Counter: ✅ IMPLEMENTED - create_counter()
     // - CounterVec: ✅ IMPLEMENTED - create_countervec()
     // - Gauge: ✅ IMPLEMENTED - create_gauge()
+    // - GaugeVec: ✅ IMPLEMENTED - create_gaugevec()
     // - GaugeHistogram: create_gauge_histogram() - for gauge histograms
     // - Histogram: ✅ IMPLEMENTED - create_histogram()
     // - HistogramVec with custom buckets: create_histogram_with_buckets()
@@ -431,17 +416,17 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
     // Keep them synchronized when adding new metric types
 
     /// Create a Counter metric
-    fn create_counter(
+    pub fn create_counter(
         &self,
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::Counter> {
-        create_metric(self, name, description, labels, None, None)
+        create_metric(&self.hierarchy, name, description, labels, None, None)
     }
 
     /// Create a CounterVec metric with label names (for dynamic labels)
-    fn create_countervec(
+    pub fn create_countervec(
         &self,
         name: &str,
         description: &str,
@@ -449,7 +434,7 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
         const_label_values: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::CounterVec> {
         create_metric(
-            self,
+            &self.hierarchy,
             name,
             description,
             const_label_values,
@@ -459,17 +444,17 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
     }
 
     /// Create a Gauge metric
-    fn create_gauge(
+    pub fn create_gauge(
         &self,
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::Gauge> {
-        create_metric(self, name, description, labels, None, None)
+        create_metric(&self.hierarchy, name, description, labels, None, None)
     }
 
     /// Create a GaugeVec metric with label names (for dynamic labels)
-    fn create_gaugevec(
+    pub fn create_gaugevec(
         &self,
         name: &str,
         description: &str,
@@ -477,7 +462,7 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
         const_label_values: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::GaugeVec> {
         create_metric(
-            self,
+            &self.hierarchy,
             name,
             description,
             const_label_values,
@@ -487,28 +472,28 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
     }
 
     /// Create a Histogram metric with custom buckets
-    fn create_histogram(
+    pub fn create_histogram(
         &self,
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
         buckets: Option<Vec<f64>>,
     ) -> anyhow::Result<prometheus::Histogram> {
-        create_metric(self, name, description, labels, buckets, None)
+        create_metric(&self.hierarchy, name, description, labels, buckets, None)
     }
 
     /// Create an IntCounter metric
-    fn create_intcounter(
+    pub fn create_intcounter(
         &self,
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::IntCounter> {
-        create_metric(self, name, description, labels, None, None)
+        create_metric(&self.hierarchy, name, description, labels, None, None)
     }
 
     /// Create an IntCounterVec metric with label names (for dynamic labels)
-    fn create_intcountervec(
+    pub fn create_intcountervec(
         &self,
         name: &str,
         description: &str,
@@ -516,7 +501,7 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
         const_label_values: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::IntCounterVec> {
         create_metric(
-            self,
+            &self.hierarchy,
             name,
             description,
             const_label_values,
@@ -526,17 +511,17 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
     }
 
     /// Create an IntGauge metric
-    fn create_intgauge(
+    pub fn create_intgauge(
         &self,
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::IntGauge> {
-        create_metric(self, name, description, labels, None, None)
+        create_metric(&self.hierarchy, name, description, labels, None, None)
     }
 
     /// Create an IntGaugeVec metric with label names (for dynamic labels)
-    fn create_intgaugevec(
+    pub fn create_intgaugevec(
         &self,
         name: &str,
         description: &str,
@@ -544,7 +529,7 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
         const_label_values: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::IntGaugeVec> {
         create_metric(
-            self,
+            &self.hierarchy,
             name,
             description,
             const_label_values,
@@ -554,11 +539,12 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
     }
 
     /// Get metrics in Prometheus text format
-    fn prometheus_expfmt(&self) -> anyhow::Result<String> {
+    pub fn prometheus_expfmt(&self) -> anyhow::Result<String> {
         // Execute callbacks first to ensure any new metrics are added to the registry
         let callback_results = self
-            .drt()
-            .execute_prometheus_update_callbacks(&self.hierarchy());
+            .hierarchy
+            .get_metrics_registry()
+            .execute_update_callbacks();
 
         // Log any callback errors but continue
         for result in callback_results {
@@ -567,14 +553,11 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
             }
         }
 
-        // Get the Prometheus registry for this hierarchy and execute exposition text callbacks
-        let (prometheus_registry, expfmt) = {
-            let mut registry_entry = self.drt().hierarchy_to_metricsregistry.write().unwrap();
-            let entry = registry_entry.entry(self.hierarchy()).or_default();
-            let registry = entry.prometheus_registry.clone();
-            let text = entry.execute_prometheus_expfmt_callbacks();
-            (registry, text)
-        };
+        // Get the Prometheus registry for this hierarchy
+        let prometheus_registry = self
+            .hierarchy
+            .get_metrics_registry()
+            .get_prometheus_registry();
 
         // Encode metrics from the registry
         let metric_families = prometheus_registry.gather();
@@ -583,7 +566,11 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
         encoder.encode(&metric_families, &mut buffer)?;
         let mut result = String::from_utf8(buffer)?;
 
-        // Append exposition text callback results if any
+        // Execute and append exposition text callback results
+        let expfmt = self
+            .hierarchy
+            .get_metrics_registry()
+            .execute_expfmt_callbacks();
         if !expfmt.is_empty() {
             if !result.ends_with('\n') {
                 result.push('\n');
@@ -595,10 +582,207 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
     }
 }
 
+/// This trait should be implemented by all metric registries, including Prometheus, Envy, OpenTelemetry, and others.
+/// It offers a unified interface for creating and managing metrics, organizing sub-registries, and
+/// generating output in Prometheus text format.
+use crate::traits::DistributedRuntimeProvider;
+
+pub trait MetricsHierarchy: Send + Sync {
+    // ========================================================================
+    // Required methods - must be implemented by all types
+    // ========================================================================
+
+    /// Get the name of this hierarchy (without any hierarchy prefix)
+    fn basename(&self) -> String;
+
+    /// Get the parent hierarchies as actual objects (not strings)
+    /// Returns a vector of hierarchy references, ordered from root to immediate parent.
+    /// For example, an Endpoint would return [DRT, Namespace, Component].
+    fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy>;
+
+    /// Get a reference to this hierarchy's metrics registry
+    fn get_metrics_registry(&self) -> &MetricsRegistry;
+
+    // ========================================================================
+    // Provided methods - have default implementations
+    // ========================================================================
+
+    /// Access the metrics interface for this hierarchy
+    /// This is a provided method that works for any type implementing MetricsHierarchy
+    fn metrics(&self) -> Metrics<&Self>
+    where
+        Self: Sized,
+    {
+        Metrics::new(self)
+    }
+}
+
+// Blanket implementation for references to types that implement MetricsHierarchy
+impl<T: MetricsHierarchy + ?Sized> MetricsHierarchy for &T {
+    fn basename(&self) -> String {
+        (**self).basename()
+    }
+
+    fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+        (**self).parent_hierarchies()
+    }
+
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
+        (**self).get_metrics_registry()
+    }
+}
+
+/// Type alias for runtime callback functions to reduce complexity
+///
+/// This type represents an Arc-wrapped callback function that can be:
+/// - Shared efficiently across multiple threads and contexts
+/// - Cloned without duplicating the underlying closure
+/// - Used in generic contexts requiring 'static lifetime
+///
+/// The Arc wrapper is included in the type to make sharing explicit.
+pub type PrometheusUpdateCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync + 'static>;
+
+/// Type alias for exposition text callback functions that return Prometheus text
+pub type PrometheusExpositionFormatCallback =
+    Arc<dyn Fn() -> anyhow::Result<String> + Send + Sync + 'static>;
+
+/// Structure to hold Prometheus registries and associated callbacks for a given hierarchy.
+///
+/// All fields are Arc-wrapped, so cloning shares state. This ensures metrics registered
+/// on cloned instances (e.g., cloned Client/Endpoint) are visible to the original.
+#[derive(Clone)]
+pub struct MetricsRegistry {
+    /// The Prometheus registry for this hierarchy.
+    /// Arc-wrapped so clones share the same registry (metrics registered on clones are visible everywhere).
+    pub prometheus_registry: Arc<std::sync::RwLock<prometheus::Registry>>,
+
+    /// Update callbacks invoked before metrics are scraped.
+    /// Wrapped in Arc to preserve callbacks across clones (prevents callback loss when MetricsRegistry is cloned).
+    pub prometheus_update_callbacks: Arc<std::sync::RwLock<Vec<PrometheusUpdateCallback>>>,
+
+    /// Callbacks that return Prometheus exposition text appended to metrics output.
+    /// Wrapped in Arc to preserve callbacks across clones (e.g., vLLM callbacks registered at Endpoint remain accessible at DRT).
+    pub prometheus_expfmt_callbacks:
+        Arc<std::sync::RwLock<Vec<PrometheusExpositionFormatCallback>>>,
+}
+
+impl std::fmt::Debug for MetricsRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetricsRegistry")
+            .field("prometheus_registry", &"<RwLock<Registry>>")
+            .field(
+                "prometheus_update_callbacks",
+                &format!(
+                    "<RwLock<Vec<Callback>>> with {} callbacks",
+                    self.prometheus_update_callbacks.read().unwrap().len()
+                ),
+            )
+            .field(
+                "prometheus_expfmt_callbacks",
+                &format!(
+                    "<RwLock<Vec<Callback>>> with {} callbacks",
+                    self.prometheus_expfmt_callbacks.read().unwrap().len()
+                ),
+            )
+            .finish()
+    }
+}
+
+impl MetricsRegistry {
+    /// Create a new metrics registry with an empty Prometheus registry and callback lists
+    pub fn new() -> Self {
+        Self {
+            prometheus_registry: Arc::new(std::sync::RwLock::new(prometheus::Registry::new())),
+            prometheus_update_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
+            prometheus_expfmt_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
+        }
+    }
+
+    /// Add a callback function that receives a reference to any MetricsHierarchy
+    pub fn add_update_callback(&self, callback: PrometheusUpdateCallback) {
+        self.prometheus_update_callbacks
+            .write()
+            .unwrap()
+            .push(callback);
+    }
+
+    /// Add an exposition text callback that returns Prometheus text
+    pub fn add_expfmt_callback(&self, callback: PrometheusExpositionFormatCallback) {
+        self.prometheus_expfmt_callbacks
+            .write()
+            .unwrap()
+            .push(callback);
+    }
+
+    /// Execute all update callbacks and return their results
+    pub fn execute_update_callbacks(&self) -> Vec<anyhow::Result<()>> {
+        self.prometheus_update_callbacks
+            .read()
+            .unwrap()
+            .iter()
+            .map(|callback| callback())
+            .collect()
+    }
+
+    /// Execute all exposition text callbacks and return their concatenated text
+    pub fn execute_expfmt_callbacks(&self) -> String {
+        let callbacks = self.prometheus_expfmt_callbacks.read().unwrap();
+        let mut result = String::new();
+        for callback in callbacks.iter() {
+            match callback() {
+                Ok(text) => {
+                    if !text.is_empty() {
+                        if !result.is_empty() && !result.ends_with('\n') {
+                            result.push('\n');
+                        }
+                        result.push_str(&text);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error executing exposition text callback: {}", e);
+                }
+            }
+        }
+        result
+    }
+
+    /// Add a Prometheus metric collector to this registry
+    pub fn add_metric(
+        &self,
+        collector: Box<dyn prometheus::core::Collector>,
+    ) -> anyhow::Result<()> {
+        self.prometheus_registry
+            .write()
+            .unwrap()
+            .register(collector)
+            .map_err(|e| anyhow::anyhow!("Failed to register metric: {}", e))
+    }
+
+    /// Get a read guard to the Prometheus registry for scraping
+    pub fn get_prometheus_registry(&self) -> std::sync::RwLockReadGuard<'_, prometheus::Registry> {
+        self.prometheus_registry.read().unwrap()
+    }
+
+    /// Returns true if a metric with the given name already exists in the Prometheus registry
+    pub fn has_metric_named(&self, metric_name: &str) -> bool {
+        self.prometheus_registry
+            .read()
+            .unwrap()
+            .gather()
+            .iter()
+            .any(|mf| mf.name() == metric_name)
+    }
+}
+
+impl Default for MetricsRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod test_helpers {
     use super::prometheus_names::name_prefix;
-    use super::prometheus_names::{nats_client, nats_service};
     use super::*;
 
     /// Base function to filter Prometheus output lines based on a predicate.
@@ -612,36 +796,6 @@ mod test_helpers {
             .filter(|line| predicate(line))
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
-    }
-
-    /// Filters out all NATS metrics from Prometheus output for test comparisons.
-    pub fn remove_nats_lines(input: &str) -> Vec<String> {
-        filter_prometheus_lines(input, |line| {
-            !line.contains(&format!(
-                "{}_{}",
-                name_prefix::COMPONENT,
-                nats_client::PREFIX
-            )) && !line.contains(&format!(
-                "{}_{}",
-                name_prefix::COMPONENT,
-                nats_service::PREFIX
-            )) && !line.trim().is_empty()
-        })
-    }
-
-    /// Filters to only include NATS metrics from Prometheus output for test comparisons.
-    pub fn extract_nats_lines(input: &str) -> Vec<String> {
-        filter_prometheus_lines(input, |line| {
-            line.contains(&format!(
-                "{}_{}",
-                name_prefix::COMPONENT,
-                nats_client::PREFIX
-            )) || line.contains(&format!(
-                "{}_{}",
-                name_prefix::COMPONENT,
-                nats_service::PREFIX
-            ))
-        })
     }
 
     /// Extracts all component metrics (excluding help text and type definitions).
@@ -771,18 +925,18 @@ mod test_metricsregistry_units {
 
     #[test]
     fn test_metrics_registry_entry_callbacks() {
-        use crate::MetricsRegistryEntry;
+        use crate::MetricsRegistry;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         // Test 1: Basic callback execution with counter increments
         {
-            let mut entry = MetricsRegistryEntry::new();
+            let registry = MetricsRegistry::new();
             let counter = Arc::new(AtomicUsize::new(0));
 
             // Add callbacks with different increment values
             for increment in [1, 10, 100] {
                 let counter_clone = counter.clone();
-                entry.add_prometheus_update_callback(Arc::new(move || {
+                registry.add_update_callback(Arc::new(move || {
                     counter_clone.fetch_add(increment, Ordering::SeqCst);
                     Ok(())
                 }));
@@ -792,52 +946,50 @@ mod test_metricsregistry_units {
             assert_eq!(counter.load(Ordering::SeqCst), 0);
 
             // First execution
-            let results = entry.execute_prometheus_update_callbacks();
+            let results = registry.execute_update_callbacks();
             assert_eq!(results.len(), 3);
             assert!(results.iter().all(|r| r.is_ok()));
             assert_eq!(counter.load(Ordering::SeqCst), 111); // 1 + 10 + 100
 
             // Second execution - callbacks should be reusable
-            let results = entry.execute_prometheus_update_callbacks();
+            let results = registry.execute_update_callbacks();
             assert_eq!(results.len(), 3);
             assert_eq!(counter.load(Ordering::SeqCst), 222); // 111 + 111
 
-            // Test cloning - cloned entry should have no callbacks
-            let cloned = entry.clone();
-            assert_eq!(cloned.execute_prometheus_update_callbacks().len(), 0);
-            assert_eq!(counter.load(Ordering::SeqCst), 222); // No change
-
-            // Original still has callbacks
-            entry.execute_prometheus_update_callbacks();
+            // Test cloning - cloned entry shares callbacks (callbacks are Arc-wrapped)
+            let cloned = registry.clone();
+            assert_eq!(cloned.execute_update_callbacks().len(), 3);
             assert_eq!(counter.load(Ordering::SeqCst), 333); // 222 + 111
+
+            // Original still has callbacks and shares the same Arc
+            registry.execute_update_callbacks();
+            assert_eq!(counter.load(Ordering::SeqCst), 444); // 333 + 111
         }
 
         // Test 2: Mixed success and error callbacks
         {
-            let mut entry = MetricsRegistryEntry::new();
+            let registry = MetricsRegistry::new();
             let counter = Arc::new(AtomicUsize::new(0));
 
             // Successful callback
             let counter_clone = counter.clone();
-            entry.add_prometheus_update_callback(Arc::new(move || {
+            registry.add_update_callback(Arc::new(move || {
                 counter_clone.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }));
 
             // Error callback
-            entry.add_prometheus_update_callback(Arc::new(|| {
-                Err(anyhow::anyhow!("Simulated error"))
-            }));
+            registry.add_update_callback(Arc::new(|| Err(anyhow::anyhow!("Simulated error"))));
 
             // Another successful callback
             let counter_clone = counter.clone();
-            entry.add_prometheus_update_callback(Arc::new(move || {
+            registry.add_update_callback(Arc::new(move || {
                 counter_clone.fetch_add(10, Ordering::SeqCst);
                 Ok(())
             }));
 
             // Execute and verify mixed results
-            let results = entry.execute_prometheus_update_callbacks();
+            let results = registry.execute_update_callbacks();
             assert_eq!(results.len(), 3);
             assert!(results[0].is_ok());
             assert!(results[1].is_err());
@@ -853,15 +1005,15 @@ mod test_metricsregistry_units {
             assert_eq!(counter.load(Ordering::SeqCst), 11); // 1 + 10
 
             // Execute again - errors should be consistent
-            let results = entry.execute_prometheus_update_callbacks();
+            let results = registry.execute_update_callbacks();
             assert!(results[1].is_err());
             assert_eq!(counter.load(Ordering::SeqCst), 22); // 11 + 11
         }
 
         // Test 3: Empty registry
         {
-            let entry = MetricsRegistryEntry::new();
-            let results = entry.execute_prometheus_update_callbacks();
+            let registry = MetricsRegistry::new();
+            let results = registry.execute_update_callbacks();
             assert_eq!(results.len(), 0);
         }
     }
@@ -888,56 +1040,64 @@ mod test_metricsregistry_prefixes {
 
         // DRT
         assert_eq!(drt.basename(), DRT_NAME);
-        assert_eq!(drt.parent_hierarchy(), Vec::<String>::new());
-        assert_eq!(drt.hierarchy(), DRT_NAME);
+        assert_eq!(drt.parent_hierarchies().len(), 0);
+        // DRT hierarchy is just its basename (empty string)
 
         // Namespace
         assert_eq!(namespace.basename(), NAMESPACE_NAME);
-        assert_eq!(namespace.parent_hierarchy(), vec!["".to_string()]);
-        assert_eq!(namespace.hierarchy(), NAMESPACE_NAME);
+        assert_eq!(namespace.parent_hierarchies().len(), 1);
+        assert_eq!(namespace.parent_hierarchies()[0].basename(), DRT_NAME);
+        // Namespace hierarchy is just its basename since parent is empty
 
         // Component
         assert_eq!(component.basename(), COMPONENT_NAME);
-        assert_eq!(
-            component.parent_hierarchy(),
-            vec!["".to_string(), NAMESPACE_NAME.to_string()]
-        );
-        assert_eq!(
-            component.hierarchy(),
-            format!("{}_{}", NAMESPACE_NAME, COMPONENT_NAME)
-        );
+        assert_eq!(component.parent_hierarchies().len(), 2);
+        assert_eq!(component.parent_hierarchies()[0].basename(), DRT_NAME);
+        assert_eq!(component.parent_hierarchies()[1].basename(), NAMESPACE_NAME);
+        // Component hierarchy structure is validated by the individual assertions above
 
         // Endpoint
         assert_eq!(endpoint.basename(), ENDPOINT_NAME);
-        assert_eq!(
-            endpoint.parent_hierarchy(),
-            vec![
-                "".to_string(),
-                NAMESPACE_NAME.to_string(),
-                COMPONENT_NAME.to_string(),
-            ]
-        );
-        assert_eq!(
-            endpoint.hierarchy(),
-            format!("{}_{}_{}", NAMESPACE_NAME, COMPONENT_NAME, ENDPOINT_NAME)
-        );
+        assert_eq!(endpoint.parent_hierarchies().len(), 3);
+        assert_eq!(endpoint.parent_hierarchies()[0].basename(), DRT_NAME);
+        assert_eq!(endpoint.parent_hierarchies()[1].basename(), NAMESPACE_NAME);
+        assert_eq!(endpoint.parent_hierarchies()[2].basename(), COMPONENT_NAME);
+        // Endpoint hierarchy structure is validated by the individual assertions above
 
         // Relationships
-        assert!(namespace.parent_hierarchy().contains(&drt.basename()));
-        assert!(component.parent_hierarchy().contains(&namespace.basename()));
-        assert!(endpoint.parent_hierarchy().contains(&component.basename()));
+        assert!(
+            namespace
+                .parent_hierarchies()
+                .iter()
+                .any(|h| h.basename() == drt.basename())
+        );
+        assert!(
+            component
+                .parent_hierarchies()
+                .iter()
+                .any(|h| h.basename() == namespace.basename())
+        );
+        assert!(
+            endpoint
+                .parent_hierarchies()
+                .iter()
+                .any(|h| h.basename() == component.basename())
+        );
 
         // Depth
-        assert_eq!(drt.parent_hierarchy().len(), 0);
-        assert_eq!(namespace.parent_hierarchy().len(), 1);
-        assert_eq!(component.parent_hierarchy().len(), 2);
-        assert_eq!(endpoint.parent_hierarchy().len(), 3);
+        assert_eq!(drt.parent_hierarchies().len(), 0);
+        assert_eq!(namespace.parent_hierarchies().len(), 1);
+        assert_eq!(component.parent_hierarchies().len(), 2);
+        assert_eq!(endpoint.parent_hierarchies().len(), 3);
 
         // Invalid namespace behavior - sanitizes to "_123" and succeeds
         // @ryanolson intended to enable validation (see TODO comment in component.rs) but didn't turn it on,
         // so invalid characters are sanitized in MetricsRegistry rather than rejected.
         let invalid_namespace = drt.namespace("@@123").unwrap();
-        let result = invalid_namespace.create_counter("test_counter", "A test counter", &[]);
+        let result =
+            invalid_namespace
+                .metrics()
+                .create_counter("test_counter", "A test counter", &[]);
         assert!(result.is_ok());
         if let Ok(counter) = &result {
             // Verify the namespace was sanitized to "_123" in the label
@@ -954,6 +1114,7 @@ mod test_metricsregistry_prefixes {
         let valid_namespace = drt.namespace("ns567").unwrap();
         assert!(
             valid_namespace
+                .metrics()
                 .create_counter("test_counter", "A test counter", &[])
                 .is_ok()
         );
@@ -974,34 +1135,30 @@ mod test_metricsregistry_prefixes {
 
         // Verify the hierarchy structure
         assert_eq!(ns1.basename(), "ns1");
-        assert_eq!(ns1.parent_hierarchy(), vec!("".to_string()));
-        assert_eq!(ns1.hierarchy(), "ns1");
+        assert_eq!(ns1.parent_hierarchies().len(), 1);
+        assert_eq!(ns1.parent_hierarchies()[0].basename(), "");
+        // ns1 hierarchy is just its basename since parent is empty
 
         assert_eq!(ns2.basename(), "ns2");
-        assert_eq!(
-            ns2.parent_hierarchy(),
-            vec!["".to_string(), "ns1".to_string()]
-        );
-        assert_eq!(ns2.hierarchy(), "ns1_ns2");
+        assert_eq!(ns2.parent_hierarchies().len(), 2);
+        assert_eq!(ns2.parent_hierarchies()[0].basename(), "");
+        assert_eq!(ns2.parent_hierarchies()[1].basename(), "ns1");
+        // ns2 hierarchy structure validated by parent assertions above
 
         assert_eq!(ns3.basename(), "ns3");
-        assert_eq!(
-            ns3.parent_hierarchy(),
-            vec!["".to_string(), "ns1".to_string(), "ns2".to_string()]
-        );
-        assert_eq!(ns3.hierarchy(), "ns1_ns2_ns3");
+        assert_eq!(ns3.parent_hierarchies().len(), 3);
+        assert_eq!(ns3.parent_hierarchies()[0].basename(), "");
+        assert_eq!(ns3.parent_hierarchies()[1].basename(), "ns1");
+        assert_eq!(ns3.parent_hierarchies()[2].basename(), "ns2");
+        // ns3 hierarchy structure validated by parent assertions above
 
         assert_eq!(component.basename(), "test-component");
-        assert_eq!(
-            component.parent_hierarchy(),
-            vec![
-                "".to_string(),
-                "ns1".to_string(),
-                "ns2".to_string(),
-                "ns3".to_string()
-            ]
-        );
-        assert_eq!(component.hierarchy(), "ns1_ns2_ns3_test-component");
+        assert_eq!(component.parent_hierarchies().len(), 4);
+        assert_eq!(component.parent_hierarchies()[0].basename(), "");
+        assert_eq!(component.parent_hierarchies()[1].basename(), "ns1");
+        assert_eq!(component.parent_hierarchies()[2].basename(), "ns2");
+        assert_eq!(component.parent_hierarchies()[3].basename(), "ns3");
+        // component hierarchy structure validated by parent assertions above
 
         println!("✓ Chained namespace test passed - all prefixes correct");
     }
@@ -1011,8 +1168,6 @@ mod test_metricsregistry_prefixes {
 #[cfg(test)]
 mod test_metricsregistry_prometheus_fmt_outputs {
     use super::prometheus_names::name_prefix;
-    use super::prometheus_names::{COMPONENT_NATS_METRICS, DRT_NATS_METRICS};
-    use super::prometheus_names::{nats_client, nats_service};
     use super::*;
     use crate::distributed::distributed_test_utils::create_test_drt_async;
     use prometheus::Counter;
@@ -1032,48 +1187,42 @@ mod test_metricsregistry_prometheus_fmt_outputs {
 
         // Test Counter creation
         let counter = endpoint
+            .metrics()
             .create_counter("testcounter", "A test counter", &[])
             .unwrap();
         counter.inc_by(123.456789);
         let epsilon = 0.01;
         assert!((counter.get() - 123.456789).abs() < epsilon);
 
-        let endpoint_output_raw = endpoint.prometheus_expfmt().unwrap();
+        let endpoint_output_raw = endpoint.metrics().prometheus_expfmt().unwrap();
         println!("Endpoint output:");
         println!("{}", endpoint_output_raw);
-
-        // Filter out NATS service metrics for test comparison
-        let endpoint_output =
-            super::test_helpers::remove_nats_lines(&endpoint_output_raw).join("\n");
 
         let expected_endpoint_output = r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
 dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789"#.to_string();
 
         assert_eq!(
-            endpoint_output, expected_endpoint_output,
+            endpoint_output_raw, expected_endpoint_output,
             "\n=== ENDPOINT COMPARISON FAILED ===\n\
-             Expected:\n{}\n\
              Actual:\n{}\n\
+             Expected:\n{}\n\
              ==============================",
-            expected_endpoint_output, endpoint_output
+            endpoint_output_raw, expected_endpoint_output
         );
 
         // Test Gauge creation
         let gauge = component
+            .metrics()
             .create_gauge("testgauge", "A test gauge", &[])
             .unwrap();
         gauge.set(50000.0);
         assert_eq!(gauge.get(), 50000.0);
 
         // Test Prometheus format output for Component (gauge + histogram)
-        let component_output_raw = component.prometheus_expfmt().unwrap();
+        let component_output_raw = component.metrics().prometheus_expfmt().unwrap();
         println!("Component output:");
         println!("{}", component_output_raw);
-
-        // Filter out NATS service metrics for test comparison
-        let component_output =
-            super::test_helpers::remove_nats_lines(&component_output_raw).join("\n");
 
         let expected_component_output = r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
@@ -1083,28 +1232,25 @@ dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",
 dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 50000"#.to_string();
 
         assert_eq!(
-            component_output, expected_component_output,
+            component_output_raw, expected_component_output,
             "\n=== COMPONENT COMPARISON FAILED ===\n\
-             Expected:\n{}\n\
              Actual:\n{}\n\
+             Expected:\n{}\n\
              ==============================",
-            expected_component_output, component_output
+            component_output_raw, expected_component_output
         );
 
         let intcounter = namespace
+            .metrics()
             .create_intcounter("testintcounter", "A test int counter", &[])
             .unwrap();
         intcounter.inc_by(12345);
         assert_eq!(intcounter.get(), 12345);
 
         // Test Prometheus format output for Namespace (int_counter + gauge + histogram)
-        let namespace_output_raw = namespace.prometheus_expfmt().unwrap();
+        let namespace_output_raw = namespace.metrics().prometheus_expfmt().unwrap();
         println!("Namespace output:");
         println!("{}", namespace_output_raw);
-
-        // Filter out NATS service metrics for test comparison
-        let namespace_output =
-            super::test_helpers::remove_nats_lines(&namespace_output_raw).join("\n");
 
         let expected_namespace_output = r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
@@ -1117,16 +1263,17 @@ dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 
 dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#.to_string();
 
         assert_eq!(
-            namespace_output, expected_namespace_output,
+            namespace_output_raw, expected_namespace_output,
             "\n=== NAMESPACE COMPARISON FAILED ===\n\
-             Expected:\n{}\n\
              Actual:\n{}\n\
+             Expected:\n{}\n\
              ==============================",
-            expected_namespace_output, namespace_output
+            namespace_output_raw, expected_namespace_output
         );
 
         // Test IntGauge creation
         let intgauge = namespace
+            .metrics()
             .create_intgauge("testintgauge", "A test int gauge", &[])
             .unwrap();
         intgauge.set(42);
@@ -1134,6 +1281,7 @@ dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#.to_string();
 
         // Test IntGaugeVec creation
         let intgaugevec = namespace
+            .metrics()
             .create_intgaugevec(
                 "testintgaugevec",
                 "A test int gauge vector",
@@ -1150,6 +1298,7 @@ dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#.to_string();
 
         // Test CounterVec creation
         let countervec = endpoint
+            .metrics()
             .create_countervec(
                 "testcountervec",
                 "A test counter vector",
@@ -1162,6 +1311,7 @@ dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#.to_string();
 
         // Test Histogram creation
         let histogram = component
+            .metrics()
             .create_histogram("testhistogram", "A test histogram", &[], None)
             .unwrap();
         histogram.observe(1.0);
@@ -1169,13 +1319,9 @@ dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#.to_string();
         histogram.observe(4.0);
 
         // Test Prometheus format output for DRT (all metrics combined)
-        let drt_output_raw = drt.prometheus_expfmt().unwrap();
+        let drt_output_raw = drt.metrics().prometheus_expfmt().unwrap();
         println!("DRT output:");
         println!("{}", drt_output_raw);
-
-        // Filter out all NATS metrics for comparison
-        let filtered_drt_output =
-            super::test_helpers::remove_nats_lines(&drt_output_raw).join("\n");
 
         let expected_drt_output = r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
@@ -1218,12 +1364,12 @@ dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server2",ser
 dynamo_component_uptime_seconds 0"#.to_string();
 
         assert_eq!(
-            filtered_drt_output, expected_drt_output,
+            drt_output_raw, expected_drt_output,
             "\n=== DRT COMPARISON FAILED ===\n\
              Expected:\n{}\n\
              Actual (filtered):\n{}\n\
              ==============================",
-            expected_drt_output, filtered_drt_output
+            expected_drt_output, drt_output_raw
         );
 
         println!("✓ All Prometheus format outputs verified successfully!");
@@ -1231,33 +1377,19 @@ dynamo_component_uptime_seconds 0"#.to_string();
 
     #[test]
     fn test_refactored_filter_functions() {
-        // Test data with mixed content
+        // Test data with component metrics
         let test_input = r#"# HELP dynamo_component_requests Total requests
 # TYPE dynamo_component_requests counter
 dynamo_component_requests 42
-# HELP dynamo_component_nats_client_connection_state Connection state
-# TYPE dynamo_component_nats_client_connection_state gauge
-dynamo_component_nats_client_connection_state 1
 # HELP dynamo_component_latency Response latency
 # TYPE dynamo_component_latency histogram
 dynamo_component_latency_bucket{le="0.1"} 10
 dynamo_component_latency_bucket{le="0.5"} 25
-dynamo_component_nats_service_requests_total 100
-dynamo_component_nats_service_errors_total 5"#;
-
-        // Test remove_nats_lines (excludes NATS lines but keeps help/type)
-        let filtered_out = super::test_helpers::remove_nats_lines(test_input);
-        assert_eq!(filtered_out.len(), 7); // 7 non-NATS lines
-        assert!(!filtered_out.iter().any(|line| line.contains("nats")));
-
-        // Test extract_nats_lines (includes all NATS lines including help/type)
-        let filtered_only = super::test_helpers::extract_nats_lines(test_input);
-        assert_eq!(filtered_only.len(), 5); // 5 NATS lines
-        assert!(filtered_only.iter().all(|line| line.contains("nats")));
+dynamo_component_errors_total 5"#;
 
         // Test extract_metrics (only actual metric lines, excluding help/type)
         let metrics_only = super::test_helpers::extract_metrics(test_input);
-        assert_eq!(metrics_only.len(), 6); // 6 actual metric lines (excluding help/type)
+        assert_eq!(metrics_only.len(), 4); // 4 actual metric lines (excluding help/type)
         assert!(
             metrics_only
                 .iter()
@@ -1265,492 +1397,5 @@ dynamo_component_nats_service_errors_total 5"#;
         );
 
         println!("✓ All refactored filter functions work correctly!");
-    }
-}
-
-#[cfg(feature = "integration")]
-#[cfg(test)]
-mod test_metricsregistry_nats {
-    use super::prometheus_names::name_prefix;
-    use super::prometheus_names::{COMPONENT_NATS_METRICS, DRT_NATS_METRICS};
-    use super::prometheus_names::{nats_client, nats_service};
-    use super::*;
-    use crate::distributed::distributed_test_utils::create_test_drt_async;
-    use crate::pipeline::PushRouter;
-    use crate::{DistributedRuntime, Runtime};
-    use tokio::time::{Duration, sleep};
-    #[tokio::test]
-    async fn test_drt_nats_metrics() {
-        // Setup real DRT and registry using the test-friendly constructor
-        let drt = create_test_drt_async().await;
-
-        // Get DRT output which should include NATS client metrics
-        let drt_output = drt.prometheus_expfmt().unwrap();
-        println!("DRT output with NATS metrics:");
-        println!("{}", drt_output);
-
-        // Additional checks for NATS client metrics (without checking specific values)
-        let drt_nats_metrics = super::test_helpers::extract_nats_lines(&drt_output);
-
-        // Check that NATS client metrics are present
-        assert!(
-            !drt_nats_metrics.is_empty(),
-            "NATS client metrics should be present"
-        );
-
-        // Check for specific NATS client metric names (without values)
-        // Extract only the metric lines from the already-filtered NATS metrics
-        let drt_nats_metric_lines =
-            super::test_helpers::extract_metrics(&drt_nats_metrics.join("\n"));
-        let actual_drt_nats_metrics_sorted: Vec<&str> = drt_nats_metric_lines
-            .iter()
-            .map(|line| {
-                let without_labels = line.split('{').next().unwrap_or(line);
-                // Remove the value part (everything after the last space)
-                without_labels.split(' ').next().unwrap_or(without_labels)
-            })
-            .collect();
-
-        let expect_drt_nats_metrics_sorted = {
-            let mut temp = DRT_NATS_METRICS
-                .iter()
-                .map(|metric| build_component_metric_name(metric))
-                .collect::<Vec<_>>();
-            temp.sort();
-            temp
-        };
-
-        // Print both lists for comparison
-        println!(
-            "actual_drt_nats_metrics_sorted: {:?}",
-            actual_drt_nats_metrics_sorted
-        );
-        println!(
-            "expect_drt_nats_metrics_sorted: {:?}",
-            expect_drt_nats_metrics_sorted
-        );
-
-        // Compare the sorted lists
-        assert_eq!(
-            actual_drt_nats_metrics_sorted, expect_drt_nats_metrics_sorted,
-            "DRT_NATS_METRICS with prefix and expected_nats_metrics should be identical when sorted"
-        );
-
-        println!("✓ DistributedRuntime NATS metrics integration test passed!");
-    }
-
-    #[tokio::test]
-    async fn test_nats_metric_names() {
-        // This test only tests the existence of the NATS metrics. It does not check
-        // the values of the metrics.
-
-        // Setup real DRT and registry using the test-friendly constructor
-        let drt = create_test_drt_async().await;
-
-        // Create a namespace and component from the DRT
-        let namespace = drt.namespace("ns789").unwrap();
-        let mut component = namespace.component("comp789").unwrap();
-
-        // Create a service to trigger metrics callback registration
-        component.add_stats_service().await.unwrap();
-
-        // Get component output which should include NATS client metrics
-        // Additional checks for NATS client metrics (without checking specific values)
-        let component_nats_metrics =
-            super::test_helpers::extract_nats_lines(&component.prometheus_expfmt().unwrap());
-        println!(
-            "Component NATS metrics count: {}",
-            component_nats_metrics.len()
-        );
-
-        // Check that NATS client metrics are present
-        assert!(
-            !component_nats_metrics.is_empty(),
-            "NATS client metrics should be present"
-        );
-
-        // Check for specific NATS client metric names (without values)
-        let component_metrics =
-            super::test_helpers::extract_metrics(&component.prometheus_expfmt().unwrap());
-        let actual_component_nats_metrics_sorted: Vec<&str> = component_metrics
-            .iter()
-            .map(|line| {
-                let without_labels = line.split('{').next().unwrap_or(line);
-                // Remove the value part (everything after the last space)
-                without_labels.split(' ').next().unwrap_or(without_labels)
-            })
-            .collect();
-
-        let expect_component_nats_metrics_sorted = {
-            let mut temp = COMPONENT_NATS_METRICS
-                .iter()
-                .map(|metric| build_component_metric_name(metric))
-                .collect::<Vec<_>>();
-            temp.sort();
-            temp
-        };
-
-        // Print both lists for comparison
-        println!(
-            "actual_component_nats_metrics_sorted: {:?}",
-            actual_component_nats_metrics_sorted
-        );
-        println!(
-            "expect_component_nats_metrics_sorted: {:?}",
-            expect_component_nats_metrics_sorted
-        );
-
-        // Compare the sorted lists
-        assert_eq!(
-            actual_component_nats_metrics_sorted, expect_component_nats_metrics_sorted,
-            "COMPONENT_NATS_METRICS with prefix and expected_nats_metrics should be identical when sorted"
-        );
-
-        // Get both DRT and component output and filter for NATS metrics only
-        let drt_output = drt.prometheus_expfmt().unwrap();
-        let drt_nats_lines = super::test_helpers::extract_nats_lines(&drt_output);
-        let drt_and_component_nats_metrics =
-            super::test_helpers::extract_metrics(&drt_nats_lines.join("\n"));
-        println!(
-            "DRT and component NATS metrics count: {}",
-            drt_and_component_nats_metrics.len()
-        );
-
-        // Check that the NATS metrics are present in the component output
-        assert_eq!(
-            drt_and_component_nats_metrics.len(),
-            DRT_NATS_METRICS.len() + COMPONENT_NATS_METRICS.len(),
-            "DRT at this point should have both the DRT and component NATS metrics"
-        );
-
-        // Check that the NATS metrics are present in the component output
-        println!("✓ Component NATS metrics integration test passed!");
-    }
-
-    /// Tests NATS metrics values before and after endpoint activity with large message processing.
-    /// Creates endpoint, sends test messages + 10k byte message, validates metrics (NATS + work handler)
-    /// at initial state and post-activity state. Ensures byte thresholds, message counts, and processing
-    /// times are within expected ranges. Tests end-to-end client-server communication and metrics collection.
-    #[tokio::test]
-    async fn test_nats_metrics_values() -> anyhow::Result<()> {
-        struct MessageHandler {}
-        impl MessageHandler {
-            fn new() -> std::sync::Arc<Self> {
-                std::sync::Arc::new(Self {})
-            }
-        }
-
-        #[async_trait]
-        impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for MessageHandler {
-            async fn generate(
-                &self,
-                input: SingleIn<String>,
-            ) -> Result<ManyOut<Annotated<String>>, Error> {
-                let (data, ctx) = input.into_parts();
-                let response = data.to_string();
-                let stream = stream::iter(vec![Annotated::from_data(response)]);
-                Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
-            }
-        }
-
-        println!("\n=== Initializing DistributedRuntime ===");
-        let runtime = Runtime::from_current()?;
-        let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
-        let namespace = drt.namespace("ns123").unwrap();
-        let mut component = namespace.component("comp123").unwrap();
-        let ingress = Ingress::for_engine(MessageHandler::new()).unwrap();
-
-        let _backend_handle = tokio::spawn(async move {
-            component.add_stats_service().await.unwrap();
-            let endpoint = component
-                .endpoint("echo")
-                .endpoint_builder()
-                .handler(ingress);
-            endpoint.start().await.unwrap();
-        });
-
-        sleep(Duration::from_millis(500)).await;
-        println!("✓ Launched endpoint service in background successfully");
-
-        let drt_output = drt.prometheus_expfmt().unwrap();
-        let parsed_metrics: Vec<_> = drt_output
-            .lines()
-            .filter_map(super::test_helpers::parse_prometheus_metric)
-            .collect();
-
-        println!("=== Initial DRT metrics output ===");
-        println!("{}", drt_output);
-
-        println!("\n=== Checking Initial Metric Values ===");
-
-        let initial_expected_metric_values = [
-            // DRT NATS metrics (ordered to match DRT_NATS_METRICS)
-            (
-                build_component_metric_name(nats_client::CONNECTION_STATE),
-                1.0,
-                1.0,
-            ), // Should be connected
-            (
-                build_component_metric_name(nats_client::CURRENT_CONNECTIONS),
-                1.0,
-                1.0,
-            ), // Should have 1 connection
-            (
-                build_component_metric_name(nats_client::IN_TOTAL_BYTES),
-                800.0,
-                4000.0,
-            ), // Wide range around observed value of 1888
-            (
-                build_component_metric_name(nats_client::IN_MESSAGES),
-                0.0,
-                5.0,
-            ), // Wide range around 2
-            (
-                build_component_metric_name(nats_client::OUT_OVERHEAD_BYTES),
-                1500.0,
-                5000.0,
-            ), // Wide range around observed value of 2752
-            (
-                build_component_metric_name(nats_client::OUT_MESSAGES),
-                0.0,
-                5.0,
-            ), // Wide range around 2
-            // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
-            (
-                build_component_metric_name(nats_service::PROCESSING_MS_AVG),
-                0.0,
-                0.0,
-            ), // No processing yet
-            (
-                build_component_metric_name(nats_service::ERRORS_TOTAL),
-                0.0,
-                0.0,
-            ), // No errors yet
-            (
-                build_component_metric_name(nats_service::REQUESTS_TOTAL),
-                0.0,
-                0.0,
-            ), // No requests yet
-            (
-                build_component_metric_name(nats_service::PROCESSING_MS_TOTAL),
-                0.0,
-                0.0,
-            ), // No processing yet
-            (
-                build_component_metric_name(nats_service::ACTIVE_SERVICES),
-                0.0,
-                2.0,
-            ), // Service may not be fully active yet
-            (
-                build_component_metric_name(nats_service::ACTIVE_ENDPOINTS),
-                0.0,
-                2.0,
-            ), // Endpoint may not be fully active yet
-        ];
-
-        for (metric_name, min_value, max_value) in &initial_expected_metric_values {
-            let actual_value = parsed_metrics
-                .iter()
-                .find(|(name, _, _)| name == metric_name)
-                .map(|(_, _, value)| *value)
-                .unwrap_or_else(|| panic!("Could not find expected metric: {}", metric_name));
-
-            assert!(
-                actual_value >= *min_value && actual_value <= *max_value,
-                "Initial metric {} should be between {} and {}, but got {}",
-                metric_name,
-                min_value,
-                max_value,
-                actual_value
-            );
-        }
-
-        println!("\n=== Client Runtime to hit the endpoint ===");
-        let client_runtime = Runtime::from_current()?;
-        let client_distributed = DistributedRuntime::from_settings(client_runtime.clone()).await?;
-        let namespace = client_distributed.namespace("ns123")?;
-        let component = namespace.component("comp123")?;
-        let client = component.endpoint("echo").client().await?;
-
-        client.wait_for_instances().await?;
-        println!("✓ Connected to endpoint, waiting for instances...");
-
-        let router =
-            PushRouter::<String, Annotated<String>>::from_client(client, Default::default())
-                .await?;
-
-        for i in 0..10 {
-            let msg = i.to_string().repeat(2000); // 2k bytes message
-            let mut stream = router.random(msg.clone().into()).await?;
-            while let Some(resp) = stream.next().await {
-                // Check if response matches the original message
-                if let Some(data) = &resp.data {
-                    let is_same = data == &msg;
-                    println!(
-                        "Response {}: {} bytes, matches original: {}",
-                        i,
-                        data.len(),
-                        is_same
-                    );
-                }
-            }
-        }
-        println!("✓ Sent messages and received responses successfully");
-
-        println!("\n=== Waiting 500ms for metrics to update ===");
-        sleep(Duration::from_millis(500)).await;
-        println!("✓ Wait complete, getting final metrics...");
-
-        let final_drt_output = drt.prometheus_expfmt().unwrap();
-        println!("\n=== Final Prometheus DRT output ===");
-        println!("{}", final_drt_output);
-
-        let final_drt_nats_output = super::test_helpers::extract_nats_lines(&final_drt_output);
-        println!("\n=== Filtered NATS metrics from final DRT output ===");
-        for line in &final_drt_nats_output {
-            println!("{}", line);
-        }
-
-        let final_parsed_metrics: Vec<_> = super::test_helpers::extract_metrics(&final_drt_output)
-            .iter()
-            .filter_map(|line| super::test_helpers::parse_prometheus_metric(line.as_str()))
-            .collect();
-
-        let post_expected_metric_values = [
-            // DRT NATS metrics
-            (
-                build_component_metric_name(nats_client::CONNECTION_STATE),
-                1.0,
-                1.0,
-            ), // Connected
-            (
-                build_component_metric_name(nats_client::CURRENT_CONNECTIONS),
-                1.0,
-                1.0,
-            ), // 1 connection
-            (
-                build_component_metric_name(nats_client::IN_TOTAL_BYTES),
-                20000.0,
-                32000.0,
-            ), // Wide range around 26117
-            (
-                build_component_metric_name(nats_client::IN_MESSAGES),
-                8.0,
-                20.0,
-            ), // Wide range around 16
-            (
-                build_component_metric_name(nats_client::OUT_OVERHEAD_BYTES),
-                2500.0,
-                8000.0,
-            ), // Wide range around 5524
-            (
-                build_component_metric_name(nats_client::OUT_MESSAGES),
-                8.0,
-                20.0,
-            ), // Wide range around 16
-            // Component NATS metrics
-            (
-                build_component_metric_name(nats_service::PROCESSING_MS_AVG),
-                0.0,
-                1.0,
-            ), // Low processing time
-            (
-                build_component_metric_name(nats_service::ERRORS_TOTAL),
-                0.0,
-                0.0,
-            ), // No errors
-            (
-                build_component_metric_name(nats_service::REQUESTS_TOTAL),
-                0.0,
-                10.0,
-            ), // NATS service stats requests (may differ from work handler count)
-            (
-                build_component_metric_name(nats_service::PROCESSING_MS_TOTAL),
-                0.0,
-                5.0,
-            ), // Low total processing time
-            (
-                build_component_metric_name(nats_service::ACTIVE_SERVICES),
-                0.0,
-                2.0,
-            ), // Service may not be fully active
-            (
-                build_component_metric_name(nats_service::ACTIVE_ENDPOINTS),
-                0.0,
-                2.0,
-            ), // Endpoint may not be fully active
-            // Work handler metrics
-            (
-                build_component_metric_name(work_handler::REQUESTS_TOTAL),
-                10.0,
-                10.0,
-            ), // 10 messages
-            (
-                build_component_metric_name(work_handler::REQUEST_BYTES_TOTAL),
-                21000.0,
-                26000.0,
-            ), // ~75-125% of 23520
-            (
-                build_component_metric_name(work_handler::RESPONSE_BYTES_TOTAL),
-                18000.0,
-                23000.0,
-            ), // ~75-125% of 20660
-            (
-                build_component_metric_name(work_handler::INFLIGHT_REQUESTS),
-                0.0,
-                1.0,
-            ), // 0 or very low
-            // Histograms have _{count,sum} suffixes
-            (
-                format!(
-                    "{}_count",
-                    build_component_metric_name(work_handler::REQUEST_DURATION_SECONDS)
-                ),
-                10.0,
-                10.0,
-            ), // 10 messages
-            (
-                format!(
-                    "{}_sum",
-                    build_component_metric_name(work_handler::REQUEST_DURATION_SECONDS)
-                ),
-                0.0001,
-                1.0,
-            ), // Processing time sum (wide range)
-        ];
-
-        println!("\n=== Checking Post-Activity All Metrics (NATS + Work Handler) ===");
-        for (metric_name, min_value, max_value) in &post_expected_metric_values {
-            let actual_value = final_parsed_metrics
-                .iter()
-                .find(|(name, _, _)| name == metric_name)
-                .map(|(_, _, value)| *value)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "Could not find expected post-activity metric: {}",
-                        metric_name
-                    )
-                });
-
-            assert!(
-                actual_value >= *min_value && actual_value <= *max_value,
-                "Post-activity metric {} should be between {} and {}, but got {}",
-                metric_name,
-                min_value,
-                max_value,
-                actual_value
-            );
-            println!(
-                "✓ {}: {} (range: {} to {})",
-                metric_name, actual_value, min_value, max_value
-            );
-        }
-
-        println!("✓ All NATS and component metrics parsed successfully!");
-        println!("✓ Byte metrics verified to be >= 100 bytes!");
-        println!("✓ Post-activity metrics verified with higher thresholds!");
-        println!("✓ Work handler metrics reflect increased activity!");
-
-        Ok(())
     }
 }

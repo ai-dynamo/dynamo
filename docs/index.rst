@@ -43,22 +43,28 @@ Quickstart
    Quickstart <self>
    Installation <_sections/installation>
    Support Matrix <reference/support-matrix.md>
-   Architecture <_sections/architecture>
    Examples <_sections/examples>
 
 .. toctree::
    :hidden:
    :caption: Kubernetes Deployment
 
-   Quickstart (K8s) <../kubernetes/README.md>
-   Detailed Installation Guide <../kubernetes/installation_guide.md>
-   Creating Deployments <../kubernetes/create_deployment.md>
-   API Reference <../kubernetes/api_reference.md>
-   Dynamo Operator <../kubernetes/dynamo_operator.md>
-   Metrics <../kubernetes/metrics.md>
-   Logging <../kubernetes/logging.md>
-   Multinode <../kubernetes/multinode-deployment.md>
-   Minikube Setup <../kubernetes/minikube.md>
+   Deployment Guide <_sections/k8s_deployment>
+   Observability (K8s) <_sections/k8s_observability>
+   Multinode <_sections/k8s_multinode>
+
+.. toctree::
+   :hidden:
+   :caption: User Guides
+
+   Tool Calling <agents/tool-calling.md>
+   Multimodality Support <multimodal/multimodal_intro.md>
+   Finding Best Initial Configs <performance/aiconfigurator.md>
+   Benchmarking <benchmarks/benchmarking.md>
+   Tuning Disaggregated Performance <performance/tuning.md>
+   Writing Python Workers in Dynamo <development/backend-guide.md>
+   Observability (Local) <_sections/observability>
+   Glossary <reference/glossary.md>
 
 .. toctree::
    :hidden:
@@ -71,13 +77,9 @@ Quickstart
 
 .. toctree::
    :hidden:
-   :caption: Developer Guide
+   :caption: Design Docs
 
-   Benchmarking Guide <benchmarks/benchmarking.md>
-   KV Router A/B Testing <benchmarks/kv-router-ab-testing.md>
-   SLA Planner (Autoscaling) Quickstart <planner/sla_planner_quickstart>
-   Logging <observability/logging.md>
-   Health Checks <observability/health-checks.md>
-   Tuning Disaggregated Serving Performance <performance/tuning.md>
-   Writing Python Workers in Dynamo <development/backend-guide.md>
-   Glossary <reference/glossary.md>
+   Overall Architecture <design_docs/architecture.md>
+   Architecture Flow <design_docs/dynamo_flow.md>
+   Disaggregated Serving <design_docs/disagg_serving.md>
+   Distributed Runtime <design_docs/distributed_runtime.md>

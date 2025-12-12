@@ -94,12 +94,13 @@ impl Backend {
         stream: ManyOut<ExecutionOutputStream>,
         prompt_token_ids: &[TokenIdType],
         stop_conditions: StopConditions,
+        skip_special_tokens: bool,
     ) -> anyhow::Result<DecoderUnfoldState> {
         let Some(tokenizer) = self.tokenizer.as_ref() else {
             anyhow::bail!("Backend built from blank ModelDeploymentCard, no tokenizer");
         };
         let decoder = Decoder::new(
-            tokenizer.decode_stream(prompt_token_ids, false),
+            tokenizer.decode_stream(prompt_token_ids, skip_special_tokens),
             stop_conditions,
         );
 
@@ -129,10 +130,18 @@ impl
 
         let prompt_token_ids = request.token_ids.clone();
 
+        // TODO: Consider updating default to true to match behavior of other frameworks
+        let skip_special_tokens = request.output_options.skip_special_tokens.unwrap_or(false);
+
         let next_stream = next.generate(request).await?;
 
         let context = next_stream.context();
-        let state = self.decoder(next_stream, &prompt_token_ids, stop_conditions)?;
+        let state = self.decoder(
+            next_stream,
+            &prompt_token_ids,
+            stop_conditions,
+            skip_special_tokens,
+        )?;
 
         let processed_stream = stream::unfold(state, |mut state| async move {
             match state.stream.next().await {
@@ -233,6 +242,8 @@ impl
                     finish_reason: data.finish_reason,
                     //mdcsum: mdcsum.clone(),
                     index: data.index,
+                    completion_usage: data.completion_usage,
+                    disaggregated_params: data.disaggregated_params,
                 })
             })
         });
@@ -457,11 +468,7 @@ impl Decoder {
                 }
             }
 
-            if self.jail.len() > self.jail_max_bytes {
-                // truncate the jail
-                let drain_len = self.jail.len() - self.jail_max_bytes;
-                self.jail.drain(0..drain_len);
-            }
+            Self::maybe_drain_to_max_bytes(&mut self.jail, self.jail_max_bytes);
         }
 
         Ok(StepResult::ok(token))
@@ -529,5 +536,29 @@ impl Decoder {
         } else {
             None
         }
+    }
+
+    fn maybe_drain_to_max_bytes(s: &mut String, max_bytes: usize) {
+        if s.len() > max_bytes {
+            let mut drain_len = s.len() - max_bytes;
+            while !s.is_char_boundary(drain_len) {
+                drain_len -= 1;
+            }
+            s.drain(0..drain_len);
+        }
+    }
+}
+
+mod tests {
+
+    #[test]
+    fn test_char_boundary_drain() {
+        use super::Decoder;
+        let mut s = String::from("helloñworld"); // 12 bytes total ñ is 2 bytes
+        let max_bytes = 6; // 12 - 6 = 6 which is inside ñ
+        assert!(!s.is_char_boundary(s.len() - max_bytes)); // initially we are not on a char boundary
+        Decoder::maybe_drain_to_max_bytes(&mut s, max_bytes);
+        assert!(s.is_char_boundary(0)); // front of jail string on valid char boundary
+        assert_eq!(s, "ñworld");
     }
 }

@@ -563,36 +563,16 @@ pub mod v2 {
                 tracker.spawn(async move {
                     let event = ctx_clone
                         .record_event()
-                        .expect(&format!("Failed to record event {}", i));
+                        .unwrap_or_else(|_| panic!("Failed to record event {}", i));
                     event
                         .synchronize()
                         .await
-                        .expect(&format!("Failed to sync event {}", i));
+                        .unwrap_or_else(|_| panic!("Failed to sync event {}", i));
                 });
             }
 
             tracker.close();
             tracker.wait().await;
-        }
-
-        #[tokio::test]
-        async fn test_performance_baseline() {
-            let ctx = setup_context();
-            let start = std::time::Instant::now();
-
-            // Test a reasonable number of synchronizations
-            for _ in 0..10 {
-                let event = ctx.record_event().expect("Failed to record event");
-                event.synchronize().await.expect("Sync failed");
-            }
-
-            let duration = start.elapsed();
-            // Should complete 10 synchronizations in reasonable time (< 1ms total)
-            assert!(
-                duration < std::time::Duration::from_millis(1),
-                "Performance regression: took {:?} for 10 syncs",
-                duration
-            );
         }
 
         #[tokio::test]

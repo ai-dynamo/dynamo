@@ -1,179 +1,145 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::pipeline::{
-    AddressedPushRouter, AddressedRequest, AsyncEngine, Data, ManyOut, PushRouter, RouterMode,
-    SingleIn,
-};
-use arc_swap::ArcSwap;
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::{collections::HashMap, time::Duration};
+
+use anyhow::Result;
+use arc_swap::ArcSwap;
+use futures::StreamExt;
 use tokio::net::unix::pipe::Receiver;
 
+use crate::discovery::{DiscoveryEvent, DiscoveryInstance};
 use crate::{
+    component::{Endpoint, Instance},
     pipeline::async_trait,
-    transports::etcd::{Client as EtcdClient, WatchEvent},
+    pipeline::{
+        AddressedPushRouter, AddressedRequest, AsyncEngine, Data, ManyOut, PushRouter, RouterMode,
+        SingleIn,
+    },
+    traits::DistributedRuntimeProvider,
+    transports::etcd::Client as EtcdClient,
 };
-
-use super::*;
-
-/// Each state will be have a nonce associated with it
-/// The state will be emitted in a watch channel, so we can observe the
-/// critical state transitions.
-enum MapState {
-    /// The map is empty; value = nonce
-    Empty(u64),
-
-    /// The map is not-empty; values are (nonce, count)
-    NonEmpty(u64, u64),
-
-    /// The watcher has finished, no more events will be emitted
-    Finished,
-}
-
-enum EndpointEvent {
-    Put(String, i64),
-    Delete(String),
-}
 
 #[derive(Clone, Debug)]
 pub struct Client {
     // This is me
     pub endpoint: Endpoint,
-    // These are the remotes I know about from watching etcd
-    pub instance_source: Arc<InstanceSource>,
+    // These are the remotes I know about from watching key-value store
+    pub instance_source: Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
     // These are the instance source ids less those reported as down from sending rpc
-    instance_avail: Arc<ArcSwap<Vec<i64>>>,
+    instance_avail: Arc<ArcSwap<Vec<u64>>>,
     // These are the instance source ids less those reported as busy (above threshold)
-    instance_free: Arc<ArcSwap<Vec<i64>>>,
-}
-
-#[derive(Clone, Debug)]
-pub enum InstanceSource {
-    Static,
-    Dynamic(tokio::sync::watch::Receiver<Vec<Instance>>),
+    instance_free: Arc<ArcSwap<Vec<u64>>>,
+    // Watch sender for available instance IDs (for sending updates)
+    instance_avail_tx: Arc<tokio::sync::watch::Sender<Vec<u64>>>,
+    // Watch receiver for available instance IDs (for cloning to external subscribers)
+    instance_avail_rx: tokio::sync::watch::Receiver<Vec<u64>>,
 }
 
 impl Client {
-    // Client will only talk to a single static endpoint
-    pub(crate) async fn new_static(endpoint: Endpoint) -> Result<Self> {
-        Ok(Client {
-            endpoint,
-            instance_source: Arc::new(InstanceSource::Static),
-            instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
-            instance_free: Arc::new(ArcSwap::from(Arc::new(vec![]))),
-        })
-    }
+    // Client with auto-discover instances using key-value store
+    pub(crate) async fn new(endpoint: Endpoint) -> Result<Self> {
+        tracing::trace!(
+            "Client::new_dynamic: Creating dynamic client for endpoint: {}",
+            endpoint.id()
+        );
+        let instance_source = Self::get_or_create_dynamic_instance_source(&endpoint).await?;
 
-    // Client with auto-discover instances using etcd
-    pub(crate) async fn new_dynamic(endpoint: Endpoint) -> Result<Self> {
-        const INSTANCE_REFRESH_PERIOD: Duration = Duration::from_secs(1);
-
-        // create live endpoint watcher
-        let Some(etcd_client) = &endpoint.component.drt.etcd_client else {
-            anyhow::bail!("Attempt to create a dynamic client on a static endpoint");
-        };
-
-        let instance_source =
-            Self::get_or_create_dynamic_instance_source(etcd_client, &endpoint).await?;
-
+        let (avail_tx, avail_rx) = tokio::sync::watch::channel(vec![]);
         let client = Client {
-            endpoint,
+            endpoint: endpoint.clone(),
             instance_source: instance_source.clone(),
             instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
             instance_free: Arc::new(ArcSwap::from(Arc::new(vec![]))),
+            instance_avail_tx: Arc::new(avail_tx),
+            instance_avail_rx: avail_rx,
         };
         client.monitor_instance_source();
         Ok(client)
     }
 
-    pub fn path(&self) -> String {
-        self.endpoint.path()
-    }
-
-    /// The root etcd path we watch in etcd to discover new instances to route to.
-    pub fn etcd_root(&self) -> String {
-        self.endpoint.etcd_root()
-    }
-
-    /// Instances available from watching etcd
+    /// Instances available from watching key-value store
     pub fn instances(&self) -> Vec<Instance> {
-        match self.instance_source.as_ref() {
-            InstanceSource::Static => vec![],
-            InstanceSource::Dynamic(watch_rx) => watch_rx.borrow().clone(),
-        }
+        self.instance_source.borrow().clone()
     }
 
-    pub fn instance_ids(&self) -> Vec<i64> {
+    pub fn instance_ids(&self) -> Vec<u64> {
         self.instances().into_iter().map(|ep| ep.id()).collect()
     }
 
-    pub fn instance_ids_avail(&self) -> arc_swap::Guard<Arc<Vec<i64>>> {
+    pub fn instance_ids_avail(&self) -> arc_swap::Guard<Arc<Vec<u64>>> {
         self.instance_avail.load()
     }
 
-    pub fn instance_ids_free(&self) -> arc_swap::Guard<Arc<Vec<i64>>> {
+    pub fn instance_ids_free(&self) -> arc_swap::Guard<Arc<Vec<u64>>> {
         self.instance_free.load()
+    }
+
+    /// Get a watcher for available instance IDs
+    pub fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
+        self.instance_avail_rx.clone()
     }
 
     /// Wait for at least one Instance to be available for this Endpoint
     pub async fn wait_for_instances(&self) -> Result<Vec<Instance>> {
-        let mut instances: Vec<Instance> = vec![];
-        if let InstanceSource::Dynamic(mut rx) = self.instance_source.as_ref().clone() {
-            // wait for there to be 1 or more endpoints
-            loop {
-                instances = rx.borrow_and_update().to_vec();
-                if instances.is_empty() {
-                    rx.changed().await?;
-                } else {
-                    break;
-                }
+        tracing::trace!(
+            "wait_for_instances: Starting wait for endpoint: {}",
+            self.endpoint.id()
+        );
+        let mut rx = self.instance_source.as_ref().clone();
+        // wait for there to be 1 or more endpoints
+        let mut instances: Vec<Instance>;
+        loop {
+            instances = rx.borrow_and_update().to_vec();
+            if instances.is_empty() {
+                rx.changed().await?;
+            } else {
+                tracing::info!(
+                    "wait_for_instances: Found {} instance(s) for endpoint: {}",
+                    instances.len(),
+                    self.endpoint.id()
+                );
+                break;
             }
         }
         Ok(instances)
     }
 
-    /// Is this component know at startup and not discovered via etcd?
-    pub fn is_static(&self) -> bool {
-        matches!(self.instance_source.as_ref(), InstanceSource::Static)
-    }
-
     /// Mark an instance as down/unavailable
-    pub fn report_instance_down(&self, instance_id: i64) {
+    pub fn report_instance_down(&self, instance_id: u64) {
         let filtered = self
             .instance_ids_avail()
             .iter()
             .filter_map(|&id| if id == instance_id { None } else { Some(id) })
             .collect::<Vec<_>>();
-        self.instance_avail.store(Arc::new(filtered));
+        self.instance_avail.store(Arc::new(filtered.clone()));
+
+        // Notify watch channel subscribers about the change
+        let _ = self.instance_avail_tx.send(filtered);
 
         tracing::debug!("inhibiting instance {instance_id}");
     }
 
     /// Update the set of free instances based on busy instance IDs
-    pub fn update_free_instances(&self, busy_instance_ids: &[i64]) {
+    pub fn update_free_instances(&self, busy_instance_ids: &[u64]) {
         let all_instance_ids = self.instance_ids();
-        let free_ids: Vec<i64> = all_instance_ids
+        let free_ids: Vec<u64> = all_instance_ids
             .into_iter()
             .filter(|id| !busy_instance_ids.contains(id))
             .collect();
         self.instance_free.store(Arc::new(free_ids));
     }
 
-    /// Monitor the ETCD instance source and update instance_avail.
+    /// Monitor the key-value instance source and update instance_avail.
     fn monitor_instance_source(&self) {
         let cancel_token = self.endpoint.drt().primary_token();
         let client = self.clone();
+        let endpoint_id = self.endpoint.id();
         tokio::task::spawn(async move {
-            let mut rx = match client.instance_source.as_ref() {
-                InstanceSource::Static => {
-                    tracing::error!("Static instance source is not watchable");
-                    return;
-                }
-                InstanceSource::Dynamic(rx) => rx.clone(),
-            };
+            let mut rx = client.instance_source.as_ref().clone();
             while !cancel_token.is_cancelled() {
-                let instance_ids: Vec<i64> = rx
+                let instance_ids: Vec<u64> = rx
                     .borrow_and_update()
                     .iter()
                     .map(|instance| instance.id())
@@ -181,12 +147,15 @@ impl Client {
 
                 // TODO: this resets both tracked available and free instances
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
-                client.instance_free.store(Arc::new(instance_ids));
+                client.instance_free.store(Arc::new(instance_ids.clone()));
 
-                tracing::debug!("instance source updated");
+                // Send update to watch channel subscribers
+                let _ = client.instance_avail_tx.send(instance_ids);
 
                 if let Err(err) = rx.changed().await {
-                    tracing::error!("The Sender is dropped: {}", err);
+                    tracing::error!(
+                        "monitor_instance_source: The Sender is dropped: {err}, endpoint={endpoint_id}",
+                    );
                     cancel_token.cancel();
                 }
             }
@@ -194,9 +163,8 @@ impl Client {
     }
 
     async fn get_or_create_dynamic_instance_source(
-        etcd_client: &EtcdClient,
         endpoint: &Endpoint,
-    ) -> Result<Arc<InstanceSource>> {
+    ) -> Result<Arc<tokio::sync::watch::Receiver<Vec<Instance>>>> {
         let drt = endpoint.drt();
         let instance_sources = drt.instance_sources();
         let mut instance_sources = instance_sources.lock().await;
@@ -209,76 +177,66 @@ impl Client {
             }
         }
 
-        let prefix_watcher = etcd_client
-            .kv_get_and_watch_prefix(endpoint.etcd_root())
+        let discovery = drt.discovery();
+        let discovery_query = crate::discovery::DiscoveryQuery::Endpoint {
+            namespace: endpoint.component.namespace.name.clone(),
+            component: endpoint.component.name.clone(),
+            endpoint: endpoint.name.clone(),
+        };
+
+        let mut discovery_stream = discovery
+            .list_and_watch(discovery_query.clone(), None)
             .await?;
-
-        let (prefix, _watcher, mut kv_event_rx) = prefix_watcher.dissolve();
-
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
 
-        let secondary = endpoint.component.drt.runtime.secondary().clone();
+        let secondary = endpoint.component.drt.runtime().secondary().clone();
 
-        // this task should be included in the registry
-        // currently this is created once per client, but this object/task should only be instantiated
-        // once per worker/instance
         secondary.spawn(async move {
-            tracing::debug!("Starting endpoint watcher for prefix: {}", prefix);
-            let mut map = HashMap::new();
+            tracing::trace!("endpoint_watcher: Starting for discovery query: {:?}", discovery_query);
+            let mut map: HashMap<u64, Instance> = HashMap::new();
 
             loop {
-                let kv_event = tokio::select! {
+                let discovery_event = tokio::select! {
                     _ = watch_tx.closed() => {
-                        tracing::debug!("all watchers have closed; shutting down endpoint watcher for prefix: {prefix}");
                         break;
                     }
-                    kv_event = kv_event_rx.recv() => {
-                        match kv_event {
-                            Some(kv_event) => kv_event,
+                    discovery_event = discovery_stream.next() => {
+                        match discovery_event {
+                            Some(Ok(event)) => {
+                                event
+                            },
+                            Some(Err(e)) => {
+                                tracing::error!("endpoint_watcher: discovery stream error: {}; shutting down for discovery query: {:?}", e, discovery_query);
+                                break;
+                            }
                             None => {
-                                tracing::debug!("watch stream has closed; shutting down endpoint watcher for prefix: {prefix}");
                                 break;
                             }
                         }
                     }
                 };
 
-                match kv_event {
-                    WatchEvent::Put(kv) => {
-                        let key = String::from_utf8(kv.key().to_vec());
-                        let val = serde_json::from_slice::<Instance>(kv.value());
-                        if let (Ok(key), Ok(val)) = (key, val) {
-                            map.insert(key.clone(), val);
-                        } else {
-                            tracing::error!("Unable to parse put endpoint event; shutting down endpoint watcher for prefix: {prefix}");
-                            break;
+                match discovery_event {
+                    DiscoveryEvent::Added(discovery_instance) => {
+                        if let DiscoveryInstance::Endpoint(instance) = discovery_instance {
+
+                                map.insert(instance.instance_id, instance);
                         }
                     }
-                    WatchEvent::Delete(kv) => {
-                        match String::from_utf8(kv.key().to_vec()) {
-                            Ok(key) => { map.remove(&key); }
-                            Err(_) => {
-                                tracing::error!("Unable to parse delete endpoint event; shutting down endpoint watcher for prefix: {}", prefix);
-                                break;
-                            }
-                        }
+                    DiscoveryEvent::Removed(instance_id) => {
+                        map.remove(&instance_id);
                     }
                 }
 
                 let instances: Vec<Instance> = map.values().cloned().collect();
-
                 if watch_tx.send(instances).is_err() {
-                    tracing::debug!("Unable to send watch updates; shutting down endpoint watcher for prefix: {}", prefix);
                     break;
                 }
-
             }
-
-            tracing::debug!("Completed endpoint watcher for prefix: {prefix}");
             let _ = watch_tx.send(vec![]);
         });
 
-        let instance_source = Arc::new(InstanceSource::Dynamic(watch_rx));
+        let instance_source = Arc::new(watch_rx);
         instance_sources.insert(endpoint.clone(), Arc::downgrade(&instance_source));
         Ok(instance_source)
     }

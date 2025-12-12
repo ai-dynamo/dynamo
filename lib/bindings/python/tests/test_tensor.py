@@ -5,18 +5,18 @@
 
 import os
 
+import pytest
 import uvloop
 
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime
 
 TEST_END_TO_END = os.environ.get("TEST_END_TO_END", 0)
 
 
-@dynamo_worker(static=False)
+@pytest.mark.asyncio
 async def test_register(runtime: DistributedRuntime):
     component = runtime.namespace("test").component("tensor")
-    await component.create_service()
 
     endpoint = component.endpoint("generate")
 
@@ -34,15 +34,12 @@ async def test_register(runtime: DistributedRuntime):
 
     assert model_config == runtime_config.get_tensor_model_config()
 
-    # [gluo FIXME] register_llm will attempt to load a LLM model,
-    # which is not well-defined for Tensor yet. Currently provide
-    # a valid model name to pass the registration.
+    # Use register_llm for tensor-based backends (skips HuggingFace downloads)
     await register_llm(
         ModelInput.Tensor,
         ModelType.TensorBased,
         endpoint,
-        "Qwen/Qwen3-0.6B",
-        "tensor",
+        "tensor",  # model_path (used as display name for tensor-based models)
         runtime_config=runtime_config,
     )
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::Error;
+use anyhow::Error;
 
 impl<Req: PipelineIO, Resp: PipelineIO> ServiceBackend<Req, Resp> {
     pub fn from_engine(engine: ServiceEngine<Req, Resp>) -> Arc<Self> {

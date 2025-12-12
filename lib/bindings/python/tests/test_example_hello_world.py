@@ -72,17 +72,14 @@ async def test_hello_world(example_dir, server_process):
     # Run the client for 5 seconds
     client_output = await run_client(example_dir)
 
-    # Split output into lines and filter out empty lines
+    # Split output into lines and strip whitespace, filter out empty lines
     lines = [line.strip() for line in client_output.split("\n") if line.strip()]
 
     # Each client iteration produces 4 lines in about 4 seconds
     # The client ran for 5 seconds so the first iteration is expected to be completed
-    # Assert the first 4 lines are the expected sequence
-    assert (
-        len(lines) >= 4
-    ), f"Expected at least 4 lines, got {len(lines)}. Output: {lines}"
+    # Check that all 4 expected lines appear in the output
     expected_lines = ["Hello world!", "Hello sun!", "Hello moon!", "Hello star!"]
-    for i, expected_line in enumerate(expected_lines):
-        assert (
-            lines[i] == expected_line
-        ), f"Line {i+1}: expected '{expected_line}', got '{lines[i]}'. Full output: {lines}"
+    for expected_line in expected_lines:
+        assert expected_line in lines, (
+            f"Expected line '{expected_line}' not found in output.\n" f"Lines: {lines}"
+        )

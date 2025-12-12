@@ -26,7 +26,7 @@ across backends.
 
 */
 
-use dynamo_async_openai::types::ChatChoiceStream;
+use dynamo_async_openai::types::{ChatChoiceStream, FinishReason};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_runtime::protocols::annotated::Annotated;
@@ -108,6 +108,7 @@ fn load_test_data(file_path: &str) -> TestData {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
                 service_tier: None,
+                nvext: None,
             };
 
             Annotated {
@@ -157,7 +158,8 @@ async fn parse_response_stream(
     > = if tool_parse_enable {
         if let Some(tool_parser) = tool_parser_str {
             Box::pin(OpenAIPreprocessor::apply_tool_calling_jail(
-                tool_parser,
+                Some(tool_parser),
+                None, // No tool_choice in this test
                 stream,
             ))
         } else {
@@ -251,6 +253,71 @@ fn aggregate_content_from_chunks(
     }
 }
 
+/// Helper function to validate finish_reason in the stream
+/// Returns true if:
+/// 1. There is exactly one finish_reason in the entire stream
+/// 2. The finish_reason is in the last chunk
+/// 3. The finish_reason matches the expected value
+fn validate_finish_reason(
+    chunks: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    expected_finish_reason: FinishReason,
+) -> bool {
+    let mut finish_reason_count = 0;
+    let mut last_chunk_index = None;
+    let mut finish_reason_value = None;
+
+    // Count finish_reason occurrences and track position
+    for (idx, chunk) in chunks.iter().enumerate() {
+        if let Some(ref response_data) = chunk.data {
+            for choice in &response_data.choices {
+                if let Some(reason) = choice.finish_reason {
+                    finish_reason_count += 1;
+                    last_chunk_index = Some(idx);
+                    finish_reason_value = Some(reason);
+                }
+            }
+        }
+    }
+
+    // Validate:
+    // 1. Exactly one finish_reason in the stream
+    if finish_reason_count != 1 {
+        eprintln!(
+            "Expected exactly 1 finish_reason, but found {}",
+            finish_reason_count
+        );
+        return false;
+    }
+
+    // 2. finish_reason is in the last chunk
+    if let Some(idx) = last_chunk_index {
+        if idx != chunks.len() - 1 {
+            eprintln!(
+                "Expected finish_reason in last chunk (index {}), but found at index {}",
+                chunks.len() - 1,
+                idx
+            );
+            return false;
+        }
+    } else {
+        eprintln!("No finish_reason found in stream");
+        return false;
+    }
+
+    // 3. finish_reason matches expected value
+    if let Some(reason) = finish_reason_value
+        && reason != expected_finish_reason
+    {
+        eprintln!(
+            "Expected finish_reason {:?}, but found {:?}",
+            expected_finish_reason, reason
+        );
+        return false;
+    }
+
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +370,12 @@ mod tests {
         assert_eq!(
             aggregated.has_tool_calls, expected_has_tool_calls,
             "Tool calls presence should match expected value"
+        );
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is Stop
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason validation failed for non-tool call case"
         );
     }
 
@@ -360,6 +433,12 @@ mod tests {
 
         // Verify tool calls
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is ToolCalls
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for tool call case"
+        );
     }
 
     #[tokio::test]
@@ -402,6 +481,12 @@ mod tests {
         assert_eq!(
             aggregated.has_tool_calls, expected_has_tool_calls,
             "Tool calls presence should match expected value"
+        );
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is Stop
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason validation failed for non-tool call case"
         );
     }
 
@@ -455,6 +540,12 @@ mod tests {
 
         // Verify tool calls
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is ToolCalls
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for tool call case"
+        );
     }
 
     #[tokio::test]
@@ -511,6 +602,12 @@ mod tests {
         );
 
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is Stop
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason validation failed for non-tool call case"
+        );
     }
 
     #[tokio::test]
@@ -567,6 +664,12 @@ mod tests {
         );
 
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is ToolCalls
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for tool call case"
+        );
     }
 
     #[tokio::test]
@@ -620,6 +723,12 @@ mod tests {
         );
 
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is Stop
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason validation failed for non-tool call case"
+        );
     }
 
     #[tokio::test]
@@ -674,6 +783,12 @@ mod tests {
             "Tool calls presence should match expected value"
         );
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is ToolCalls
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for tool call case"
+        );
     }
 
     #[tokio::test]
@@ -726,5 +841,256 @@ mod tests {
 
         // Verify tool calls
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is ToolCalls
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for tool call case"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_qwen_finish_reason_length_vllm() {
+        let file_paths = vec![
+            format!(
+                "{}/vllm/qwen3-0.6B/chat_completion_stream_finish_length.json",
+                DATA_ROOT_PATH
+            ),
+            format!(
+                "{}/vllm/qwen3-0.6B/chat_completion_incomplete_tool.json",
+                DATA_ROOT_PATH
+            ),
+        ];
+
+        for file_path in file_paths {
+            let test_data = load_test_data(&file_path);
+
+            // Create a stream from the mock chunks
+            let input_stream = stream::iter(test_data.stream_chunks);
+
+            // Parse the response stream with tool parsing enabled
+            let output_chunks =
+                parse_response_stream(input_stream, true, false, Some("hermes".to_string()), None)
+                    .await;
+
+            // Verify we got output chunks
+            assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+            // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is Length
+            assert!(
+                validate_finish_reason(&output_chunks, FinishReason::Length),
+                "finish_reason validation failed for length finish case"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_e2e_with_tools_vllm() {
+        // E2E Parsing test for DeepSeek V3 with tools.
+        let file_path = format!(
+            "{}/vllm/deepseek-v3/chat_completion_stream_tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+
+        // Create a stream from the mock chunks
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        // Parse the response stream with reasoning and tool parsing enabled
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("deepseek_v3".to_string()),
+            Some("deepseek_v3".to_string()),
+        )
+        .await;
+
+        // Verify we got output chunks
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        // Aggregate content from output chunks
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        // Assert reasoning content was parsed
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+
+        // Verify tool calls match expectations
+        let expected_has_tool_calls = !test_data.expected_tool_calls.is_empty();
+        assert_eq!(
+            aggregated.has_tool_calls, expected_has_tool_calls,
+            "Tool calls presence should match expected value"
+        );
+
+        // Verify tool calls
+        assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is ToolCalls
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for tool call case"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_1_e2e_with_tools_vllm() {
+        // E2E Parsing test for DeepSeek V3.1 with tools.
+        let file_path = format!(
+            "{}/vllm/deepseek-v3.1/chat_completion_stream_tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+
+        // Create a stream from the mock chunks
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        // Parse the response stream with reasoning and tool parsing enabled
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("deepseek_v3_1".to_string()),
+            Some("deepseek_v3_1".to_string()),
+        )
+        .await;
+
+        // Verify we got output chunks
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        // Aggregate content from output chunks
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        // Assert reasoning content was parsed
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+
+        // Verify tool calls match expectations
+        let expected_has_tool_calls = !test_data.expected_tool_calls.is_empty();
+        assert_eq!(
+            aggregated.has_tool_calls, expected_has_tool_calls,
+            "Tool calls presence should match expected value"
+        );
+
+        // Verify tool calls
+        assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is ToolCalls
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for tool call case"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_e2e_with_no_tools_vllm() {
+        // E2E Parsing test for DeepSeek V3 without tools.
+        let file_path = format!(
+            "{}/vllm/deepseek-v3/chat_completion_stream_no_tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+
+        // Create a stream from the mock chunks
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        // Parse the response stream with reasoning and tool parsing enabled
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("deepseek_v3".to_string()),
+            Some("deepseek_v3".to_string()),
+        )
+        .await;
+
+        // Verify we got output chunks
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        // Aggregate content from output chunks
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        // Assert reasoning content was parsed
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+
+        // Verify no tool calls
+        assert!(!aggregated.has_tool_calls, "Should not have any tool calls");
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is Stop
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason validation failed for non-tool call case"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_1_e2e_with_no_tools_vllm() {
+        // E2E Parsing test for DeepSeek V3.1 without tools.
+        let file_path = format!(
+            "{}/vllm/deepseek-v3.1/chat_completion_stream_no_tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+
+        // Create a stream from the mock chunks
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        // Parse the response stream with reasoning and tool parsing enabled
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("deepseek_v3_1".to_string()),
+            Some("deepseek_v3_1".to_string()),
+        )
+        .await;
+
+        // Verify we got output chunks
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        // Aggregate content from output chunks
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        // Assert reasoning content was parsed
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+
+        // Verify no tool calls
+        assert!(!aggregated.has_tool_calls, "Should not have any tool calls");
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is Stop
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason validation failed for non-tool call case"
+        );
     }
 }

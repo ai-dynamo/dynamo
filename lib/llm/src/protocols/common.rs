@@ -22,6 +22,7 @@ use super::TokenIdType;
 pub mod llm_backend;
 pub mod postprocessor;
 pub mod preprocessor;
+pub mod timing;
 
 /// SamplingOptionsProvider is a trait that allows the caller to extract the sampling options from
 /// the object that implements it. This will mutate the object.
@@ -254,7 +255,6 @@ pub struct StopConditions {
 impl StopConditions {
     pub fn apply_ignore_eos(&mut self) {
         if self.ignore_eos.unwrap_or(false) {
-            self.min_tokens = self.max_tokens;
             self.stop = None;
             self.stop_token_ids_hidden = None;
         }
@@ -473,8 +473,6 @@ pub struct OutputOptions {
     pub prompt_logprobs: Option<u32>,
 
     /// Whether to skip special tokens in the output.
-    /// spaces_between_special_tokens: Whether to add spaces between special
-    /// tokens in the output.  Defaults to True.
     pub skip_special_tokens: Option<bool>,
 
     /// If true, the Context object will contain the prompt that was pass to
