@@ -12,7 +12,10 @@ use std::fs;
 /// Global cached topology
 static TOPOLOGY: std::sync::OnceLock<Result<NumaTopology, String>> = std::sync::OnceLock::new();
 
-/// Represents the CPU topology for NUMA nodes
+/// Represents the CPU topology for NUMA nodes.
+///
+/// This struct provides bidirectional lookup between NUMA nodes and CPUs,
+/// read from the Linux sysfs interface at `/sys/devices/system/node/`.
 pub struct NumaTopology {
     /// Maps NUMA node ID -> list of CPU IDs
     node_to_cpus: HashMap<u32, Vec<usize>>,
@@ -21,12 +24,13 @@ pub struct NumaTopology {
 }
 
 impl NumaTopology {
-    /// Read NUMA topology from sysfs
+    /// Read NUMA topology from sysfs.
+    ///
+    /// Parses `/sys/devices/system/node/node*/cpulist` to build the CPU-to-NUMA mapping.
     pub fn from_sysfs() -> Result<Self, String> {
         let mut node_to_cpus: HashMap<u32, Vec<usize>> = HashMap::new();
         let mut cpu_to_node: HashMap<usize, u32> = HashMap::new();
 
-        // TODO: Read /sys/devices/system/node directory
         let node_dir = std::path::Path::new("/sys/devices/system/node");
         if !node_dir.exists() {
             return Err("Node directory not found".to_string());
@@ -75,32 +79,33 @@ impl NumaTopology {
         })
     }
 
-    /// Get all CPUs for a NUMA node
+    /// Get all CPUs for a NUMA node.
     pub fn cpus_for_node(&self, node_id: u32) -> Option<&[usize]> {
         self.node_to_cpus.get(&node_id).map(|v| v.as_slice())
     }
 
-    /// Get NUMA node for a CPU
+    /// Get NUMA node for a CPU.
     pub fn node_for_cpu(&self, cpu_id: usize) -> Option<u32> {
         self.cpu_to_node.get(&cpu_id).copied()
     }
 
-    /// Get number of NUMA nodes
+    /// Get number of NUMA nodes.
     pub fn num_nodes(&self) -> usize {
         self.node_to_cpus.len()
     }
 
-    /// Check if single-node system
+    /// Check if single-node system.
     pub fn is_single_node(&self) -> bool {
         self.num_nodes() == 1
     }
 }
 
-/// Parse Linux cpulist format
-/// Examples:
-///   "0-15"        -> [0,1,2,...,15]
-///   "0,4,8"       -> [0,4,8]
-///   "0-3,8-11"    -> [0,1,2,3,8,9,10,11]
+/// Parse Linux cpulist format.
+///
+/// # Examples
+/// - `"0-15"` -> `[0,1,2,...,15]`
+/// - `"0,4,8"` -> `[0,4,8]`
+/// - `"0-3,8-11"` -> `[0,1,2,3,8,9,10,11]`
 fn parse_cpulist(cpulist: &str) -> Result<Vec<usize>, String> {
     let mut cpus = Vec::new();
 
@@ -137,7 +142,7 @@ fn parse_cpulist(cpulist: &str) -> Result<Vec<usize>, String> {
     Ok(cpus)
 }
 
-/// Get the global NUMA topology (cached after first call)
+/// Get the global NUMA topology (cached after first call).
 ///
 /// Returns an error if NUMA topology cannot be read from sysfs. This indicates either:
 /// - System doesn't support NUMA
@@ -270,3 +275,4 @@ mod tests {
         assert_eq!(topology.node_for_cpu(999), None);
     }
 }
+

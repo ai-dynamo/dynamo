@@ -1,141 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod topology;
-pub mod worker_pool;
+//! NUMA-aware memory allocation utilities.
+//!
+//! This module re-exports the NUMA utilities from `dynamo-memory` for use in the block manager.
+//! See [`dynamo_memory::numa`] for full documentation.
 
-use nix::libc;
-use serde::{Deserialize, Serialize};
-use std::{mem, process::Command};
-
-/// Check if NUMA optimization is enabled via environment variable
-///
-/// Set `DYN_KVBM_ENABLE_NUMA=1` to enable NUMA-aware allocation.
-/// Default: disabled (opt-in)
-pub fn is_numa_enabled() -> bool {
-    std::env::var("DYN_KVBM_ENABLE_NUMA")
-        .map(|v| v == "1" || v.to_lowercase() == "true")
-        .unwrap_or(false)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct NumaNode(pub u32);
-
-impl NumaNode {
-    pub const UNKNOWN: NumaNode = NumaNode(u32::MAX);
-
-    pub fn is_unknown(&self) -> bool {
-        self.0 == u32::MAX
-    }
-}
-
-impl std::fmt::Display for NumaNode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.is_unknown() {
-            write!(f, "UNKNOWN")
-        } else {
-            write!(f, "NumaNode({})", self.0)
-        }
-    }
-}
-
-/// Get the current CPU's NUMA node
-///
-/// Uses the Linux `getcpu` syscall to determine which NUMA node the current CPU belongs to.
-/// Returns `NumaNode::UNKNOWN` if the syscall fails.
-pub fn get_current_cpu_numa_node() -> NumaNode {
-    unsafe {
-        let mut cpu: libc::c_uint = 0;
-        let mut node: libc::c_uint = 0;
-
-        // getcpu syscall: int getcpu(unsigned *cpu, unsigned *node, struct getcpu_cache *tcache);
-        let result = libc::syscall(
-            libc::SYS_getcpu,
-            &mut cpu,
-            &mut node,
-            std::ptr::null_mut::<libc::c_void>(),
-        );
-        if result == 0 {
-            NumaNode(node)
-        } else {
-            NumaNode::UNKNOWN
-        }
-    }
-}
-
-/// Get NUMA node for device (GPU) memory
-///
-/// For GPU memory, the NUMA affinity depends on which PCIe bus the GPU is attached to.
-/// This can be queried via nvidia-smi.
-pub fn get_device_numa_node(device_id: u32) -> NumaNode {
-    // Use nvidia-smi topo to get NUMA ID of nearest CPU
-    // This directly returns the NUMA node
-    let output = match Command::new("nvidia-smi")
-        .args([
-            "topo",
-            "--get-numa-id-of-nearby-cpu",
-            "-i",
-            &device_id.to_string(),
-        ])
-        .output()
-    {
-        Ok(out) if out.status.success() => out,
-        _ => {
-            tracing::warn!("nvidia-smi failed for GPU {}, using heuristic", device_id);
-            return NumaNode(device_id % 2);
-        }
-    };
-
-    if let Ok(stdout) = std::str::from_utf8(&output.stdout)
-        && let Some(line) = stdout.lines().next()
-        && let Some(numa_str) = line.split(':').nth(1)
-        && let Ok(node) = numa_str.trim().parse::<u32>()
-    {
-        tracing::trace!("GPU {} on NUMA node {}", device_id, node);
-        return NumaNode(node);
-    }
-    tracing::warn!("Failed to get NUMA node for GPU {}", device_id);
-    NumaNode::UNKNOWN
-}
-
-/// Pin the current thread to a specific NUMA node's CPUs
-///
-/// This sets the CPU affinity for the calling thread to only run on CPUs
-/// belonging to the specified NUMA node. This is critical for ensuring
-/// that memory allocations follow the first-touch policy on the correct node.
-pub fn pin_thread_to_numa_node(node: NumaNode) -> Result<(), String> {
-    let topology =
-        topology::get_numa_topology().map_err(|e| format!("Can not get NUMA topology: {}", e))?;
-
-    let cpus = topology
-        .cpus_for_node(node.0)
-        .ok_or_else(|| format!("No CPUs found for NUMA node {}", node.0))?;
-
-    if cpus.is_empty() {
-        return Err(format!("No CPUs found for NUMA node {}", node.0));
-    }
-
-    unsafe {
-        let mut cpu_set: libc::cpu_set_t = mem::zeroed();
-
-        for cpu in cpus {
-            libc::CPU_SET(*cpu, &mut cpu_set);
-        }
-
-        let result = libc::sched_setaffinity(
-            0, // current thread
-            mem::size_of::<libc::cpu_set_t>(),
-            &cpu_set,
-        );
-
-        if result != 0 {
-            let err = std::io::Error::last_os_error();
-            return Err(format!("Failed to set CPU affinity: {}", err));
-        }
-    }
-
-    Ok(())
-}
+// Re-export everything from dynamo-memory's numa module
+pub use dynamo_memory::numa::topology;
+pub use dynamo_memory::numa::worker_pool;
+pub use dynamo_memory::numa::{
+    NumaNode, get_current_cpu_numa_node, get_device_numa_node, is_numa_enabled,
+    pin_thread_to_numa_node,
+};
 
 #[cfg(test)]
 mod tests {

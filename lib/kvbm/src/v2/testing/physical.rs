@@ -131,7 +131,7 @@ pub fn create_fc_layout_with_config(
 
     match storage_kind {
         StorageKind::System => builder.allocate_system().build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(false).build().unwrap(),
+        StorageKind::Pinned => builder.allocate_pinned(None).build().unwrap(),
         StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
     }
@@ -158,7 +158,7 @@ pub fn create_lw_layout_with_config(
 
     match storage_kind {
         StorageKind::System => builder.allocate_system().build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(false).build().unwrap(),
+        StorageKind::Pinned => builder.allocate_pinned(None).build().unwrap(),
         StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
     }

@@ -212,7 +212,7 @@ impl Worker {
             }
             (LayoutType::FullyContiguous, MemoryType::Pinned) => builder
                 .fully_contiguous()
-                .allocate_pinned(false) // not numa-aware by default
+                .allocate_pinned(Some(rank as u32))
                 .build(),
             (LayoutType::FullyContiguous, MemoryType::Device) => builder
                 .fully_contiguous()
@@ -232,7 +232,7 @@ impl Worker {
                 .build(),
             (LayoutType::LayerSeparate, MemoryType::Pinned) => builder
                 .layer_separate(BlockDimension::BlockIsFirstDim)
-                .allocate_pinned(false) // not numa-aware by default
+                .allocate_pinned(Some(rank as u32))
                 .build(),
             (LayoutType::LayerSeparate, MemoryType::Device) => builder
                 .layer_separate(BlockDimension::BlockIsFirstDim)

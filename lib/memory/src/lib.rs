@@ -12,6 +12,7 @@
 pub mod actions;
 pub mod arena;
 pub mod nixl;
+pub mod numa;
 pub mod offset;
 pub mod prelude;
 
@@ -29,6 +30,7 @@ pub use arena::{ArenaAllocator, ArenaBuffer, ArenaError};
 pub use device::DeviceStorage;
 pub use disk::DiskStorage;
 pub use external::ExternalDeviceMemory;
+pub use numa::{is_numa_enabled, NumaNode};
 pub use offset::OffsetBuffer;
 pub use pinned::PinnedStorage;
 pub use system::SystemStorage;

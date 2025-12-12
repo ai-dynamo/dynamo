@@ -221,7 +221,7 @@ impl PendingWorkerState {
         let host_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
             .with_config(host_layout)
             .fully_contiguous()
-            .allocate_pinned(false) // numa_aware=false
+            .allocate_pinned(Some(self.cuda_device_id as u32))
             .build()?;
 
         let g2_handle = transfer_manager.register_layout(host_layout)?;

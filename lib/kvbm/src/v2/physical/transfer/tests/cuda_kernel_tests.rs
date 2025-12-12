@@ -27,7 +27,7 @@ fn create_fc_layout(agent: NixlAgent, storage: StorageKind) -> PhysicalLayout {
 
     match storage {
         StorageKind::Device(id) => builder.allocate_device(id).build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(false).build().unwrap(),
+        StorageKind::Pinned => builder.allocate_pinned(None).build().unwrap(),
         _ => panic!("Unsupported storage kind"),
     }
 }
@@ -50,7 +50,7 @@ fn create_lw_layout(agent: NixlAgent, storage: StorageKind) -> PhysicalLayout {
 
     match storage {
         StorageKind::Device(id) => builder.allocate_device(id).build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(false).build().unwrap(),
+        StorageKind::Pinned => builder.allocate_pinned(None).build().unwrap(),
         _ => panic!("Unsupported storage kind"),
     }
 }
