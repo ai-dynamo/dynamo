@@ -460,6 +460,7 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    enable_local_indexer: bool
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
 
@@ -843,7 +844,8 @@ class ZmqKvEventPublisherConfig:
         worker_id: int,
         kv_block_size: int,
         zmq_endpoint: str = "tcp://127.0.0.1:5557",
-        zmq_topic: str = ""
+        zmq_topic: str = "",
+        enable_local_indexer: bool = False
     ) -> None:
         """
         Configuration for the ZmqKvEventPublisher.
@@ -852,6 +854,7 @@ class ZmqKvEventPublisherConfig:
         :param kv_block_size: The block size for the key-value store.
         :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
         :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
+        :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to False.
         """
         ...
 

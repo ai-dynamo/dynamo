@@ -411,14 +411,20 @@ async fn completions_single(
     if streaming {
         // For streaming, we'll drop the http_queue_guard on the first token
         let mut http_queue_guard = Some(http_queue_guard);
-        let stream = stream.map(move |response| {
-            // Calls observe_response() on each token
-            process_response_using_event_converter_and_observe_metrics(
-                EventConverter::from(response),
-                &mut response_collector,
-                &mut http_queue_guard,
-            )
-        });
+        let stream = stream
+            .map(move |response| {
+                // Calls observe_response() on each token
+                process_response_using_event_converter_and_observe_metrics(
+                    EventConverter::from(response),
+                    &mut response_collector,
+                    &mut http_queue_guard,
+                )
+            })
+            .filter_map(|result| {
+                use futures::future;
+                // Transpose Result<Option<T>> -> Option<Result<T>>
+                future::ready(result.transpose())
+            });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
         let mut sse_stream = Sse::new(stream);
@@ -567,14 +573,20 @@ async fn completions_batch(
     if streaming {
         // For streaming, we'll drop the http_queue_guard on the first token
         let mut http_queue_guard = Some(http_queue_guard);
-        let stream = merged_stream.map(move |response| {
-            // Calls observe_response() on each token
-            process_response_using_event_converter_and_observe_metrics(
-                EventConverter::from(response),
-                &mut response_collector,
-                &mut http_queue_guard,
-            )
-        });
+        let stream = merged_stream
+            .map(move |response| {
+                // Calls observe_response() on each token
+                process_response_using_event_converter_and_observe_metrics(
+                    EventConverter::from(response),
+                    &mut response_collector,
+                    &mut http_queue_guard,
+                )
+            })
+            .filter_map(|result| {
+                use futures::future;
+                // Transpose Result<Option<T>> -> Option<Result<T>>
+                future::ready(result.transpose())
+            });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
         let mut sse_stream = Sse::new(stream);
@@ -942,15 +954,21 @@ async fn chat_completions(
         stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
 
         let mut http_queue_guard = Some(http_queue_guard);
-        let stream = stream.map(move |response| {
-            // Calls observe_response() on each token
-            // EventConverter will detect `event: "error"` and convert to SSE error events
-            process_response_using_event_converter_and_observe_metrics(
-                EventConverter::from(response),
-                &mut response_collector,
-                &mut http_queue_guard,
-            )
-        });
+        let stream = stream
+            .map(move |response| {
+                // Calls observe_response() on each token
+                // EventConverter will detect `event: "error"` and convert to SSE error events
+                process_response_using_event_converter_and_observe_metrics(
+                    EventConverter::from(response),
+                    &mut response_collector,
+                    &mut http_queue_guard,
+                )
+            })
+            .filter_map(|result| {
+                use futures::future;
+                // Transpose Result<Option<T>> -> Option<Result<T>>
+                future::ready(result.transpose())
+            });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
         let mut sse_stream = Sse::new(stream);
