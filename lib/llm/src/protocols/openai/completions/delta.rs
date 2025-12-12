@@ -272,6 +272,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             .and_then(|params| params.get("worker_id"))
         {
             use crate::protocols::openai::nvext::{NvExtResponse, WorkerIdInfo};
+
             let prefill_worker_id = worker_id_json
                 .get("prefill_worker_id")
                 .and_then(|v| v.as_u64());
@@ -279,16 +280,22 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
                 .get("decode_worker_id")
                 .and_then(|v| v.as_u64());
 
+            let worker_id_info = WorkerIdInfo {
+                prefill_worker_id,
+                decode_worker_id,
+            };
+
             let nvext_response = NvExtResponse {
-                worker_id: Some(WorkerIdInfo {
-                    prefill_worker_id,
-                    decode_worker_id,
-                }),
-                ..Default::default()
+                worker_id: Some(worker_id_info),
             };
 
             if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
                 response.inner.nvext = Some(nvext_json);
+                tracing::debug!(
+                    "Injected worker_id into completions nvext: prefill={:?}, decode={:?}",
+                    prefill_worker_id,
+                    decode_worker_id
+                );
             }
         }
 
