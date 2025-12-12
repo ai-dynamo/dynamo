@@ -41,6 +41,24 @@ spec:
           - -c
           args:
             - "python -m dynamo.frontend --router-mode kv --http-port 8787"
+          # Liveness probe pointing to actual frontend port (8787), not operator default (8000)
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /live
+              port: 8787
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+          # Readiness probe also needs to check correct port
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: 8787
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
       envs:
         - name: HF_HOME
           value: /models/hub
@@ -74,10 +92,9 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 5
           args:
-          # Recipe args: --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 8 --data-parallel-size 1 --disable-log-requests --is-prefill-worker --gpu-memory-utilization 0.95 --no-enable-prefix-caching --block-size 128
-          # Our additions: --enforce-eager, --connector nixl (NOT in recipe)
-          # Removed from ours: --pipeline-parallel-size 1 (recipe doesn't have it, uses default)
-          - "python3 -m dynamo.vllm --model deepseek-ai/DeepSeek-R1-Distill-Llama-70B --tensor-parallel-size 8 --data-parallel-size 1 --disable-log-requests --is-prefill-worker --gpu-memory-utilization 0.95 --no-enable-prefix-caching --block-size 128 --enforce-eager --connector nixl"
+          # Original repro command args (exactly matching the bug report):
+          # --is-prefill-worker --enforce-eager --tensor-parallel-size 8 --pipeline-parallel-size 1 --gpu-memory-utilization 0.8 --model ... --data-parallel-size 1 --connector nixl
+          - "python3 -m dynamo.vllm --is-prefill-worker --enforce-eager --tensor-parallel-size 8 --pipeline-parallel-size 1 --gpu-memory-utilization 0.8 --model deepseek-ai/DeepSeek-R1-Distill-Llama-70B --data-parallel-size 1 --connector nixl"
           command:
           - /bin/sh
           - -c
@@ -118,11 +135,10 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 5
           args:
-          # Recipe args: --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 8 --data-parallel-size 1 --disable-log-requests --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128
-          # Our additions: --enforce-eager, --connector nixl (NOT in recipe)
-          # Removed from ours: --pipeline-parallel-size 1 (recipe doesn't have it, uses default)
-          # NOTE: Recipe decode worker does NOT have --is-decode-worker flag
-          - "python3 -m dynamo.vllm --model deepseek-ai/DeepSeek-R1-Distill-Llama-70B --tensor-parallel-size 8 --data-parallel-size 1 --disable-log-requests --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128 --enforce-eager --connector nixl"
+          # Original repro command args (exactly matching the bug report):
+          # --enforce-eager --tensor-parallel-size 8 --pipeline-parallel-size 1 --gpu-memory-utilization 0.8 --model ... --data-parallel-size 1 --connector nixl
+          # NOTE: Original does NOT have --is-decode-worker flag
+          - "python3 -m dynamo.vllm --enforce-eager --tensor-parallel-size 8 --pipeline-parallel-size 1 --gpu-memory-utilization 0.8 --model deepseek-ai/DeepSeek-R1-Distill-Llama-70B --data-parallel-size 1 --connector nixl"
           command:
           - /bin/sh
           - -c
