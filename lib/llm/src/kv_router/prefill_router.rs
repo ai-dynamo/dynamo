@@ -202,35 +202,20 @@ impl PrefillRouter {
         &self,
         request: SingleIn<PreprocessedRequest>,
         query_only: bool,
-        engine_ctx: Option<&Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>>,
     ) -> Result<PrefillCallResult, PrefillError> {
         // Get the prefill router, error if not activated
         let Some(prefill_router) = self.prefill_router.get() else {
             return Err(PrefillError::NotActivated);
         };
 
-        // Prepare request - add query_instance_id annotation if query_only so that the prefill only picks
-        // the prefill worker but does not execute the actual prefill.
-        let request_id = request.id().to_string();
-        let (mut req, _) = request.into_parts();
-        if query_only {
-            req.annotations.push("query_instance_id".to_string());
-        }
-        let context = Context::with_id(req, request_id);
-
-        // Link context as child for cancellation propagation (only needed for full prefill)
-        if let Some(ctx) = engine_ctx {
-            ctx.link_child(context.context());
-        }
-
         // Call the appropriate router
         let mut response = match prefill_router {
             InnerPrefillRouter::KvRouter(router) => router
-                .generate(context)
+                .generate(request)
                 .await
                 .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
             InnerPrefillRouter::SimpleRouter(router) => router
-                .generate(context)
+                .generate(request)
                 .await
                 .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
         };
@@ -397,9 +382,9 @@ impl PrefillRouter {
 
         // Attempt prefill
         let prefill_context = Context::with_id(prefill_req, request_id.to_string());
-        let prefill_result = self
-            .call_prefill(prefill_context, false, Some(engine_ctx))
-            .await;
+        // Link context for cancellation propagation
+        engine_ctx.link_child(prefill_context.context());
+        let prefill_result = self.call_prefill(prefill_context, false).await;
 
         // Abort if cancelled during prefill
         if engine_ctx.is_stopped() || engine_ctx.is_killed() {
@@ -510,9 +495,13 @@ impl PrefillRouter {
         request_id: &str,
         engine_ctx: &Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
-        // Query prefill worker using KV-aware routing (query_only=true, no engine_ctx needed)
-        let query_context = Context::with_id(req.clone(), request_id.to_string());
-        let prefill_worker_id = match self.call_prefill(query_context, true, None).await {
+        // Query prefill worker using KV-aware routing (query_only=true)
+        let mut prefill_query_req = req.clone();
+        prefill_query_req
+            .annotations
+            .push("query_instance_id".to_string());
+        let query_context = Context::with_id(prefill_query_req, request_id.to_string());
+        let prefill_worker_id = match self.call_prefill(query_context, true).await {
             Ok(PrefillCallResult::WorkerIdOnly(id)) => Some(id),
             Ok(PrefillCallResult::Full(_)) => {
                 // Shouldn't happen with query_only=true
