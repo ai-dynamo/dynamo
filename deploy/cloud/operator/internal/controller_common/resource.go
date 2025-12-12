@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
@@ -44,6 +45,9 @@ import (
 const (
 	// NvidiaAnnotationHashKey indicates annotation name for last applied hash by the operator
 	NvidiaAnnotationHashKey = "nvidia.com/last-applied-hash"
+	// NvidiaAnnotationGenerationKey indicates annotation name for last applied generation by the operator
+	// This is used to detect manual changes to resources
+	NvidiaAnnotationGenerationKey = "nvidia.com/last-applied-generation"
 )
 
 type Reconciler interface {
@@ -120,7 +124,8 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 			return
 		}
 
-		updateHashAnnotation(resource, hash)
+		// On create, set generation to 1 (new resources start at generation 1)
+		updateAnnotations(resource, hash, 1)
 
 		r.GetRecorder().Eventf(parentResource, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Creating a new %s %s", resourceType, resourceNamespace)
 		err = r.Create(ctx, resource)
@@ -136,7 +141,7 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 	} else {
 		logs.Info(fmt.Sprintf("%s found.", resourceType))
 		if toDelete {
-			logs.Info(fmt.Sprintf("%s not found. Deleting the existing one.", resourceType))
+			logs.Info(fmt.Sprintf("%s found. Deleting the existing one.", resourceType))
 			err = r.Delete(ctx, oldResource)
 			if err != nil {
 				logs.Error(err, fmt.Sprintf("Failed to delete %s.", resourceType))
@@ -150,46 +155,55 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 		}
 
 		// Check if the Spec has changed and update if necessary
-		var newHash *string
-		newHash, err = IsSpecChanged(oldResource, resource)
+		var changeResult SpecChangeResult
+		changeResult, err = GetSpecChangeResult(oldResource, resource)
 		if err != nil {
 			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("CalculatePatch%s", resourceType), "Failed to calculate patch for %s %s: %s", resourceType, resourceNamespace, err)
 			return false, resource, fmt.Errorf("failed to check if spec has changed: %w", err)
 		}
-		if newHash != nil {
-			// Generate and log diff before updating
-			diff, diffErr := generateSpecDiff(oldResource, resource)
-			if diffErr != nil {
-				logs.V(1).Info(fmt.Sprintf("Failed to generate diff for %s: %v", resourceType, diffErr))
-			} else if diff != "" {
-				logs.Info(fmt.Sprintf("%s spec changes detected", resourceType), "diff", diff)
-			}
 
-			// update the spec of the current object with the desired spec
-			err = CopySpec(resource, oldResource)
-			if err != nil {
-				logs.Error(err, fmt.Sprintf("Failed to copy spec for %s.", resourceType))
-				r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("CopySpec%s", resourceType), "Failed to copy spec for %s %s: %s", resourceType, resourceNamespace, err)
-				return
-			}
-
-			updateHashAnnotation(oldResource, *newHash)
-
-			err = r.Update(ctx, oldResource)
-			if err != nil {
-				logs.Error(err, fmt.Sprintf("Failed to update %s.", resourceType))
-				r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("Update%s", resourceType), "Failed to update %s %s: %s", resourceType, resourceNamespace, err)
-				return
-			}
-			logs.Info(fmt.Sprintf("%s updated.", resourceType))
-			r.GetRecorder().Eventf(parentResource, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Updated %s %s", resourceType, resourceNamespace)
-			modified = true
-			res = oldResource
-		} else {
+		if !changeResult.NeedsUpdate {
 			logs.Info(fmt.Sprintf("%s spec is the same. Skipping update.", resourceType))
 			r.GetRecorder().Eventf(parentResource, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Skipping update %s %s", resourceType, resourceNamespace)
 			res = oldResource
+			return
 		}
+
+		// Log if manual changes were detected
+		if changeResult.ManualChangeDetected {
+			logs.Info(fmt.Sprintf("Manual changes detected on %s, will be overwritten", resourceType),
+				"currentGeneration", oldResource.GetGeneration(),
+				"lastAppliedGeneration", getAnnotation(oldResource, NvidiaAnnotationGenerationKey))
+		}
+
+		// Generate and log diff before updating
+		diff, diffErr := generateSpecDiff(oldResource, resource)
+		if diffErr != nil {
+			logs.V(1).Info(fmt.Sprintf("Failed to generate diff for %s: %v", resourceType, diffErr))
+		} else if diff != "" {
+			logs.Info(fmt.Sprintf("%s spec changes detected", resourceType), "diff", diff)
+		}
+
+		// Update the spec of the current object with the desired spec
+		err = CopySpec(resource, oldResource)
+		if err != nil {
+			logs.Error(err, fmt.Sprintf("Failed to copy spec for %s.", resourceType))
+			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("CopySpec%s", resourceType), "Failed to copy spec for %s %s: %s", resourceType, resourceNamespace, err)
+			return
+		}
+
+		updateAnnotations(oldResource, *changeResult.NewHash, changeResult.NewGeneration)
+
+		err = r.Update(ctx, oldResource)
+		if err != nil {
+			logs.Error(err, fmt.Sprintf("Failed to update %s.", resourceType))
+			r.GetRecorder().Eventf(parentResource, corev1.EventTypeWarning, fmt.Sprintf("Update%s", resourceType), "Failed to update %s %s: %s", resourceType, resourceNamespace, err)
+			return
+		}
+		logs.Info(fmt.Sprintf("%s updated.", resourceType))
+		r.GetRecorder().Eventf(parentResource, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Updated %s %s", resourceType, resourceNamespace)
+		modified = true
+		res = oldResource
 	}
 	return
 }
@@ -247,27 +261,102 @@ func getSpec(obj client.Object) (any, error) {
 	return spec, nil
 }
 
-// IsSpecChanged returns the new hash if the spec has changed between the existing one
-// It compares the actual current spec hash with the desired spec hash to detect manual edits
-func IsSpecChanged(current client.Object, desired client.Object) (*string, error) {
+// SpecChangeResult contains the result of spec change detection
+type SpecChangeResult struct {
+	// NewHash is the hash to set in the annotation (nil if no update needed)
+	NewHash *string
+	// NewGeneration is the generation to set in the annotation
+	NewGeneration int64
+	// NeedsUpdate indicates whether the resource needs to be updated
+	NeedsUpdate bool
+	// ManualChangeDetected indicates whether a manual change was detected
+	ManualChangeDetected bool
+}
+
+// GetSpecChangeResult determines if a resource needs to be updated by comparing the desired spec hash
+// with the last applied hash annotation. It also tracks generation to detect manual changes.
+//
+// Returns:
+//   - SpecChangeResult with update information
+//   - error if hash computation fails
+func GetSpecChangeResult(current client.Object, desired client.Object) (SpecChangeResult, error) {
 	desiredHash, err := GetSpecHash(desired)
 	if err != nil {
-		return nil, err
+		return SpecChangeResult{}, err
 	}
 
-	// Compute hash of the actual current spec (not just the annotation)
-	// This ensures we detect manual edits even if the annotation is stale
-	currentHash, err := GetSpecHash(current)
+	lastAppliedHash := getAnnotation(current, NvidiaAnnotationHashKey)
+	lastAppliedGenStr := getAnnotation(current, NvidiaAnnotationGenerationKey)
+	currentGen := current.GetGeneration()
+
+	// Case 1: Hash annotation missing (external create or pre-upgrade resource)
+	// Note: This is not first-time CREATE (handled separately in SyncResource with generation=1).
+	// This handles existing resources without our annotations - we're about to update them,
+	// so NewGeneration = currentGen + 1 is correct.
+	if lastAppliedHash == "" {
+		return SpecChangeResult{
+			NewHash:       &desiredHash,
+			NewGeneration: currentGen + 1,
+			NeedsUpdate:   true,
+		}, nil
+	}
+
+	// Case 2: Hash different (spec changed)
+	if desiredHash != lastAppliedHash {
+		return SpecChangeResult{
+			NewHash:       &desiredHash,
+			NewGeneration: currentGen + 1,
+			NeedsUpdate:   true,
+		}, nil
+	}
+
+	// Case 3: Hash same, but generation annotation missing (upgrade scenario)
+	// Do a full update to ensure spec is exactly what we want - there could have been
+	// manual edits before we added generation tracking. The cost is one extra Update
+	// per resource during upgrade, but on next reconcile generations will match.
+	if lastAppliedGenStr == "" {
+		return SpecChangeResult{
+			NewHash:       &desiredHash,
+			NewGeneration: currentGen + 1,
+			NeedsUpdate:   true,
+		}, nil
+	}
+
+	// Case 4: Both annotations exist, check for manual changes
+	lastAppliedGen, err := strconv.ParseInt(lastAppliedGenStr, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get current spec hash: %w", err)
+		// Corrupted annotation, force update to fix
+		return SpecChangeResult{
+			NewHash:       &desiredHash,
+			NewGeneration: currentGen + 1,
+			NeedsUpdate:   true,
+		}, nil
 	}
 
-	// Compare actual spec hashes
-	if currentHash == desiredHash {
-		return nil, nil
+	// Detect manual changes: if current generation > last applied generation,
+	// someone else modified the resource after our last update
+	if currentGen > 0 && currentGen > lastAppliedGen {
+		return SpecChangeResult{
+			NewHash:              &desiredHash,
+			NewGeneration:        currentGen + 1,
+			NeedsUpdate:          true,
+			ManualChangeDetected: true,
+		}, nil
 	}
 
-	return &desiredHash, nil
+	// No update needed
+	return SpecChangeResult{
+		NeedsUpdate: false,
+	}, nil
+}
+
+// getAnnotation safely retrieves an annotation value from an object
+func getAnnotation(obj client.Object, key string) string {
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		return ""
+	}
+	return annotations[key]
 }
 
 // generateSpecDiff creates a unified diff showing changes between old and new resource specs
@@ -299,12 +388,14 @@ func GetSpecHash(obj client.Object) (string, error) {
 	return GetResourceHash(spec)
 }
 
-func updateHashAnnotation(obj client.Object, hash string) {
+// updateAnnotations sets both hash and generation annotations on an object
+func updateAnnotations(obj client.Object, hash string, generation int64) {
 	annotations := obj.GetAnnotations()
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
 	annotations[NvidiaAnnotationHashKey] = hash
+	annotations[NvidiaAnnotationGenerationKey] = strconv.FormatInt(generation, 10)
 	obj.SetAnnotations(annotations)
 }
 
