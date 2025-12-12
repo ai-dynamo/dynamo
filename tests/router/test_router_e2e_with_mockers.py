@@ -560,7 +560,7 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.parallel
 @pytest.mark.parametrize("use_nats_core", [False, True], ids=["jetstream", "nats_core"])
 def test_router_decisions(
-    request, runtime_services, predownload_tokenizers, use_nats_core
+    request, runtime_services_session, predownload_tokenizers, use_nats_core
 ):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
 

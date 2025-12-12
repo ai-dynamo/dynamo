@@ -654,12 +654,12 @@ pub async fn start_kv_router_background_nats_core(
     worker_query_client: WorkerQueryClient,
 ) -> Result<()> {
     // Subscribe to KV events using NATS Core
-    let subject = format!("{}.{}", component.subject(), KV_EVENT_SUBJECT);
-    let mut subscriber = component.subscribe(&subject).await?;
+    let mut subscriber = component.subscribe(KV_EVENT_SUBJECT).await?;
 
     tracing::info!(
-        "KV Router using NATS Core subscription on subject: {} (local_indexer mode)",
-        subject
+        "KV Router using NATS Core subscription on subject: {}.{} (local_indexer mode)",
+        component.subject(),
+        KV_EVENT_SUBJECT
     );
 
     // Get the generate endpoint and watch for instance events (add/remove)
