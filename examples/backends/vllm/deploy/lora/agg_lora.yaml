@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-lora
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: vllm-agg-lora
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/biswa:7e499b5c460f1883a9945d221123e0760051210f-39500608-vllm-amd64
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: vllm-agg-lora
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      modelRef:
+        name: Qwen/Qwen3-0.6B
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/biswa:7e499b5c460f1883a9945d221123e0760051210f-39500608-vllm-amd64
+          workingDir: /workspace/examples/backends/vllm
+          env:
+            - name: DYN_LORA_ENABLED
+              value: "true"
+            - name: DYN_LORA_PATH
+              value: "/tmp/dynamo_loras_minio"
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+            - name: AWS_ENDPOINT
+              value: "http://minio:9000"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: minio-secret
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-secret
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: AWS_REGION
+              value: "us-east-1"
+            - name: AWS_ALLOW_HTTP
+              value: "true"
+            - name: BUCKET_NAME
+              value: "my-loras"
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --connector
+            - none
+            - --enable-lora
+            - --max-lora-rank
+            - "64"
+            - --enforce-eager

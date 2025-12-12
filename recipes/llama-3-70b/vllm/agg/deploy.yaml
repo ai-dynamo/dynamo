@@ -43,7 +43,7 @@ spec:
             - name: HF_HOME
               value: /opt/models
           args:
-          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --disable-log-requests --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
           command:
           - /bin/sh
           - -c

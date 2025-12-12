@@ -13,14 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import logging
 import re
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Dict, List, Optional, Pattern
 
-from typing_extensions import TypedDict
+from typing_extensions import Required, TypedDict
 
-from tests.utils.managed_deployment import DeploymentSpec
+from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
 
 if TYPE_CHECKING:
     from tests.fault_tolerance.deploy.base_checker import BaseChecker
@@ -54,8 +57,8 @@ class DeploymentInfo(TypedDict, total=False):
         is_moe: Optional flag indicating if this is a Mixture-of-Experts model
     """
 
-    spec: DeploymentSpec
-    backend: str
+    spec: Required[DeploymentSpec]
+    backend: Required[str]
     model: str
     is_moe: bool
 
@@ -155,14 +158,144 @@ class Load:
     overflow_request_count: int = 15  # Number of overflow requests
     normal_request_count: int = 15  # Number of normal requests after overflow
 
+    continuous_load: bool = (
+        False  # If True, use continuous load instead of fixed request count
+    )
+
 
 @dataclass
-class Failure:
+class Failure(ABC):
+    """Base class for all failure types."""
+
+    # time to wait in seconds before the failure is injected
     time: int
-    pod_name: str
-    command: str
-    signal: str = "SIGINT"
-    replicas: int = 1
+
+    # names of DGD services to inject the failure into the corresponding pods for
+    service_names: list[str]
+
+    @abstractmethod
+    async def execute(
+        self, deployment: ManagedDeployment, logger: logging.Logger
+    ) -> list[str]:
+        """Execute the failure injection.
+
+        Args:
+            deployment: The managed deployment to inject the failure into
+            logger: Logger instance for logging failure injection
+
+        Returns: List of affected pod names
+        """
+        pass
+
+    @abstractmethod
+    def get_failure_key(self) -> str:
+        """Get the failure key for the failure."""
+        pass
+
+
+@dataclass
+class RollingUpgradeFailure(Failure):
+    """Failure type for triggering rolling upgrades."""
+
+    async def execute(
+        self, deployment: ManagedDeployment, logger: logging.Logger
+    ) -> list[str]:
+        """Execute rolling upgrade failure injection."""
+        await deployment.trigger_rolling_upgrade(self.service_names)
+
+        # Need to wait for the deployment to be unready so we know the rolling upgrade has started
+        await deployment.wait_for_unready(timeout=60, log_interval=10)
+
+        await deployment._wait_for_ready(timeout=1800)  # 30 minute timeout
+
+        await asyncio.sleep(
+            self.time
+        )  # have some requests processed after the rolling upgrade has completed
+
+        return await deployment.get_pod_names(self.service_names)
+
+    def get_failure_key(self) -> str:
+        """Get the failure key for the rolling upgrade failure."""
+        return f"rolling_upgrade:{','.join(self.service_names)}"
+
+
+@dataclass
+class DeletePodFailure(Failure):
+    """Failure type for deleting pods."""
+
+    async def execute(
+        self, deployment: ManagedDeployment, logger: logging.Logger
+    ) -> list[str]:
+        """Execute pod deletion failure injection."""
+        service_pod_dict = deployment.get_pods(self.service_names)
+        pod_names: list[str] = []
+        for service_name, pods in service_pod_dict.items():
+            for pod in pods:
+                deployment.get_pod_manifest_logs_metrics(
+                    service_name, pod, ".before_delete"
+                )
+                pod.delete(force=True)  # force means no graceful termination
+                pod_names.append(pod.name)
+
+        return pod_names
+
+    def get_failure_key(self) -> str:
+        """Get the failure key for the delete pod failure."""
+        return f"delete_pod:{','.join(self.service_names)}"
+
+
+class TerminateProcessFailure(Failure):
+    """Failure type for terminating specific processes by name."""
+
+    def __init__(
+        self,
+        time: int,
+        service_names: list[str],
+        signal: str = "SIGINT",
+        process_name: str = "",
+    ):
+        """Initialize TerminateProcessFailure.
+
+        Args:
+            time: Time to wait in seconds before the failure is injected
+            service_names: Names of DGD services to inject the failure into
+            signal: Signal to send (default: "SIGINT")
+            process_name: Name of the process to terminate (required)
+            end_condition: End condition for failure (e.g., "dgd_ready")
+        """
+        super().__init__(
+            time=time,
+            service_names=service_names,
+        )
+        if not process_name or not signal:
+            raise ValueError(
+                "process_name and signal are required for TerminateProcessFailure"
+            )
+        self.process_name = process_name
+        self.signal = signal
+
+    async def execute(
+        self, deployment: ManagedDeployment, logger: logging.Logger
+    ) -> list[str]:
+        """Execute process termination failure injection."""
+        service_pod_dict = deployment.get_pods(self.service_names)
+        pod_names: list[str] = []
+        for service_name, pods in service_pod_dict.items():
+            for pod in pods:
+                processes = deployment.get_processes(pod)
+                for process in processes:
+                    if self.process_name in process.command:
+                        logger.info(
+                            f"Terminating {service_name} pod {pod} Pid {process.pid} Command {process.command}"
+                        )
+                        process.kill(self.signal)
+                pod_names.append(pod.name)
+
+        return pod_names
+
+    def get_failure_key(self) -> str:
+        """Get the failure key for the terminate process failure."""
+        return f"terminate_process:{','.join(self.service_names)}:{self.process_name}:{self.signal}"
 
 
 @dataclass
@@ -182,12 +315,24 @@ class TokenOverflowFailure(Failure):
     ):
         super().__init__(
             time=time,
-            pod_name="Client",
-            command="token_overflow",
+            service_names=["Client"],
         )
         self.max_seq_len = max_seq_len
         self.overflow_multiplier = overflow_multiplier
         self.overflow_token_count = int(max_seq_len * overflow_multiplier)
+
+    async def execute(
+        self, deployment: ManagedDeployment, logger: logging.Logger
+    ) -> list[str]:
+        """Token overflow is handled client-side, so this is a no-op."""
+        # The actual overflow is handled by the client configuration
+        # which uses the input_token_length from the Load config
+        # This is just a placeholder for the abstract method
+        return []
+
+    def get_failure_key(self) -> str:
+        """Get the failure key for the token overflow failure."""
+        return f"token_overflow:{self.overflow_token_count}"
 
 
 @dataclass
@@ -206,7 +351,7 @@ class Scenario:
 
 
 # Helper functions to create deployment specs
-def _create_deployment_spec(backend: str, yaml_path: str) -> DeploymentInfo:
+def _create_deployment_info(backend: str, yaml_path: str) -> DeploymentInfo:
     """Create a deployment spec with backend information.
 
     Args:
@@ -240,7 +385,9 @@ def _set_replicas(deployment_spec, backend, deploy_type, replicas):
             spec[WORKER_MAP[backend]["prefill"]].replicas = replicas
 
 
-def _set_tensor_parallel(deployment_spec, backend, deploy_type, tp_size):
+def _set_tensor_parallel(
+    deployment_spec: DeploymentInfo, backend: str, deploy_type: str, tp_size: int
+):
     """Set tensor parallel size for worker components."""
     spec = deployment_spec["spec"]
 
@@ -308,7 +455,7 @@ def _create_deployments_for_backend(backend: str) -> Dict[str, DeploymentInfo]:
             scenario_name = "-".join(name_parts)
 
             # Create and configure the deployment
-            deployment = _create_deployment_spec(backend, yaml_files[deploy_type])
+            deployment = _create_deployment_info(backend, yaml_files[deploy_type])
             if tp_size > 1:
                 _set_tensor_parallel(deployment, backend, deploy_type, tp_size)
             if dp_replicas > 1:
@@ -397,34 +544,69 @@ def _create_backend_failures(backend, deploy_type="disagg"):
     process_name = f"dynamo.{backend}"
 
     failures = {
-        "frontend": [Failure(30, "Frontend", "dynamo.frontend")],
-        "frontend_pod": [Failure(30, "Frontend", "delete_pod")],
-        "decode_worker": [Failure(30, decode_worker, process_name, "SIGKILL")],
-        "decode_worker_pod": [Failure(30, decode_worker, "delete_pod")],
-        "prefill_worker": [Failure(30, prefill_worker, process_name, "SIGKILL")],
-        "prefill_worker_pod": [Failure(30, prefill_worker, "delete_pod")],
+        "frontend": [
+            TerminateProcessFailure(
+                30, ["Frontend"], "SIGINT", process_name="dynamo.frontend"
+            )
+        ],
+        "frontend_pod": [DeletePodFailure(30, ["Frontend"])],
+        "decode_worker": [
+            TerminateProcessFailure(
+                30, [decode_worker], "SIGKILL", process_name=process_name
+            )
+        ],
+        "decode_worker_pod": [DeletePodFailure(30, [decode_worker])],
+        "prefill_worker": [
+            TerminateProcessFailure(
+                30, [prefill_worker], "SIGKILL", process_name=process_name
+            )
+        ],
+        "prefill_worker_pod": [DeletePodFailure(30, [prefill_worker])],
         "none": [],
     }
 
     if backend == "vllm":
         failures["vllm_decode_engine_core"] = [
-            Failure(30, decode_worker, "VLLM::EngineCore", "SIGKILL")
+            TerminateProcessFailure(
+                30, [decode_worker], "SIGKILL", process_name="VLLM::EngineCore"
+            )
         ]
         failures["vllm_prefill_engine_core"] = [
-            Failure(30, prefill_worker, "VLLM::EngineCore", "SIGKILL")
+            TerminateProcessFailure(
+                30, [prefill_worker], "SIGKILL", process_name="VLLM::EngineCore"
+            )
         ]
     elif backend == "sglang":
         failures["sglang_decode_scheduler"] = [
-            Failure(30, decode_worker, "sglang::scheduler", "SIGKILL")
+            TerminateProcessFailure(
+                30, [decode_worker], "SIGKILL", process_name="sglang::scheduler"
+            )
         ]
         failures["sglang_decode_detokenizer"] = [
-            Failure(30, decode_worker, "sglang::detokenizer", "SIGKILL")
+            TerminateProcessFailure(
+                30, [decode_worker], "SIGKILL", process_name="sglang::detokenizer"
+            )
         ]
         failures["sglang_prefill_scheduler"] = [
-            Failure(30, prefill_worker, "sglang::scheduler", "SIGKILL")
+            TerminateProcessFailure(
+                30, [prefill_worker], "SIGKILL", process_name="sglang::scheduler"
+            )
         ]
         failures["sglang_prefill_detokenizer"] = [
-            Failure(30, prefill_worker, "sglang::detokenizer", "SIGKILL")
+            TerminateProcessFailure(
+                30, [prefill_worker], "SIGKILL", process_name="sglang::detokenizer"
+            )
+        ]
+    elif backend == "trtllm":
+        failures["trtllm_decode_engine_core"] = [
+            TerminateProcessFailure(
+                30, [decode_worker], "SIGKILL", process_name="TRTLLM::EngineCore"
+            )
+        ]
+        failures["trtllm_prefill_engine_core"] = [
+            TerminateProcessFailure(
+                30, [prefill_worker], "SIGKILL", process_name="TRTLLM::EngineCore"
+            )
         ]
 
     return failures
@@ -533,7 +715,7 @@ model = None
 
 # Populate Scenarios
 
-scenarios = {}
+scenarios: dict[str, Scenario] = {}
 
 # Map of backend+deploy_type to failure definitions
 backend_failure_map = {}
@@ -729,5 +911,59 @@ def add_token_overflow_scenarios():
         )
 
 
+def add_rolling_upgrade_scenarios():
+    for backend in ["vllm", "sglang", "trtllm"]:
+        for worker_mode in ["agg", "disagg"]:
+            yaml_files = {
+                "agg": f"examples/backends/{backend}/deploy/agg.yaml",
+                "disagg": f"examples/backends/{backend}/deploy/disagg.yaml",
+            }
+            deployment_info = _create_deployment_info(backend, yaml_files[worker_mode])
+            deployment_spec: DeploymentSpec = deployment_info["spec"]
+
+            service_names: list[str] = []
+
+            # setting replicas to 2 so we have availability of 1 replica at a time
+            if worker_mode == "agg" and backend == "trtllm":
+                service_names.append(WORKER_MAP[backend]["decode_agg"])
+            else:
+                service_names.append(WORKER_MAP[backend]["decode"])
+
+            if worker_mode == "disagg":
+                service_names.append(WORKER_MAP[backend]["prefill"])
+
+            for service_name in service_names:
+                deployment_spec.set_service_replicas(service_name, 2)
+
+            load = Load(
+                clients=10,
+                input_token_length=100,
+                output_token_length=100,
+                max_retries=1,
+                client_type="aiperf",
+                max_request_rate=1.0,
+                success_threshold=100.0,
+                continuous_load=True,
+            )
+
+            scenario_name = f"{backend}-{worker_mode}-rolling-upgrade"
+            model = "Qwen/Qwen3-0.6B"
+
+            failure = RollingUpgradeFailure(
+                time=30,
+                service_names=service_names,
+            )
+            scenarios[scenario_name] = Scenario(
+                deployment=deployment_info["spec"],
+                load=load,
+                failures=[failure],
+                model=model,
+                backend=backend,
+            )
+
+
 # Add the token overflow scenarios
 add_token_overflow_scenarios()
+
+# Add the rolling upgrade scenarios
+add_rolling_upgrade_scenarios()

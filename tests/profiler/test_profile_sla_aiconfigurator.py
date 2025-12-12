@@ -66,6 +66,7 @@ class TestProfileSlaAiconfigurator:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
+                self.pick_with_webui = False
                 # Provide minimal model_info to avoid HF queries
                 self.model_info = ModelInfo(
                     model_size=16384.0,

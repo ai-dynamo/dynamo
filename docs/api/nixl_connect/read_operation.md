@@ -38,7 +38,7 @@ therefore the operation should be awaited until completed unless cancellation is
     ) -> None:
       descriptor = dynamo.nixl_connect.Descriptor(local_tensor)
 
-      with self.connector.begin_read(descriptor, remote_metadata) as read_op:
+      with await self.connector.begin_read(remote_metadata, descriptor) as read_op:
         # Wait for the operation to complete writing data from the remote worker to local_tensor.
         await read_op.wait_for_completion()
 ```

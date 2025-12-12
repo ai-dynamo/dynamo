@@ -18,6 +18,18 @@ use tokcfg::{ChatTemplate, ChatTemplateValue};
 
 impl PromptFormatter {
     pub fn from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+        // Special handling for DeepSeek-V3.2(-Speciale) which doesn't provide Jinja chat_template
+        let name_lower = mdc.display_name.to_lowercase();
+        if name_lower.contains("deepseek")
+            && name_lower.contains("v3.2")
+            && !name_lower.contains("exp")
+        {
+            tracing::info!("Detected DeepSeek V3.2 model (non-Exp), using native Rust formatter");
+            return Ok(Self::OAI(Arc::new(
+                super::deepseek_v32::DeepSeekV32Formatter::new_thinking(),
+            )));
+        }
+
         match mdc
             .prompt_formatter
             .as_ref()

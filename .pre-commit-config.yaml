@@ -64,6 +64,7 @@ repos:
   - id: mixed-line-ending
   - id: requirements-txt-fixer
   - id: trailing-whitespace
+    exclude: lib/llm/tests/data/deepseek-v3.2/.*\.txt$
 
 # NOTE: removing from pre commit
 # will move to gitlab ci to run in proper

@@ -16,6 +16,27 @@ import "model_config.proto";
 //@@
 service GRPCInferenceService
 {
+  //@@  .. cpp:var:: rpc ServerLive(ServerLiveRequest) returns
+  //@@       (ServerLiveResponse)
+  //@@
+  //@@     Check liveness of the inference server.
+  //@@
+  rpc ServerLive(ServerLiveRequest) returns (ServerLiveResponse) {}
+
+  //@@  .. cpp:var:: rpc ServerReady(ServerReadyRequest) returns
+  //@@       (ServerReadyResponse)
+  //@@
+  //@@     Check readiness of the inference server.
+  //@@
+  rpc ServerReady(ServerReadyRequest) returns (ServerReadyResponse) {}
+
+  //@@  .. cpp:var:: rpc ModelReady(ModelReadyRequest) returns
+  //@@       (ModelReadyResponse)
+  //@@
+  //@@     Check readiness of a model in the inference server.
+  //@@
+  rpc ModelReady(ModelReadyRequest) returns (ModelReadyResponse) {}
+
   //@@  .. cpp:var:: rpc ModelMetadata(ModelMetadataRequest) returns
   //@@       (ModelMetadataResponse)
   //@@
@@ -43,6 +64,89 @@ service GRPCInferenceService
   //@@     Get model configuration.
   //@@
   rpc ModelConfig(ModelConfigRequest) returns (ModelConfigResponse) {}
+}
+
+//@@
+//@@.. cpp:var:: message ServerLiveRequest
+//@@
+//@@   Request message for ServerLive.
+//@@
+message ServerLiveRequest {}
+
+//@@
+//@@.. cpp:var:: message ServerLiveResponse
+//@@
+//@@   Response message for ServerLive.
+//@@
+message ServerLiveResponse
+{
+  //@@
+  //@@  .. cpp:var:: bool live
+  //@@
+  //@@     True if the inference server is live, false if not live.
+  //@@
+  bool live = 1;
+}
+
+//@@
+//@@.. cpp:var:: message ServerReadyRequest
+//@@
+//@@   Request message for ServerReady.
+//@@
+message ServerReadyRequest {}
+
+//@@
+//@@.. cpp:var:: message ServerReadyResponse
+//@@
+//@@   Response message for ServerReady.
+//@@
+message ServerReadyResponse
+{
+  //@@
+  //@@  .. cpp:var:: bool ready
+  //@@
+  //@@     True if the inference server is ready, false if not ready. The server
+  //@@     is considered ready if it has any registered models, since models
+  //@@     can freely be registered and unregistered at runtime.
+  //@@
+  bool ready = 1;
+}
+
+//@@
+//@@.. cpp:var:: message ModelReadyRequest
+//@@
+//@@   Request message for ModelReady.
+//@@
+message ModelReadyRequest
+{
+  //@@
+  //@@  .. cpp:var:: string name
+  //@@
+  //@@     The name of the model to check for readiness.
+  //@@
+  string name = 1;
+
+  //@@  .. cpp:var:: string version
+  //@@
+  //@@     The version of the model to check for readiness. If not given the
+  //@@     server will choose a version based on the model and internal policy.
+  //@@
+  string version = 2;
+}
+
+//@@
+//@@.. cpp:var:: message ModelReadyResponse
+//@@
+//@@   Response message for ModelReady.
+//@@
+message ModelReadyResponse
+{
+  //@@
+  //@@  .. cpp:var:: bool ready
+  //@@
+  //@@     True if the model is ready, false if not ready.
+  //@@
+  bool ready = 1;
 }
 
 //@@

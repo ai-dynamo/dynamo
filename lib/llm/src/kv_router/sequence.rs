@@ -38,8 +38,10 @@ use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::protocols::{ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank};
-use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
+use super::protocols::{
+    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank,
+};
+use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::CancellationToken;
 
@@ -701,6 +703,9 @@ impl ActiveSequencesMultiWorker {
             self.request_to_worker.remove(expired_id);
         }
 
+        // Publish ActiveLoad metrics for this worker
+        self.publish_active_load_for_worker(worker).await;
+
         Ok(())
     }
 
@@ -743,6 +748,9 @@ impl ActiveSequencesMultiWorker {
             .map_err(|_| SequenceError::WorkerChannelClosed)?;
 
         self.request_to_worker.remove(request_id);
+
+        // Publish ActiveLoad metrics for this worker
+        self.publish_active_load_for_worker(worker).await;
 
         Ok(())
     }
@@ -790,7 +798,64 @@ impl ActiveSequencesMultiWorker {
             })
             .map_err(|_| SequenceError::WorkerChannelClosed)?;
 
+        // Publish ActiveLoad metrics for this worker
+        self.publish_active_load_for_worker(worker).await;
+
         Ok(())
+    }
+
+    /// Helper method to query a single worker for active blocks/tokens and publish ActiveLoad
+    async fn publish_active_load_for_worker(&self, worker: WorkerWithDpRank) {
+        let Some(sender) = self.senders.get(&worker) else {
+            tracing::warn!("Worker {worker:?} not found when publishing ActiveLoad");
+            return;
+        };
+
+        // Query active blocks
+        let (blocks_tx, blocks_rx) = tokio::sync::oneshot::channel();
+        if sender
+            .send(UpdateSequences::ActiveBlocks { resp_tx: blocks_tx })
+            .is_err()
+        {
+            tracing::warn!("Failed to send ActiveBlocks query to worker {worker:?}");
+            return;
+        }
+
+        // Query active tokens
+        let (tokens_tx, tokens_rx) = tokio::sync::oneshot::channel();
+        if sender
+            .send(UpdateSequences::ActiveTokens { resp_tx: tokens_tx })
+            .is_err()
+        {
+            tracing::warn!("Failed to send ActiveTokens query to worker {worker:?}");
+            return;
+        }
+
+        // Await both responses
+        let (active_blocks, active_tokens) = match tokio::join!(blocks_rx, tokens_rx) {
+            (Ok(blocks), Ok(tokens)) => (blocks, tokens),
+            _ => {
+                tracing::warn!("Failed to receive active blocks/tokens from worker {worker:?}");
+                return;
+            }
+        };
+
+        // Publish ActiveLoad
+        let active_load = ActiveLoad {
+            worker_id: worker.worker_id,
+            dp_rank: worker.dp_rank,
+            active_decode_blocks: Some(active_blocks as u64),
+            active_prefill_tokens: Some(active_tokens as u64),
+        };
+
+        if let Err(e) = self
+            .component
+            .namespace()
+            .publish(KV_METRICS_SUBJECT, &active_load)
+            .await
+        {
+            tracing::warn!("Failed to publish ActiveLoad for worker {worker:?}: {e:?}");
+        }
     }
 
     /// Get the number of workers

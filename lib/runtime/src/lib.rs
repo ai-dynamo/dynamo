@@ -24,6 +24,7 @@ pub mod component;
 pub mod compute;
 pub mod discovery;
 pub mod engine;
+pub mod engine_routes;
 pub mod health_check;
 pub mod local_endpoint_registry;
 pub mod system_status_server;

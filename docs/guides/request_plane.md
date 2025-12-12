@@ -108,12 +108,14 @@ export DYN_REQUEST_PLANE=tcp
 
 # Optional: Configure TCP server host and port
 export DYN_TCP_RPC_HOST=0.0.0.0  # Default host
-export DYN_TCP_RPC_PORT=9999     # Default port
+# export DYN_TCP_RPC_PORT=9999   # Optional: specify a fixed port
 
 # Run your Dynamo service
 DYN_REQUEST_PLANE=tcp python -m dynamo.frontend --http-port=8000 &
 DYN_REQUEST_PLANE=tcp python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 ```
+
+**Note:** By default, TCP uses an OS-assigned free port (port 0). This is ideal for environments where multiple services may run on the same machine or when you want to avoid port conflicts. If you need a specific port (e.g., for firewall rules), set `DYN_TCP_RPC_PORT` explicitly.
 
 **When to use TCP:**
 - Simple deployments with direct service-to-service communication (e.g. frontend to backend)
@@ -124,7 +126,7 @@ DYN_REQUEST_PLANE=tcp python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 
 Additional TCP-specific environment variables:
 - `DYN_TCP_RPC_HOST`: Server host address (default: auto-detected)
-- `DYN_TCP_RPC_PORT`: Server port (default: 9999)
+- `DYN_TCP_RPC_PORT`: Server port. If not set, the OS assigns a free port automatically (recommended for most deployments). Set explicitly only if you need a specific port for firewall rules.
 - `DYN_TCP_MAX_MESSAGE_SIZE`: Maximum message size for TCP client (default: 32MB)
 - `DYN_TCP_REQUEST_TIMEOUT`: Request timeout for TCP client (default: 10 seconds)
 - `DYN_TCP_POOL_SIZE`: Connection pool size for TCP client (default: 50)
@@ -228,7 +230,7 @@ Request plane configuration is loaded from environment variables at startup and 
 
 1. Stop your Dynamo services
 2. Set environment variable `DYN_REQUEST_PLANE=tcp`
-3. Optionally configure TCP-specific settings (`DYN_TCP_RPC_PORT`, etc.)
+3. Optionally configure TCP-specific settings (e.g., `DYN_TCP_RPC_HOST`). Note: `DYN_TCP_RPC_PORT` is optional; if not set, an OS-assigned free port is used automatically.
 4. Restart your services
 
 
@@ -279,7 +281,7 @@ curl http://localhost:8000/v1/chat/completions \
 **Symptoms:** Server fails to start due to "address already in use"
 
 **Solutions:**
-- TCP default port: 9999 (adjust environment variable `DYN_TCP_RPC_PORT`)
+- TCP: By default, TCP uses an OS-assigned free port, so port conflicts should be rare. If you explicitly set `DYN_TCP_RPC_PORT` to a specific port and get conflicts, either change the port or remove the setting to use automatic port assignment.
 - HTTP default port: 8888 (adjust environment variable `DYN_HTTP_RPC_PORT`)
 
 ## Performance Considerations

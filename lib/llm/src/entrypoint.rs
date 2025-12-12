@@ -21,7 +21,10 @@ use crate::{
 pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,
-    pub busy_threshold: Option<f64>,
+    /// Threshold for active decode blocks utilization (0.0-1.0)
+    pub active_decode_blocks_threshold: Option<f64>,
+    /// Threshold for active prefill tokens utilization (literal token count)
+    pub active_prefill_tokens_threshold: Option<u64>,
     pub enforce_disagg: bool,
 }
 
@@ -30,13 +33,19 @@ impl RouterConfig {
         Self {
             router_mode,
             kv_router_config,
-            busy_threshold: None,
+            active_decode_blocks_threshold: None,
+            active_prefill_tokens_threshold: None,
             enforce_disagg: false,
         }
     }
 
-    pub fn with_busy_threshold(mut self, threshold: Option<f64>) -> Self {
-        self.busy_threshold = threshold;
+    pub fn with_active_decode_blocks_threshold(mut self, threshold: Option<f64>) -> Self {
+        self.active_decode_blocks_threshold = threshold;
+        self
+    }
+
+    pub fn with_active_prefill_tokens_threshold(mut self, threshold: Option<u64>) -> Self {
+        self.active_prefill_tokens_threshold = threshold;
         self
     }
 

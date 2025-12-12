@@ -526,22 +526,33 @@ impl Leader for KvConnectorLeader {
         // remove the request from the inflight requests
         self.inflight_requests.remove(&request_id);
 
-        // if the slot has finished, we can return false to vllm, indicating all gpu blocks are free to be reused
-        // otherwise, we return true, which means there are still outstanding operations on gpu blocks which
-        // must be awaited before the gpu blocks can be reused. if we return true, then it is the worker side
-        // of the connector api which will be used to inform vllm that the request is finished.
+        // Return value semantics:
+        // - `false`: Tells vLLM all GPU blocks are free and the request can be fully cleaned up.
+        //            vLLM will immediately remove the request from its internal hash table.
+        // - `true`:  Tells vLLM there are outstanding async operations on GPU blocks.
+        //            The worker side of the connector API will later call `finish_requests()`
+        //            to notify vLLM when the request is truly complete.
+        //
+        // TODO(jthomson04): This is a temporary fix to ensure vLLM 0.11.2 compatibility.
+        //     IMPORTANT: We must ALWAYS return `true` here, even when the slot is already Finished.
+        //
+        //      Why? If we return `false`, vLLM removes the request from `self.requests` immediately.
+        //      However, our worker connector may still report completion later via `finish_requests()`.
+        //      When that happens, vLLM's scheduler.py has an assertion `req_id in self.requests`
+        //      that will fail because the request was already removed from the hash table.
+        //
+        //      By always returning `true`, we ensure vLLM keeps the request in its hash table until
+        //      our worker explicitly signals completion, avoiding the race condition.
+        //
+        //      If the slot is already Finished (no pending operations), we clean it up from our side
+        //      but still return `true` so vLLM waits for the worker's completion signal.
         if let SlotState::Finished = slot.state() {
-            // All operations complete - safe to remove slot and tell vLLM blocks are free
             self.slot_manager().remove_slot(&request_id)?;
-            Ok(false)
         } else {
             debug_assert!(matches!(slot.state(), SlotState::Finishing));
-            // Still has pending operations - keep slot alive for worker to process
-            // Don't remove slot here. Worker needs it to process the finish event.
-            // Worker will remove it after verifying all operations are complete.
-            // The lock on the slot prevents new operations from being created in offload_blocks()
-            Ok(true)
         }
+
+        Ok(true)
     }
 
     fn has_slot(&self, request_id: String) -> bool {

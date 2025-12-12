@@ -18,7 +18,7 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 # Dynamo deploy
 /deploy/ @ai-dynamo/dynamo-deploy-codeowners
 /examples/*/deploy/ @ai-dynamo/dynamo-deploy-codeowners
-
+/examples/backends/*/deploy/ @ai-dynamo/dynamo-deploy-codeowners
 # CI/CD
 /.github/ @ai-dynamo/Devops
 /.github/workflows/*.ps1 @ai-dynamo/Devops

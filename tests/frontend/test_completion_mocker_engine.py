@@ -142,7 +142,7 @@ def runtime_services(request):
 
 
 @pytest.fixture(scope="module")
-def start_services(request, runtime_services):
+def start_services(request, runtime_services, predownload_tokenizers):
     """Start frontend and worker processes once for this module's tests."""
     with DynamoFrontendProcess(request):
         logger.info("Frontend started for tests")

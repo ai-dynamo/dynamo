@@ -70,7 +70,7 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "flags": ["--use-sglang-tokenizer"],
         "action": "store_true",
         "default": False,
-        "help": "Use SGLang's tokenizer. This will skip tokenization of the input and output and only v1/chat/completions will be available when using the dynamo frontend. Cannot be used with --custom-jinja-template.",
+        "help": "Use SGLang's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend. Cannot be used with --custom-jinja-template.",
     },
     "multimodal-processor": {
         "flags": ["--multimodal-processor"],

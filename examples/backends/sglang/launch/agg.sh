@@ -46,10 +46,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Enable tracing if requested
+TRACE_ARGS=()
 if [ "$ENABLE_OTEL" = true ]; then
     export DYN_LOGGING_JSONL=true
     export OTEL_EXPORT_ENABLED=1
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
+    TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
 
 # run ingress
@@ -59,7 +61,7 @@ python3 -m dynamo.frontend &
 DYNAMO_PID=$!
 
 # run worker with metrics enabled
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
+OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 python3 -m dynamo.sglang \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
@@ -68,4 +70,5 @@ python3 -m dynamo.sglang \
   --trust-remote-code \
   --skip-tokenizer-init \
   --enable-metrics \
+  "${TRACE_ARGS[@]}" \
   "${EXTRA_ARGS[@]}"

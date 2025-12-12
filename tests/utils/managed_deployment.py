@@ -5,18 +5,18 @@ import asyncio
 import logging
 import os
 import re
+import secrets
 import shlex
 import time
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
 import kr8s
-import kubernetes
 import requests
 import yaml
-from kr8s.objects import Pod as kr8s_Pod
-from kr8s.objects import Service as kr8s_Service
+from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
+from kubernetes_asyncio.client import exceptions
 
 
 def _get_workspace_dir() -> str:
@@ -64,6 +64,15 @@ class ServiceSpec:
         if "mainContainer" not in self._spec["extraPodSpec"]:
             self._spec["extraPodSpec"]["mainContainer"] = {}
         self._spec["extraPodSpec"]["mainContainer"]["image"] = value
+
+    @property
+    def envs(self) -> list[dict[str, str]]:
+        """Environment variables for the service"""
+        return self._spec.get("envs", [])
+
+    @envs.setter
+    def envs(self, value: list[dict[str, str]]):
+        self._spec["envs"] = value
 
     # ----- Replicas -----
     @property
@@ -314,8 +323,36 @@ class DeploymentSpec:
 
         return {"jsonl_enabled": jsonl_enabled, "log_level": log_level}
 
+    def set_service_env_var(self, service_name: str, name: str, value: str):
+        """
+        Set an environment variable for a specific service
+        """
+        service = self.get_service(service_name)
+        envs = service.envs if service.envs is not None else []
+
+        # if env var already exists, update it
+        for env in envs:
+            if env["name"] == name:
+                env["value"] = value
+                service.envs = envs  # Save back to trigger the setter
+                return
+
+        # if env var does not exist, add it
+        envs.append({"name": name, "value": value})
+        service.envs = envs  # Save back to trigger the setter
+
+    def get_service_env_vars(self, service_name: str) -> list[dict]:
+        """
+        Get all environment variables for a specific service
+
+        Returns:
+            List of environment variable dicts (e.g., [{"name": "VAR", "value": "val"}])
+        """
+        service = self.get_service(service_name)
+        return service.envs
+
     @property
-    def services(self) -> list:
+    def services(self) -> list[ServiceSpec]:
         """List of ServiceSpec objects"""
         return [
             ServiceSpec(svc, spec)
@@ -340,28 +377,25 @@ class DeploymentSpec:
             arg_name: Argument name (e.g., "--max-model-len", "--max-seq-len")
             arg_value: Argument value (e.g., "1024")
         """
-        # Get the service
-        if service_name not in self._deployment_spec["spec"]["services"]:
-            raise ValueError(f"Service '{service_name}' not found in deployment spec")
-
-        service = self._deployment_spec["spec"]["services"][service_name]
+        service = self.get_service(service_name)
+        service_spec = service._spec
 
         # Ensure args list exists
-        if "extraPodSpec" not in service:
-            service["extraPodSpec"] = {"mainContainer": {}}
-        if "mainContainer" not in service["extraPodSpec"]:
-            service["extraPodSpec"]["mainContainer"] = {}
-        if "args" not in service["extraPodSpec"]["mainContainer"]:
-            service["extraPodSpec"]["mainContainer"]["args"] = []
+        if "extraPodSpec" not in service_spec:
+            service_spec["extraPodSpec"] = {"mainContainer": {}}
+        if "mainContainer" not in service_spec["extraPodSpec"]:
+            service_spec["extraPodSpec"]["mainContainer"] = {}
+        if "args" not in service_spec["extraPodSpec"]["mainContainer"]:
+            service_spec["extraPodSpec"]["mainContainer"]["args"] = []
 
-        args_list = service["extraPodSpec"]["mainContainer"]["args"]
+        args_list = service_spec["extraPodSpec"]["mainContainer"]["args"]
 
         # Convert to list if needed (sometimes it's a single string)
         if isinstance(args_list, str):
             import shlex
 
             args_list = shlex.split(args_list)
-            service["extraPodSpec"]["mainContainer"]["args"] = args_list
+            service_spec["extraPodSpec"]["mainContainer"]["args"] = args_list
 
         # Find existing argument
         arg_index = None
@@ -384,6 +418,24 @@ class DeploymentSpec:
             # Add new argument
             args_list.extend([arg_name, arg_value])
 
+    def get_service(self, service_name: str) -> ServiceSpec:
+        """
+        Get a specific service from the deployment spec
+        """
+        if service_name not in self._deployment_spec["spec"]["services"]:
+            raise ValueError(f"Service '{service_name}' not found in deployment spec")
+
+        return ServiceSpec(
+            service_name, self._deployment_spec["spec"]["services"][service_name]
+        )
+
+    def set_service_replicas(self, service_name: str, replicas: int):
+        """
+        Set the number of replicas for a specific service
+        """
+        service = self.get_service(service_name)
+        service.replicas = replicas
+
     def save(self, out_file: str):
         """Save updated deployment to file"""
         with open(out_file, "w") as f:
@@ -391,7 +443,7 @@ class DeploymentSpec:
 
 
 class PodProcess:
-    def __init__(self, pod: kr8s_Pod, line: str):
+    def __init__(self, pod: Pod, line: str):
         self.pid = int(re.split(r"\s+", line)[1])
         self.command = " ".join(
             re.split(r"\s+", line)[10:]
@@ -439,10 +491,13 @@ class ManagedDeployment:
     log_dir: str
     deployment_spec: DeploymentSpec
     namespace: str
-    frontend_service_name: Optional[str] = "Frontend"
+    # TODO: this should be determined by the deployment_spec
+    # the service containing component_type: Frontend determines what is actually the frontend service
+    frontend_service_name: str = "Frontend"
+    skip_service_restart: bool = False
 
-    _custom_api: Optional[Any] = None
-    _core_api: Optional[Any] = None
+    _custom_api: Optional[client.CustomObjectsApi] = None
+    _core_api: Optional[client.CoreV1Api] = None
     _in_cluster: bool = False
     _logger: logging.Logger = logging.getLogger()
     _port_forward: Optional[Any] = None
@@ -457,7 +512,7 @@ class ManagedDeployment:
         """Initialize kubernetes client"""
         try:
             # Try in-cluster config first (for pods with service accounts)
-            await config.load_incluster_config()
+            config.load_incluster_config()
             self._in_cluster = True
         except Exception:
             # Fallback to kube config file (for local development)
@@ -511,6 +566,17 @@ class ManagedDeployment:
 
         self._logger.info(f"Restarted {name} {label}")
 
+    async def wait_for_unready(self, timeout: int = 1800, sleep=1, log_interval=60):
+        """
+        Wait for the custom resource to be unready.
+
+        Args:
+            timeout: Maximum time to wait in seconds, default to 30 mins (image pulling can take a while)
+        """
+        return await self._wait_for_condition(
+            timeout, sleep, log_interval, False, "pending"
+        )
+
     async def _wait_for_ready(self, timeout: int = 1800, sleep=1, log_interval=60):
         """
         Wait for the custom resource to be ready.
@@ -518,9 +584,23 @@ class ManagedDeployment:
         Args:
             timeout: Maximum time to wait in seconds, default to 30 mins (image pulling can take a while)
         """
+        return await self._wait_for_condition(
+            timeout, sleep, log_interval, True, "successful"
+        )
+
+    async def _wait_for_condition(
+        self,
+        timeout: int = 1800,
+        sleep=1,
+        log_interval=60,
+        desired_ready_condition_val: bool = True,
+        desired_state_val: str = "successful",
+    ):
         start_time = time.time()
 
-        self._logger.info(f"Waiting for Deployment {self._deployment_name}")
+        self._logger.info(
+            f"Waiting for Deployment {self._deployment_name} to have Ready condition {desired_ready_condition_val} and state {desired_state_val}"
+        )
 
         attempt = 0
 
@@ -528,7 +608,7 @@ class ManagedDeployment:
             try:
                 attempt += 1
                 assert self._custom_api is not None, "Kubernetes API not initialized"
-                status = await self._custom_api.get_namespaced_custom_object(
+                status = await self._custom_api.get_namespaced_custom_object(  # type: ignore[awaitable-is-not-coroutine]
                     group="nvidia.com",
                     version="v1alpha1",
                     namespace=self.namespace,
@@ -538,29 +618,34 @@ class ManagedDeployment:
                 # Check both conditions:
                 # 1. Ready condition is True
                 # 2. State is successful
-                status_obj = status.get("status", {})
-                conditions = status_obj.get("conditions", [])
-                current_state = status_obj.get("state", "unknown")
+                status_obj = status.get("status", {})  # type: ignore[attr-defined]
+                conditions = status_obj.get("conditions", [])  # type: ignore[attr-defined]
+                current_state = status_obj.get("state", "unknown")  # type: ignore[attr-defined]
 
-                ready_condition = False
+                observed_ready_condition_val = ""
                 for condition in conditions:
-                    if (
-                        condition.get("type") == "Ready"
-                        and condition.get("status") == "True"
-                    ):
-                        ready_condition = True
-                        break
+                    if condition.get("type") == "Ready":
+                        observed_ready_condition_val = condition.get("status")
+                        if observed_ready_condition_val == str(
+                            desired_ready_condition_val
+                        ):
+                            break
 
-                state_successful = status_obj.get("state") == "successful"
+                observed_state_val = status_obj.get("state")  # type: ignore[attr-defined]
 
-                if ready_condition and state_successful:
+                if (
+                    observed_ready_condition_val == str(desired_ready_condition_val)
+                    and observed_state_val == desired_state_val
+                ):
                     self._logger.info(f"Current deployment state: {current_state}")
                     self._logger.info(f"Current conditions: {conditions}")
                     self._logger.info(
                         f"Elapsed time: {time.time() - start_time:.1f}s / {timeout}s"
                     )
 
-                    self._logger.info(f"Deployment {self._deployment_name} is ready")
+                    self._logger.info(
+                        f"Deployment {self._deployment_name} has Ready condition {desired_ready_condition_val} and state {desired_state_val}"
+                    )
                     return True
                 else:
                     if attempt % log_interval == 0:
@@ -570,10 +655,10 @@ class ManagedDeployment:
                             f"Elapsed time: {time.time() - start_time:.1f}s / {timeout}s"
                         )
                         self._logger.info(
-                            f"Deployment not ready yet - Ready condition: {ready_condition}, State successful: {state_successful}"
+                            f"Deployment has Ready condition {observed_ready_condition_val} and state {observed_state_val}, desired condition {desired_ready_condition_val} and state {desired_state_val}"
                         )
 
-            except kubernetes.client.rest.ApiException as e:
+            except exceptions.ApiException as e:
                 self._logger.info(
                     f"API Exception while checking deployment status: {e}"
                 )
@@ -624,7 +709,7 @@ class ManagedDeployment:
             )
             self._logger.info(self.deployment_spec.spec())
             self._logger.info(f"Deployment Started {self._deployment_name}")
-        except kubernetes.client.rest.ApiException as e:
+        except exceptions.ApiException as e:
             if e.status == 409:  # Already exists
                 self._logger.info(f"Deployment {self._deployment_name} already exists")
             else:
@@ -633,7 +718,64 @@ class ManagedDeployment:
                 )
                 raise
 
-    def get_processes(self, pod) -> list:
+    async def trigger_rolling_upgrade(self, service_names: list[str]):
+        """
+        Triggers a rolling update for a list of services
+        This is a dummy update - sets an env var on the service
+        """
+
+        if not service_names:
+            raise ValueError(
+                "service_names cannot be empty for trigger_rolling_upgrade"
+            )
+
+        patch_body: dict[str, Any] = {"spec": {"services": {}}}
+
+        for service_name in service_names:
+            self.deployment_spec.set_service_env_var(
+                service_name, "TEST_ROLLING_UPDATE_TRIGGER", secrets.token_hex(8)
+            )
+
+            updated_envs = self.deployment_spec.get_service_env_vars(service_name)
+            patch_body["spec"]["services"][service_name] = {"envs": updated_envs}
+
+        try:
+            assert self._custom_api is not None, "Kubernetes API not initialized"
+            await self._custom_api.patch_namespaced_custom_object(
+                group="nvidia.com",
+                version="v1alpha1",
+                namespace=self.namespace,
+                plural="dynamographdeployments",
+                name=self._deployment_name,
+                body=patch_body,
+                _content_type="application/merge-patch+json",
+            )
+        except exceptions.ApiException as e:
+            self._logger.info(
+                f"Failed to patch deployment {self._deployment_name}: {e}"
+            )
+            raise
+
+    async def get_pod_names(self, service_names: list[str] | None = None) -> list[str]:
+        if not service_names:
+            service_names = [service.name for service in self.deployment_spec.services]
+
+        pod_names: list[str] = []
+
+        for service_name in service_names:
+            label_selector = (
+                f"nvidia.com/selector={self._deployment_name}-{service_name.lower()}"
+            )
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            pods: client.V1PodList = await self._core_api.list_namespaced_pod(
+                self.namespace, label_selector=label_selector
+            )
+            for pod in pods.items:
+                pod_names.append(pod.metadata.name)
+
+        return pod_names
+
+    def get_processes(self, pod: Pod) -> list[PodProcess]:
         """Get list of processes in the given pod"""
         result = pod.exec(["ps", "-aux"])
         lines = result.stdout.decode().splitlines()
@@ -646,38 +788,34 @@ class ManagedDeployment:
             service_name = ""
         full_service_name = f"{self._deployment_name}-{service_name.lower()}"
 
-        return kr8s_Service.get(full_service_name, namespace=self.namespace)
+        return Service.get(full_service_name, namespace=self.namespace)
 
-    def get_pods(self, service_name=None):
-        result = {}
+    def get_pods(self, service_names: list[str] | None = None) -> dict[str, list[Pod]]:
+        result: dict[str, list[Pod]] = {}
 
-        service_list = []
+        if not service_names:
+            service_names = [service.name for service in self.deployment_spec.services]
 
-        if not service_name:
-            service_list = [service.name for service in self.deployment_spec.services]
-        else:
-            service_list = [service_name]
-
-        for service in service_list:
+        for service_name in service_names:
             # List pods for this service using the selector label
             # nvidia.com/selector: deployment-name-service
             label_selector = (
-                f"nvidia.com/selector={self._deployment_name}-{service.lower()}"
+                f"nvidia.com/selector={self._deployment_name}-{service_name.lower()}"
             )
 
-            pods = []
+            pods: list[Pod] = []
 
             for pod in kr8s.get(
                 "pods", namespace=self.namespace, label_selector=label_selector
             ):
-                pods.append(pod)
+                pods.append(pod)  # type: ignore[arg-type]
 
-            result[service] = pods
+            result[service_name] = pods
 
         return result
 
-    def get_pod_logs(self, service, pod, suffix=""):
-        directory = os.path.join(self.log_dir, service)
+    def get_pod_manifest_logs_metrics(self, service_name: str, pod: Pod, suffix=""):
+        directory = os.path.join(self.log_dir, service_name)
         os.makedirs(directory, exist_ok=True)
 
         try:
@@ -699,16 +837,20 @@ class ManagedDeployment:
         except Exception as e:
             self._logger.debug(e)
 
-        self._get_pod_metrics(pod, service, suffix)
+        self._get_pod_metrics(pod, service_name, suffix)
 
     def _get_service_logs(self, service_name=None, suffix=""):
-        service_pods = self.get_pods(service_name)
+        service_names = None
+        if service_name:
+            service_names = [service_name]
+
+        service_pods = self.get_pods(service_names)
 
         for service, pods in service_pods.items():
-            for i, pod in enumerate(pods):
-                self.get_pod_logs(service, pod, suffix)
+            for pod in pods:
+                self.get_pod_manifest_logs_metrics(service, pod, suffix)
 
-    def _get_pod_metrics(self, pod, service_name, suffix=""):
+    def _get_pod_metrics(self, pod: Pod, service_name: str, suffix=""):
         directory = os.path.join(self.log_dir, service_name)
         os.makedirs(directory, exist_ok=True)
         port = None
@@ -757,11 +899,13 @@ class ManagedDeployment:
                     plural="dynamographdeployments",
                     name=self._deployment_name,
                 )
-        except client.exceptions.ApiException as e:
+        except exceptions.ApiException as e:
             if e.status != 404:  # Ignore if already deleted
                 raise
 
-    def port_forward(self, pod, remote_port, max_connection_attempts=3):
+    def port_forward(
+        self, pod: Pod, remote_port: int, max_connection_attempts: int = 3
+    ):
         """Attempt to connect to a pod and return the port-forward object on success.
 
         Note: Port forwards run in background threads. When pods are terminated,
@@ -866,9 +1010,13 @@ class ManagedDeployment:
             self._deployment_name = self.deployment_spec.name
             logging.getLogger("httpx").setLevel(logging.WARNING)
             await self._init_kubernetes()
-            await self._delete_deployment()
-            await self._restart_etcd()
-            await self._restart_nats()
+
+            # Run delete deployment and service restarts in parallel
+            tasks = [self._delete_deployment()]
+            if not self.skip_service_restart:
+                tasks.extend([self._restart_etcd(), self._restart_nats()])
+            await asyncio.gather(*tasks)
+
             await self._create_deployment()
             await self._wait_for_ready()
 

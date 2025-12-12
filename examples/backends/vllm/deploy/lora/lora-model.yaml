@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoModel
+metadata:
+  name: codelion-recovery-lora
+spec:
+  modelName: codelion/Qwen3-0.6B-accuracy-recovery-lora
+  baseModelName: Qwen/Qwen3-0.6B
+  modelType: lora
+  source:
+    uri: s3://my-loras/codelion/Qwen3-0.6B-accuracy-recovery-lora

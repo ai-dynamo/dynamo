@@ -18,6 +18,10 @@ FROM ubuntu:24.04
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
+# Version for documentation (e.g., "0.3.0" for releases, "dev" for main/PRs)
+ARG DYNAMO_DOCS_VERSION=dev
+ENV DYNAMO_DOCS_VERSION=$DYNAMO_DOCS_VERSION
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 RUN apt-get update && \

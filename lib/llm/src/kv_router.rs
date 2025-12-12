@@ -22,6 +22,8 @@ use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::protocols::openai::nvext::WorkerIdInfo;
+
 pub mod approx;
 pub mod indexer;
 pub mod prefill_router;
@@ -32,8 +34,11 @@ pub mod scheduler;
 pub mod scoring;
 pub mod sequence;
 pub mod subscriber;
+pub mod worker_query;
 
+use indexer::WorkerKvQueryResponse;
 pub use prefill_router::PrefillRouter;
+use worker_query::WorkerQueryClient;
 
 use crate::{
     kv_router::{
@@ -43,11 +48,12 @@ use crate::{
             compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         protocols::{
-            LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult, WorkerWithDpRank,
+            LocalBlockHash, RouterRequest, RouterResponse, WorkerId, WorkerSelectionResult,
+            WorkerWithDpRank,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         sequence::SequenceError,
-        subscriber::start_kv_router_background,
+        subscriber::{recover_from_all_workers, start_kv_router_background},
     },
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
@@ -74,6 +80,10 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 // for radix tree snapshot storage
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
+
+// for worker-local kvindexer query
+pub const WORKER_KV_INDEXER_QUERY_SUBJECT: &str = "worker_kv_indexer_query";
+pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
 
 // for router discovery registration
 pub const KV_ROUTER_COMPONENT: &str = "kv-router";
@@ -268,6 +278,8 @@ pub struct KvRouter {
     cancellation_token: tokio_util::sync::CancellationToken,
 
     client: Client,
+
+    worker_query_client: Option<WorkerQueryClient>,
 }
 
 impl KvRouter {
@@ -294,7 +306,7 @@ impl KvRouter {
             endpoint: endpoint_id.name.clone(),
         };
         let discovery_stream = discovery
-            .list_and_watch(discovery_key, Some(cancellation_token.clone()))
+            .list_and_watch(discovery_key.clone(), Some(cancellation_token.clone()))
             .await?;
         let runtime_configs_rx =
             watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
@@ -331,12 +343,18 @@ impl KvRouter {
             component.clone(),
             block_size,
             instance_ids_rx,
-            runtime_configs_rx,
+            runtime_configs_rx.clone(),
             selector,
             kv_router_config.router_replica_sync,
             consumer_id.clone(),
         )
         .await?;
+
+        // Initialize worker query client using namespace abstraction
+        // (created before background task so we can use it for startup recovery)
+        let worker_query_client =
+            worker_query::WorkerQueryClient::new(component.clone(), runtime_configs_rx.clone());
+        tracing::info!("Worker query client initialized");
 
         // Start KV event subscriber background process (only when use_kv_events is enabled)
         if kv_router_config.use_kv_events
@@ -358,6 +376,47 @@ impl KvRouter {
                 kv_router_config.router_reset_states,
             )
             .await?;
+
+            // Perform startup recovery from workers with local indexers
+            // This catches up on any events missed while the router was offline
+            let last_event_ids = kv_indexer
+                .get_last_received_event_ids()
+                .await
+                .unwrap_or_default();
+            let instances = client.instance_source.as_ref().borrow().clone();
+            let worker_ids: Vec<WorkerId> = instances.iter().map(|i| i.instance_id).collect();
+
+            if !worker_ids.is_empty() {
+                tracing::info!(
+                    worker_count = worker_ids.len(),
+                    "Starting recovery from workers with local indexers"
+                );
+
+                // NOTE: recover_from_all_workers() is a no-op if
+                // Worker with worker_id is not associated with a
+                // local indexer instance.
+                let recovered = recover_from_all_workers(
+                    &worker_query_client,
+                    &last_event_ids,
+                    &worker_ids,
+                    &kv_indexer.event_sender(),
+                )
+                .await;
+
+                if recovered > 0 {
+                    tracing::info!(
+                        recovered_events = recovered,
+                        "KV Router startup: Recovered {} KV events from workers {:?}",
+                        recovered,
+                        worker_ids
+                    );
+                } else {
+                    tracing::info!(
+                        "KV Router startup: No KV events recovered from workers {:?}",
+                        worker_ids
+                    );
+                }
+            }
         }
 
         tracing::info!("KV Routing initialized");
@@ -368,6 +427,7 @@ impl KvRouter {
             kv_router_config,
             cancellation_token,
             client,
+            worker_query_client: Some(worker_query_client),
         })
     }
 
@@ -499,6 +559,62 @@ impl KvRouter {
     /// Dump all events from the indexer
     pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         self.indexer.dump_events().await
+    }
+
+    /// Query a specific worker's local KV indexer for its events
+    /// (See docstring for `WorkerQueryClient.query_worker()`)
+    pub async fn query_worker_local_kv(
+        &self,
+        worker_id: WorkerId,
+        start_event_id: Option<u64>,
+        end_event_id: Option<u64>,
+    ) -> Result<WorkerKvQueryResponse> {
+        let query_client = self
+            .worker_query_client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Worker query client not available (NATS required)"))?;
+
+        query_client
+            .query_worker(worker_id, start_event_id, end_event_id)
+            .await
+    }
+
+    /// Recover missed KV events from a specific worker.
+    ///
+    /// Queries the worker's local KV indexer for events starting from
+    /// `start_event_id` and applies them to the router's indexer.
+    ///
+    /// # Arguments
+    ///
+    /// * `worker_id` - The worker to recover from
+    /// * `start_event_id` - First event ID to fetch (inclusive), or None to start from beginning
+    /// * `end_event_id` - Last event ID to fetch (inclusive), or None for all
+    pub async fn recover_from_worker(
+        &self,
+        worker_id: WorkerId,
+        start_event_id: Option<u64>,
+        end_event_id: Option<u64>,
+    ) -> Result<usize> {
+        let query_client = self
+            .worker_query_client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Worker query client not available"))?;
+
+        let event_tx = match &self.indexer {
+            Indexer::KvIndexer(kv_indexer) => kv_indexer.event_sender(),
+            Indexer::None => {
+                anyhow::bail!("Cannot recover: indexer is disabled (--overlap_score_weight is 0)")
+            }
+        };
+
+        subscriber::recover_from_worker(
+            query_client,
+            worker_id,
+            start_event_id,
+            end_event_id,
+            &event_tx,
+        )
+        .await
     }
 }
 
@@ -646,13 +762,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
         backend_input.dp_rank = Some(dp_rank);
 
-        // Get prefill worker ID if available (stored by PrefillRouter)
-        // In aggregated mode, prefill_worker_id is None, so we use decode_worker_id for both
+        // Get prefill worker ID from prefill_result if available
+        // In aggregated mode, prefill_result is None, so we use decode_worker_id for both
         let decode_worker_id = instance_id;
-        let prefill_worker_id = context
-            .get::<u64>("prefill_worker_id")
-            .ok()
-            .map(|arc| *arc)
+        let prefill_worker_id = backend_input
+            .prefill_result
+            .as_ref()
+            .and_then(|prefill_result| {
+                prefill_result
+                    .disaggregated_params
+                    .get("worker_id")
+                    .and_then(|v| serde_json::from_value::<WorkerIdInfo>(v.clone()).ok())
+                    .and_then(|info| info.prefill_worker_id)
+            })
             .or(Some(decode_worker_id)); // Use decode_worker_id if no separate prefill worker
 
         let updated_request = context.map(|_| backend_input);
@@ -699,12 +821,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 continue;
                             };
 
-                            // prefill_worker_id comes from context (set by PrefillRouter) or falls back to instance_id
+                            // prefill_worker_id comes from prefill_result.disaggregated_params or falls back to instance_id
                             // decode_worker_id is always the current instance_id
-                            let worker_id_json = json!({
-                                "prefill_worker_id": prefill_worker_id,
-                                "decode_worker_id": decode_worker_id,
-                            });
+                            let worker_id_info = WorkerIdInfo {
+                                prefill_worker_id,
+                                decode_worker_id: Some(decode_worker_id),
+                            };
+                            let worker_id_json = serde_json::to_value(&worker_id_info)
+                                .expect("WorkerIdInfo serialization should not fail");
 
                             if let Some(obj) = data.disaggregated_params.as_mut().and_then(|p| p.as_object_mut()) {
                                 obj.insert("worker_id".to_string(), worker_id_json);

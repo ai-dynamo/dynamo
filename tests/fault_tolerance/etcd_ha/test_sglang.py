@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# TODO: Update to use dynamic port allocation (allocate_free_port) for parallel execution
+# Currently uses hardcoded ports: FRONTEND_PORT (8000), system ports (8081, 8082)
+# See tests/fault_tolerance/migration/test_sglang.py for dynamic port pattern
+
 import logging
 import os
 import shutil

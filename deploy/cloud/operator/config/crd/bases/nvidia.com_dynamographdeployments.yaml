@@ -219,12 +219,13 @@ spec:
                           (such as Pod, Service, and Ingress when applicable).
                         type: object
                       autoscaling:
-                        description: Autoscaling config for this component (replica range, target utilization, etc.).
+                        description: |-
+                          Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
+                          with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+                          for migration guidance. This field will be removed in a future API version.
                         properties:
                           behavior:
-                            description: |-
-                              HorizontalPodAutoscalerBehavior configures the scaling behavior of the target
-                              in both Up and Down directions (scaleUp and scaleDown fields respectively).
+                            description: 'Deprecated: This field is ignored.'
                             properties:
                               scaleDown:
                                 description: |-
@@ -373,10 +374,13 @@ spec:
                                 type: object
                             type: object
                           enabled:
+                            description: 'Deprecated: This field is ignored.'
                             type: boolean
                           maxReplicas:
+                            description: 'Deprecated: This field is ignored.'
                             type: integer
                           metrics:
+                            description: 'Deprecated: This field is ignored.'
                             items:
                               description: |-
                                 MetricSpec specifies how to scale based on a single metric
@@ -807,6 +811,7 @@ spec:
                               type: object
                             type: array
                           minReplicas:
+                            description: 'Deprecated: This field is ignored.'
                             type: integer
                         type: object
                       componentType:
@@ -10319,8 +10324,12 @@ spec:
                             type: integer
                         type: object
                       replicas:
-                        description: Replicas is the desired number of Pods for this component when autoscaling is not used.
+                        description: |-
+                          Replicas is the desired number of Pods for this component.
+                          When scalingAdapter is enabled (default), this field is managed by the
+                          DynamoGraphDeploymentScalingAdapter and should not be modified directly.
                         format: int32
+                        minimum: 0
                         type: integer
                       resources:
                         description: |-
@@ -10398,6 +10407,20 @@ spec:
                                 description: Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi")
                                 type: string
                             type: object
+                        type: object
+                      scalingAdapter:
+                        description: |-
+                          ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
+                          When enabled (default), replicas are managed via DGDSA and external autoscalers can scale
+                          the service using the Scale subresource. When disabled, replicas can be modified directly.
+                        properties:
+                          disable:
+                            default: false
+                            description: |-
+                              Disable indicates whether the ScalingAdapter should be disabled for this service.
+                              When false (default), a DGDSA is created and owns the replicas field.
+                              When true, no DGDSA is created and replicas can be modified directly in the DGD.
+                            type: boolean
                         type: object
                       serviceName:
                         description: The name of the component
@@ -10507,6 +10530,64 @@ spec:
                       - type
                     type: object
                   type: array
+                services:
+                  additionalProperties:
+                    description: ServiceReplicaStatus contains replica information for a single service.
+                    properties:
+                      availableReplicas:
+                        description: |-
+                          AvailableReplicas is the number of available replicas.
+                          For Deployment: replicas ready for >= minReadySeconds.
+                          For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.
+                          Not available for PodClique or LeaderWorkerSet.
+                          When nil, the field is omitted from the API response.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      componentKind:
+                        description: ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet").
+                        enum:
+                          - PodClique
+                          - PodCliqueScalingGroup
+                          - Deployment
+                          - LeaderWorkerSet
+                        type: string
+                      componentName:
+                        description: ComponentName is the name of the underlying resource.
+                        type: string
+                      readyReplicas:
+                        description: |-
+                          ReadyReplicas is the number of ready replicas.
+                          Populated for PodClique, Deployment, and LeaderWorkerSet.
+                          Not available for PodCliqueScalingGroup.
+                          When nil, the field is omitted from the API response.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      replicas:
+                        description: |-
+                          Replicas is the total number of non-terminated replicas.
+                          Required for all component kinds.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      updatedReplicas:
+                        description: |-
+                          UpdatedReplicas is the number of replicas at the current/desired revision.
+                          Required for all component kinds.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    required:
+                      - componentKind
+                      - componentName
+                      - replicas
+                      - updatedReplicas
+                    type: object
+                  description: |-
+                    Services contains per-service replica status information.
+                    The map key is the service name from spec.services.
+                  type: object
                 state:
                   description: State is a high-level textual status of the graph deployment lifecycle.
                   type: string

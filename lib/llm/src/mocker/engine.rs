@@ -60,7 +60,11 @@ impl MockVllmEngine {
     }
 
     pub async fn start(&self, component: Component) -> Result<()> {
-        let cancel_token = component.drt().runtime().child_token();
+        // Use primary_token() instead of child_token() so the mocker continues running
+        // during graceful shutdown (Phase 1/2) and only stops in Phase 3.
+        // child_token() is a child of endpoint_shutdown_token which is cancelled in Phase 1.
+        // primary_token() is only cancelled in Phase 3, after waiting for inflight requests.
+        let cancel_token = component.drt().primary_token();
 
         // Simulate engine startup time if configured
         if let Some(startup_time_secs) = self.engine_args.startup_time {
@@ -143,6 +147,11 @@ impl MockVllmEngine {
                             }
                         }
                         _ = cancel_token_cloned.cancelled() => {
+                            tracing::info!("Scheduler output task cancelled, clearing active requests");
+                            // Clear all active requests to unblock waiting request handlers
+                            // This will cause their request_rx.recv() to return None
+                            let mut active = active_requests_clone.lock().await;
+                            active.clear();
                             break;
                         }
                     }
