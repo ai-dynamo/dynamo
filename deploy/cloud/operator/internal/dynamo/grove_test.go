@@ -6,14 +6,20 @@ import (
 	"testing"
 
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
+	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
+	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestResolveKaiSchedulerQueueName(t *testing.T) {
@@ -308,6 +314,331 @@ func TestEnsureQueueExists(t *testing.T) {
 					t.Logf("Queue validation passed (this is expected in unit tests)")
 				}
 			}
+		})
+	}
+}
+
+func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name                   string
+		dgdSpec                v1alpha1.DynamoGraphDeploymentSpec
+		existingGroveResources []client.Object
+		wantReady              bool
+		wantReason             string
+		wantServiceStatuses    map[string]v1alpha1.ServiceReplicaStatus
+	}{
+		{
+			name: "single-node service not ready - PodClique not ready",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						ServiceName:     "frontend",
+						DynamoNamespace: ptr.To("default"),
+						ComponentType:   string(commonconsts.ComponentTypeFrontend),
+						Replicas:        ptr.To(int32(2)),
+					},
+				},
+			},
+			existingGroveResources: []client.Object{
+				&grovev1alpha1.PodClique{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dgd-0-frontend",
+						Namespace: "default",
+					},
+					Spec: grovev1alpha1.PodCliqueSpec{
+						Replicas: 2,
+					},
+					Status: grovev1alpha1.PodCliqueStatus{
+						Replicas:        2,
+						UpdatedReplicas: 2,
+						ReadyReplicas:   1,
+					},
+				},
+			},
+			wantReady:  false,
+			wantReason: "podclique/test-dgd-0-frontend: desired=2, ready=1",
+			wantServiceStatuses: map[string]v1alpha1.ServiceReplicaStatus{
+				"frontend": {
+					ComponentKind:   v1alpha1.ComponentKindPodClique,
+					ComponentName:   "test-dgd-0-frontend",
+					Replicas:        2,
+					UpdatedReplicas: 2,
+					ReadyReplicas:   ptr.To(int32(1)),
+				},
+			},
+		},
+		{
+			name: "all multinode services ready - all PCSGs ready",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"decode": {
+						ServiceName:     "decode",
+						DynamoNamespace: ptr.To("default"),
+						ComponentType:   string(commonconsts.ComponentTypeDecode),
+						Replicas:        ptr.To(int32(2)),
+						Multinode: &v1alpha1.MultinodeSpec{
+							NodeCount: 2,
+						},
+					},
+					"prefill": {
+						ServiceName:     "prefill",
+						DynamoNamespace: ptr.To("default"),
+						ComponentType:   string(commonconsts.ComponentTypePrefill),
+						Replicas:        ptr.To(int32(3)),
+						Multinode: &v1alpha1.MultinodeSpec{
+							NodeCount: 4,
+						},
+					},
+				},
+			},
+			existingGroveResources: []client.Object{
+				&grovev1alpha1.PodCliqueScalingGroup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dgd-0-decode",
+						Namespace: "default",
+					},
+					Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
+						Replicas: 2,
+					},
+					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+						Replicas:          2,
+						UpdatedReplicas:   2,
+						AvailableReplicas: 2,
+					},
+				},
+				&grovev1alpha1.PodCliqueScalingGroup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dgd-0-prefill",
+						Namespace: "default",
+					},
+					Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
+						Replicas: 3,
+					},
+					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+						Replicas:          3,
+						UpdatedReplicas:   3,
+						AvailableReplicas: 3,
+					},
+				},
+			},
+			wantReady:  true,
+			wantReason: "",
+			wantServiceStatuses: map[string]v1alpha1.ServiceReplicaStatus{
+				"decode": {
+					ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
+					ComponentName:     "test-dgd-0-decode",
+					Replicas:          2,
+					UpdatedReplicas:   2,
+					AvailableReplicas: ptr.To(int32(2)),
+				},
+				"prefill": {
+					ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
+					ComponentName:     "test-dgd-0-prefill",
+					Replicas:          3,
+					UpdatedReplicas:   3,
+					AvailableReplicas: ptr.To(int32(3)),
+				},
+			},
+		},
+		{
+			name: "multinode service not ready - PCSG not ready",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"worker": {
+						ServiceName:     "worker",
+						DynamoNamespace: ptr.To("default"),
+						ComponentType:   string(commonconsts.ComponentTypeWorker),
+						Replicas:        ptr.To(int32(2)),
+						Multinode: &v1alpha1.MultinodeSpec{
+							NodeCount: 4,
+						},
+					},
+				},
+			},
+			existingGroveResources: []client.Object{
+				&grovev1alpha1.PodCliqueScalingGroup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dgd-0-worker",
+						Namespace: "default",
+					},
+					Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
+						Replicas: 2,
+					},
+					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+						Replicas:          2,
+						UpdatedReplicas:   2,
+						AvailableReplicas: 1,
+					},
+				},
+			},
+			wantReady:  false,
+			wantReason: "pcsg/test-dgd-0-worker: desired=2, available=1",
+			wantServiceStatuses: map[string]v1alpha1.ServiceReplicaStatus{
+				"worker": {
+					ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
+					ComponentName:     "test-dgd-0-worker",
+					Replicas:          2,
+					UpdatedReplicas:   2,
+					AvailableReplicas: ptr.To(int32(1)),
+				},
+			},
+		},
+		{
+			name: "mixed services - some ready, some not - combination of PodClique and PCSG",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						ServiceName:     "frontend",
+						DynamoNamespace: ptr.To("default"),
+						ComponentType:   string(commonconsts.ComponentTypeFrontend),
+						Replicas:        ptr.To(int32(1)),
+					},
+					"decode": {
+						ServiceName:     "decode",
+						DynamoNamespace: ptr.To("default"),
+						ComponentType:   string(commonconsts.ComponentTypeDecode),
+						Replicas:        ptr.To(int32(2)),
+						Multinode: &v1alpha1.MultinodeSpec{
+							NodeCount: 2,
+						},
+					},
+					"prefill": {
+						ServiceName:     "prefill",
+						DynamoNamespace: ptr.To("default"),
+						ComponentType:   string(commonconsts.ComponentTypePrefill),
+						Replicas:        ptr.To(int32(2)),
+						Multinode: &v1alpha1.MultinodeSpec{
+							NodeCount: 2,
+						},
+					},
+				},
+			},
+			existingGroveResources: []client.Object{
+				&grovev1alpha1.PodClique{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dgd-0-frontend",
+						Namespace: "default",
+					},
+					Spec: grovev1alpha1.PodCliqueSpec{
+						Replicas: 1,
+					},
+					Status: grovev1alpha1.PodCliqueStatus{
+						Replicas:        1,
+						UpdatedReplicas: 1,
+						ReadyReplicas:   1,
+					},
+				},
+				&grovev1alpha1.PodCliqueScalingGroup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dgd-0-decode",
+						Namespace: "default",
+					},
+					Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
+						Replicas: 2,
+					},
+					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+						Replicas:          2,
+						UpdatedReplicas:   2,
+						AvailableReplicas: 1,
+					},
+				},
+				&grovev1alpha1.PodCliqueScalingGroup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dgd-0-prefill",
+						Namespace: "default",
+					},
+					Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
+						Replicas: 2,
+					},
+					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+						Replicas:          2,
+						UpdatedReplicas:   2,
+						AvailableReplicas: 2,
+					},
+				},
+			},
+			wantReady:  false,
+			wantReason: "pcsg/test-dgd-0-decode: desired=2, available=1",
+			wantServiceStatuses: map[string]v1alpha1.ServiceReplicaStatus{
+				"frontend": {
+					ComponentKind:   v1alpha1.ComponentKindPodClique,
+					ComponentName:   "test-dgd-0-frontend",
+					Replicas:        1,
+					UpdatedReplicas: 1,
+					ReadyReplicas:   ptr.To(int32(1)),
+				},
+				"decode": {
+					ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
+					ComponentName:     "test-dgd-0-decode",
+					Replicas:          2,
+					UpdatedReplicas:   2,
+					AvailableReplicas: ptr.To(int32(1)),
+				},
+				"prefill": {
+					ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
+					ComponentName:     "test-dgd-0-prefill",
+					Replicas:          2,
+					UpdatedReplicas:   2,
+					AvailableReplicas: ptr.To(int32(2)),
+				},
+			},
+		},
+		{
+			name: "service resource not found - PodClique missing",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						ServiceName:     "frontend",
+						DynamoNamespace: ptr.To("default"),
+						ComponentType:   string(commonconsts.ComponentTypeFrontend),
+						Replicas:        ptr.To(int32(1)),
+					},
+				},
+			},
+			existingGroveResources: []client.Object{},
+			wantReady:              false,
+			wantReason:             "podclique/test-dgd-0-frontend: resource not found",
+			wantServiceStatuses: map[string]v1alpha1.ServiceReplicaStatus{
+				"frontend": {},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			s := scheme.Scheme
+			err := v1alpha1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			err = grovev1alpha1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgd",
+					Namespace: "default",
+				},
+				Spec: tt.dgdSpec,
+			}
+
+			var objects []client.Object
+			objects = append(objects, dgd)
+			objects = append(objects, tt.existingGroveResources...)
+
+			fakeKubeClient := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(objects...).
+				WithStatusSubresource(objects...).
+				Build()
+
+			ready, reason, serviceStatuses := GetComponentReadinessAndServiceReplicaStatuses(ctx, fakeKubeClient, dgd)
+
+			g.Expect(ready).To(gomega.Equal(tt.wantReady))
+			g.Expect(reason).To(gomega.Equal(tt.wantReason))
+			g.Expect(serviceStatuses).To(gomega.Equal(tt.wantServiceStatuses))
 		})
 	}
 }
