@@ -19,6 +19,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 MODEL_NAME="llava-hf/llava-1.5-7b-hf"
 PROMPT_TEMPLATE="USER: <image>\n<prompt> ASSISTANT:"
 PROVIDED_PROMPT_TEMPLATE=""
+SINGLE_GPU=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -31,11 +32,16 @@ while [[ $# -gt 0 ]]; do
             PROVIDED_PROMPT_TEMPLATE=$2
             shift 2
             ;;
+        --single-gpu)
+            SINGLE_GPU=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --model <model_name> Specify the model to use (default: $MODEL_NAME)"
             echo "  --prompt-template <template> Specify the multi-modal prompt template to use. LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates."
+            echo "  --single-gpu         Run both encode and PD workers on GPU 0 (for pre-merge CI)"
             echo "  -h, --help           Show this help message"
             exit 0
             ;;
@@ -54,7 +60,7 @@ elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
     PROMPT_TEMPLATE="USER: <image>\n<prompt> ASSISTANT:"
 elif [[ "$MODEL_NAME" == "microsoft/Phi-3.5-vision-instruct" ]]; then
     PROMPT_TEMPLATE="<|user|>\n<|image_1|>\n<prompt><|end|>\n<|assistant|>\n"
-elif [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
+elif [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]] || [[ "$MODEL_NAME" == "Qwen/Qwen2-VL-2B-Instruct" ]]; then
     PROMPT_TEMPLATE="<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><prompt><|im_end|>\n<|im_start|>assistant\n"
 else
     echo "No multi-modal prompt template is defined for the model: $MODEL_NAME"
@@ -67,11 +73,14 @@ fi
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend &
 
-# To make Qwen2.5-VL fit in A100 40GB, set the following extra arguments
+# Set GPU memory utilization and model length based on deployment mode
+# Single-GPU mode: Both workers share GPU 0, so use reduced memory settings
+# Multi-GPU mode: Each worker gets its own GPU, so use higher memory settings
 EXTRA_ARGS=""
-if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
-    EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
-elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    EXTRA_ARGS="--gpu-memory-utilization 0.3 --max-model-len 3072 --enforce-eager"
+else
+    # Multi-GPU mode: standard memory settings
     EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
 fi
 
@@ -79,8 +88,15 @@ fi
 python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME --mm-prompt-template "$PROMPT_TEMPLATE" &
 
 # run E/P/D workers
-CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME &
-CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --multimodal-worker --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $EXTRA_ARGS &
+# Use single GPU (GPU 0) for pre-merge CI, otherwise use GPU 0 for encode and GPU 1 for PD
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    # Single GPU mode: both workers share GPU 0 with reduced memory
+    CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME $EXTRA_ARGS &
+    CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-worker --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $EXTRA_ARGS &
+else
+    CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME $EXTRA_ARGS &
+    CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --multimodal-worker --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $EXTRA_ARGS &
+fi
 
 # Wait for all background processes to complete
 wait

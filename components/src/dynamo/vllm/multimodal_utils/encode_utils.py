@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from .model import SupportedModels, is_model_supported
+from .model import SupportedModels, is_model_supported, is_qwen_vl_model
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ def encode_image_embeddings(
 
             embeddings = projector(vision_outputs.last_hidden_state)
 
-        elif is_model_supported(model_name, SupportedModels.QWEN_2_5_VL_7B):
+        elif is_qwen_vl_model(model_name):
             embeddings = get_qwen_image_features(vision_encoder, image_embeds)
 
         else:
@@ -123,7 +123,7 @@ def get_encoder_components(
         projector = getattr(vision_model, "multi_modal_projector", None)
         return vision_encoder, projector
 
-    elif is_model_supported(model_name, SupportedModels.QWEN_2_5_VL_7B):
+    elif is_qwen_vl_model(model_name):
         vision_encoder = vision_model
         projector = None
         return vision_encoder, projector
