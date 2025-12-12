@@ -72,8 +72,6 @@ class DynamoWorkerProcess(ManagedProcess):
             FAULT_TOLERANCE_MODEL_NAME,
             "--disaggregation-mode",
             mode,
-            "--free-gpu-memory-fraction",
-            "0.45",
             "--max-seq-len",
             "16384",
             "--max-num-tokens",
@@ -87,6 +85,7 @@ class DynamoWorkerProcess(ManagedProcess):
                     "cache_transceiver_config:\n  backend: DEFAULT\n  max_tokens_in_buffer: 16384\n"
                 )
                 f.write("disable_overlap_scheduler: true\n")
+                f.write("kv_cache_config:\n  max_tokens: 16384\n")
             command += [
                 "--extra-engine-args",
                 "test_request_cancellation_trtllm_config.yaml",
