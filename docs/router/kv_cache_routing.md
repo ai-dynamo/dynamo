@@ -372,20 +372,19 @@ To get a feel for how KV Cache management works on a single worker with KV Cache
 Further details can be found for: [TRT-LLM](https://developer.nvidia.com/blog/introducing-new-kv-cache-reuse-optimizations-in-nvidia-tensorrt-llm/), [vLLM](https://docs.vllm.ai/en/latest/design/automatic_prefix_caching.html#design-automatic-prefix-caching) and [SGLang](https://lmsys.org/blog/2024-01-17-sglang/).
 
 ## KV Cache Routing and Load Balancing
-```text
-+---------+          +------------------+           +---------+
-|  Tokens |--------->| KV Aware Router  |---------> | Worker 2|
-+---------+          +------------------+           +---------+
-                             |
-          +------------------+------------------+
-          |                  |                  |
-          | Cached: 2 blocks | Cached: 5 blocks | Cached: 8 blocks
-          | Prefill: 8 blks  | Prefill: 5 blks  | Prefill: 2 blks
-          | Decode: 10 blks  | Decode: 5 blks   | Decode: 9 blks
-          v                  v                  v
-   +----------------+  +----------------+  +----------------+
-   |   Worker 1     |  |   Worker 2     |  |   Worker 3     |
-   +----------------+  +----------------+  +----------------+
+```mermaid
+graph TD
+    T[Tokens] --> R[KV Aware Router]
+
+    R -.-> W1["Worker 1<br/>Cached: 2 blocks<br/>Prefill: 8 blks<br/>Decode: 10 blks"]
+    R ==>|Selected| W2["Worker 2<br/>Cached: 5 blocks<br/>Prefill: 5 blks<br/>Decode: 5 blks"]
+    R -.-> W3["Worker 3<br/>Cached: 8 blocks<br/>Prefill: 2 blks<br/>Decode: 9 blks"]
+
+    style T fill:#fff3e0,color:#5a850f
+    style R fill:#e1f5fe,color:#5a850f
+    style W1 fill:#f3e5f5,color:#5a850f
+    style W2 fill:#e8f5e9,color:#5a850f
+    style W3 fill:#f3e5f5,color:#5a850f
 ```
 
 KV Cache reuse introduces complexity to LLM serving load balancing. While it can significantly reduce computation costs, routing strategies that ignore worker-specific KV states can lead to:
