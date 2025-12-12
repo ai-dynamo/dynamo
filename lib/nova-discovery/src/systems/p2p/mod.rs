@@ -27,10 +27,10 @@ const DEFAULT_RECORD_TTL_SECS: u64 = 600;
 /// # Example
 ///
 /// ```no_run
-/// use dynamo_nova_discovery::systems::P2pConfig;
+/// use dynamo_nova_discovery::systems::P2pConfigBuilder;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// let system = P2pConfig::builder()
+/// let system = P2pConfigBuilder::default()
 ///     .cluster_id("my-cluster")
 ///     .enable_mdns(true)
 ///     .build()
