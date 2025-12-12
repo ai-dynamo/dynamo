@@ -1165,6 +1165,7 @@ mod tests {
         );
 
         // 7. Prefill attaches
+        #[allow(deprecated)]
         let mut handle = pair
             .prefill
             .leader
@@ -1359,6 +1360,7 @@ mod tests {
         );
 
         // Prefill attaches using legacy API (already tested)
+        #[allow(deprecated)]
         let mut prefill_handle = pair
             .prefill
             .leader

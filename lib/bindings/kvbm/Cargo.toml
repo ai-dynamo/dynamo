@@ -23,8 +23,9 @@ crate-type = ["cdylib", "rlib"]
 default = ["v1", "v2", "kernels"]
 dynamo = ["dep:dynamo-runtime"]
 v1 = ["dynamo", "dep:dynamo-llm", "dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
-v2 = ["dep:dynamo-kvbm", "dep:dynamo-memory", "dep:dynamo-kvbm-kernels"]
-kernels = ["dep:dynamo-kvbm-kernels", "dep:dynamo-memory"]
+v2 = ["dep:dynamo-kvbm", "dep:dynamo-memory", "static-kernels"]
+kernels = ["static-kernels", "dep:dynamo-memory"]
+static-kernels = ["dynamo-kvbm-kernels/static-kernels"]
 
 [dependencies]
 dynamo-llm = { path = "../../llm", optional = true }
