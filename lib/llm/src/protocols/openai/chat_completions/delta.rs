@@ -368,7 +368,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
             let mut nvext_response = NvExtResponse::default();
 
-            // Extract worker_id if present (standard Dynamo flow)
+            // Extract worker_id if present (used by both standard Dynamo and GAIE flows)
             if let Some(worker_id_json) = params.get("worker_id") {
                 let prefill_worker_id = worker_id_json
                     .get("prefill_worker_id")
@@ -383,27 +383,19 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                 });
             }
 
-            // Extract GAIE Stage 1 response fields directly
-            nvext_response.prefill_worker_id =
-                params.get("prefill_worker_id").and_then(|v| v.as_u64());
-            nvext_response.decode_worker_id =
-                params.get("decode_worker_id").and_then(|v| v.as_u64());
+            // Extract token_data if present (GAIE Stage 1)
             nvext_response.token_data = params
                 .get("token_data")
                 .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok());
 
             // Only inject nvext if we have data
-            let has_data = nvext_response.worker_id.is_some()
-                || nvext_response.prefill_worker_id.is_some()
-                || nvext_response.decode_worker_id.is_some()
-                || nvext_response.token_data.is_some();
+            let has_data = nvext_response.worker_id.is_some() || nvext_response.token_data.is_some();
 
             if has_data && let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
                 stream_response.nvext = Some(nvext_json);
                 tracing::debug!(
-                    "Injected nvext into chat completion: prefill_worker={:?}, decode_worker={:?}, token_count={:?}",
-                    nvext_response.prefill_worker_id,
-                    nvext_response.decode_worker_id,
+                    "Injected nvext into chat completion: worker_id={:?}, token_count={:?}",
+                    nvext_response.worker_id,
                     nvext_response.token_data.as_ref().map(|t| t.len())
                 );
             }

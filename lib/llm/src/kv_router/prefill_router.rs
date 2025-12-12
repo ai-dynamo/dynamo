@@ -553,6 +553,7 @@ impl PrefillRouter {
         }
 
         // Build response with selected worker IDs and tokens for Stage 2
+        // Use nested worker_id structure to match standard Dynamo flow
         let query_response = LLMEngineOutput {
             token_ids: vec![],
             tokens: None,
@@ -563,8 +564,10 @@ impl PrefillRouter {
             finish_reason: None,
             index: None,
             disaggregated_params: Some(json!({
-                "prefill_worker_id": prefill_worker_id,
-                "decode_worker_id": decode_worker_id,
+                "worker_id": {
+                    "prefill_worker_id": prefill_worker_id,
+                    "decode_worker_id": decode_worker_id,
+                },
                 "token_data": req.token_ids,  // Include tokens for Stage 2 to skip re-tokenization
             })),
             extra_args: None,

@@ -26,16 +26,9 @@ pub struct WorkerIdInfo {
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct NvExtResponse {
     /// Worker ID information (prefill and decode worker IDs)
+    /// Used by both standard Dynamo flow and GAIE Stage 1
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<WorkerIdInfo>,
-
-    /// Selected prefill worker ID (GAIE Stage 1 response)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prefill_worker_id: Option<u64>,
-
-    /// Selected decode worker ID (GAIE Stage 1 response)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub decode_worker_id: Option<u64>,
 
     /// Token IDs from preprocessing (GAIE Stage 1 response, for Stage 2 to skip re-tokenization)
     #[serde(skip_serializing_if = "Option::is_none")]

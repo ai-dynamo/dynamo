@@ -754,11 +754,12 @@ pub async fn extract_worker_selection_from_stream(
             && let Some(nvext_value) = data.nvext.as_ref()
             && let Ok(nvext_response) = serde_json::from_value::<NvExtResponse>(nvext_value.clone())
         {
-            // Extract prefill_worker_id (GAIE Stage 1)
-            result.prefill_worker_id = nvext_response.prefill_worker_id.map(|id| id as i64);
-            // Extract decode_worker_id into worker_id field
-            if let Some(decode_id) = nvext_response.decode_worker_id {
-                result.worker_id = decode_id as i64;
+            // Extract worker IDs from nested worker_id structure (both standard Dynamo and GAIE)
+            if let Some(worker_id_info) = nvext_response.worker_id {
+                result.prefill_worker_id = worker_id_info.prefill_worker_id.map(|id| id as i64);
+                if let Some(decode_id) = worker_id_info.decode_worker_id {
+                    result.worker_id = decode_id as i64;
+                }
             }
             // Extract token_data for Stage 2 optimization
             if let Some(tokens) = nvext_response.token_data {
@@ -774,12 +775,6 @@ pub async fn extract_worker_selection_from_stream(
                 result.worker_id,
                 result.tokens.len()
             );
-            // Also extract worker_id from worker_id info if present
-            if let Some(worker_id_info) = nvext_response.worker_id
-                && let Some(decode_id) = worker_id_info.decode_worker_id
-            {
-                result.worker_id = decode_id as i64;
-            }
         }
 
         let Some(event) = &response.event else {
