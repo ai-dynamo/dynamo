@@ -1942,7 +1942,6 @@ dependencies = [
  "ahash",
  "aho-corasick",
  "akin",
- "aligned-vec",
  "anyhow",
  "async-nats 0.45.0",
  "async-stream",
@@ -1959,13 +1958,11 @@ dependencies = [
  "bytes",
  "candle-core",
  "chrono",
- "cudarc",
  "dashmap 5.5.3",
  "derive-getters",
  "derive_builder",
  "dialoguer",
  "dynamo-async-openai",
- "dynamo-memory",
  "dynamo-parsers",
  "dynamo-runtime",
  "either",
@@ -1988,8 +1985,6 @@ dependencies = [
  "ndarray",
  "ndarray-interp",
  "ndarray-npy",
- "nix 0.26.4",
- "nixl-sys",
  "object_store",
  "offset-allocator",
  "oneshot",
@@ -4862,15 +4857,6 @@ checksum = "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
 
 [[package]]
 name = "memoffset"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5de893c32cde5f383baa4c04c5d6dbdd735cfd4a794b0debdb2bb1b421da5ff4"
-dependencies = [
- "autocfg",
-]
-
-[[package]]
-name = "memoffset"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
@@ -5318,8 +5304,6 @@ dependencies = [
  "bitflags 1.3.2",
  "cfg-if 1.0.4",
  "libc",
- "memoffset 0.7.1",
- "pin-utils",
 ]
 
 [[package]]
@@ -5344,7 +5328,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "cfg_aliases",
  "libc",
- "memoffset 0.9.1",
+ "memoffset",
 ]
 
 [[package]]
@@ -6654,7 +6638,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "indoc",
  "libc",
- "memoffset 0.9.1",
+ "memoffset",
  "once_cell",
  "portable-atomic",
  "pyo3-build-config",

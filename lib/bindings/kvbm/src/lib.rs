@@ -9,9 +9,6 @@ mod dynamo;
 #[cfg(feature = "kernels")]
 mod kernels;
 
-#[cfg(feature = "v1")]
-mod block_manager;
-
 #[cfg(feature = "v2")]
 mod v2;
 
@@ -24,9 +21,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     #[cfg(feature = "dynamo")]
     dynamo::add_to_module(m)?;
-
-    #[cfg(feature = "v1")]
-    block_manager::add_to_module(m)?;
 
     #[cfg(feature = "v2")]
     {
