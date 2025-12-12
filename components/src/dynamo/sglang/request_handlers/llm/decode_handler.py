@@ -258,42 +258,54 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         log_probs = []
         top_logprobs = []
 
-        # Extract selected token logprobs
-        for token_data in new_token_logprobs:
+        # Get top logprobs slice if available
+        new_top_logprobs = None
+        if output_top_logprobs:
+            new_top_logprobs = output_top_logprobs[num_output_tokens_so_far:]
+
+        # Extract logprobs for each token, maintaining 1:1 alignment
+        for idx, token_data in enumerate(new_token_logprobs):
+            # Skip if token_data is None or logprob_val is None
             if token_data is None:
                 continue
             # SGLang format: (logprob, token_id, decoded_text)
             logprob_val = token_data[0]
-            if logprob_val is not None:
-                log_probs.append(float(logprob_val))
+            if logprob_val is None:
+                continue
 
-        # Extract top logprobs if available
-        if output_top_logprobs:
-            new_top_logprobs = output_top_logprobs[num_output_tokens_so_far:]
-            for token_top_list in new_top_logprobs:
+            log_probs.append(float(logprob_val))
+
+            # Extract corresponding top logprobs for this token position
+            if new_top_logprobs and idx < len(new_top_logprobs):
+                token_top_list = new_top_logprobs[idx]
                 if not token_top_list:
                     top_logprobs.append([])
-                    continue
+                else:
+                    # Filter out None entries and sort by logprob descending
+                    # SGLang doesn't guarantee order, so we sort to assign proper ranks
+                    valid_entries = [
+                        alt_data
+                        for alt_data in token_top_list
+                        if alt_data is not None and alt_data[0] is not None
+                    ]
+                    # Sort by logprob descending (highest probability first)
+                    valid_entries.sort(key=lambda x: x[0], reverse=True)
 
-                token_top_logprobs = []
-                for rank, alt_data in enumerate(token_top_list):
-                    if alt_data is None:
-                        continue
-                    # SGLang format: (logprob, token_id, decoded_text)
-                    logprob_val = alt_data[0]
-                    token_id = alt_data[1]
-                    decoded_text = alt_data[2] if len(alt_data) > 2 else None
-                    token_top_logprobs.append(
-                        {
-                            "rank": rank,
-                            "token_id": token_id,
-                            "token": decoded_text,
-                            "logprob": (
-                                float(logprob_val) if logprob_val is not None else None
-                            ),
-                        }
-                    )
-                top_logprobs.append(token_top_logprobs)
+                    token_top_logprobs = []
+                    for rank, alt_data in enumerate(valid_entries):
+                        # SGLang format: (logprob, token_id, decoded_text)
+                        alt_logprob_val = alt_data[0]
+                        token_id = alt_data[1]
+                        decoded_text = alt_data[2] if len(alt_data) > 2 else None
+                        token_top_logprobs.append(
+                            {
+                                "rank": rank,
+                                "token_id": token_id,
+                                "token": decoded_text,
+                                "logprob": float(alt_logprob_val),
+                            }
+                        )
+                    top_logprobs.append(token_top_logprobs)
 
         return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 

@@ -235,7 +235,11 @@ sglang_configs = {
         name="aggregated_logprobs",
         directory=sglang_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(240),  # 3x measured time + download time
+        ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_with_logprobs(
