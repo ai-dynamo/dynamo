@@ -78,7 +78,7 @@ python -m dynamo.frontend &
 # Multi-GPU mode: Each worker gets its own GPU, so use higher memory settings
 EXTRA_ARGS=""
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    EXTRA_ARGS="--gpu-memory-utilization 0.25 --max-model-len 3072 --enforce-eager"
+    EXTRA_ARGS="--gpu-memory-utilization 0.3 --max-model-len 3072 --enforce-eager"
 else
     # Multi-GPU mode: standard memory settings
     EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
