@@ -1,25 +1,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Nightly CI Pipeline
+name: Post-Merge CI Pipeline
 
 on:
-  schedule:
-    - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
-  workflow_dispatch:  # Allow manual triggering for testing
+  push:
+    branches:
+      - main
+      - 'release/*.*.*'
+  workflow_dispatch:  # Temporary: for testing purposes
+
+# Cancel any previous runs for the same branch to avoid redundant workflows
+# concurrency:
+#   group: post-merge-ci-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
+#   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
 
 jobs:
   ci-pipeline:
-    name: Nightly CI
+    name: Post-Merge CI
     uses: ./.github/workflows/ci-test-suite.yml
     with:
-      pipeline_type: nightly
-      include_nightly_marks: true
-      image_prefix: nightly
-      enable_slack_notification: true
+      pipeline_type: post_merge
+      include_nightly_marks: false
+      image_prefix: main
+      enable_slack_notification: false
     secrets:
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -32,3 +39,4 @@ jobs:
       AZURE_ACR_USER: ${{ secrets.AZURE_ACR_USER }}
       AZURE_ACR_PASSWORD: ${{ secrets.AZURE_ACR_PASSWORD }}
       SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+
