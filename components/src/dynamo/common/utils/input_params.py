@@ -12,7 +12,6 @@ class InputParamManager:
         """
 
         if use_tokenizer:
-            print(f"Request: {request}")
             if self.tokenizer is None:
                 raise ValueError("Tokenizer is not available")
 
@@ -21,10 +20,9 @@ class InputParamManager:
                     request["messages"], tokenize=False, add_generation_prompt=True
                 )
             elif "prompt" in request:
-                return request["prompt"]
+                return self.tokenizer.encode(request["prompt"])
             elif "text" in request:
-                return request["text"]
+                return self.tokenizer.encode(request["text"])
             else:
                 raise ValueError("No input parameter found in request")
-
         return request.get("token_ids")
