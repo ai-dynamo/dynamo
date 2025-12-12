@@ -263,7 +263,34 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
         // create choice
         let index = delta.index.unwrap_or(0);
-        let response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
+        let mut response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
+
+        // Extract worker_id from disaggregated_params and inject into nvext if present
+        if let Some(worker_id_json) = delta
+            .disaggregated_params
+            .as_ref()
+            .and_then(|params| params.get("worker_id"))
+        {
+            use crate::protocols::openai::nvext::{NvExtResponse, WorkerIdInfo};
+            let prefill_worker_id = worker_id_json
+                .get("prefill_worker_id")
+                .and_then(|v| v.as_u64());
+            let decode_worker_id = worker_id_json
+                .get("decode_worker_id")
+                .and_then(|v| v.as_u64());
+
+            let nvext_response = NvExtResponse {
+                worker_id: Some(WorkerIdInfo {
+                    prefill_worker_id,
+                    decode_worker_id,
+                }),
+                ..Default::default()
+            };
+
+            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
+                response.inner.nvext = Some(nvext_json);
+            }
+        }
 
         Ok(response)
     }
