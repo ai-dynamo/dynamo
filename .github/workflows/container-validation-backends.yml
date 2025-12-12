@@ -185,8 +185,8 @@ jobs:
           AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
           AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
         run: |
-          # Run push in background
-          (
+          # Run push in background using nohup to detach from shell
+          nohup bash -c '
             set -e
             ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
 
@@ -207,8 +207,11 @@ jobs:
             fi
 
             echo "Push completed successfully"
-          ) > /tmp/push.log 2>&1 &
+            echo "0" > /tmp/push.exit_code
+          ' > /tmp/push.log 2>&1 &
           echo $! > /tmp/push.pid
+          # If the script fails, write the exit code
+          (tail --pid=$(cat /tmp/push.pid) -f /dev/null 2>/dev/null; [ ! -f /tmp/push.exit_code ] && echo "1" > /tmp/push.exit_code) &
           echo "Started push in background with PID $(cat /tmp/push.pid)"
       - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
@@ -225,10 +228,24 @@ jobs:
           if [ -f /tmp/push.pid ]; then
             PID=$(cat /tmp/push.pid)
             echo "Waiting for push process (PID: $PID) to complete..."
-            if wait $PID; then
-              echo "✅ Push completed successfully"
+            # Poll until process completes (check if /proc/PID exists)
+            while [ -d /proc/$PID ]; do
+              echo "Push still running..."
+              sleep 5
+            done
+            # Check exit code from file
+            if [ -f /tmp/push.exit_code ]; then
+              EXIT_CODE=$(cat /tmp/push.exit_code)
+              if [ "$EXIT_CODE" = "0" ]; then
+                echo "✅ Push completed successfully"
+              else
+                echo "❌ Push failed with exit code $EXIT_CODE"
+                echo "=== Push Log ==="
+                cat /tmp/push.log || true
+                exit 1
+              fi
             else
-              echo "❌ Push failed with exit code $?"
+              echo "❌ Push failed (no exit code file found)"
               echo "=== Push Log ==="
               cat /tmp/push.log || true
               exit 1
@@ -293,8 +310,8 @@ jobs:
           AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
           AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
         run: |
-          # Run push in background
-          (
+          # Run push in background using nohup to detach from shell
+          nohup bash -c '
             set -e
             ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
 
@@ -315,8 +332,11 @@ jobs:
             fi
 
             echo "Push completed successfully"
-          ) > /tmp/push.log 2>&1 &
+            echo "0" > /tmp/push.exit_code
+          ' > /tmp/push.log 2>&1 &
           echo $! > /tmp/push.pid
+          # If the script fails, write the exit code
+          (tail --pid=$(cat /tmp/push.pid) -f /dev/null 2>/dev/null; [ ! -f /tmp/push.exit_code ] && echo "1" > /tmp/push.exit_code) &
           echo "Started push in background with PID $(cat /tmp/push.pid)"
       - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
@@ -333,10 +353,24 @@ jobs:
           if [ -f /tmp/push.pid ]; then
             PID=$(cat /tmp/push.pid)
             echo "Waiting for push process (PID: $PID) to complete..."
-            if wait $PID; then
-              echo "✅ Push completed successfully"
+            # Poll until process completes (check if /proc/PID exists)
+            while [ -d /proc/$PID ]; do
+              echo "Push still running..."
+              sleep 5
+            done
+            # Check exit code from file
+            if [ -f /tmp/push.exit_code ]; then
+              EXIT_CODE=$(cat /tmp/push.exit_code)
+              if [ "$EXIT_CODE" = "0" ]; then
+                echo "✅ Push completed successfully"
+              else
+                echo "❌ Push failed with exit code $EXIT_CODE"
+                echo "=== Push Log ==="
+                cat /tmp/push.log || true
+                exit 1
+              fi
             else
-              echo "❌ Push failed with exit code $?"
+              echo "❌ Push failed (no exit code file found)"
               echo "=== Push Log ==="
               cat /tmp/push.log || true
               exit 1
@@ -401,8 +435,8 @@ jobs:
           AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
           AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
         run: |
-          # Run push in background
-          (
+          # Run push in background using nohup to detach from shell
+          nohup bash -c '
             set -e
             ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
 
@@ -423,8 +457,11 @@ jobs:
             fi
 
             echo "Push completed successfully"
-          ) > /tmp/push.log 2>&1 &
+            echo "0" > /tmp/push.exit_code
+          ' > /tmp/push.log 2>&1 &
           echo $! > /tmp/push.pid
+          # If the script fails, write the exit code
+          (tail --pid=$(cat /tmp/push.pid) -f /dev/null 2>/dev/null; [ ! -f /tmp/push.exit_code ] && echo "1" > /tmp/push.exit_code) &
           echo "Started push in background with PID $(cat /tmp/push.pid)"
       - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
@@ -441,10 +478,24 @@ jobs:
           if [ -f /tmp/push.pid ]; then
             PID=$(cat /tmp/push.pid)
             echo "Waiting for push process (PID: $PID) to complete..."
-            if wait $PID; then
-              echo "✅ Push completed successfully"
+            # Poll until process completes (check if /proc/PID exists)
+            while [ -d /proc/$PID ]; do
+              echo "Push still running..."
+              sleep 5
+            done
+            # Check exit code from file
+            if [ -f /tmp/push.exit_code ]; then
+              EXIT_CODE=$(cat /tmp/push.exit_code)
+              if [ "$EXIT_CODE" = "0" ]; then
+                echo "✅ Push completed successfully"
+              else
+                echo "❌ Push failed with exit code $EXIT_CODE"
+                echo "=== Push Log ==="
+                cat /tmp/push.log || true
+                exit 1
+              fi
             else
-              echo "❌ Push failed with exit code $?"
+              echo "❌ Push failed (no exit code file found)"
               echo "=== Push Log ==="
               cat /tmp/push.log || true
               exit 1
