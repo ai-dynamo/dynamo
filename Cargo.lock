@@ -2709,6 +2709,7 @@ dependencies = [
  "itertools 0.14.0",
  "json-five",
  "lazy_static",
+ "memfile",
  "minijinja",
  "minijinja-contrib",
  "mockito",
@@ -5972,6 +5973,15 @@ name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
+
+[[package]]
+name = "memfile"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f64636fdb65a5f0740f920c4281f3dbb76a71e25e25914b6d27000739897d40e"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "memmap2"
@@ -11934,7 +11944,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "859aad7261bac267f90f9635ec9addba3b4bcb4bbb2edb03fec3e6b765657bee"
 dependencies = [
  "ffmpeg-next",
- "ndarray",
  "tracing",
  "url",
 ]

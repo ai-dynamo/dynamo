@@ -125,6 +125,13 @@ impl MediaLoader {
                     let url = &video_part.video_url.url;
                     self.check_if_url_allowed(url)?;
                     let data = EncodedMediaData::from_url(url, &self.http_client).await?;
+
+                    #[cfg(not(feature = "media-ffmpeg"))]
+                    anyhow::bail!(
+                        "Video decoding requires the 'media-ffmpeg' feature to be enabled"
+                    );
+
+                    #[cfg(feature = "media-ffmpeg")]
                     self.media_decoder.video_decoder.decode_async(data).await?
                 }
                 ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
