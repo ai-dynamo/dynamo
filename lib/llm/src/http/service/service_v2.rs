@@ -18,6 +18,7 @@ use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::{Discovery, KVStoreDiscovery};
 use dynamo_runtime::logging::make_request_span;
 use dynamo_runtime::metrics::prometheus_names::name_prefix;
@@ -143,8 +144,6 @@ impl State {
 pub struct HttpService {
     // The state we share with every request handler
     state: Arc<State>,
-    // Store the main cancel token separately for service lifecycle management
-    main_cancel_token: Option<CancellationToken>,
 
     router: axum::Router,
     port: u16,
@@ -224,26 +223,8 @@ impl HttpService {
         self.state().manager()
     }
 
-    /// Set the cancellation token for this service
-    pub fn with_cancel_token(&mut self, cancel_token: CancellationToken) {
-        // Create new state with the cancel token
-        let model_manager = self.state.manager_clone();
-        let store = self.state.store().clone();
-        let new_state = Arc::new(State::new(model_manager, store, cancel_token.clone()));
-
-        // Copy over the flags from the old state
-        for endpoint_type in crate::endpoint_type::EndpointType::all() {
-            let enabled = self.state.flags.get(&endpoint_type);
-            new_state.flags.set(&endpoint_type, enabled);
-        }
-
-        self.state = new_state;
-        self.main_cancel_token = Some(cancel_token);
-    }
-
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
-        let mut this = self.clone();
-        this.with_cancel_token(cancel_token.clone());
+        let this = self.clone();
         tokio::spawn(async move { this.run(cancel_token).await })
     }
 
@@ -254,6 +235,8 @@ impl HttpService {
 
         let router = self.router.clone();
         let observer = cancel_token.child_token();
+
+        let state_cancel = self.state.cancel_token().clone();
 
         let addr: SocketAddr = address
             .parse()
@@ -289,9 +272,11 @@ impl HttpService {
                     result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e))?;
                 }
                 _ = observer.cancelled() => {
+                    state_cancel.cancel();
                     tracing::info!("HTTPS server shutdown requested");
-                    handle.graceful_shutdown(Some(Duration::from_secs(5)));
-                    // TODO: Do we need to wait?
+                    // accepting requests for 5 more seconds, to allow incorrectly routed requests to arrive
+                    handle.graceful_shutdown(Some(Duration::from_secs(get_graceful_shutdown_timeout() as u64)));
+                    // no longer accepting requests, draining all existing connections
                 }
             }
         } else {
@@ -318,11 +303,13 @@ impl HttpService {
             })?;
 
             axum::serve(listener, router)
-                .with_graceful_shutdown(async {
+                .with_graceful_shutdown(async move {
                     observer.cancelled_owned().await;
+                    state_cancel.cancel();
                     tracing::info!("HTTP server shutdown requested");
                     // accepting requests for 5 more seconds, to allow incorrectly routed requests to arrive
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::time::sleep(Duration::from_secs(get_graceful_shutdown_timeout() as u64))
+                        .await;
                     // no longer accepting requests, draining all existing connections
                 })
                 .await
@@ -345,6 +332,13 @@ impl HttpService {
             if enable { "enabled" } else { "disabled" }
         );
     }
+}
+
+fn get_graceful_shutdown_timeout() -> usize {
+    std::env::var(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(5)
 }
 
 /// Environment variable to set the metrics endpoint path (default: `/metrics`)
@@ -437,7 +431,6 @@ impl HttpServiceConfigBuilder {
 
         Ok(HttpService {
             state,
-            main_cancel_token: None,
             router,
             port: config.port,
             host: config.host,
@@ -520,5 +513,50 @@ impl HttpServiceConfigBuilder {
             routes.push((docs, route));
         }
         routes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    #[serial]
+    async fn test_liveness_endpoint_reflects_cancellation() {
+        // 1. Setup service & token
+        let cancel_token = Arc::new(CancellationToken::new());
+        let service = HttpService::builder().build().unwrap();
+        let port = service.port;
+
+        // 2. Spawn service with shared token
+        let service_token = cancel_token.clone();
+        let handle = tokio::spawn(async move {
+            service.run((*service_token).clone()).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+        // 3. Cancel the token
+        cancel_token.cancel();
+
+        // 4. Wait a tiny bit for propagation
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // 5. Hit the endpoint
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://localhost:{}/live", port))
+            .send()
+            .await
+            .expect("Request failed");
+
+        // 6. ASSERTION: Should be 503 Service Unavailable
+        assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+        // Clean up
+        handle.abort();
     }
 }
