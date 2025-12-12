@@ -8,6 +8,7 @@ on:
     branches:
       - main
       - 'release/*.*.*'
+      - 'pvijayakrish/post-merge-workflow'  # Temporary: for testing
   workflow_dispatch:  # Temporary: for testing purposes
 
 # Cancel any previous runs for the same branch to avoid redundant workflows
