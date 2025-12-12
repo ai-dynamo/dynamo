@@ -333,7 +333,10 @@ fn map_dtype(dtype_width_bytes: usize) -> Option<TensorDataType> {
 /// 1. If CUDA 12.9+ is available, use Auto (which prioritizes cudaMemcpyBatchAsync)
 /// 2. If both layouts are fully contiguous, use cudaMemcpyAsync
 /// 3. If one or both layouts are not fully contiguous (mixed), use the vectorized kernel
-fn select_backend_for_layouts(src: &PhysicalLayout, dst: &PhysicalLayout) -> OperationalCopyBackend {
+fn select_backend_for_layouts(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+) -> OperationalCopyBackend {
     // If batch copy available (CUDA 12.9+), let Auto handle it
     if dynamo_kvbm_kernels::is_memcpy_batch_available() {
         return OperationalCopyBackend::Auto;
