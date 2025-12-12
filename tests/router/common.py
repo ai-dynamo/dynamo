@@ -1798,11 +1798,16 @@ def _test_router_decisions(
     test_dp_rank: bool = False,
     block_size: int = BLOCK_SIZE,
 ):
-    """Validate KV cache prefix reuse and worker routing by sending progressive requests with overlapping prefixes.
+    """Validate KV cache prefix reuse and worker routing by sending requests diverging prefixes.
 
-    Assumes engine workers are already initialized. Sends 4 progressive requests where each extends
-    the previous tokens by `block_size`. The first request is forced to a specific worker (and optionally
-    dp_rank), and subsequent requests should naturally route to the same worker due to prefix reuse.
+    Assumes engine workers are already initialized.
+    The first request is forced to a specific worker (and optionally dp_rank),
+    and subsequent requests should naturally route to the same worker due to prefix reuse.
+
+    Test sequence:
+    1. Request 1: [A, B, C, D] → Forces to Worker 1, caches 4 blocks
+    2. Request 2: [A, B, E, F] → Shares [A, B] prefix, diverges from Request 1
+    3. Request 3: [A, B, C, D, G, H] → Should route to Worker 1 (has [A, B, C, D] cached)
 
     Args:
         engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
@@ -1844,23 +1849,39 @@ def _test_router_decisions(
         else:
             logger.info(f"Will force first request to worker_id={forced_worker_id}")
 
-        # Send 4 progressive requests with overlapping prefixes
-        cumulative_tokens = []
+        # Send 3 requests with some shared prefixes and some divergent prefixes
         response_worker_ids: list[dict[str, Optional[int]]] = []
 
+<<<<<<< HEAD
         for i in range(4):
             # Add `block_size` new random tokens
             new_tokens = [random.randint(1, 10000) for _ in range(block_size)]
             cumulative_tokens.extend(new_tokens)
+||||||| parent of eef1dd3d6 (chore: add test for diverging prefixes)
+        for i in range(4):
+            # Add BLOCK_SIZE new random tokens
+            new_tokens = [random.randint(1, 10000) for _ in range(BLOCK_SIZE)]
+            cumulative_tokens.extend(new_tokens)
+=======
+        num_blocks = 8
+        blocks = [
+            [random.randint(1, 10000) for _ in range(BLOCK_SIZE)]
+            for _ in range(num_blocks)
+        ]
+>>>>>>> eef1dd3d6 (chore: add test for diverging prefixes)
 
+        requests = [
+            blocks[0] + blocks[1] + blocks[2] + blocks[3],
+            blocks[0] + blocks[1] + blocks[4] + blocks[5],
+            blocks[0] + blocks[1] + blocks[2] + blocks[3] + blocks[6] + blocks[7],
+        ]
+
+        for i, request in enumerate(requests):
             # Force first request to specific worker_id (and dp_rank if testing DP), let subsequent requests follow naturally
             worker_id_override = forced_worker_id if i == 0 else None
             dp_rank_override = forced_dp_rank if i == 0 and test_dp_rank else None
 
-            log_msg = (
-                f"Sending request {i + 1}/4 with {len(cumulative_tokens)} tokens "
-                f"(added {len(new_tokens)} new tokens)"
-            )
+            log_msg = f"Sending request {i + 1}/4 with {len(request)} tokens "
             if worker_id_override is not None:
                 if test_dp_rank:
                     log_msg += f" - FORCING worker_id={worker_id_override}, dp_rank={dp_rank_override}"
@@ -1871,7 +1892,7 @@ def _test_router_decisions(
             result = await send_request_via_python_kv_router(
                 kv_python_router=kv_push_router,
                 model_name=model_name,
-                token_ids=cumulative_tokens.copy(),
+                token_ids=request,
                 initial_wait=1.0,
                 max_retries=8,
                 stop_conditions={
