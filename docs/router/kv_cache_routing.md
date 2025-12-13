@@ -122,15 +122,14 @@ await prefill_endpoint.serve_endpoint(prefill_handler.generate)
 The following diagram shows an overview of the major components in disaggregated serving:
 
 ```mermaid
-%%{init: {'theme':'base', 'themeVariables': { 'fontSize':'10px', 'primaryColor':'#2e8b57', 'primaryTextColor':'#fff', 'primaryBorderColor':'#333', 'lineColor':'#81b1db', 'secondaryColor':'#b35900', 'tertiaryColor':'#808080', 'edgeLabelBackground':'transparent'}}}%%
 graph TD
     HTTP[HTTP]
     ROUTER[Router]
     PREFILL[Prefill Worker]
     DECODE[Decode Worker]
 
-    classDef worker_style fill:#2e8b57,stroke:#333,stroke-width:2px,color:#fff;
-    classDef router_style fill:#b35900,stroke:#333,stroke-width:2px,color:#fff;
+    classDef worker_style fill:#f3e5f5,stroke:#333,stroke-width:2px,color:#333;
+    classDef router_style fill:#2e8b57,stroke:#333,stroke-width:2px,color:#fff;
 
     class PREFILL,DECODE worker_style
     class ROUTER router_style
@@ -142,6 +141,9 @@ graph TD
     DECODE --> |"4. stream response"| ROUTER
 
     PREFILL -.-> |"publish kv events"| ROUTER
+
+    linkStyle 0,1,2,3,4 stroke:#8b4513,stroke-width:2px
+    linkStyle 5 stroke:#2196f3,stroke-width:2px
 ```
 
 ## Overview
@@ -188,13 +190,15 @@ graph TD
     JS -->|Consume as Durable Consumer| R2
     JS -->|Periodic Snapshot| OS
 
-    style JS fill:#e1f5fe,color:#5a850f
-    style OS fill:#e8f5e9,color:#5a850f
-    style E1 fill:#fff3e0,color:#5a850f
-    style E2 fill:#fff3e0,color:#5a850f
-    style E3 fill:#fff3e0,color:#5a850f
-    style R1 fill:#f3e5f5,color:#5a850f
-    style R2 fill:#f3e5f5,color:#5a850f
+    style JS fill:#e1f5fe,stroke:#333,color:#333
+    style OS fill:#e1f5fe,stroke:#333,color:#333
+    style E1 fill:#f3e5f5,stroke:#333,color:#333
+    style E2 fill:#f3e5f5,stroke:#333,color:#333
+    style E3 fill:#f3e5f5,stroke:#333,color:#333
+    style R1 fill:#2e8b57,stroke:#333,color:#fff
+    style R2 fill:#2e8b57,stroke:#333,color:#fff
+
+    linkStyle 0,1,2,3,4,5 stroke:#2196f3,stroke-width:2px
 ```
 
 #### Mode 2: NATS Core with Local Indexer
@@ -229,12 +233,14 @@ graph TD
     NC -->|Subscribe| R1
     NC -->|Subscribe| R2
 
-    style NC fill:#e1f5fe,color:#5a850f
-    style E1 fill:#fff3e0,color:#5a850f
-    style E2 fill:#fff3e0,color:#5a850f
-    style E3 fill:#fff3e0,color:#5a850f
-    style R1 fill:#f3e5f5,color:#5a850f
-    style R2 fill:#f3e5f5,color:#5a850f
+    style NC fill:#e1f5fe,stroke:#333,color:#333
+    style E1 fill:#f3e5f5,stroke:#333,color:#333
+    style E2 fill:#f3e5f5,stroke:#333,color:#333
+    style E3 fill:#f3e5f5,stroke:#333,color:#333
+    style R1 fill:#2e8b57,stroke:#333,color:#fff
+    style R2 fill:#2e8b57,stroke:#333,color:#fff
+
+    linkStyle 0,1,2,3,4 stroke:#2196f3,stroke-width:2px
 ```
 
 **How gap detection works:**
@@ -415,11 +421,13 @@ graph TD
     R ==>|Selected| W2["Worker 2<br/>Cached: 5 blocks<br/>Prefill: 5 blks<br/>Decode: 5 blks"]
     R -.-> W3["Worker 3<br/>Cached: 8 blocks<br/>Prefill: 2 blks<br/>Decode: 9 blks"]
 
-    style T fill:#fff3e0,color:#5a850f
-    style R fill:#e1f5fe,color:#5a850f
-    style W1 fill:#f3e5f5,color:#5a850f
-    style W2 fill:#e8f5e9,color:#5a850f
-    style W3 fill:#f3e5f5,color:#5a850f
+    style T fill:#fff3e0,stroke:#333,color:#333
+    style R fill:#2e8b57,stroke:#333,color:#fff
+    style W1 fill:#f3e5f5,stroke:#333,color:#333
+    style W2 fill:#c8e6c9,stroke:#333,color:#333
+    style W3 fill:#f3e5f5,stroke:#333,color:#333
+
+    linkStyle 0,1,2,3 stroke:#8b4513,stroke-width:2px
 ```
 
 KV Cache reuse introduces complexity to LLM serving load balancing. While it can significantly reduce computation costs, routing strategies that ignore worker-specific KV states can lead to:
