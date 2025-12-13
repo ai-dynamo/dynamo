@@ -492,7 +492,8 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
 }
 
 /// Query worker selection on an existing pipeline and return:
-/// - `worker_instance_id_out` (`i64`)
+/// - `worker_instance_id_out` (`i64`) - decode worker ID
+/// - `prefill_worker_id_out` (`i64`) - prefill worker ID (0 if not in disaggregated mode)
 /// - `token_ids_out` (heap-allocated `*mut u32`; caller must free via
 ///   `dynamo_free_worker_selection_result`)
 /// - `token_count_out` (`usize`)
@@ -513,10 +514,10 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
 ///     function returns `DynamoLlmResult::ERR`.
 ///   - Must remain valid for the duration of this call.
 /// - Output pointers:
-///   - `worker_instance_id_out`, `token_ids_out`, `token_count_out`,
+///   - `worker_instance_id_out`, `prefill_worker_id_out`, `token_ids_out`, `token_count_out`,
 ///     and `annotated_request_json_out` must each be **non-null** and point to
 ///     writable memory for their respective types. On success, this function
-///     writes to all four outputs exactly once.
+///     writes to all outputs exactly once.
 ///   - On **error**, outputs are left unmodified.
 /// - Ownership & deallocation:
 ///   - On success, if there are zero tokens, `*token_ids_out` may be set to `NULL`
@@ -545,6 +546,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     pipeline: *mut WorkerSelectionPipeline,
     request_json_c_str: *const c_char,
     worker_instance_id_out: *mut i64,
+    prefill_worker_id_out: *mut i64,
     token_ids_out: *mut *mut u32,
     token_count_out: *mut usize,
     annotated_request_json_out: *mut *mut c_char,
@@ -554,6 +556,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         return DynamoLlmResult::ERR;
     }
     if worker_instance_id_out.is_null()
+        || prefill_worker_id_out.is_null()
         || token_ids_out.is_null()
         || token_count_out.is_null()
         || annotated_request_json_out.is_null()
@@ -579,7 +582,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
 
     let pl = unsafe { &*pipeline };
     let fut = async { query_worker_selection_and_annotate(&pl.engine, request).await };
-    let (worker_id, tokens, annotated_req) = match pl.wk.runtime().secondary().block_on(fut) {
+    let (result, annotated_req) = match pl.wk.runtime().secondary().block_on(fut) {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = ?e, "query_worker_selection_and_annotate failed");
@@ -587,10 +590,10 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         }
     };
 
-    let tokens_ptr = if tokens.is_empty() {
+    let tokens_ptr = if result.tokens.is_empty() {
         std::ptr::null_mut()
     } else {
-        let len = tokens.len();
+        let len = result.tokens.len();
         let layout = std::alloc::Layout::array::<u32>(len).unwrap();
         let ptr = unsafe { std::alloc::alloc(layout) as *mut u32 };
         if ptr.is_null() {
@@ -598,7 +601,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
             return DynamoLlmResult::ERR;
         }
         unsafe {
-            std::ptr::copy_nonoverlapping(tokens.as_ptr(), ptr, len);
+            std::ptr::copy_nonoverlapping(result.tokens.as_ptr(), ptr, len);
         }
         ptr
     };
@@ -606,7 +609,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     let annotated_json = match serde_json::to_string(&annotated_req) {
         Ok(s) => s,
         Err(e) => {
-            let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
+            let layout = std::alloc::Layout::array::<u32>(result.tokens.len()).unwrap();
             unsafe {
                 std::alloc::dealloc(tokens_ptr as *mut u8, layout);
             }
@@ -621,7 +624,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         Err(e) => {
             tracing::error!(error = ?e, "CString::new for annotated JSON failed");
             if !tokens_ptr.is_null() {
-                let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
+                let layout = std::alloc::Layout::array::<u32>(result.tokens.len()).unwrap();
                 unsafe {
                     std::alloc::dealloc(tokens_ptr as *mut u8, layout);
                 }
@@ -630,9 +633,10 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         }
     };
     unsafe {
-        *worker_instance_id_out = worker_id;
+        *worker_instance_id_out = result.worker_id;
+        *prefill_worker_id_out = result.prefill_worker_id.unwrap_or(0);
         *token_ids_out = tokens_ptr;
-        *token_count_out = tokens.len();
+        *token_count_out = result.tokens.len();
         *annotated_request_json_out = cjson.into_raw();
     }
     DynamoLlmResult::OK
@@ -724,18 +728,67 @@ pub unsafe extern "C" fn dynamo_free_worker_selection_result(
     DynamoLlmResult::OK
 }
 
+/// Result structure for worker selection
+#[derive(Default, Debug)]
+pub struct WorkerSelectionResult {
+    /// Worker ID (decode worker in disaggregated mode)
+    pub worker_id: i64,
+    /// Token IDs for re-use in subsequent requests
+    pub tokens: Vec<u32>,
+    /// Prefill worker ID (only set in disaggregated mode with query_instance_id annotation)
+    pub prefill_worker_id: Option<i64>,
+}
+
 /// Helper function to extract worker selection information from the annotation stream
 pub async fn extract_worker_selection_from_stream(
     mut stream: Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
-) -> anyhow::Result<(i64, Vec<u32>)> {
+) -> anyhow::Result<WorkerSelectionResult> {
+    use dynamo_llm::protocols::openai::nvext::NvExtResponse;
     use futures::StreamExt;
 
-    let mut worker_id: i64 = 0;
-    let mut tokens: Vec<u32> = Vec::new();
+    let mut result = WorkerSelectionResult::default();
 
     while let Some(response) = stream.next().await {
+        // Check for worker selection data in nvext
+        if let Some(data) = response.data.as_ref()
+            && let Some(nvext_value) = data.nvext.as_ref()
+            && let Ok(nvext_response) = serde_json::from_value::<NvExtResponse>(nvext_value.clone())
+        {
+            // Extract worker IDs from nested worker_id structure (both standard Dynamo and GAIE)
+            // The response comes in the form:
+            // {
+            //  "nvext": {
+            //     "worker_id": {
+            //     "prefill_worker_id": 123,
+            //     "decode_worker_id": 456
+            //     },
+            //     "token_data": [1, 2, 3]
+            //   }
+            // }
+            if let Some(worker_id_info) = nvext_response.worker_id {
+                result.prefill_worker_id = worker_id_info.prefill_worker_id.map(|id| id as i64);
+                if let Some(decode_id) = worker_id_info.decode_worker_id {
+                    result.worker_id = decode_id as i64;
+                }
+            }
+            // Extract token_data for Stage 2 optimization
+            if let Some(tokens) = nvext_response.token_data {
+                result.tokens = tokens;
+                tracing::debug!(
+                    "Extracted {} tokens from nvext.token_data for Stage 2",
+                    result.tokens.len()
+                );
+            }
+            tracing::debug!(
+                "Extracted from nvext: prefill_worker={:?}, worker_id={}, tokens={}",
+                result.prefill_worker_id,
+                result.worker_id,
+                result.tokens.len()
+            );
+        }
+
         let Some(event) = &response.event else {
-            tracing::error!("Response has no event field");
+            // Not an event-based response, skip
             continue;
         };
 
@@ -752,8 +805,11 @@ pub async fn extract_worker_selection_from_stream(
                 if let Ok(id_string) = serde_json::from_str::<String>(first_comment) {
                     match id_string.parse::<i64>() {
                         Ok(parsed_id) => {
-                            worker_id = parsed_id;
-                            tracing::debug!("parsed worker_id from JSON string: {}", worker_id);
+                            result.worker_id = parsed_id;
+                            tracing::debug!(
+                                "parsed worker_id from JSON string: {}",
+                                result.worker_id
+                            );
                         }
                         Err(_) => {
                             tracing::error!(
@@ -767,8 +823,8 @@ pub async fn extract_worker_selection_from_stream(
 
                 match first_comment.parse::<i64>() {
                     Ok(parsed_id) => {
-                        worker_id = parsed_id;
-                        tracing::debug!("parsed worker_id directly: {}", worker_id);
+                        result.worker_id = parsed_id;
+                        tracing::debug!("parsed worker_id directly: {}", result.worker_id);
                     }
                     Err(_) => {
                         tracing::error!("failed to parse worker_id from: '{}'", first_comment);
@@ -787,8 +843,8 @@ pub async fn extract_worker_selection_from_stream(
                 tracing::debug!("Token comment: '{}'", first_comment);
                 match serde_json::from_str::<Vec<u32>>(first_comment) {
                     Ok(parsed_tokens) => {
-                        tokens = parsed_tokens;
-                        tracing::debug!("Successfully parsed {} tokens", tokens.len());
+                        result.tokens = parsed_tokens;
+                        tracing::debug!("Successfully parsed {} tokens", result.tokens.len());
                     }
                     Err(e) => {
                         tracing::error!("Failed to parse tokens from '{}': {}", first_comment, e);
@@ -803,11 +859,12 @@ pub async fn extract_worker_selection_from_stream(
     }
 
     tracing::info!(
-        "Final worker_id={}, tokens.len()={}",
-        worker_id,
-        tokens.len()
+        "Final worker_id={}, tokens.len()={}, prefill_worker={:?}",
+        result.worker_id,
+        result.tokens.len(),
+        result.prefill_worker_id
     );
-    Ok((worker_id, tokens))
+    Ok(result)
 }
 
 /// Utility function to add the "query_instance_id" annotation to an OpenAI request
@@ -892,14 +949,14 @@ fn set_kv_annotation(
 /// 2. Calls engine.generate() with the modified request
 /// 3. Extracts worker_instance_id and tokens from the response stream
 /// 4. Adds worker_instance_id and token_data annotations to the original request
-/// 5. Returns (worker_id, tokens, annotated_original_request)
+/// 5. Returns WorkerSelectionResult with all data and annotated_original_request
 ///
 /// # Parameters
 /// - `engine`: The worker selection pipeline engine
 /// - `original_request`: The original OpenAI request to process
 ///
 /// # Returns
-/// A tuple containing (worker_instance_id, tokens, modified_original_request)
+/// A tuple containing (WorkerSelectionResult, modified_original_request)
 /// where the modified_original_request has worker_instance_id and token_data annotations added
 pub async fn query_worker_selection_and_annotate(
     engine: &ServiceEngine<
@@ -907,16 +964,16 @@ pub async fn query_worker_selection_and_annotate(
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >,
     mut original_request: NvCreateChatCompletionRequest,
-) -> anyhow::Result<(i64, Vec<u32>, NvCreateChatCompletionRequest)> {
+) -> anyhow::Result<(WorkerSelectionResult, NvCreateChatCompletionRequest)> {
     let mut query_request = original_request.clone();
     add_query_instance_id(&mut query_request);
     let single_in = SingleIn::new(query_request);
     let response_stream = engine.generate(single_in).await?;
-    let (worker_id, tokens) = extract_worker_selection_from_stream(response_stream).await?;
-    add_worker_instance_id_annotation(&mut original_request, worker_id);
-    add_token_data_annotation(&mut original_request, &tokens);
+    let result = extract_worker_selection_from_stream(response_stream).await?;
+    add_worker_instance_id_annotation(&mut original_request, result.worker_id);
+    add_token_data_annotation(&mut original_request, &result.tokens);
 
-    Ok((worker_id, tokens, original_request))
+    Ok((result, original_request))
 }
 
 /// Create a worker selection pipeline for OpenAI Chat Completion requests

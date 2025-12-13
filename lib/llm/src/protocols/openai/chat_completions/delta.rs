@@ -407,6 +407,13 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             .and_then(|params| params.get("worker_id"))
             .and_then(|v| serde_json::from_value::<WorkerIdInfo>(v.clone()).ok());
 
+        // Extract token_data from disaggregated_params (GAIE Stage 1)
+        let token_data = delta
+            .disaggregated_params
+            .as_ref()
+            .and_then(|params| params.get("token_data"))
+            .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok());
+
         // Get timing info if this is the final response (has finish_reason)
         let timing_info: Option<TimingInfo> = if finish_reason.is_some() {
             self.timing_tracker.as_ref().map(|tracker| {
@@ -417,10 +424,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             None
         };
 
-        // Inject nvext if we have worker_id or timing
-        if worker_id_info.is_some() || timing_info.is_some() {
+        // Inject nvext if we have worker_id, token_data, or timing
+        if worker_id_info.is_some() || token_data.is_some() || timing_info.is_some() {
             let nvext_response = NvExtResponse {
                 worker_id: worker_id_info.clone(),
+                token_data,
                 timing: timing_info,
             };
 

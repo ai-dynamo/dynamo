@@ -4,7 +4,8 @@
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
-use futures::StreamExt;
+use futures::{StreamExt, stream};
+use serde_json::json;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -12,7 +13,7 @@ use dynamo_runtime::{
     component::Endpoint,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Context, ManyOut, Operator, PushRouter,
-        RouterMode, ServerStreamingEngine, SingleIn, async_trait,
+        ResponseStream, RouterMode, ServerStreamingEngine, SingleIn, async_trait,
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -39,6 +40,16 @@ pub enum PrefillError {
     /// Disaggregated params not found in prefill response
     #[error("No disaggregated params in prefill response: {0}")]
     NoDisaggregatedParams(String),
+}
+
+/// Result from calling the prefill router
+/// Either just a worker ID (query only) or full prefill result with worker ID
+enum PrefillCallResult {
+    /// Query only mode: just the selected worker ID.
+    /// This is used for GAIE to communicate the choices to the gateway during scheduling stage.
+    WorkerIdOnly(u64),
+    /// This is Dynamo Standard mode of operation. Used to pass the info from the prefill to decode worker.
+    Full(PrefillResult),
 }
 
 /// The inner router used by PrefillRouter
@@ -176,17 +187,65 @@ impl PrefillRouter {
         Ok(())
     }
 
-    /// Call the prefill router and extract structured prefill result
+    /// Call the prefill router with optional query-only mode (GAIE)
+    /// Query - only mode: only get the prefill worker id for the
+    /// Default Dynamo mode  - extract structured prefill result in addition to getting the prefill worker
     async fn call_prefill(
         &self,
         request: SingleIn<PreprocessedRequest>,
-    ) -> Result<PrefillResult, PrefillError> {
+        query_only: bool,
+    ) -> Result<PrefillCallResult, PrefillError> {
         // Get the prefill router, error if not activated
         let Some(prefill_router) = self.prefill_router.get() else {
             return Err(PrefillError::NotActivated);
         };
 
-        // Call the appropriate router based on the type
+        // GAIE Query-only mode: select worker without executing prefill
+        if query_only {
+            match prefill_router {
+                InnerPrefillRouter::KvRouter(router) => {
+                    // Add query_instance_id annotation to get worker ID without routing
+                    let (mut req, ctx) = request.into_parts();
+                    req.annotations.push("query_instance_id".to_string());
+                    let query_request = ctx.map(|_| req);
+
+                    let mut response = router
+                        .generate(query_request)
+                        .await
+                        .map_err(|e| PrefillError::PrefillError(e.to_string()))?;
+
+                    // Parse worker_instance_id from annotation response
+                    while let Some(item) = response.next().await {
+                        if let Some(event) = item.event.as_ref()
+                            && event == "worker_instance_id"
+                            && let Some(comments) = item.comment.as_ref()
+                            && let Some(first_comment) = comments.first()
+                            && let Ok(id_str) = serde_json::from_str::<String>(first_comment)
+                            && let Ok(worker_id) = id_str.parse::<u64>()
+                        {
+                            return Ok(PrefillCallResult::WorkerIdOnly(worker_id));
+                        }
+                    }
+                    return Err(PrefillError::PrefillError(
+                        "Failed to get prefill worker ID from query_instance_id response"
+                            .to_string(),
+                    ));
+                }
+                InnerPrefillRouter::SimpleRouter(router) => {
+                    // SimpleRouter's generate() doesn't support query-only mode,
+                    // so get available workers directly and pick first one
+                    let instance_ids = router.client.instance_ids();
+                    if instance_ids.is_empty() {
+                        return Err(PrefillError::PrefillError(
+                            "No prefill workers available".to_string(),
+                        ));
+                    }
+                    return Ok(PrefillCallResult::WorkerIdOnly(instance_ids[0]));
+                }
+            }
+        }
+
+        // Standard Dynamo prefill mode: call generate and extract PrefillResult
         let mut prefill_response = match prefill_router {
             InnerPrefillRouter::KvRouter(router) => router
                 .generate(request)
@@ -239,10 +298,10 @@ impl PrefillRouter {
             ));
         };
 
-        Ok(PrefillResult {
+        Ok(PrefillCallResult::Full(PrefillResult {
             disaggregated_params,
             prompt_tokens_details,
-        })
+        }))
     }
 }
 
@@ -272,21 +331,78 @@ impl
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
 
-        // Save original max_tokens for decode
+        // GAIE integration scheduling stage: figure out the prefill and decode workers only
+        // If query_instance_id annotation is present, only return worker IDs without execution
+        if req.has_annotation("query_instance_id") {
+            tracing::debug!(
+                request_id = %request_id,
+                "GAIE Stage 1 (query_instance_id): Querying prefill and decode worker selection"
+            );
+            return self
+                .select_prefill_decode_workers(req, context, next, &request_id, &engine_ctx)
+                .await;
+        }
+
+        // Standard Dynamo Flow, same as GAIE stage 2 flow.
+        // The only difference is that for the GAIE the workers IDs were already selected in stage 1.
+        let target_prefill_worker = req.target_prefill_worker_id;
+        let target_decode_worker = req.target_decode_worker_id;
+        let has_target_workers = target_prefill_worker.is_some() && target_decode_worker.is_some();
+
+        if has_target_workers {
+            tracing::debug!(
+                request_id = %request_id,
+                prefill_worker = ?target_prefill_worker,
+                decode_worker = ?target_decode_worker,
+                "GAIE state 2: Using provided worker IDs for disaggregated serving"
+            );
+        }
+
+        // Execute prefill and decode
+        self.execute_prefill_and_decode(
+            req,
+            context,
+            next,
+            &request_id,
+            &engine_ctx,
+            target_prefill_worker,
+            target_decode_worker,
+        )
+        .await
+    }
+}
+
+impl PrefillRouter {
+    /// Execute prefill and decode with optional target worker IDs
+    /// Unified function for both GAIE Stage 2 (with target workers) and normal Dynamo flow
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_prefill_and_decode(
+        &self,
+        req: PreprocessedRequest,
+        context: Context<()>,
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        request_id: &str,
+        engine_ctx: &Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>,
+        target_prefill_worker: Option<u64>,
+        target_decode_worker: Option<u64>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         let original_max_tokens = req.stop_conditions.max_tokens;
+        let has_target_workers = target_prefill_worker.is_some();
 
         // Prepare prefill request with max_tokens = 1
         let mut prefill_req = req.clone();
         prefill_req.stop_conditions.max_tokens = Some(1);
-        let prefill_context = Context::with_id(prefill_req, request_id.clone());
 
-        // Link the prefill context as a child so that kill signals propagate
-        engine_ctx.link_child(prefill_context.context());
-
-        let prefill_request = prefill_context;
+        // If target prefill worker specified, route directly to it
+        if let Some(prefill_worker_id) = target_prefill_worker {
+            prefill_req.backend_instance_id = Some(prefill_worker_id);
+        }
 
         // Attempt prefill
-        let prefill_result = self.call_prefill(prefill_request).await;
+        let prefill_context = Context::with_id(prefill_req, request_id.to_string());
+        // Link the prefill context as a child so that kill signals propagate
+        engine_ctx.link_child(prefill_context.context());
+        let prefill_result = self.call_prefill(prefill_context, false).await;
 
         // Abort if cancelled during prefill
         if engine_ctx.is_stopped() || engine_ctx.is_killed() {
@@ -299,28 +415,30 @@ impl
 
         // Handle prefill result
         match prefill_result {
-            Ok(prefill_result) => {
+            Ok(PrefillCallResult::Full(prefill_result)) => {
                 tracing::debug!("Prefill succeeded, using disaggregated params for decode");
-
-                let mut decode_req = req;
-                // Update request with prefill result
-                decode_req.prefill_result = Some(prefill_result.clone());
-                // Restore original max_tokens for decode
-                decode_req.stop_conditions.max_tokens = original_max_tokens;
-
-                // Set router_config_override for decode: overlap_score_weight = 0
-                let existing_override = decode_req.router_config_override.take();
-                decode_req.router_config_override = Some(RouterConfigOverride {
-                    overlap_score_weight: Some(0.0),
-                    ..existing_override.unwrap_or_default()
-                });
-
-                // Map the modified request through with preserved context
-                let decode_request = context.map(|_| decode_req);
-                next.generate(decode_request).await
+                Self::route_to_decode(
+                    req,
+                    context,
+                    next,
+                    prefill_result,
+                    target_prefill_worker,
+                    original_max_tokens,
+                    target_decode_worker,
+                )
+                .await
+            }
+            Ok(PrefillCallResult::WorkerIdOnly(_)) => {
+                // This shouldn't happen with query_only=false
+                tracing::error!("Unexpected WorkerIdOnly result in prefill flow");
+                if has_target_workers {
+                    Err(anyhow::anyhow!("Unexpected WorkerIdOnly result"))
+                } else {
+                    next.generate(context.map(|_| req)).await
+                }
             }
             Err(PrefillError::NotActivated) => {
-                if self.enforce_disagg {
+                if self.enforce_disagg || has_target_workers {
                     tracing::error!(
                         "Prefill router not activated, but disaggregated mode is enforced. Failing request."
                     );
@@ -330,7 +448,7 @@ impl
                 next.generate(context.map(|_| req)).await
             }
             Err(e) => {
-                if self.enforce_disagg {
+                if self.enforce_disagg || has_target_workers {
                     tracing::error!(
                         error = %e,
                         "Remote prefill failed, but disaggregated mode is enforced. Failing request."
@@ -344,5 +462,145 @@ impl
                 next.generate(context.map(|_| req)).await
             }
         }
+    }
+
+    /// Route to decode worker after prefill completes
+    /// Common logic for both Dynamo normal flow and Stage 2 GAIE flow
+    async fn route_to_decode(
+        req: PreprocessedRequest,
+        mut context: Context<()>,
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        prefill_result: PrefillResult,
+        prefill_worker_id: Option<u64>,
+        original_max_tokens: Option<u32>,
+        target_decode_worker_id: Option<u64>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        let mut decode_req = req;
+
+        // Update request with prefill result
+        decode_req.prefill_result = Some(prefill_result);
+        // Restore original max_tokens for decode
+        decode_req.stop_conditions.max_tokens = original_max_tokens;
+
+        // If target decode worker is specified, route directly to it
+        if let Some(decode_worker_id) = target_decode_worker_id {
+            decode_req.backend_instance_id = Some(decode_worker_id);
+        }
+
+        // Set router_config_override for decode: overlap_score_weight = 0
+        let existing_override = decode_req.router_config_override.take();
+        decode_req.router_config_override = Some(RouterConfigOverride {
+            overlap_score_weight: Some(0.0),
+            ..existing_override.unwrap_or_default()
+        });
+
+        // Store prefill worker ID in context if available
+        if let Some(worker_id) = prefill_worker_id {
+            context.insert("prefill_worker_id", worker_id);
+        }
+
+        // Map the modified request through with preserved context
+        let decode_request = context.map(|_| decode_req);
+        next.generate(decode_request).await
+    }
+
+    /// GAIE Stage 1: Select prefill and decode workers using KV-aware routing
+    /// Returns worker IDs without executing prefill/decode.
+    async fn select_prefill_decode_workers(
+        &self,
+        req: PreprocessedRequest,
+        _context: Context<()>,
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        request_id: &str,
+        engine_ctx: &Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        // Query prefill worker using KV-aware routing (query_only=true)
+        let mut prefill_query_req = req.clone();
+        prefill_query_req
+            .annotations
+            .push("query_instance_id".to_string());
+        let query_context = Context::with_id(prefill_query_req, request_id.to_string());
+        let prefill_worker_id = match self.call_prefill(query_context, true).await {
+            Ok(PrefillCallResult::WorkerIdOnly(id)) => Some(id),
+            Ok(PrefillCallResult::Full(_)) => {
+                // Shouldn't happen with query_only=true
+                tracing::error!("Unexpected Full result in query-only mode");
+                None
+            }
+            Err(PrefillError::NotActivated) => {
+                if self.enforce_disagg {
+                    tracing::error!("Prefill router not activated for query stage");
+                    return Err(anyhow::anyhow!(PrefillError::NotActivated));
+                }
+                None
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to query prefill worker");
+                None
+            }
+        };
+
+        // Query decode worker using next stage's router (with query_instance_id annotation)
+        // Match Standard Dynamo behavior: ignore KV overlap for decode selection
+        // since KV cache will be transferred from prefill worker
+        let mut query_req = req.clone();
+        query_req.annotations.push("query_instance_id".to_string());
+        query_req.router_config_override = Some(RouterConfigOverride {
+            overlap_score_weight: Some(0.0),
+            ..Default::default()
+        });
+        let query_context = Context::with_id(query_req, request_id.to_string());
+        engine_ctx.link_child(query_context.context());
+
+        let mut decode_response = next.generate(query_context).await?;
+        let mut decode_worker_id: Option<u64> = None;
+
+        while let Some(item) = decode_response.next().await {
+            if let Some(event) = item.event.as_ref()
+                && event == "worker_instance_id"
+                && let Some(comments) = item.comment.as_ref()
+                && let Some(first_comment) = comments.first()
+            {
+                if let Ok(id_str) = serde_json::from_str::<String>(first_comment) {
+                    decode_worker_id = id_str.parse().ok();
+                }
+                break;
+            }
+        }
+
+        // Build response with selected worker IDs and tokens for Stage 2
+        // Use nested worker_id structure to match standard Dynamo flow
+        let query_response = LLMEngineOutput {
+            token_ids: vec![],
+            tokens: None,
+            text: None,
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: None,
+            index: None,
+            disaggregated_params: Some(json!({
+                "worker_id": {
+                    "prefill_worker_id": prefill_worker_id,
+                    "decode_worker_id": decode_worker_id,
+                },
+                "token_data": req.token_ids,  // Include tokens for Stage 2 to skip re-tokenization
+            })),
+            extra_args: None,
+            completion_usage: None,
+        };
+
+        tracing::debug!(
+            request_id = %request_id,
+            prefill_worker_id = ?prefill_worker_id,
+            decode_worker_id = ?decode_worker_id,
+            "Worker selection complete, returning IDs"
+        );
+
+        let response_stream = stream::once(async { Annotated::from_data(query_response) });
+        Ok(ResponseStream::new(
+            Box::pin(response_stream),
+            engine_ctx.clone(),
+        ))
     }
 }

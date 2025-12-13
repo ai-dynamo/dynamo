@@ -316,6 +316,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         if worker_id_info.is_some() || timing_info.is_some() {
             let nvext_response = NvExtResponse {
                 worker_id: worker_id_info.clone(),
+                token_data: None,
                 timing: timing_info,
             };
 
