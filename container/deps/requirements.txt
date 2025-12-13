@@ -12,7 +12,7 @@
 
 # For Multimodal EPD (required for device_map="auto" in vision model loading)
 accelerate
-aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@bdc142609b97c23a298115f09a9f88ae143f48d8
+aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@7f7ad5e248f3eaa4a0b74a069095828a4f356e60
 aiofiles
 aiperf @ git+https://github.com/ai-dynamo/aiperf.git@4d3fa29403c8f75da22a14f1f7b3aeb27db9288f
 av==15.0.0
@@ -39,7 +39,7 @@ prometheus-api-client==0.6.0
 prometheus_client==0.23.1
 prophet==1.2.1
 protobuf==5.29.5
-pydantic>=2.11.4,<2.12  # Required by aiconfigurator==0.4.0
+pydantic>=2.11.4,<2.13  # vllm==0.12.0 depends on pydantic>=2.12.0
 pyright==1.1.407
 PyYAML==6.0.3
 scikit-learn==1.7.2

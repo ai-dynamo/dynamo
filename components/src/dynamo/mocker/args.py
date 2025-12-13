@@ -113,6 +113,7 @@ def create_temp_engine_args_file(args) -> Path:
         else None,
         "is_prefill": getattr(args, "is_prefill_worker", None),
         "is_decode": getattr(args, "is_decode_worker", None),
+        "enable_local_indexer": getattr(args, "enable_local_indexer", None),
     }
 
     # Remove None values to only include explicitly set arguments
@@ -283,6 +284,12 @@ def parse_args():
         action="store_true",
         default=False,
         help="Mark this as a decode worker which does not publish KV events and skips prefill cost estimation (default: False)",
+    )
+    parser.add_argument(
+        "--enable-local-indexer",
+        action="store_true",
+        default=False,
+        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (default: False)",
     )
     parser.add_argument(
         "--store-kv",

@@ -11,8 +11,8 @@ import pytest
 import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
-from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,19 @@ class DynamoFrontendProcess(ManagedProcess):
     """Process manager for Dynamo frontend"""
 
     def __init__(self, request):
-        command = ["python", "-m", "dynamo.frontend", "--router-mode", "round-robin"]
+        # Allocate frontend port
+        frontend_port = allocate_port(8100)
+        self.frontend_port = frontend_port
+
+        command = [
+            "python",
+            "-m",
+            "dynamo.frontend",
+            "--router-mode",
+            "round-robin",
+            "--http-port",
+            str(frontend_port),
+        ]
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
@@ -47,14 +59,27 @@ class DynamoFrontendProcess(ManagedProcess):
             command=command,
             env=env,
             display_output=True,
-            terminate_existing=True,
+            terminate_existing=False,  # Don't terminate other processes of the same name, we'll only terminate our own PID
             log_dir=log_dir,
         )
 
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Release allocated port when frontend exits."""
+        try:
+            # frontend_port is always allocated in __init__
+            deallocate_port(self.frontend_port)
+        except Exception as e:
+            logger.warning(f"Failed to release frontend port: {e}")
 
-def start_completion_request() -> tuple:
+        return super().__exit__(exc_type, exc_val, exc_tb)
+
+
+def start_completion_request(frontend_port: int) -> tuple:
     """
     Start a long-running completion request in a separate thread.
+
+    Args:
+        frontend_port: Port where the frontend is running
 
     Returns:
         tuple: (request_thread, response_list)
@@ -80,7 +105,7 @@ def start_completion_request() -> tuple:
 
         try:
             response = requests.post(
-                f"http://localhost:{FRONTEND_PORT}/v1/completions",
+                f"http://localhost:{frontend_port}/v1/completions",
                 headers=headers,
                 json=payload,
                 timeout=timeout,

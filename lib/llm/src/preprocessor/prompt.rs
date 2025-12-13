@@ -23,6 +23,7 @@ use minijinja::value::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub mod deepseek_v32;
 mod template;
 
 pub use template::ContextMixins;

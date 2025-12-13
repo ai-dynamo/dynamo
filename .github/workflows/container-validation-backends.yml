@@ -192,7 +192,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "pre_merge and vllm"
+          pytest_marks: "pre_merge and vllm and (gpu_0 or gpu_1)"
           framework: "vllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
@@ -253,7 +253,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "pre_merge and sglang"
+          pytest_marks: "pre_merge and sglang and (gpu_0 or gpu_1)"
           framework: "sglang"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
@@ -314,7 +314,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "pre_merge and trtllm"
+          pytest_marks: "pre_merge and trtllm and (gpu_0 or gpu_1)"
           framework: "trtllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
