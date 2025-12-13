@@ -33,6 +33,7 @@ aiperf profile \
   --tokenizer ${model} \
   --endpoint-type ${type} \
   --endpoint ${endpoint} \
+  --streaming \
   --url http://localhost:${port} \
   --synthetic-input-tokens-mean ${isl} \
   --synthetic-input-tokens-stddev 0 \
@@ -47,4 +48,5 @@ aiperf profile \
   --num-dataset-entries ${num_unique_prompts} \
   --random-seed ${seed} \
   -v \
-  -H 'Authorization: Bearer NOT USED'
+  -H 'Authorization: Bearer NOT USED' \
+  -H 'Accept: text/event-stream'
