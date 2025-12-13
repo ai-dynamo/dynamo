@@ -281,8 +281,8 @@ def cmd_line_args():
     parser.add_argument(
         "--connector",
         type=str,
-        default=None,
-        choices=["kvbm"],
+        default="none",
+        choices=["none", "kvbm"],
         help="Connector to use for the model.",
     )
     add_config_dump_args(parser)

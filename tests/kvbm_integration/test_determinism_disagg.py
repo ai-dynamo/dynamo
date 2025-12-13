@@ -114,7 +114,7 @@ class LLMServerManager:
                 f"{self.server_type} is not supported yet in the KVBM test suite"
             )
 
-    def _set_up_dynamo_config(self, router_mode: str = "kv"):
+    def _set_up_dynamo_config(self, router_mode: str = "round-robin"):
         self.dynamo_frontend_cmd = [
             "python3",
             "-m",

@@ -118,6 +118,8 @@ def build_kv_connector_config(config: Config):
                 connector_scheduler_class="DynamoKVBMConnectorLeader",
                 connector_worker_class="DynamoKVBMConnectorWorker",
             )
+        elif config.connector == "none":
+            return None
         else:
             logging.error(f"Invalid connector: {config.connector}")
             sys.exit(1)
