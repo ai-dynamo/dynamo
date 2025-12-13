@@ -5,6 +5,7 @@ import logging
 import os
 from typing import List, Optional
 
+import tensorrt_llm
 from kvbm import KvbmLeader
 from kvbm.trtllm_integration.consolidator_config import is_truthy
 from kvbm.trtllm_integration.rust import KvbmRequest
@@ -120,9 +121,9 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
         for req in scheduler_output.new_requests:
             if not hasattr(req, "num_scheduled_tokens"):
                 raise ValueError(
-                    """num_scheduled_tokens is not found in the SchedulerOutput!
-                    This indicates you're using an older, unsupported version of TensorRT-LLM.
-                    Are you running at least TRTLLM v1.2.0rc2?"""
+                    f"""num_scheduled_tokens is not found in the SchedulerOutput!
+                    You're currently using TRTLLM {tensorrt_llm.__version__}
+                    The mimimum supported version is 1.2.0rc2"""
                 )
             output.add_new_request(
                 str(req.request_id),
