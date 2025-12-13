@@ -92,6 +92,7 @@ fn create_mock_backend_stream(
             log_probs: None,
             top_logprobs: None,
             finish_reason: None,
+            stop_reason: None,
             index: Some(0),
         },
         // Second chunk with " world"
@@ -103,6 +104,7 @@ fn create_mock_backend_stream(
             log_probs: None,
             top_logprobs: None,
             finish_reason: None,
+            stop_reason: None,
             index: Some(0),
         },
         // Third chunk with "!" and finish_reason
@@ -114,6 +116,7 @@ fn create_mock_backend_stream(
             log_probs: None,
             top_logprobs: None,
             finish_reason: Some(FinishReason::Stop),
+            stop_reason: None,
             index: Some(0),
         },
     ];

@@ -83,6 +83,7 @@ fn create_choice_stream(
     content: &str,
     tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
     finish_reason: Option<FinishReason>,
+    stop_reason: Option<dynamo_async_openai::types::StopReason>,
     logprobs: Option<ChatChoiceLogprobs>,
 ) -> ChatChoiceStream {
     #[allow(deprecated)]
@@ -97,6 +98,7 @@ fn create_choice_stream(
             reasoning_content: None,
         },
         finish_reason,
+        stop_reason,
         logprobs,
     }
 }
@@ -156,6 +158,7 @@ impl ChoiceJailState {
                             &prefix,
                             None,
                             choice.finish_reason,
+                            None,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
@@ -196,6 +199,7 @@ impl ChoiceJailState {
                                 trailing_part,
                                 None,
                                 choice.finish_reason,
+                                None,
                                 choice.logprobs.clone(),
                             );
                             emissions.push(ChoiceEmission::Trailing(trailing_choice));
@@ -228,6 +232,7 @@ impl ChoiceJailState {
                             &prefix,
                             None,
                             choice.finish_reason,
+                            None,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
@@ -271,6 +276,7 @@ impl ChoiceJailState {
                                 &content,
                                 None,
                                 choice.finish_reason,
+                                None,
                                 choice.logprobs.clone(),
                             );
                             emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
@@ -316,6 +322,7 @@ impl ChoiceJailState {
                         trailing_part,
                         None,
                         choice.finish_reason,
+                        None,
                         choice.logprobs.clone(),
                     );
                     emissions.push(ChoiceEmission::Trailing(trailing_choice));
@@ -345,6 +352,7 @@ impl ChoiceJailState {
                 &self.accumulated_content,
                 None,
                 self.stream_finish_reason, // For the accumulated content, assign the original stream finish reason, otherwise it will get lost
+                None,
                 None,
             );
 
@@ -490,12 +498,12 @@ impl JailedStream {
                             let emissions = choice_state.process_content(choice, content, &self).await;
                             all_emissions.extend(emissions);
                         } else {
-                            // Handle choices without content (e.g., final chunks with finish_reason)
                             // These should always pass through
                             let pass_through_choice = ChatChoiceStream {
                                 index: choice.index,
                                 delta: choice.delta.clone(),
                                 finish_reason: choice.finish_reason,
+                                stop_reason: choice.stop_reason.clone(),
                                 logprobs: choice.logprobs.clone(),
                             };
                             all_emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
