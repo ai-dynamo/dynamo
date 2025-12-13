@@ -294,6 +294,37 @@ async fn download_stable_snapshot(
     Ok(())
 }
 
+/// Load initial snapshot from NATS object store synchronously.
+///
+/// This function is called during router initialization (before spawning background tasks)
+/// to ensure the router has its initial state before accepting requests. This fixes a race
+/// condition where the background task might not complete snapshot loading before requests arrive.
+///
+/// # Arguments
+///
+/// * `component` - The component for deriving bucket name
+/// * `kv_events_tx` - Channel to send recovered events to the indexer
+pub async fn load_initial_snapshot(
+    component: Component,
+    kv_events_tx: &mpsc::Sender<RouterEvent>,
+) -> Result<()> {
+    let nats_server = std::env::var(env_nats::NATS_SERVER)
+        .unwrap_or_else(|_| "nats://localhost:4222".to_string());
+
+    // Create NATS client
+    let client_options = dynamo_runtime::transports::nats::Client::builder()
+        .server(&nats_server)
+        .build()?;
+    let nats_client = client_options.connect().await?;
+
+    // Create bucket name for snapshots/state
+    let bucket_name = Slug::slugify(&format!("{}-{RADIX_STATE_BUCKET}", component.subject()))
+        .to_string()
+        .replace("_", "-");
+
+    download_stable_snapshot(&nats_client, &bucket_name, kv_events_tx).await
+}
+
 /// Resources required for snapshot operations
 #[derive(Clone)]
 struct SnapshotResources {
@@ -400,6 +431,11 @@ impl SnapshotResources {
 }
 
 /// Start a unified background task for event consumption and optional snapshot management
+///
+/// # Arguments
+///
+/// * `skip_initial_snapshot` - If true, skip loading initial snapshot (useful when snapshot
+///   was already loaded synchronously during router initialization via `load_initial_snapshot`)
 #[allow(clippy::too_many_arguments)]
 pub async fn start_kv_router_background(
     component: Component,
@@ -411,6 +447,7 @@ pub async fn start_kv_router_background(
     cancellation_token: CancellationToken,
     router_snapshot_threshold: Option<u32>,
     router_reset_states: bool,
+    skip_initial_snapshot: bool,
 ) -> Result<()> {
     // Set up NATS connections
     let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
@@ -439,16 +476,17 @@ pub async fn start_kv_router_background(
         .to_string()
         .replace("_", "-");
 
-    // Handle initial state based on router_reset_states flag
-    if !router_reset_states {
-        // Try to download initial state from object store with stability check
-        download_stable_snapshot(&nats_client, &bucket_name, &kv_events_tx).await?;
-    } else {
+    // Handle initial state based on flags
+    if router_reset_states {
         // Delete the bucket to reset state
         tracing::info!("Resetting router state, deleting bucket: {bucket_name}");
         if let Err(e) = nats_client.object_store_delete_bucket(&bucket_name).await {
             tracing::warn!("Failed to delete bucket (may not exist): {e:?}");
         }
+    } else if !skip_initial_snapshot {
+        // Try to download initial state from object store with stability check
+        // Skip if already loaded synchronously during router initialization
+        download_stable_snapshot(&nats_client, &bucket_name, &kv_events_tx).await?;
     }
 
     // Cleanup orphaned consumers on startup

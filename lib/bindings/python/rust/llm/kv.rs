@@ -720,7 +720,8 @@ impl KvIndexer {
                 None,
                 cancellation_token,
                 None,
-                true,
+                true,  // router_reset_states
+                false, // skip_initial_snapshot (not relevant since reset_states=true)
             )
             .await
             .map_err(to_pyerr)?;

@@ -357,11 +357,23 @@ impl KvRouter {
         tracing::info!("Worker query client initialized");
 
         // Start KV event subscriber background process (only when use_kv_events is enabled)
-        // This is spawned as a background task to avoid blocking router startup.
-        // The task waits for runtime_configs to determine whether to use NATS Core or JetStream.
+        // The background task waits for runtime_configs to determine whether to use NATS Core or JetStream.
+        // NOTE: Snapshot loading is done synchronously BEFORE spawning to ensure state is restored
+        // before KvRouter::new returns, enabling proper router state synchronization across replicas.
         if kv_router_config.use_kv_events
             && let Indexer::KvIndexer(ref kv_indexer) = indexer
         {
+            // Load initial snapshot synchronously before spawning background task.
+            // This ensures the router has its initial state before accepting requests,
+            // fixing the race condition where requests arrive before snapshot is loaded.
+            if !kv_router_config.router_reset_states
+                && let Err(e) =
+                    subscriber::load_initial_snapshot(component.clone(), &kv_indexer.event_sender())
+                        .await
+            {
+                tracing::warn!("Failed to load initial snapshot: {e}");
+            }
+
             // Clone everything needed for the background task
             let component_clone = component.clone();
             let kv_indexer_clone = kv_indexer.clone();
@@ -420,6 +432,7 @@ impl KvRouter {
                         "Not all workers have local_indexer enabled, using JetStream subscription"
                     );
 
+                    // Note: skip_initial_snapshot=true because we already loaded it synchronously above
                     if let Err(e) = start_kv_router_background(
                         component_clone.clone(),
                         consumer_id,
@@ -434,6 +447,7 @@ impl KvRouter {
                         cancellation_token_clone.clone(),
                         kv_router_config.router_snapshot_threshold,
                         kv_router_config.router_reset_states,
+                        true, // skip_initial_snapshot - already loaded synchronously
                     )
                     .await
                     {
