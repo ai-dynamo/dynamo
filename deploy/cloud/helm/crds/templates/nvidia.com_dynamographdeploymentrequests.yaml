@@ -96,8 +96,9 @@ spec:
                   type: boolean
                 backend:
                   description: |-
-                    Backend specifies the inference backend to use.
+                    Backend specifies the inference backend for profiling.
                     The controller automatically sets this value in profilingConfig.config.engine.backend.
+                    Profiling runs on real GPUs or via AIC simulation to collect performance data.
                   enum:
                     - vllm
                     - sglang
@@ -304,6 +305,15 @@ spec:
                   required:
                     - profilerImage
                   type: object
+                useMocker:
+                  default: false
+                  description: |-
+                    UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of
+                    a real backend deployment. When true, the deployment uses simulated engines that
+                    don't require GPUs, using the profiling data to simulate realistic timing behavior.
+                    Mocker is available in all backend images and useful for large-scale experiments.
+                    Profiling still runs against the real backend (specified above) to collect performance data.
+                  type: boolean
               required:
                 - backend
                 - model
@@ -404,6 +414,7 @@ spec:
                     including metadata, based on profiling results. Users can extract this to create
                     a DGD manually, or it's used automatically when autoApply is true.
                     Stored as RawExtension to preserve all fields including metadata.
+                    For mocker backends, this contains the mocker DGD spec.
                   type: object
                   x-kubernetes-embedded-resource: true
                   x-kubernetes-preserve-unknown-fields: true
