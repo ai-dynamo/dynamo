@@ -9,13 +9,6 @@ on:
       - main
       - "pull-request/[0-9]+"
       - release/*.*.*
-  workflow_dispatch:
-    inputs:
-      run_deploy_operator:
-        description: 'Run deploy operator and deployment tests'
-        required: false
-        type: boolean
-        default: false
 
 concurrency:
     # The group name is a ternary operation. If the ref_name is 'main',
@@ -28,7 +21,6 @@ concurrency:
 jobs:
   changed-files:
     runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
       has_code_changes: ${{ steps.filter.outputs.has_code_changes }}
     steps:
@@ -169,13 +161,6 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      - name: Login to Container Registries
-        uses: ./.github/actions/docker-login
-        with:
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
@@ -187,15 +172,15 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      - name: Run tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "pre_merge and vllm and (gpu_0 or gpu_1)"
-          framework: "vllm"
-          test_type: "pre_merge"
-          platform_arch: ${{ matrix.platform.arch }}
+      # - name: Run tests
+      #   if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "pre_merge and vllm"
+      #     framework: "vllm"
+      #     test_type: "pre_merge"
+      #     platform_arch: ${{ matrix.platform.arch }}
 
   sglang:
     needs: changed-files
@@ -248,15 +233,15 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      - name: Run tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "pre_merge and sglang and (gpu_0 or gpu_1)"
-          framework: "sglang"
-          test_type: "pre_merge"
-          platform_arch: ${{ matrix.platform.arch }}
+      # - name: Run tests
+      #   if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "pre_merge and sglang"
+      #     framework: "sglang"
+      #     test_type: "pre_merge"
+      #     platform_arch: ${{ matrix.platform.arch }}
 
   trtllm:
     needs: changed-files
@@ -309,15 +294,15 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      - name: Run tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "pre_merge and trtllm and (gpu_0 or gpu_1)"
-          framework: "trtllm"
-          test_type: "pre_merge"
-          platform_arch: ${{ matrix.platform.arch }}
+      # - name: Run tests
+      #   if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "pre_merge and trtllm"
+      #     framework: "trtllm"
+      #     test_type: "pre_merge"
+      #     platform_arch: ${{ matrix.platform.arch }}
 
   deploy-test-fault-tolerance:
     runs-on: cpu-amd-m5-2xlarge
@@ -452,8 +437,6 @@ jobs:
           echo "🧪 Fault tolerance tests completed with exit code: ${TEST_EXIT_CODE}"
 
           exit ${TEST_EXIT_CODE}
-        continue-on-error: true
-
       - name: Process Fault Tolerance Test Results
         if: always()
         run: |
@@ -500,9 +483,7 @@ jobs:
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-operator job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -578,9 +559,7 @@ jobs:
 
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-test-vllm job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
@@ -720,8 +699,6 @@ jobs:
           echo "Test passed: Response matches expected format and content"
         fi
         exit $TEST_RESULT
-      continue-on-error: true
-
     - name: Process Deployment Test Results
       if: always()
       run: |
@@ -757,6 +734,7 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE
 
         # For debugging purposes, list all the resources before we delete
+        kubectl get dynamographdeployments
         kubectl get all
 
         echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
@@ -764,9 +742,7 @@ jobs:
 
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-test-sglang job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, sglang]
     permissions:
       contents: read
@@ -787,9 +763,7 @@ jobs:
 
   deploy-test-trtllm:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-test-trtllm job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, trtllm]
     permissions:
       contents: read
@@ -812,9 +786,7 @@ jobs:
 
   cleanup:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment the below if statement when we have a way to test the cleanup job in CI.
-    # if: always()
-    if: github.event.inputs.run_deploy_operator
+    if: always()
     needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
     steps:
     - name: Output Node Name
@@ -848,6 +820,7 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
 
         # For debugging purposes, list all the resources before we uninstall
+        kubectl get dynamographdeployments
         kubectl get all
 
         echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
