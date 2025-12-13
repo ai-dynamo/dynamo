@@ -149,8 +149,8 @@ toktrie_hf_tokenizers = { version = "1.1" }
 bs62 = { version = "0.1" }
 erased-serde = { version = "0.4" }
 itertools = { version = "0.14.0" }
-minijinja = { version = "2.10.2", features = ["loader"] }
-minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
+minijinja = { version = "2.14.0", features = ["loader"] }
+minijinja-contrib = { version = "2.14.0", features = ["pycompat"] }
 json-five = { version = "0.3" }
 
 # media loading in the preprocessor
