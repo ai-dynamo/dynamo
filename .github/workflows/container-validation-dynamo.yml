@@ -44,20 +44,20 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
-          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target dev --framework none --enable-kvbm
+          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target dev --framework none --enable-kvbm --enable-media-ffmpeg
       - name: Start services with docker-compose
         working-directory: ./deploy
         run: |
           docker compose up -d nats-server etcd-server
-      - name: Run Rust checks (block-manager + media-nixl + integration tests)
+      - name: Run Rust checks (block-manager + media-nixl + media-ffmpeg + integration tests)
         run: |
           docker run --rm -w /workspace/lib/llm \
             --name ${{ env.CONTAINER_ID }}_rust_checks \
             ${{ steps.define_image_tag.outputs.image_tag }} \
             bash -ec 'rustup component add rustfmt clippy && \
                       cargo fmt -- --check && \
-                      cargo clippy --features block-manager,media-nixl --no-deps --all-targets -- -D warnings && \
-                      cargo test --locked --all-targets --features=block-manager,media-nixl && \
+                      cargo clippy --features block-manager,media-nixl,media-ffmpeg --no-deps --all-targets -- -D warnings && \
+                      cargo test --locked --all-targets --features=block-manager,media-nixl,media-ffmpeg && \
                       cargo test --locked --features integration -- --nocapture'
       - name: Cleanup services
         if: always()

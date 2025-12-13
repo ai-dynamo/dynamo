@@ -40,6 +40,7 @@ ARG FRAMEWORK_IMAGE_TAG
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_MEDIA_NIXL
+ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
 ARG CUDA_VERSION
 
@@ -158,6 +159,34 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         libibumad-devel \
         librdmacm-devel \
         numactl-devel
+
+# Build FFmpeg from source
+ARG FFMPEG_VERSION=7.1
+ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH}"
+RUN if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+    dnf install -y pkg-config && \
+    cd /tmp && \
+    curl -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    cd ffmpeg-${FFMPEG_VERSION} && \
+    ./configure \
+        --prefix=/usr/local \
+        --disable-programs \
+        --disable-doc \
+        --disable-static \
+        --disable-x86asm \
+        --disable-postproc \
+        --disable-network \
+        --disable-encoders \
+        --disable-muxers \
+        --disable-bsfs \
+        --disable-devices \
+        --enable-shared && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/ffmpeg-${FFMPEG_VERSION}*; \
+fi
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
@@ -311,8 +340,15 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
+    FEATURES=""; \
     if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
-        maturin build --release --features dynamo-llm/media-nixl --out /opt/dynamo/dist; \
+        FEATURES="$FEATURES dynamo-llm/media-nixl"; \
+    fi; \
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+        FEATURES="$FEATURES media-ffmpeg"; \
+    fi; \
+    if [ -n "$FEATURES" ]; then \
+        maturin build --release --features "$FEATURES" --out /opt/dynamo/dist; \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
@@ -616,6 +652,7 @@ ${NIXL_PLUGIN_DIR}:\
 /usr/local/ucx/lib/ucx:\
 /usr/local/nvidia/lib64:\
 ${LD_LIBRARY_PATH}
+ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 
 # Copy NATS and ETCD from dynamo_base, and UCX/NIXL from wheel_builder
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
@@ -744,6 +781,7 @@ RUN apt-get update -y && \
     bear \
     ccache \
     less \
+    pkg-config \
     # Language and development support
     clang \
     libclang-dev \

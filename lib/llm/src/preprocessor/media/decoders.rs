@@ -7,8 +7,12 @@ use serde::{Deserialize, Serialize};
 use super::common::EncodedMediaData;
 use super::rdma::DecodedMediaData;
 pub mod image;
+#[cfg(feature = "media-ffmpeg")]
+pub mod video;
 
 pub use image::{ImageDecoder, ImageMetadata};
+#[cfg(feature = "media-ffmpeg")]
+pub use video::{VideoDecoder, VideoMetadata};
 
 #[async_trait::async_trait]
 pub trait Decoder: Clone + Send + 'static {
@@ -27,10 +31,15 @@ pub trait Decoder: Clone + Send + 'static {
 pub struct MediaDecoder {
     #[serde(default)]
     pub image_decoder: ImageDecoder,
-    // TODO: video, audio decoders
+    #[cfg(feature = "media-ffmpeg")]
+    #[serde(default)]
+    pub video_decoder: VideoDecoder,
+    // TODO: audio decoder
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum DecodedMediaMetadata {
     Image(ImageMetadata),
+    #[cfg(feature = "media-ffmpeg")]
+    Video(VideoMetadata),
 }

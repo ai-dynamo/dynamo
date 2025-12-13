@@ -27,6 +27,7 @@ ARG BASE_IMAGE_TAG
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_MEDIA_NIXL
+ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -112,6 +113,7 @@ FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 ARG ARCH
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
+ARG ENABLE_MEDIA_FFMPEG
 
 WORKDIR /workspace
 
@@ -154,6 +156,37 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         libibumad-devel \
         librdmacm-devel \
         numactl-devel
+
+# Build FFmpeg from source
+# Or write dummies for future stages COPY --from
+ARG FFMPEG_VERSION=7.1
+ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH}"
+RUN if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+    dnf install -y pkg-config && \
+    cd /tmp && \
+    curl -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    cd ffmpeg-${FFMPEG_VERSION} && \
+    ./configure \
+        --prefix=/usr/local \
+        --disable-programs \
+        --disable-doc \
+        --disable-static \
+        --disable-x86asm \
+        --disable-postproc \
+        --disable-network \
+        --disable-encoders \
+        --disable-muxers \
+        --disable-bsfs \
+        --disable-devices \
+        --enable-shared && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/ffmpeg-${FFMPEG_VERSION}*; \
+else \
+    touch /usr/local/include/av.dummy /usr/local/lib/libav.dummy /usr/local/lib/pkgconfig/libav.dummy; \
+fi
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
@@ -307,8 +340,15 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
+    FEATURES=""; \
     if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
-        maturin build --release --features dynamo-llm/media-nixl --out /opt/dynamo/dist; \
+        FEATURES="$FEATURES dynamo-llm/media-nixl"; \
+    fi; \
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+        FEATURES="$FEATURES media-ffmpeg"; \
+    fi; \
+    if [ -n "$FEATURES" ]; then \
+        maturin build --release --features "$FEATURES" --out /opt/dynamo/dist; \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
@@ -319,6 +359,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             --exclude libnixl.so \
             --exclude libnixl_build.so \
             --exclude libnixl_common.so \
+            --exclude 'lib*.so*' \
             --plat manylinux_2_28_${ARCH_ALT} \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \
@@ -353,6 +394,10 @@ COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
 COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+# Copy ffmpeg (or dummy)
+COPY --chown=dynamo: --from=wheel_builder /usr/local/include/av* /usr/local/include/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib/libav* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib/pkgconfig/libav* /usr/local/lib/pkgconfig/
 
 # Copy built artifacts
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
@@ -374,6 +419,7 @@ RUN apt-get update -y \
         clang \
         libclang-dev \
         protobuf-compiler \
+	pkg-config \
         # sudo for dev stage
         sudo \
     && apt-get clean \
