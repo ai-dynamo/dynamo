@@ -142,6 +142,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
+        # Extract logprobs params (they go to async_generate, not SamplingParams)
+        return_logprob = sampling_params.pop("return_logprob", False)
+        top_logprobs_num = sampling_params.pop("top_logprobs_num", None)
+
         if self.serving_mode == DisaggregationMode.DECODE:
             # request the bootstrap info from the target prefill worker
             if (
@@ -190,6 +194,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
+                return_logprob=return_logprob,
+                top_logprobs_num=top_logprobs_num,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
@@ -210,6 +216,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
+                return_logprob=return_logprob,
+                top_logprobs_num=top_logprobs_num,
                 rid=trace_id,
             )
             if self.skip_tokenizer_init:
