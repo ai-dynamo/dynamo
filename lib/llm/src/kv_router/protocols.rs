@@ -320,7 +320,7 @@ impl RequestExtraInfo {
         block_size: usize,
         total_tokens: usize,
     ) -> Vec<Option<BlockExtraInfo>> {
-        let num_blocks = (total_tokens + block_size - 1) / block_size;
+        let num_blocks = total_tokens.div_ceil(block_size);
         let mut block_infos: Vec<Option<BlockExtraInfo>> = vec![None; num_blocks];
 
         for req_mm_obj in &self.mm_objects {
@@ -329,7 +329,13 @@ impl RequestExtraInfo {
                 let start_block = req_start / block_size;
                 let end_block = (req_end.saturating_sub(1)) / block_size;
 
-                for block_idx in start_block..=end_block.min(num_blocks - 1) {
+                let upper_bound = end_block.min(num_blocks - 1) + 1;
+                for (block_idx, block_info_opt) in block_infos
+                    .iter_mut()
+                    .enumerate()
+                    .take(upper_bound)
+                    .skip(start_block)
+                {
                     let block_start_global = block_idx * block_size;
                     let block_end_global = ((block_idx + 1) * block_size).min(total_tokens);
 
@@ -338,7 +344,7 @@ impl RequestExtraInfo {
                     let local_end = (*req_end).min(block_end_global) - block_start_global;
 
                     if local_start < local_end {
-                        let block_info = block_infos[block_idx]
+                        let block_info = block_info_opt
                             .get_or_insert_with(|| BlockExtraInfo { mm_objects: vec![] });
 
                         // Check if we already have this mm_hash in this block

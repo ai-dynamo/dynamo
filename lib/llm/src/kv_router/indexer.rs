@@ -143,20 +143,20 @@ pub fn compute_block_hash_for_seq(
             let mut bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
 
             // Include MM hashes in the block hash computation if present
-            if let Some(mm_infos) = block_mm_infos {
-                if let Some(Some(block_mm_info)) = mm_infos.get(block_idx) {
-                    // Sort mm_hashes for deterministic ordering
-                    let mut mm_hashes: Vec<u64> = block_mm_info
-                        .mm_objects
-                        .iter()
-                        .map(|obj| obj.mm_hash)
-                        .collect();
-                    mm_hashes.sort_unstable();
+            if let Some(mm_infos) = block_mm_infos
+                && let Some(Some(block_mm_info)) = mm_infos.get(block_idx)
+            {
+                // Sort mm_hashes for deterministic ordering
+                let mut mm_hashes: Vec<u64> = block_mm_info
+                    .mm_objects
+                    .iter()
+                    .map(|obj| obj.mm_hash)
+                    .collect();
+                mm_hashes.sort_unstable();
 
-                    // Append sorted mm_hashes to the byte array
-                    for mm_hash in mm_hashes {
-                        bytes.extend_from_slice(&mm_hash.to_le_bytes());
-                    }
+                // Append sorted mm_hashes to the byte array
+                for mm_hash in mm_hashes {
+                    bytes.extend_from_slice(&mm_hash.to_le_bytes());
                 }
             }
 
