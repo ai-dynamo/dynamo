@@ -7,6 +7,7 @@ use regex::RegexBuilder;
 use serde_json::Value;
 use uuid::Uuid;
 
+use super::super::ToolDefinition;
 use super::config::JsonParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
@@ -165,6 +166,7 @@ fn try_parse_normal_text(input: &str, start_token: &str) -> String {
 pub fn try_tool_call_parse_basic_json(
     message: &str,
     config: &JsonParserConfig,
+    _tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     // Log the config we are using
     tracing::debug!("Using JSON parser config: {:?}", config);
