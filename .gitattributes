@@ -8,6 +8,7 @@
 *.[Zz][Ii][Pp]      binary
 *.[Tt][Gg][Zz]      binary
 *.fatbin            binary
+*.a                 binary
 
 # Exclude test data files from linguist language detection
 lib/llm/tests/data/** linguist-vendored

@@ -527,7 +527,11 @@ fn get_copy_kernel() -> Result<cudarc::driver::sys::CUfunction, TransferError> {
 fn load_embedded_fatbin() -> Result<cudarc::driver::sys::CUmodule, cudarc::driver::DriverError> {
     // FATBIN was copied to OUT_DIR by build.rs and embedded here
     const FATBIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vectorized_copy.fatbin"));
-    tracing::debug!("Loading embedded FATBIN ({} bytes)", FATBIN.len());
+    tracing::debug!(
+        "Loading embedded FATBIN from {} ({} bytes)",
+        concat!(env!("OUT_DIR"), "/vectorized_copy.fatbin"),
+        FATBIN.len()
+    );
     unsafe {
         let mut module = std::ptr::null_mut();
         let result = cudarc::driver::sys::cuModuleLoadData(
