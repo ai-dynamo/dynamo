@@ -117,6 +117,31 @@ impl<R> Annotated<R> {
         }
     }
 
+    /// Async version of map_data
+    pub async fn map_data_async<U, Fut, F>(self, transform: F) -> Annotated<U>
+    where
+        F: FnOnce(R) -> Fut,
+        Fut: Future<Output = Result<U, String>>,
+    {
+        match self.data {
+            Some(r) => match transform(r).await {
+                Ok(u) => Annotated::<U> {
+                    data: Some(u),
+                    id: self.id,
+                    event: self.event,
+                    comment: self.comment,
+                },
+                Err(e) => Annotated::from_error(e),
+            },
+            None => Annotated::<U> {
+                data: None,
+                id: self.id,
+                event: self.event,
+                comment: self.comment,
+            },
+        }
+    }
+
     pub fn is_error(&self) -> bool {
         self.event.as_deref() == Some("error")
     }

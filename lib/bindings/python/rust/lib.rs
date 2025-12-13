@@ -898,14 +898,18 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
-        let request_ctx = create_request_context(request, &context);
+        // Convert to an owned GIL-independent handle and move into async:
+        let request_py: Py<PyAny> = request.into_py(py);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let request_json: serde_json::Value = Bridge::global().from_py(request_py).await?;
+
+            let request_ctx = create_request_context(request_json, &context);
+
             let stream = match context {
                 Some(context) => {
                     // Always instrument with appropriate span (none if no trace context)
@@ -935,14 +939,18 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
-        let request_ctx = create_request_context(request, &context);
+        // Convert to an owned GIL-independent handle and move into async:
+        let request_py: Py<PyAny> = request.into_py(py);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let request_json: serde_json::Value = Bridge::global().from_py(request_py).await?;
+
+            let request_ctx = create_request_context(request_json, &context);
+
             let stream = match context {
                 Some(context) => {
                     // Always instrument with appropriate span (none if no trace context)
@@ -973,14 +981,18 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
-        let request_ctx = create_request_context(request, &context);
+        // Convert to an owned GIL-independent handle and move into async:
+        let request_py: Py<PyAny> = request.into_py(py);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let request_json: serde_json::Value = Bridge::global().from_py(request_py).await?;
+
+            let request_ctx = create_request_context(request_json, &context);
+
             let stream = match context {
                 Some(context) => {
                     // Always instrument with appropriate span (none if no trace context)
@@ -1016,16 +1028,19 @@ async fn process_stream(
     while let Some(response) = stream.next().await {
         // Convert the response to a PyObject using Python's GIL
         let annotated: RsAnnotated<serde_json::Value> = response;
-        let annotated: RsAnnotated<PyObject> = annotated.map_data(|data| {
-            Python::with_gil(|py| match pythonize::pythonize(py, &data) {
-                Ok(pyobj) => Ok(pyobj.into()),
-                Err(e) => Err(e.to_string()),
-            })
+        let annotated: RsAnnotated<PyObject> = .map_data_async(|data| async move {
+            Bridge::global()
+                    .to_py(data) // runs on bridge worker thread
+                    .await
+                    .map_err(|e| e.to_string())
+                    .await;
         });
 
         let is_error = annotated.is_error();
 
         // Send the PyObject through the channel or log an error
+        // TODO: add  timeout(Duration::from_secs(300), tx.send(annotated)).await;
+        // to avoid e.g. if the python side misses to read from the stream, but does not gc' it
         if let Err(e) = tx.send(annotated).await {
             tracing::error!("Failed to send response: {:?}", e);
             break;
