@@ -57,6 +57,7 @@ impl From<RouterMode> for RsRouterMode {
     }
 }
 
+mod bridge;
 mod context;
 mod engine;
 mod http;
@@ -65,6 +66,8 @@ mod llm;
 mod parsers;
 mod planner;
 mod prometheus_metrics;
+
+use bridge::Bridge;
 
 type JsonServerStreamingIngress =
     Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
@@ -899,6 +902,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Convert to an owned GIL-independent handle and move into async:
+        #[allow(deprecated)]
         let request_py: Py<PyAny> = request.into_py(py);
         let annotated = annotated.unwrap_or(false);
 
@@ -940,6 +944,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Convert to an owned GIL-independent handle and move into async:
+        #[allow(deprecated)]
         let request_py: Py<PyAny> = request.into_py(py);
         let annotated = annotated.unwrap_or(false);
 
@@ -982,6 +987,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Convert to an owned GIL-independent handle and move into async:
+        #[allow(deprecated)]
         let request_py: Py<PyAny> = request.into_py(py);
         let annotated = annotated.unwrap_or(false);
 
@@ -1028,13 +1034,14 @@ async fn process_stream(
     while let Some(response) = stream.next().await {
         // Convert the response to a PyObject using Python's GIL
         let annotated: RsAnnotated<serde_json::Value> = response;
-        let annotated: RsAnnotated<PyObject> = .map_data_async(|data| async move {
-            Bridge::global()
+        let annotated: RsAnnotated<PyObject> = annotated
+            .map_data_async(|data| async move {
+                Bridge::global()
                     .to_py(data) // runs on bridge worker thread
                     .await
                     .map_err(|e| e.to_string())
-                    .await;
-        });
+            })
+            .await;
 
         let is_error = annotated.is_error();
 

@@ -8,19 +8,19 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::{PyAny, PyErr};
 use pyo3_async_runtimes::TaskLocals;
-use pythonize::{depythonize, pythonize};
+use pythonize::pythonize;
 pub use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
+use super::context::{Context, callable_accepts_kwarg};
+use crate::bridge;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 pub use dynamo_runtime::{
     pipeline::{AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream, SingleIn},
     protocols::annotated::Annotated,
 };
-use crate::bridge;
-use super::context::{Context, callable_accepts_kwarg};
 
 /// Add bingings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -182,7 +182,6 @@ where
         let stream = bridge::Bridge::global()
             .with_gil(move |py| {
                 let py_request = pythonize(py, &request)?;
-                let id = ctx_python.id().to_string();
 
                 let py_ctx = Py::new(py, Context::new(ctx_python.clone(), current_trace_context))?;
 

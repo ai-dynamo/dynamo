@@ -1,6 +1,6 @@
 use std::{
     sync::{OnceLock, mpsc},
-    thread::{self, ThreadId},
+    thread::{self},
 };
 
 use crossbeam_channel::{Sender, bounded};
