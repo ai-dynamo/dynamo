@@ -139,6 +139,7 @@ impl KvManager {
                     .map(|(global_hash, local_hash)| KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(global_hash),
                         tokens_hash: LocalBlockHash(*local_hash),
+                        mm_extra_info: None,
                     })
                     .collect(),
             })

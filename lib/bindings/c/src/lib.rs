@@ -170,10 +170,12 @@ fn kv_event_create_stored_block_from_parts(
     let tokens_hash = compute_block_hash_for_seq(
         unsafe { std::slice::from_raw_parts(token_ids, num_tokens) },
         kv_block_size,
+        None,
     )[0];
     KvCacheStoredBlockData {
         block_hash: ExternalSequenceBlockHash(block_hash),
         tokens_hash,
+        mm_extra_info: None,
     }
 }
 static WARN_COUNT: AtomicU32 = AtomicU32::new(0);

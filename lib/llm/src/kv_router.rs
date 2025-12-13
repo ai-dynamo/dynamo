@@ -357,11 +357,23 @@ impl KvRouter {
         tracing::info!("Worker query client initialized");
 
         // Start KV event subscriber background process (only when use_kv_events is enabled)
-        // This is spawned as a background task to avoid blocking router startup.
-        // The task waits for runtime_configs to determine whether to use NATS Core or JetStream.
+        // The background task waits for runtime_configs to determine whether to use NATS Core or JetStream.
+        // NOTE: Snapshot loading is done synchronously BEFORE spawning to ensure state is restored
+        // before KvRouter::new returns, enabling proper router state synchronization across replicas.
         if kv_router_config.use_kv_events
             && let Indexer::KvIndexer(ref kv_indexer) = indexer
         {
+            // Load initial snapshot synchronously before spawning background task.
+            // This ensures the router has its initial state before accepting requests,
+            // fixing the race condition where requests arrive before snapshot is loaded.
+            if !kv_router_config.router_reset_states
+                && let Err(e) =
+                    subscriber::load_initial_snapshot(component.clone(), &kv_indexer.event_sender())
+                        .await
+            {
+                tracing::warn!("Failed to load initial snapshot: {e}");
+            }
+
             // Clone everything needed for the background task
             let component_clone = component.clone();
             let kv_indexer_clone = kv_indexer.clone();
@@ -420,6 +432,7 @@ impl KvRouter {
                         "Not all workers have local_indexer enabled, using JetStream subscription"
                     );
 
+                    // Note: skip_initial_snapshot=true because we already loaded it synchronously above
                     if let Err(e) = start_kv_router_background(
                         component_clone.clone(),
                         consumer_id,
@@ -434,6 +447,7 @@ impl KvRouter {
                         cancellation_token_clone.clone(),
                         kv_router_config.router_snapshot_threshold,
                         kv_router_config.router_reset_states,
+                        true, // skip_initial_snapshot - already loaded synchronously
                     )
                     .await
                     {
@@ -477,7 +491,7 @@ impl KvRouter {
 
         let isl_tokens = tokens.len();
 
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
         let seq_hashes = compute_seq_hash_for_block(&block_hashes);
 
         let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
@@ -532,7 +546,7 @@ impl KvRouter {
         let isl_tokens = tokens.len();
 
         let maybe_seq_hashes = self.kv_router_config.router_track_active_blocks.then(|| {
-            let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+            let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
             compute_seq_hash_for_block(&block_hashes)
         });
 
@@ -566,11 +580,11 @@ impl KvRouter {
     /// Get potential prefill and decode loads for all workers
     pub async fn get_potential_loads(&self, tokens: &[u32]) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
 
         let maybe_seq_hashes = self.kv_router_config.router_track_active_blocks.then(|| {
-            let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+            let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
             compute_seq_hash_for_block(&block_hashes)
         });
 
@@ -654,7 +668,10 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let context_id = ctx.context().id().to_string();
         // Handle different request types
         let response = match request {
-            RouterRequest::New { tokens } => {
+            RouterRequest::New {
+                tokens,
+                request_extra_info: _,
+            } => {
                 let (best_worker, overlap_blocks) = self
                     .find_best_match(Some(&context_id), &tokens, None, true)
                     .await?;
@@ -737,7 +754,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
             // Compute actual overlap blocks by querying the indexer
             let block_hashes =
-                compute_block_hash_for_seq(&request.token_ids, self.chooser.block_size());
+                compute_block_hash_for_seq(&request.token_ids, self.chooser.block_size(), None);
             let overlap_scores = self.chooser.indexer.find_matches(block_hashes).await?;
             let worker = WorkerWithDpRank::new(id, dp_rank);
             let overlap_blocks = overlap_scores.scores.get(&worker).copied().unwrap_or(0);
