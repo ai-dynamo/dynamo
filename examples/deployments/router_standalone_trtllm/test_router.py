@@ -197,7 +197,9 @@ class KvRouterTests:
         # First request - should populate cache (or hit existing cache)
         self.log("Sending first request...")
         if not send_request(self.client, self.config.api_url, payload):
-            self.results.append(RouterTestResult("full_match", False, "First request failed"))
+            self.results.append(
+                RouterTestResult("full_match", False, "First request failed")
+            )
             return
 
         # Wait for KV events
@@ -259,7 +261,9 @@ class KvRouterTests:
         # Send request B
         self.log("Sending request B (longer, shares prefix)...")
         if not send_request(self.client, self.config.api_url, payload_b):
-            self.results.append(RouterTestResult("partial_match", False, "Request B failed"))
+            self.results.append(
+                RouterTestResult("partial_match", False, "Request B failed")
+            )
             return
 
         time.sleep(self.config.kv_settle_time)
@@ -735,7 +739,9 @@ class KvRouterTests:
         self.log("Sending first text request...")
         if not send_request(self.client, self.config.api_url, payload):
             self.results.append(
-                RouterTestResult("text_cache_hit_overlap", False, "First request failed")
+                RouterTestResult(
+                    "text_cache_hit_overlap", False, "First request failed"
+                )
             )
             return
 
@@ -751,7 +757,9 @@ class KvRouterTests:
         self.log("Sending second text request (should hit cache)...")
         if not send_request(self.client, self.config.api_url, payload):
             self.results.append(
-                RouterTestResult("text_cache_hit_overlap", False, "Second request failed")
+                RouterTestResult(
+                    "text_cache_hit_overlap", False, "Second request failed"
+                )
             )
             return
 
