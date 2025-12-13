@@ -88,26 +88,61 @@ When both workers are registered, requests are automatically routed.
 
 ```python
 # Decode worker registration (in your decode worker)
+decode_endpoint = runtime.namespace("dynamo").component("decode").endpoint("generate")
+
 await register_llm(
     model_input=ModelInput.Tokens,
     model_type=ModelType.Chat | ModelType.Completions,
-    endpoint=generate_endpoint,
+    endpoint=decode_endpoint,
     model_name="meta-llama/Llama-2-7b-hf",
     # ... other parameters
 )
 
+await decode_endpoint.serve_endpoint(decode_handler.generate)
+
 # Prefill worker registration (in your prefill worker)
+prefill_endpoint = runtime.namespace("dynamo").component("prefill").endpoint("generate")
+
 await register_llm(
     model_input=ModelInput.Tokens,
     model_type=ModelType.Prefill,  # <-- Mark as prefill worker
-    endpoint=generate_endpoint,
+    endpoint=prefill_endpoint,
     model_name="meta-llama/Llama-2-7b-hf",  # Must match decode model name
     # ... other parameters
 )
+
+await prefill_endpoint.serve_endpoint(prefill_handler.generate)
 ```
 
 > [!Note]
 > The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh).
+
+### Request Flow
+
+The following diagram shows an overview of the major components in disaggregated serving:
+
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'fontSize':'10px', 'primaryColor':'#2e8b57', 'primaryTextColor':'#fff', 'primaryBorderColor':'#333', 'lineColor':'#81b1db', 'secondaryColor':'#b35900', 'tertiaryColor':'#808080', 'edgeLabelBackground':'transparent'}}}%%
+graph TD
+    HTTP[HTTP]
+    ROUTER[Router]
+    PREFILL[Prefill Worker]
+    DECODE[Decode Worker]
+
+    classDef worker_style fill:#2e8b57,stroke:#333,stroke-width:2px,color:#fff;
+    classDef router_style fill:#b35900,stroke:#333,stroke-width:2px,color:#fff;
+
+    class PREFILL,DECODE worker_style
+    class ROUTER router_style
+
+    HTTP <--> |"request/response"| ROUTER
+    ROUTER --> |"1. send to prefill"| PREFILL
+    PREFILL --> |"2. return NIXL metadata"| ROUTER
+    ROUTER --> |"3. send with metadata"| DECODE
+    DECODE --> |"4. stream response"| ROUTER
+
+    PREFILL -.-> |"publish kv events"| ROUTER
+```
 
 ## Overview
 
