@@ -73,6 +73,63 @@ fn may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
     Some(Value::from_serialize(&updated_tools))
 }
 
+/// Normalizes OpenAI multimodal content types to HuggingFace format.
+/// Transforms 'image_url' → 'image' and 'audio_url' → 'audio' for templates
+/// that expect HuggingFace format (e.g., LLaVa uses `selectattr('type', 'equalto', 'image')`).
+fn normalize_multimodal_types(messages: serde_json::Value) -> serde_json::Value {
+    let Some(arr) = messages.as_array() else {
+        return messages;
+    };
+
+    let updated_messages: Vec<_> = arr
+        .iter()
+        .map(|msg| {
+            match msg.get("content") {
+                Some(serde_json::Value::Array(content_array)) => {
+                    let mut modified_msg = msg.clone();
+                    if let Some(msg_object) = modified_msg.as_object_mut() {
+                        let normalized_content: Vec<serde_json::Value> = content_array
+                            .iter()
+                            .map(|part| {
+                                let mut normalized_part = part.clone();
+                                if let Some(obj) = normalized_part.as_object_mut() {
+                                    if let Some(type_val) = obj.get("type").and_then(|v| v.as_str())
+                                    {
+                                        match type_val {
+                                            "image_url" => {
+                                                // Transform image_url → image
+                                                obj.insert(
+                                                    "type".to_string(),
+                                                    serde_json::Value::String("image".to_string()),
+                                                );
+                                            }
+                                            "audio_url" => {
+                                                // Transform audio_url → audio
+                                                obj.insert(
+                                                    "type".to_string(),
+                                                    serde_json::Value::String("audio".to_string()),
+                                                );
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                normalized_part
+                            })
+                            .collect();
+                        msg_object
+                            .insert("content".to_string(), serde_json::Value::Array(normalized_content));
+                    }
+                    modified_msg
+                }
+                _ => msg.clone(),
+            }
+        })
+        .collect();
+
+    serde_json::Value::Array(updated_messages)
+}
+
 fn may_be_fix_msg_content(messages: serde_json::Value, preserve_arrays: bool) -> Value {
     // preserve_arrays=true: strings → arrays (multimodal)
     // preserve_arrays=false: text-only arrays → strings (standard)
@@ -307,6 +364,12 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
             self.requires_content_arrays,
         ))
         .unwrap();
+
+        // Transform OpenAI multimodal types to HuggingFace format if needed
+        // (e.g., 'image_url' → 'image' for LLaVa templates)
+        if self.requires_hf_image_type {
+            messages_for_template = normalize_multimodal_types(messages_for_template);
+        }
 
         normalize_tool_arguments_in_messages(&mut messages_for_template);
 
@@ -1017,5 +1080,111 @@ NORMAL MODE
     fn add_when_empty() {
         let s = dummy_state(vec![]);
         assert!(s.should_add_generation_prompt());
+    }
+
+    /// Tests that normalize_multimodal_types transforms 'image_url' to 'image'
+    #[test]
+    fn test_normalize_multimodal_types_image_url_to_image() {
+        let messages = serde_json::json!([
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this image?"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
+                ]
+            }
+        ]);
+
+        let normalized = normalize_multimodal_types(messages);
+
+        // Verify: image_url type is transformed to image
+        assert!(normalized[0]["content"][0]["type"] == "text");
+        assert!(normalized[0]["content"][1]["type"] == "image");
+        // The image_url field should still be present
+        assert!(normalized[0]["content"][1]["image_url"]["url"] == "https://example.com/image.jpg");
+    }
+
+    /// Tests that normalize_multimodal_types transforms 'audio_url' to 'audio'
+    #[test]
+    fn test_normalize_multimodal_types_audio_url_to_audio() {
+        let messages = serde_json::json!([
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this audio?"},
+                    {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.mp3"}}
+                ]
+            }
+        ]);
+
+        let normalized = normalize_multimodal_types(messages);
+
+        // Verify: audio_url type is transformed to audio
+        assert!(normalized[0]["content"][0]["type"] == "text");
+        assert!(normalized[0]["content"][1]["type"] == "audio");
+    }
+
+    /// Tests that normalize_multimodal_types handles mixed content correctly
+    #[test]
+    fn test_normalize_multimodal_types_mixed_content() {
+        let messages = serde_json::json!([
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Check this:"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/img1.jpg"}},
+                    {"type": "text", "text": "And this:"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/img2.jpg"}},
+                    {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.mp3"}}
+                ]
+            }
+        ]);
+
+        let normalized = normalize_multimodal_types(messages);
+        let content = normalized[0]["content"].as_array().unwrap();
+
+        // Verify all types are transformed correctly
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[2]["type"], "text");
+        assert_eq!(content[3]["type"], "image");
+        assert_eq!(content[4]["type"], "audio");
+    }
+
+    /// Tests that normalize_multimodal_types preserves string content unchanged
+    #[test]
+    fn test_normalize_multimodal_types_string_content_unchanged() {
+        let messages = serde_json::json!([
+            {
+                "role": "user",
+                "content": "Simple text message"
+            }
+        ]);
+
+        let normalized = normalize_multimodal_types(messages);
+
+        // Verify: String content is preserved
+        assert_eq!(normalized[0]["content"], "Simple text message");
+    }
+
+    /// Tests that normalize_multimodal_types preserves text-only arrays unchanged
+    #[test]
+    fn test_normalize_multimodal_types_text_only_array() {
+        let messages = serde_json::json!([
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "part 1"},
+                    {"type": "text", "text": "part 2"}
+                ]
+            }
+        ]);
+
+        let normalized = normalize_multimodal_types(messages);
+        let content = normalized[0]["content"].as_array().unwrap();
+
+        // Verify: Text types are preserved
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "text");
     }
 }

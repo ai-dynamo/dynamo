@@ -38,6 +38,48 @@ fn detect_content_array_usage(env: &Environment) -> bool {
     out_array.contains("template_test") && !out_string.contains("template_test")
 }
 
+/// Detects if a template expects HuggingFace image type format ('image') vs OpenAI format ('image_url').
+/// Some models like LLaVa use templates with `selectattr('type', 'equalto', 'image')` which
+/// expects the HuggingFace format, while the OpenAI API uses 'image_url'.
+/// Returns true if the template expects 'image' type instead of 'image_url'.
+fn detect_hf_image_type_usage(env: &Environment) -> bool {
+    // Test with HuggingFace format: type="image"
+    let hf_format_msg = context! {
+        messages => json!([{"role": "user", "content": [
+            {"type": "text", "text": "test"},
+            {"type": "image"}
+        ]}]),
+        add_generation_prompt => false,
+    };
+
+    // Test with OpenAI format: type="image_url"
+    let openai_format_msg = context! {
+        messages => json!([{"role": "user", "content": [
+            {"type": "text", "text": "test"},
+            {"type": "image_url", "image_url": {"url": "https://example.com/test.jpg"}}
+        ]}]),
+        add_generation_prompt => false,
+    };
+
+    let out_hf = env
+        .get_template("default")
+        .and_then(|t| t.render(&hf_format_msg))
+        .unwrap_or_default();
+    let out_openai = env
+        .get_template("default")
+        .and_then(|t| t.render(&openai_format_msg))
+        .unwrap_or_default();
+
+    // If HF format renders successfully but OpenAI format doesn't include the image placeholder,
+    // or if HF format works and contains image placeholder while OpenAI doesn't,
+    // then template expects HF format.
+    // A common pattern is that LLaVa templates output "<image>" placeholder only when type="image"
+    let hf_has_image_marker = out_hf.contains("<image>") || out_hf.contains("<|image|>");
+    let openai_has_image_marker = out_openai.contains("<image>") || out_openai.contains("<|image|>");
+
+    hf_has_image_marker && !openai_has_image_marker
+}
+
 /// Remove known non-standard Jinja2 tags from chat templates
 ///
 /// Some models use custom Jinja2 extensions that minijinja doesn't recognize. These tags
@@ -152,12 +194,22 @@ impl HfTokenizerConfigJsonFormatter {
         // Detect at model load time whether this template requires content arrays
         let requires_content_arrays = detect_content_array_usage(&env);
 
+        // Detect if template expects HuggingFace image format ('image') vs OpenAI format ('image_url')
+        let requires_hf_image_type = detect_hf_image_type_usage(&env);
+        if requires_hf_image_type {
+            tracing::info!(
+                "Template expects HuggingFace image type format ('image'). \
+                Will transform OpenAI 'image_url' to 'image' during rendering."
+            );
+        }
+
         Ok(HfTokenizerConfigJsonFormatter {
             env,
             config,
             mixins: Arc::new(mixins),
             supports_add_generation_prompt: supports_add_generation_prompt.unwrap_or(false),
             requires_content_arrays,
+            requires_hf_image_type,
         })
     }
 }
@@ -197,5 +249,46 @@ mod tests {
         let template = "Start {% generation %}Part 1{% endgeneration %} middle {% generation %}Part 2{% endgeneration %}";
         let result = remove_known_non_jinja2_tags(template);
         assert_eq!(result, "Start Part 1 middle Part 2");
+    }
+
+    /// Tests detection of HuggingFace image type format in LLaVa-style templates.
+    /// LLaVa templates use `selectattr('type', 'equalto', 'image')` which
+    /// produces `<image>` only when the type is 'image', not 'image_url'.
+    #[test]
+    fn test_detect_hf_image_type_usage_llava_style() {
+        let mut env = Environment::new();
+        env.set_lstrip_blocks(true);
+        env.set_trim_blocks(true);
+        // Simplified LLaVa-style template that outputs <image> for type="image"
+        let template = r#"{% for message in messages %}{% for content in message.content | selectattr('type', 'equalto', 'image') %}<image>{% endfor %}{% for content in message.content | selectattr('type', 'equalto', 'text') %}{{ content.text }}{% endfor %}{% endfor %}"#;
+        env.add_template("default", template).unwrap();
+
+        assert!(detect_hf_image_type_usage(&env));
+    }
+
+    /// Tests that standard OpenAI-compatible templates return false.
+    #[test]
+    fn test_detect_hf_image_type_usage_openai_style() {
+        let mut env = Environment::new();
+        env.set_lstrip_blocks(true);
+        env.set_trim_blocks(true);
+        // Standard template that doesn't filter by image type
+        let template = r#"{% for message in messages %}{{ message.content }}{% endfor %}"#;
+        env.add_template("default", template).unwrap();
+
+        assert!(!detect_hf_image_type_usage(&env));
+    }
+
+    /// Tests that text-only templates return false for HF image detection.
+    #[test]
+    fn test_detect_hf_image_type_usage_text_only_template() {
+        let mut env = Environment::new();
+        env.set_lstrip_blocks(true);
+        env.set_trim_blocks(true);
+        // Simple text-only template
+        let template = r#"{% for message in messages %}{{ message.content }}{% endfor %}"#;
+        env.add_template("default", template).unwrap();
+
+        assert!(!detect_hf_image_type_usage(&env));
     }
 }
