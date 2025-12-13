@@ -18,7 +18,7 @@ from typing import Optional
 import httpx
 import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from router import RouterAPI, RouterRequest, RouterResponse
 from tensorrt_llm.inputs.multimodal import apply_mm_hashes
@@ -231,11 +231,13 @@ class ServiceAPI:
     def _process_multimodal(self, prompt: str, image_urls: list[str]) -> ProcessedInput:
         """Process multimodal request: load images, compute tokens and mm_hash."""
         try:
+            # Use "multiple_image" modality when there are multiple images
+            modality = "multiple_image" if len(image_urls) > 1 else "image"
             inputs = default_multimodal_input_loader(
                 tokenizer=self.tokenizer,
                 model_dir=self.init_params.model,
                 model_type=self.init_params.model_type,
-                modality="image",
+                modality=modality,
                 prompts=[prompt],
                 media=[image_urls],
                 image_data_format="pt",
@@ -412,6 +414,46 @@ class ServiceAPI:
         }
         return f"data: {json.dumps(chunk)}\n\n"
 
+    async def _generate_full_response(
+        self, request: ChatCompletionRequest, result_generator, request_id: str
+    ) -> dict:
+        """Collect all outputs and generate a complete (non-streaming) response."""
+        created = int(time.time())
+        full_text = ""
+
+        try:
+            async for output in result_generator:
+                if isinstance(output, dict):
+                    text = output.get("text_diff") or output.get("text", "")
+                else:
+                    text = getattr(output, "text_diff", None) or getattr(
+                        output, "text", ""
+                    )
+                full_text += text
+
+            return {
+                "id": request_id,
+                "object": "chat.completion",
+                "created": created,
+                "model": request.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": full_text},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,  # Not tracked in this implementation
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+            }
+
+        except Exception as e:
+            logger.error(f"Generation error: {e}")
+            return {"error": make_error(str(e), "internal_error", 500)}
+
     # -------------------------------------------------------------------------
     # Main Request Handler
     # -------------------------------------------------------------------------
@@ -435,13 +477,18 @@ class ServiceAPI:
                 if isinstance(parsed, ErrorResponse):
                     return parsed
 
-                # Build prompt
-                prompt = self._build_prompt(parsed.messages_dict)
-
                 # Process input (multimodal or text-only)
                 if parsed.image_urls:
-                    processed = self._process_multimodal(prompt, parsed.image_urls)
+                    # For multimodal: pass raw text, let default_multimodal_input_loader apply chat template
+                    raw_text = " ".join(
+                        msg["content"]
+                        for msg in parsed.messages_dict
+                        if msg.get("content")
+                    )
+                    processed = self._process_multimodal(raw_text, parsed.image_urls)
                 else:
+                    # For text-only: apply chat template ourselves
+                    prompt = self._build_prompt(parsed.messages_dict)
                     processed = ProcessedInput(
                         tokens=self.tokenizer.encode(prompt),
                         mm_input=None,
@@ -495,11 +542,21 @@ class ServiceAPI:
                     prompt_input, worker_id, sampling_params
                 )
 
-                return StreamingResponse(
-                    self._stream_response(request, result_generator, request_id),
-                    media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-                )
+                if request.stream:
+                    return StreamingResponse(
+                        self._stream_response(request, result_generator, request_id),
+                        media_type="text/event-stream",
+                        headers={
+                            "Cache-Control": "no-cache",
+                            "Connection": "keep-alive",
+                        },
+                    )
+                else:
+                    # Non-streaming: collect all outputs and return complete response
+                    response_data = await self._generate_full_response(
+                        request, result_generator, request_id
+                    )
+                    return JSONResponse(content=response_data)
 
             except Exception as e:
                 logger.error(f"Request processing error: {e}")

@@ -12,7 +12,7 @@ import numpy as np
 import uvicorn
 import zmq
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from dynamo._core import RadixTree, ZmqKvEventListener
 
@@ -125,15 +125,15 @@ class KvRouter:
     # -------------------------------------------------------------------------
 
     async def start_background_tasks(self):
-        """Start background tasks for load and indexer updates."""
+        """Start background tasks for load and tree updates."""
         logger.info("Starting router background tasks...")
-        self.background_tasks.append(asyncio.create_task(self._run_load_updates()))
-        self.background_tasks.append(asyncio.create_task(self._run_tree_updates()))
-
-    async def _run_load_updates(self):
-        """Spawn per-worker load polling tasks."""
         for worker_id in range(self.num_workers):
-            asyncio.create_task(self._poll_worker_load(worker_id))
+            self.background_tasks.append(
+                asyncio.create_task(self._poll_worker_load(worker_id))
+            )
+            self.background_tasks.append(
+                asyncio.create_task(self._poll_worker_kv_events(worker_id))
+            )
 
     async def _poll_worker_load(self, worker_id: int):
         """Poll load metrics for a single worker."""
@@ -145,14 +145,11 @@ class KvRouter:
                 self.waitings[worker_id] = metrics.num_waiting_reqs
             except zmq.Again:
                 pass
-            except Exception as e:
+            except (zmq.ZMQError, ValidationError) as e:
                 logger.warning(f"Worker {worker_id} metrics error: {e}")
+            except Exception:
+                logger.exception(f"Worker {worker_id} unexpected metrics error")
             await asyncio.sleep(0.1)
-
-    async def _run_tree_updates(self):
-        """Spawn per-worker tree update tasks."""
-        for worker_id in range(self.num_workers):
-            asyncio.create_task(self._poll_worker_kv_events(worker_id))
 
     async def _poll_worker_kv_events(self, worker_id: int):
         """Poll KV events for a single worker and update RadixTree."""
@@ -167,8 +164,10 @@ class KvRouter:
                     )
             except zmq.Again:
                 pass
-            except Exception as e:
+            except (zmq.ZMQError, json.JSONDecodeError) as e:
                 logger.warning(f"Worker {worker_id} KV events error: {e}")
+            except Exception:
+                logger.exception(f"Worker {worker_id} unexpected KV events error")
             await asyncio.sleep(0.1)
 
     # -------------------------------------------------------------------------

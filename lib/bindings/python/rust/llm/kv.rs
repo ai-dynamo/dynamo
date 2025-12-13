@@ -32,11 +32,10 @@ pub fn compute_block_hash_for_seq_py(
     kv_block_size: usize,
     block_mm_infos: Option<Bound<PyAny>>,
 ) -> PyResult<Vec<u64>> {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-
     if kv_block_size == 0 {
-        return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "kv_block_size cannot be 0",
+        ));
     }
 
     // Convert Python block_mm_infos to Rust Vec<Option<BlockExtraInfo>>
@@ -52,40 +51,8 @@ pub fn compute_block_hash_for_seq_py(
         })
         .transpose()?;
 
-    // Log parameters to file
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/debug_rust_hash_params.txt")
-    {
-        let _ = writeln!(
-            file,
-            "\n============================================================"
-        );
-        let _ = writeln!(file, "=== compute_block_hash_for_seq_py PARAMETERS ===");
-        let _ = writeln!(file, "kv_block_size: {}", kv_block_size);
-        let _ = writeln!(file, "num_tokens: {}", tokens.len());
-        let _ = writeln!(file, "tokens: {:?}", tokens);
-        let _ = writeln!(file, "mm_infos_rust: {:?}", mm_infos_rust);
-    }
-
     let hashes =
         compute_block_hash_for_seq(&tokens, kv_block_size as u32, mm_infos_rust.as_deref());
-
-    // Log result
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/debug_rust_hash_params.txt")
-    {
-        let hash_values: Vec<u64> = hashes.iter().map(|h| h.0).collect();
-        let _ = writeln!(file, "=== RESULT ===");
-        let _ = writeln!(file, "hashes ({}): {:?}", hash_values.len(), hash_values);
-        let _ = writeln!(
-            file,
-            "============================================================"
-        );
-    }
 
     Ok(hashes.into_iter().map(|h| h.0).collect())
 }

@@ -32,7 +32,6 @@
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use dynamo_runtime::{
     component::Component,
     metrics::{MetricsHierarchy, prometheus_names::kvrouter},
@@ -137,27 +136,7 @@ pub fn compute_block_hash_for_seq(
     kv_block_size: u32,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
 ) -> Vec<LocalBlockHash> {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-
-    // Log input parameters
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/debug_compute_block_hash.txt")
-    {
-        let _ = writeln!(
-            file,
-            "\n============================================================"
-        );
-        let _ = writeln!(file, "=== compute_block_hash_for_seq INPUT ===");
-        let _ = writeln!(file, "kv_block_size: {}", kv_block_size);
-        let _ = writeln!(file, "num_tokens: {}", tokens.len());
-        let _ = writeln!(file, "tokens: {:?}", tokens);
-        let _ = writeln!(file, "block_mm_infos: {:?}", block_mm_infos);
-    }
-
-    let result: Vec<LocalBlockHash> = tokens
+    tokens
         .chunks_exact(kv_block_size as usize)
         .enumerate()
         .map(|(block_idx, chunk)| {
@@ -166,26 +145,13 @@ pub fn compute_block_hash_for_seq(
             // Include MM hashes in the block hash computation if present
             if let Some(mm_infos) = block_mm_infos {
                 if let Some(Some(block_mm_info)) = mm_infos.get(block_idx) {
-                    // Sort mm_hashes for consistent ordering
+                    // Sort mm_hashes for deterministic ordering
                     let mut mm_hashes: Vec<u64> = block_mm_info
                         .mm_objects
                         .iter()
                         .map(|obj| obj.mm_hash)
                         .collect();
                     mm_hashes.sort_unstable();
-
-                    // Log MM hash inclusion
-                    if let Ok(mut file) = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/debug_compute_block_hash.txt")
-                    {
-                        let _ = writeln!(
-                            file,
-                            "Block {}: Including mm_hashes {:?} in hash computation",
-                            block_idx, mm_hashes
-                        );
-                    }
 
                     // Append sorted mm_hashes to the byte array
                     for mm_hash in mm_hashes {
@@ -194,46 +160,9 @@ pub fn compute_block_hash_for_seq(
                 }
             }
 
-            let hash = compute_block_hash(&Bytes::from(bytes));
-
-            // Log per-block result
-            if let Ok(mut file) = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/debug_compute_block_hash.txt")
-            {
-                let _ = writeln!(
-                    file,
-                    "Block {}: chunk tokens {:?} -> hash {}",
-                    block_idx, chunk, hash.0
-                );
-            }
-
-            hash
+            compute_block_hash(&bytes)
         })
-        .collect();
-
-    // Log output
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/debug_compute_block_hash.txt")
-    {
-        let hash_values: Vec<u64> = result.iter().map(|h| h.0).collect();
-        let _ = writeln!(file, "=== OUTPUT ===");
-        let _ = writeln!(
-            file,
-            "result_hashes ({}): {:?}",
-            hash_values.len(),
-            hash_values
-        );
-        let _ = writeln!(
-            file,
-            "============================================================"
-        );
-    }
-
-    result
+        .collect()
 }
 
 /// Compute rolling sequence hashes for a vector of block hashes.

@@ -347,7 +347,7 @@ def test_mm_block_hash_error_zero_block_size():
     """Test that zero block size raises an error."""
     tokens = [100] * 32
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="kv_block_size cannot be 0"):
         compute_block_hash_for_seq_py(tokens, 0)
 
 

@@ -24,7 +24,7 @@ from typing import Optional
 import httpx
 import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from router import RouterAPI, RouterRequest, RouterResponse  # Add this import
 from transformers import PreTrainedTokenizerBase
 from vllm.config import ModelConfig
@@ -189,23 +189,54 @@ class ServiceAPI:
                 result_generator = self.workers.direct(
                     tokens_prompt, best_worker_id, sampling_params
                 )
-                assert request.stream
 
-                # Use vLLM's streaming response generator
-                return StreamingResponse(
-                    self.openai_serving_chat.chat_completion_stream_generator(
-                        request,
-                        result_generator,
-                        request_id,
-                        self.init_params.model,
-                        conversation,
-                        self.tokenizer,
-                        request_metadata,
-                        enable_force_include_usage=False,
-                    ),
-                    media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-                )
+                if request.stream:
+                    # Use vLLM's streaming response generator
+                    return StreamingResponse(
+                        self.openai_serving_chat.chat_completion_stream_generator(
+                            request,
+                            result_generator,
+                            request_id,
+                            self.init_params.model,
+                            conversation,
+                            self.tokenizer,
+                            request_metadata,
+                            enable_force_include_usage=False,
+                        ),
+                        media_type="text/event-stream",
+                        headers={
+                            "Cache-Control": "no-cache",
+                            "Connection": "keep-alive",
+                        },
+                    )
+                else:
+                    # Non-streaming: collect all outputs and return complete response
+                    final_output = None
+                    async for output in result_generator:
+                        final_output = output
+
+                    if final_output is None:
+                        return ErrorResponse(
+                            error={
+                                "message": "No output generated",
+                                "type": "internal_error",
+                                "code": 500,
+                            }
+                        )
+
+                    # Use vLLM's full response generator
+                    response = (
+                        await self.openai_serving_chat.chat_completion_full_generator(
+                            request,
+                            final_output,
+                            request_id,
+                            self.init_params.model,
+                            conversation,
+                            self.tokenizer,
+                            request_metadata,
+                        )
+                    )
+                    return JSONResponse(content=response.model_dump())
 
             except Exception as e:
                 logger.error(f"Error processing request: {e}")

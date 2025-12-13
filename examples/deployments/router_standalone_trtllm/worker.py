@@ -93,9 +93,18 @@ class KvEventsPublisher:
         block_hashes: list[int],
         token_ids: list[int],
         parent_hash: int | None,
-        mm_extra_info: dict | None,
+        block_mm_infos: list[dict | None] | None,
     ):
-        """Publish a BlockStored event."""
+        """Publish a BlockStored event.
+
+        Args:
+            block_hashes: List of block hashes being stored.
+            token_ids: All token IDs across the blocks.
+            parent_hash: Hash of the parent block (if any).
+            block_mm_infos: Per-block multimodal info list. Each element corresponds
+                to a block and is either the mm_info dict (for blocks containing
+                image tokens) or None (for text-only blocks).
+        """
         event = {
             "type": "BlockStored",
             "block_hashes": [to_unsigned_u64(h) for h in block_hashes],
@@ -106,8 +115,8 @@ class KvEventsPublisher:
         if parent_hash is not None:
             event["parent_block_hash"] = to_unsigned_u64(parent_hash)
 
-        if mm_extra_info is not None:
-            event["block_mm_infos"] = [mm_extra_info] * len(block_hashes)
+        if block_mm_infos is not None:
+            event["block_mm_infos"] = block_mm_infos
 
         self._send([event])
 
@@ -147,8 +156,14 @@ class KvEventsPublisher:
 # -----------------------------------------------------------------------------
 
 
-def extract_mm_info(blocks_data: list[dict], all_token_ids: list[int]) -> dict | None:
-    """Extract multimodal hash info from TRTLLM block data."""
+def extract_mm_info(
+    blocks_data: list[dict], all_token_ids: list[int]
+) -> tuple[dict | None, list[int] | None]:
+    """Extract multimodal hash info from TRTLLM block data.
+
+    Returns:
+        Tuple of (mm_info dict, image token offsets [start, end)) or (None, None).
+    """
     for block in blocks_data:
         mm_keys = block.get("mm_keys", [])
         for mm_key in mm_keys:
@@ -163,9 +178,10 @@ def extract_mm_info(blocks_data: list[dict], all_token_ids: list[int]) -> dict |
             offsets = find_image_token_range(all_token_ids)
 
             if offsets:
-                return {"mm_objects": [{"mm_hash": mm_hash, "offsets": [offsets]}]}
+                mm_info = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [offsets]}]}
+                return mm_info, offsets
 
-    return None
+    return None, None
 
 
 def find_image_token_range(token_ids: list[int]) -> list[int] | None:
@@ -178,6 +194,43 @@ def find_image_token_range(token_ids: list[int]) -> list[int] | None:
             end = i + 1
 
     return [start, end] if start is not None else None
+
+
+def build_per_block_mm_infos(
+    num_blocks: int,
+    block_size: int,
+    mm_info: dict | None,
+    image_offsets: list[int] | None,
+) -> list[dict | None] | None:
+    """Build per-block mm_infos list, setting mm_info only for blocks containing image tokens.
+
+    Args:
+        num_blocks: Number of blocks in the stored event.
+        block_size: Number of tokens per block.
+        mm_info: The multimodal info dict (or None if no images).
+        image_offsets: [start, end) token indices of image tokens (or None).
+
+    Returns:
+        List of mm_info (one per block), with None for blocks without image tokens.
+        Returns None if no mm_info is provided.
+    """
+    if mm_info is None or image_offsets is None:
+        return None
+
+    img_start, img_end = image_offsets
+    result: list[dict | None] = []
+
+    for block_idx in range(num_blocks):
+        block_start = block_idx * block_size
+        block_end = block_start + block_size
+
+        # Check if this block overlaps with the image token range
+        if block_end > img_start and block_start < img_end:
+            result.append(mm_info)
+        else:
+            result.append(None)
+
+    return result
 
 
 def parse_stored_blocks(
@@ -250,9 +303,7 @@ class TrtllmWorker:
 
     def _initialize(self, kv_events_port: int, metrics_port: int):
         """Initialize TensorRT-LLM engine and publishers."""
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(self.worker_id)
-
-        logger.info(f"Worker {self.worker_id}: Initializing on GPU {self.worker_id}")
+        logger.info(f"Worker {self.worker_id}: Initializing")
 
         self.llm = LLM(
             model=self.model,
@@ -384,9 +435,14 @@ class TrtllmWorker:
             return
 
         parent_hash = data.get("parent_hash")
-        mm_info = extract_mm_info(data["blocks"], all_token_ids)
+        mm_info, image_offsets = extract_mm_info(data["blocks"], all_token_ids)
 
         block_hashes = [b["block_hash"] for b in blocks]
+
+        # Build per-block mm_infos (only blocks with image tokens get mm_info)
+        block_mm_infos = build_per_block_mm_infos(
+            len(blocks), self.block_size, mm_info, image_offsets
+        )
 
         # Debug dump
         dump_worker_kv_event(
@@ -396,7 +452,7 @@ class TrtllmWorker:
         )
 
         self.kv_events_publisher.publish_stored(
-            block_hashes, all_token_ids, parent_hash, mm_info
+            block_hashes, all_token_ids, parent_hash, block_mm_infos
         )
 
     def _handle_removed_event(self, data: dict):
@@ -429,7 +485,7 @@ class TrtllmWorker:
         )
 
         outputs = self.llm.generate_async(
-            prompt_input, sampling_params=trtllm_params, streaming=True
+            prompt_input, sampling_params=trtllm_params, streaming=False
         )
 
         async for output in outputs:
@@ -475,7 +531,11 @@ class TrtllmWorker:
 
 
 class TrtllmWorkers:
-    """Manages multiple TensorRT-LLM workers."""
+    """Manages multiple TensorRT-LLM workers.
+
+    Warning: Creating multiple workers in the same process causes them to share
+    the same GPU(s).
+    """
 
     def __init__(
         self,
@@ -486,6 +546,13 @@ class TrtllmWorkers:
         num_workers: int = 1,
     ):
         self.workers = []
+
+        if num_workers > 1:
+            logger.warning(
+                f"Creating {num_workers} workers in the same process. "
+                "All workers will share the same GPU(s). For multi-GPU isolation, "
+                "start each worker in a separate process with CUDA_VISIBLE_DEVICES set."
+            )
 
         logger.info(f"Initializing {num_workers} workers for {model}")
 
