@@ -7,7 +7,7 @@ Test Execution Times (Last Run: 2025-12-13):
 - test_request_cancellation_trtllm_decode_cancel: ~65s (gpu_1)
 - test_request_cancellation_trtllm_prefill_cancel: ~65s (gpu_1)
 - test_request_cancellation_trtllm_kv_transfer_cancel: ~65s (gpu_1)
-- Total: ~460s (0:07:40) for both nats and tcp request planes
+- Total: ~240s x2 request planes = ~480s (0:08:00)
 """
 
 import logging
