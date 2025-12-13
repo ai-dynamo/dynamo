@@ -52,11 +52,18 @@ dynamo-nova-backend = { workspace = true, optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 indicatif = { version = "0.18", optional = true }
 
+# S3 object storage optional dependencies
+aws-sdk-s3 = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
+rayon = { version = "1", optional = true }
+tokio-rayon = { version = "2", optional = true }
+
 [features]
 default = ["testing"]
 console = []
 testing = ["dynamo-nova-backend"]
 kvbm-bench = ["testing", "dep:clap", "dep:indicatif"]
+s3 = ["dep:aws-sdk-s3", "dep:aws-config", "dep:rayon", "dep:tokio-rayon"]
 
 [dev-dependencies]
 dynamo-memory = {workspace=true, features = ["unsafe-slices"]}

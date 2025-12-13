@@ -9,7 +9,8 @@
 // pub mod cohort;
 
 pub mod leader;
-pub mod offload;
 pub mod worker;
 
+pub mod object;
+pub mod offload;
 pub mod parallelism;

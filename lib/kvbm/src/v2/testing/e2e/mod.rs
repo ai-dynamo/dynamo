@@ -9,6 +9,9 @@
 #[cfg(test)]
 mod find_blocks;
 
+#[cfg(all(test, feature = "s3"))]
+mod s3_object;
+
 #[cfg(test)]
 mod tests {
     use crate::v2::physical::transfer::FillPattern;
