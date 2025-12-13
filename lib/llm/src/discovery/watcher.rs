@@ -234,7 +234,15 @@ impl ModelWatcher {
         let card = match self.manager.remove_model_card(key) {
             Some(card) => card,
             None => {
-                anyhow::bail!("Missing ModelDeploymentCard for {key}");
+                // This is expected when a Removed event arrives for a model from a different
+                // namespace. The Added event was filtered out (lines 146-157), so we never
+                // tracked this model. Gracefully ignore instead of returning an error.
+                // See: https://github.com/ai-dynamo/dynamo/issues/4801
+                tracing::debug!(
+                    key,
+                    "ModelDeploymentCard not found - likely from another namespace, ignoring"
+                );
+                return Ok(None);
             }
         };
         let model_name = card.name().to_string();
