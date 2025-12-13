@@ -45,7 +45,7 @@ pytest -v tests/kvbm_integration/test_determinism_disagg.py -s
 Environment variables control server settings and test load:
 
 - Server/model
-  - `KVBM_MODEL_ID` (default: `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`)
+  - `KVBM_MODEL_ID` (default: `Qwen/Qwen3-0.6B`)
   - `KVBM_SERVER_PORT` (default: `8000`)
   - `KVBM_SERVER_START_TIMEOUT` (default: `300` seconds)
 

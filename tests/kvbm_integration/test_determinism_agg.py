@@ -250,9 +250,7 @@ class DynamoKVBMServerManager:
         self.cpu_cache_blocks = cpu_cache_blocks
         self.gpu_cache_blocks = gpu_cache_blocks
         self.cpu_cache_gb = cpu_cache_gb
-        self.model = os.environ.get(
-            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-        )
+        self.model = os.environ.get("KVBM_MODEL_ID", "Qwen/Qwen3-0.6B")
 
         self.frontend_process: Optional[DynamoFrontendProcess] = None
         self.worker_process: Optional[ManagedProcess] = None

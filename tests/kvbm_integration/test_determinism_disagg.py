@@ -130,7 +130,7 @@ class LLMServerManager:
             "-m",
             "dynamo.vllm",
             "--model",
-            os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
+            os.environ.get("KVBM_MODEL_ID", "Qwen/Qwen3-0.6B"),
             "--block-size",
             "16",
             "--max-model-len",
@@ -145,7 +145,7 @@ class LLMServerManager:
             "-m",
             "dynamo.vllm",
             "--model",
-            os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
+            os.environ.get("KVBM_MODEL_ID", "Qwen/Qwen3-0.6B"),
             "--is-prefill-worker",
             "--block-size",
             "16",
@@ -214,9 +214,7 @@ class LLMServerManager:
         # Give frontend time to start up
         time.sleep(5)
 
-        model = os.environ.get(
-            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-        )
+        model = os.environ.get("KVBM_MODEL_ID", "Qwen/Qwen3-0.6B")
 
         # Try to download the model.
         print("Attempting model download...")
@@ -349,9 +347,7 @@ class LLMServerManager:
 
             # Then check if the model endpoint is ready with a simple test request
             test_payload = {
-                "model": os.environ.get(
-                    "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-                ),
+                "model": os.environ.get("KVBM_MODEL_ID", "Qwen/Qwen3-0.6B"),
                 "messages": [{"role": "user", "content": "test"}],
                 "max_completion_tokens": 1,
                 "temperature": 0,

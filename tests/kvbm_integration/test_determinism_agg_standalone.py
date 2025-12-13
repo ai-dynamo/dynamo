@@ -115,7 +115,7 @@ class LLMServerManager:
             str(self.port),
             "--kv-transfer-config",
             '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}',
-            os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
+            os.environ.get("KVBM_MODEL_ID", "Qwen/Qwen3-0.6B"),
             "--max-model-len",
             "8000",  # required to fit on L4 GPU when using 8b model
         ]
@@ -152,7 +152,7 @@ class LLMServerManager:
         # Construct serve command
         self.server_cmd = [
             "trtllm-serve",
-            os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
+            os.environ.get("KVBM_MODEL_ID", "Qwen/Qwen3-0.6B"),
             "--host",
             "localhost",
             "--port",
@@ -188,9 +188,7 @@ class LLMServerManager:
             self.server_stdout_file.flush()
 
         # Try to download the model.
-        model = os.environ.get(
-            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-        )
+        model = os.environ.get("KVBM_MODEL_ID", "Qwen/Qwen3-0.6B")
         print("Attempting model download...")
         try:
             subprocess.run(
@@ -260,9 +258,7 @@ class LLMServerManager:
 
             # Then check if the model endpoint is ready with a simple test request
             test_payload = {
-                "model": os.environ.get(
-                    "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-                ),
+                "model": os.environ.get("KVBM_MODEL_ID", "Qwen/Qwen3-0.6B"),
                 "messages": [{"role": "user", "content": "test"}],
                 "max_completion_tokens": 1,
                 "temperature": 0,
