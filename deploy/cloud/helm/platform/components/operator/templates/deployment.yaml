@@ -66,6 +66,7 @@ spec:
         image: {{ .Values.controllerManager.kubeRbacProxy.image.repository }}:{{
           .Values.controllerManager.kubeRbacProxy.image.tag | default .Chart.AppVersion
           }}
+        imagePullPolicy: {{ .Values.controllerManager.kubeRbacProxy.image.pullPolicy | quote }}
         name: kube-rbac-proxy
         ports:
         - containerPort: 8443
@@ -155,6 +156,7 @@ spec:
             name: dynamo-deployment-env
         image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag
 | default .Chart.AppVersion }}
+        imagePullPolicy: {{ .Values.controllerManager.manager.image.pullPolicy | quote }}
         livenessProbe:
           httpGet:
             path: /healthz
