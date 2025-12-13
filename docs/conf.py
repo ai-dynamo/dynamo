@@ -86,6 +86,15 @@ redirects = {
     "dynamo_glossary": "../reference/glossary.html",
     "support_matrix": "../reference/support-matrix.html",
     "components/router/README": "../router/README.html",
+    # Multimodal documentation consolidation
+    "backends/vllm/multimodal": "../../multimodal/vllm.html",
+    "backends/vllm/multimodal_vllm_guide": "../../multimodal/vllm.html",
+    "backends/trtllm/multimodal_support": "../../multimodal/trtllm.html",
+    "backends/trtllm/multimodal_trtllm_guide": "../../multimodal/trtllm.html",
+    "backends/trtllm/multinode/multinode-multimodal-example": "../../../multimodal/trtllm.html",
+    "backends/sglang/multimodal_epd": "../../multimodal/sglang.html",
+    "backends/sglang/multimodal_sglang_guide": "../../multimodal/sglang.html",
+    "multimodal/multimodal_intro": "index.html",
 }
 
 # Custom extensions
