@@ -574,12 +574,12 @@ impl DistributedConfig {
 /// Request plane transport mode configuration
 ///
 /// This determines how requests are distributed from routers to workers:
-/// - `Nats`: Use NATS for request distribution (default, legacy)
+/// - `Nats`: Use NATS for request distribution (legacy)
 /// - `Http`: Use HTTP/2 for request distribution
-/// - `Tcp`: Use raw TCP for request distribution with msgpack support
+/// - `Tcp`: Use raw TCP for request distribution with msgpack support (default)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestPlaneMode {
-    /// Use NATS for request plane (default for backward compatibility)
+    /// Use NATS for request plane
     Nats,
     /// Use HTTP/2 for request plane
     Http,
@@ -589,7 +589,7 @@ pub enum RequestPlaneMode {
 
 impl Default for RequestPlaneMode {
     fn default() -> Self {
-        Self::Nats
+        Self::Tcp
     }
 }
 
