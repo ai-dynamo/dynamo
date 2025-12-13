@@ -17,7 +17,7 @@ use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::block_manager::cache_stats::CacheStatsTracker;
-use crate::{get_current_cancel_token, get_current_tokio_handle};
+use crate::dynamo::{get_current_cancel_token, get_current_tokio_handle};
 
 use super::*;
 
@@ -185,7 +185,7 @@ pub struct ConnectorSlotManager<R: RequestKey> {
     /// Cache statistics tracker
     cache_stats: Arc<CacheStatsTracker>,
     /// KVBM metrics for exposing cache hit rates
-    kvbm_metrics: KvbmMetrics,
+    _kvbm_metrics: KvbmMetrics,
 }
 
 impl std::fmt::Debug for ConnectorSlotManager<String> {
@@ -256,7 +256,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             xfer_tx,
             _transfer_engine_handle: Some(xfer_engine_task),
             cache_stats,
-            kvbm_metrics: kvbm_metrics.clone(),
+            _kvbm_metrics: kvbm_metrics.clone(),
         }
     }
 }

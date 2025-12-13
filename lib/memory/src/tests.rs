@@ -7,13 +7,13 @@ use super::*;
 
 /// Helper function to validate NIXL descriptor consistency.
 ///
-/// For any MemoryDescription that returns Some from nixl_descriptor(),
+/// For any MemoryDescriptor that returns Some from nixl_descriptor(),
 /// this validates that the descriptor's addr and size match the memory region's addr and size.
 ///
 /// # Panics
 /// Panics if descriptor values don't match memory region values.
 #[allow(dead_code)]
-fn validate_nixl_descriptor<M: MemoryDescription>(memory: &M) {
+fn validate_nixl_descriptor<M: MemoryDescriptor>(memory: &M) {
     if let Some(desc) = memory.nixl_descriptor() {
         assert_eq!(
             desc.addr as usize,

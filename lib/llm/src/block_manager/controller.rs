@@ -98,7 +98,8 @@ pub enum ResetResponse {
 mod tests {
     use crate::tokens::Tokens;
 
-    use super::super::tests::create_reference_block_manager_with_counts;
+    use super::super::ReferenceBlockManager;
+    use super::super::tests::create_reference_block_manager_config_with_counts;
     use super::*;
 
     #[tokio::test]
@@ -112,7 +113,8 @@ mod tests {
 
         let worker_id = drt.connection_id();
 
-        let block_manager = create_reference_block_manager_with_counts(8, 16, 0).await;
+        let config = create_reference_block_manager_config_with_counts(8, 16, 0);
+        let block_manager = ReferenceBlockManager::new(config).await.unwrap();
 
         let component = drt
             .namespace("test-kvbm")
@@ -124,7 +126,7 @@ mod tests {
             .await
             .unwrap();
 
-        let client = client::ControlClient::new(component.clone(), worker_id)
+        let client = client::ControlClient::new(component.clone(), worker_id as i64)
             .await
             .unwrap();
 

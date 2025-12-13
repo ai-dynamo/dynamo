@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-kvbm-config"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "KVBM Configuration Library for Tokio, Rayon, and Nova runtimes"
+
+[features]
+default = []
+rayon = ["dep:rayon"]
+
+[dependencies]
+anyhow = { workspace = true }
+figment = { version = "0.10", features = ["env", "toml", "json"] }
+nix = { version = "0.30.1", features = ["net"] }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+validator = { workspace = true }
+
+# Optional dependencies
+rayon = { version = "1.10", optional = true }
+
+# Nova dependencies
+dynamo-nova = { path = "../nova" }
+dynamo-nova-backend = { path = "../nova-backend" }
+dynamo-nova-discovery = { path = "../nova-discovery", default-features = false, features = ["etcd", "p2p", "filesystem"] }
+
+# Memory dependencies (for NixL)
+dynamo-memory = { path = "../memory" }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+temp-env = { version = "0.3.6" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -3,10 +3,10 @@
 
 //! Storage actions.
 
-use super::{MemoryDescription, StorageError};
+use super::{MemoryDescriptor, StorageError};
 
 /// Extension trait for storage types that support memory setting operations
-pub trait Memset: MemoryDescription {
+pub trait Memset: MemoryDescriptor {
     /// Sets a region of memory to a specific value
     ///
     /// # Arguments
@@ -22,7 +22,7 @@ pub trait Memset: MemoryDescription {
 }
 
 /// Extension trait for storage types that support slicing operations
-pub trait Slice: MemoryDescription + 'static {
+pub trait Slice: MemoryDescriptor + 'static {
     /// Returns an immutable byte slice view of the entire storage region
     ///
     /// # Safety
@@ -133,7 +133,7 @@ pub trait Slice: MemoryDescription + 'static {
     }
 }
 
-pub trait SliceMut: MemoryDescription + 'static {
+pub trait SliceMut: MemoryDescriptor + 'static {
     /// Returns a mutable byte slice view of the entire storage region
     ///
     /// # Safety
