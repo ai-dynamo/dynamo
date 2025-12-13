@@ -27,9 +27,9 @@ use rstest::rstest;
 
 use crate::v2::distributed::object::s3::{S3Config, S3ObjectBlockClient};
 use crate::v2::distributed::object::{LayoutConfigExt, ObjectBlockClient};
-use crate::v2::physical::layout::{BlockDimension, LayoutConfig, PhysicalLayout};
+use crate::v2::physical::layout::{BlockDimension, PhysicalLayout};
 use crate::v2::physical::transfer::{
-    BlockChecksum, FillPattern, NixlAgent, StorageKind, compute_block_checksums, fill_blocks,
+    BlockChecksum, FillPattern, NixlAgent, compute_block_checksums, fill_blocks,
 };
 use crate::v2::testing::physical::{LayoutKind, standard_config};
 use crate::{BlockId, SequenceHash};
@@ -105,13 +105,7 @@ async fn is_minio_available() -> bool {
     // Try to connect to MinIO
     let config = S3Config::default();
     match S3ObjectBlockClient::new(config).await {
-        Ok(client) => {
-            // Try to list buckets as a health check
-            match client.client().list_buckets().send().await {
-                Ok(_) => true,
-                Err(_) => false,
-            }
-        }
+        Ok(client) => client.client().list_buckets().send().await.is_ok(),
         Err(_) => false,
     }
 }
@@ -127,6 +121,7 @@ pub struct TestS3Client {
     runtime: tokio::runtime::Handle,
 }
 
+#[allow(dead_code)]
 impl TestS3Client {
     /// Create a new test client with a unique bucket name.
     ///
@@ -202,17 +197,15 @@ impl TestS3Client {
 
             let list_result = list_req.send().await?;
 
-            if let Some(contents) = list_result.contents() {
-                for object in contents {
-                    if let Some(key) = object.key() {
-                        s3_client
-                            .delete_object()
-                            .bucket(&self.bucket)
-                            .key(key)
-                            .send()
-                            .await
-                            .ok(); // Ignore individual delete errors
-                    }
+            for object in list_result.contents() {
+                if let Some(key) = object.key() {
+                    s3_client
+                        .delete_object()
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .send()
+                        .await
+                        .ok(); // Ignore individual delete errors
                 }
             }
 
@@ -250,7 +243,7 @@ impl Drop for TestS3Client {
         let client = self.inner.client().clone();
 
         // Use spawn_blocking to run async cleanup in drop
-        let _ = self.runtime.spawn(async move {
+        self.runtime.spawn(async move {
             // Delete all objects first
             let mut continuation_token: Option<String> = None;
 
@@ -263,17 +256,15 @@ impl Drop for TestS3Client {
 
                 match list_req.send().await {
                     Ok(list_result) => {
-                        if let Some(contents) = list_result.contents() {
-                            for object in contents {
-                                if let Some(key) = object.key() {
-                                    client
-                                        .delete_object()
-                                        .bucket(&bucket)
-                                        .key(key)
-                                        .send()
-                                        .await
-                                        .ok();
-                                }
+                        for object in list_result.contents() {
+                            if let Some(key) = object.key() {
+                                client
+                                    .delete_object()
+                                    .bucket(&bucket)
+                                    .key(key)
+                                    .send()
+                                    .await
+                                    .ok();
                             }
                         }
 

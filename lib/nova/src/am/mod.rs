@@ -307,8 +307,9 @@ impl Nova {
             futures::future::Either::Right(shared_future) => shared_future.await,
         };
 
-        let peer_info = result
-            .map_err(|e| anyhow::anyhow!("Discovery failed for instance {}: {:?}", instance_id, e))?;
+        let peer_info = result.map_err(|e| {
+            anyhow::anyhow!("Discovery failed for instance {}: {:?}", instance_id, e)
+        })?;
 
         tracing::info!(
             target: "dynamo_nova::discovery",
