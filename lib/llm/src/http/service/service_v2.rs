@@ -205,6 +205,18 @@ impl HttpService {
         self.state().manager()
     }
 
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn is_tls_enabled(&self) -> bool {
+        self.enable_tls
+    }
+
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
         let this = self.clone();
         tokio::spawn(async move { this.run(cancel_token).await })
