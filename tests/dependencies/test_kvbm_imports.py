@@ -43,12 +43,16 @@ def _check_kvbm_imports():
 
 # Base tests (no framework markers) - run in main job with --framework none --enable-kvbm
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
 def test_kvbm_wheel_exists():
     """Verify KVBM wheel file exists in expected location."""
     _check_kvbm_wheel_exists()
 
 
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
 def test_kvbm_imports():
     """Verify KVBM package and core classes can be imported."""
     _check_kvbm_imports()
@@ -57,6 +61,8 @@ def test_kvbm_imports():
 # vLLM-specific tests - run in vLLM job (vLLM auto-enables KVBM)
 @pytest.mark.pre_merge
 @pytest.mark.vllm
+@pytest.mark.unit
+@pytest.mark.gpu_0
 def test_kvbm_wheel_exists_vllm():
     """Verify KVBM wheel exists in vLLM image."""
     _check_kvbm_wheel_exists()
@@ -64,6 +70,8 @@ def test_kvbm_wheel_exists_vllm():
 
 @pytest.mark.pre_merge
 @pytest.mark.vllm
+@pytest.mark.unit
+@pytest.mark.gpu_0
 def test_kvbm_imports_vllm():
     """Verify KVBM package and core classes can be imported in vLLM image."""
     _check_kvbm_imports()
@@ -72,6 +80,8 @@ def test_kvbm_imports_vllm():
 # TRT-LLM-specific tests - run in TRT-LLM job (TRT-LLM auto-enables KVBM)
 @pytest.mark.pre_merge
 @pytest.mark.trtllm
+@pytest.mark.unit
+@pytest.mark.gpu_0
 def test_kvbm_wheel_exists_trtllm():
     """Verify KVBM wheel exists in TRT-LLM image."""
     _check_kvbm_wheel_exists()
@@ -79,6 +89,8 @@ def test_kvbm_wheel_exists_trtllm():
 
 @pytest.mark.pre_merge
 @pytest.mark.trtllm
+@pytest.mark.unit
+@pytest.mark.gpu_0
 def test_kvbm_imports_trtllm():
     """Verify KVBM package and core classes can be imported in TRT-LLM image."""
     _check_kvbm_imports()

@@ -386,6 +386,7 @@ def test_router_decisions_vllm_multiple_workers(
 
 
 @pytest.mark.gpu_2
+@pytest.mark.nightly
 def test_router_decisions_vllm_dp(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):

@@ -371,6 +371,7 @@ def test_router_decisions_sglang_multiple_workers(
 
 
 @pytest.mark.gpu_2
+@pytest.mark.post_merge
 def test_router_decisions_sglang_dp(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):

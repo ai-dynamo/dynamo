@@ -165,7 +165,12 @@ trtllm_configs = {
         name="disaggregated_multimodal",
         directory=trtllm_dir,
         script_name="disagg_multimodal.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.multimodal],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.nightly,
+        ],
         model="Qwen/Qwen2-VL-7B-Instruct",
         models_port=8000,
         timeout=900,
@@ -179,6 +184,7 @@ trtllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
+            pytest.mark.post_merge,
             pytest.mark.timeout(
                 480
             ),  # 3x measured time (83.85s) + download time (210s) for 7B model
@@ -218,6 +224,7 @@ def test_deployment(trtllm_config_test, request, runtime_services, predownload_m
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
+@pytest.mark.pre_merge
 @pytest.mark.timeout(660)  # 3x measured time (159.68s) + download time (180s)
 def test_chat_only_aggregated_with_test_logits_processor(
     request, runtime_services, predownload_models, monkeypatch

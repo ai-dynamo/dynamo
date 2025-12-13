@@ -78,7 +78,7 @@ vllm_configs = {
         name="aggregated_logprobs",
         directory=vllm_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[pytest.mark.gpu_1, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_with_logprobs(
@@ -120,6 +120,7 @@ vllm_configs = {
         script_name="agg_lmcache_multiproc.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
@@ -308,6 +309,7 @@ vllm_configs = {
         script_name="agg_multimodal.sh",
         marks=[
             pytest.mark.gpu_2,
+            pytest.mark.nightly,
             # https://github.com/ai-dynamo/dynamo/issues/4501
             pytest.mark.xfail(strict=False),
         ],
@@ -369,7 +371,7 @@ vllm_configs = {
         name="multimodal_audio_agg",
         directory="/workspace/examples/multimodal",
         script_name="audio_agg.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="Qwen/Qwen2-Audio-7B-Instruct",
         delayed_start=0,
         script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
@@ -397,7 +399,7 @@ vllm_configs = {
         name="aggregated_toolcalling",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.multimodal],
+        marks=[pytest.mark.gpu_2, pytest.mark.multimodal, pytest.mark.nightly],
         model="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
         script_args=[
             "--model",
@@ -477,6 +479,7 @@ vllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.post_merge,
             pytest.mark.timeout(
                 420
             ),  # 3x estimated time (60s) + download time (240s) for 7B model
@@ -563,7 +566,6 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.nightly
 def test_serve_deployment(
     vllm_config_test, request, runtime_services, predownload_models, image_server
 ):
@@ -577,6 +579,7 @@ def test_serve_deployment(
 @pytest.mark.vllm
 @pytest.mark.e2e
 @pytest.mark.gpu_2
+@pytest.mark.nightly
 def test_multimodal_b64(request, runtime_services, predownload_models):
     """
     Test multimodal inference with base64 url passthrough.
