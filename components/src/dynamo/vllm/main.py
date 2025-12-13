@@ -15,6 +15,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
+from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
@@ -43,6 +44,32 @@ from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+def create_sequence_length_metrics(endpoint, model_name: str):
+    """Create ISL and OSL histogram metrics on the endpoint.
+
+    Args:
+        endpoint: The Dynamo endpoint to create metrics on.
+        model_name: The model name to use as a label.
+
+    Returns:
+        Tuple of (isl_histogram, osl_histogram).
+    """
+    worker_id = str(endpoint.connection_id())
+    const_labels = [("model", model_name or "unknown"), ("worker_id", worker_id)]
+
+    isl_histogram = endpoint.metrics.create_histogram(
+        f"worker_{prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS}",
+        "Input sequence length in tokens (worker-side)",
+        const_labels,
+    )
+    osl_histogram = endpoint.metrics.create_histogram(
+        f"worker_{prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS}",
+        "Output sequence length in tokens (worker-side)",
+        const_labels,
+    )
+    return isl_histogram, osl_histogram
 
 
 async def graceful_shutdown(runtime):
@@ -377,6 +404,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         prometheus_temp_dir,
     ) = setup_vllm_engine(config)
 
+    # Create ISL/OSL metrics
+    isl_histogram, osl_histogram = create_sequence_length_metrics(
+        generate_endpoint, config.served_model_name
+    )
+
     handler = PrefillWorkerHandler(
         runtime,
         component,
@@ -387,6 +419,8 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         generate_endpoint=generate_endpoint,
         config=config,
         use_vllm_tokenizer=config.use_vllm_tokenizer,
+        isl_histogram=isl_histogram,
+        osl_histogram=osl_histogram,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -496,6 +530,11 @@ async def init(runtime: DistributedRuntime, config: Config):
     factory.set_request_total_slots_all(vllm_config.scheduler_config.max_num_seqs)
     factory.init_publish()
 
+    # Create ISL/OSL metrics
+    isl_histogram, osl_histogram = create_sequence_length_metrics(
+        generate_endpoint, config.served_model_name
+    )
+
     handler = DecodeWorkerHandler(
         runtime,
         component,
@@ -506,6 +545,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         generate_endpoint=generate_endpoint,
         config=config,
         use_vllm_tokenizer=config.use_vllm_tokenizer,
+        isl_histogram=isl_histogram,
+        osl_histogram=osl_histogram,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
