@@ -186,23 +186,19 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
     try:
-        # Start endpoint immediately and register model concurrently
-        # Requests queue until ready_event is set (TODO: Part of new PR)
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=metrics_labels,
-                health_check_payload=health_check_payload,
-            ),
-            register_llm_with_readiness_gate(
-                engine,
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
-                readiness_gate=ready_event,
-            ),
+        await register_llm_with_readiness_gate(
+            engine,
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
+            readiness_gate=ready_event,
+        )
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=metrics_labels,
+            health_check_payload=health_check_payload,
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -326,24 +322,20 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     ).to_dict()
 
     try:
-        # Start endpoint immediately and register model concurrently
-        # Requests queue until ready_event is set
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=metrics_labels,
-                health_check_payload=health_check_payload,
-            ),
-            register_llm_with_readiness_gate(
-                engine,
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                input_type=ModelInput.Text,
-                output_type=ModelType.Embedding,
-                readiness_gate=ready_event,
-            ),
+        await register_llm_with_readiness_gate(
+            engine,
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            input_type=ModelInput.Text,
+            output_type=ModelType.Embedding,
+            readiness_gate=ready_event,
+        )
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=metrics_labels,
+            health_check_payload=health_check_payload,
         )
     except Exception as e:
         logging.error(f"Failed to serve embedding endpoints: {e}")
@@ -383,20 +375,18 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
     await encode_worker_client.wait_for_instances()
 
     try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=[("model", server_args.served_model_name)],
-            ),
-            register_llm_with_readiness_gate(
-                None,  # engine
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                input_type=ModelInput.Text,
-                readiness_gate=ready_event,
-            ),
+        await register_llm_with_readiness_gate(
+            None,  # engine
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            input_type=ModelInput.Text,
+            readiness_gate=ready_event,
+        )
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=[("model", server_args.served_model_name)],
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -431,20 +421,18 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
     ready_event = asyncio.Event()
 
     try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=[("model", server_args.served_model_name)],
-            ),
-            register_llm_with_readiness_gate(
-                None,  # encode worker doesn't have engine
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                input_type=ModelInput.Text,
-                readiness_gate=ready_event,
-            ),
+        await register_llm_with_readiness_gate(
+            None,  # encode worker doesn't have engine
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            input_type=ModelInput.Text,
+            readiness_gate=ready_event,
+        )
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=[("model", server_args.served_model_name)],
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -483,20 +471,18 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     ready_event = asyncio.Event()
 
     try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                metrics_labels=[("model", server_args.served_model_name)],
-                graceful_shutdown=True,
-                health_check_payload=health_check_payload,
-            ),
-            register_llm_with_readiness_gate(
-                engine,
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                readiness_gate=ready_event,
-            ),
+        await register_llm_with_readiness_gate(
+            engine,
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            readiness_gate=ready_event,
+        )
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            metrics_labels=[("model", server_args.served_model_name)],
+            graceful_shutdown=True,
+            health_check_payload=health_check_payload,
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -524,20 +510,18 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
     ready_event = asyncio.Event()
 
     try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=[("model", server_args.served_model_name)],
-                health_check_payload=health_check_payload,
-            ),
-            register_llm_with_readiness_gate(
-                engine,
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                readiness_gate=ready_event,
-            ),
+        await register_llm_with_readiness_gate(
+            engine,
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            readiness_gate=ready_event,
+        )
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=[("model", server_args.served_model_name)],
+            health_check_payload=health_check_payload,
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
