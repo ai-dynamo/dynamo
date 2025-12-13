@@ -3,17 +3,14 @@
 
 import json
 import logging
-import os
 import queue
-from pathlib import Path
 
+from benchmarks.profiler.utils.defaults import DEFAULT_GPU_COST_PER_HOUR
 from benchmarks.profiler.webui.utils import (
-    PlotType,
+    create_gpu_cost_update_handler,
     create_gradio_interface,
     create_selection_handler,
-    populate_cost_data,
-    populate_decode_data,
-    populate_prefill_data,
+    generate_config_data,
     wait_for_selection,
 )
 
@@ -28,55 +25,6 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def generate_config_data(prefill_data, decode_data, args):
-    """
-    Generate JSON data file for WebUI from profiling results.
-
-    Args:
-        prefill_data: PrefillProfileData instance
-        decode_data: DecodeProfileData instance
-        args: Arguments containing SLA targets (ttft, itl, isl, osl) and output_dir
-
-    Returns a JSON data file for WebUI consumption,
-        see https://github.com/ai-dynamo/aiconfigurator/blob/main/src/aiconfigurator/webapp/components/profiling/standalone/sample_profiling_data.json for more details
-    """
-    # Load template
-    template_path = Path(__file__).parent / "data_template.json"
-    with open(template_path, "r") as f:
-        data = json.load(f)
-
-    # Construct output path
-    output_path = os.path.join(args.output_dir, "webui_data.json")
-
-    # Set SLA targets
-    data[PlotType.PREFILL]["chart"]["target_line"]["value"] = args.ttft
-    data[PlotType.PREFILL]["chart"]["target_line"][
-        "label"
-    ] = f"Target TTFT: {args.ttft} ms"
-
-    data[PlotType.DECODE]["chart"]["target_line"]["value"] = args.itl
-    data[PlotType.DECODE]["chart"]["target_line"][
-        "label"
-    ] = f"Target ITL: {args.itl} ms"
-
-    data[PlotType.COST]["chart"][
-        "title"
-    ] = f"Cost Per 1000 i{args.isl}o{args.osl} requests"
-
-    # Populate data sections
-    populate_prefill_data(data, prefill_data)
-    populate_decode_data(data, decode_data)
-    populate_cost_data(data, prefill_data, decode_data, args)
-
-    # Save JSON file
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "w") as f:
-        json.dump(data, f, indent=4)
-
-    logger.info(f"Generated WebUI config data at {output_path}")
-    return data
-
-
 def pick_config_with_webui(prefill_data, decode_data, args):
     """
     Launch WebUI for user to pick configurations.
@@ -89,13 +37,15 @@ def pick_config_with_webui(prefill_data, decode_data, args):
     Returns:
         tuple[int, int]: (selected_prefill_idx, selected_decode_idx)
     """
-    # Generate JSON data file and load it
-    generate_config_data(prefill_data, decode_data, args)
-
-    output_path = os.path.join(args.output_dir, "webui_data.json")
-    with open(output_path, "r") as f:
-        json_data_str = f.read()
-        data_dict = json.loads(json_data_str)
+    # Generate JSON data (also writes default JSON file for convenience)
+    data_dict = generate_config_data(
+        prefill_data,
+        decode_data,
+        args,
+        gpu_cost_per_hour=DEFAULT_GPU_COST_PER_HOUR,
+        write_to_disk=True,
+    )
+    json_data_str = json.dumps(data_dict)
 
     logger.info(f"Launching WebUI on port {args.webui_port}...")
 
@@ -107,9 +57,23 @@ def pick_config_with_webui(prefill_data, decode_data, args):
     decode_selection = {"idx": None}
 
     # Create selection handler and Gradio interface
+    data_dict_ref = {"data": data_dict}
     handle_selection = create_selection_handler(
-        data_dict, selection_queue, prefill_selection, decode_selection
+        data_dict_ref, selection_queue, prefill_selection, decode_selection
     )
-    demo = create_gradio_interface(json_data_str, handle_selection)
+    update_gpu_cost_per_hour = create_gpu_cost_update_handler(
+        prefill_data=prefill_data,
+        decode_data=decode_data,
+        args=args,
+        data_dict_ref=data_dict_ref,
+        default_gpu_cost_per_hour=DEFAULT_GPU_COST_PER_HOUR,
+    )
+
+    demo = create_gradio_interface(
+        json_data_str,
+        handle_selection,
+        update_json_data_fn=update_gpu_cost_per_hour,
+        default_gpu_cost_per_hour=DEFAULT_GPU_COST_PER_HOUR,
+    )
 
     return wait_for_selection(demo, selection_queue, args.webui_port)

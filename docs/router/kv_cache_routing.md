@@ -42,7 +42,10 @@ The main KV-aware routing arguments:
 - `--router-prune-target-ratio`: Target size ratio to prune down to when `--router-max-tree-size` is exceeded. For example, with a value of 0.8 (default) and max tree size of 1048576, the router will prune down to approximately 838860 blocks when the threshold is exceeded. Defaults to 0.8 when `--no-kv-events` is used. This creates headroom before the next pruning cycle.
 
 >[!Note]
-> State persistence is only available when KV events are enabled (default). When using `--no-kv-events`, state persistence is not currently supported.
+> **State persistence** depends on the event transport mode:
+> - **JetStream mode** (default): State persists across router restarts via JetStream and NATS object store snapshots.
+> - **NATS Core with Local Indexer mode** (`--enable-local-indexer` on workers): State persists on workers—router rebuilds state by querying workers on startup.
+> - **No KV events** (`--no-kv-events`): State persistence is not supported.
 >
 > When `--kv-overlap-score-weight` is set to 0 or `--no-kv-events` is set, no KvIndexer will be launched to drain and process KV events. It's recommended to disable your backend workers from relaying events through `KvEventPublisher` to avoid event accumulation in JetStream. WIP to enable disabling publishing of KV events completely in these cases.
 >
@@ -110,9 +113,16 @@ await register_llm(
 
 The KV-aware router operates on two key principles to optimize request routing:
 
-### Global KV Cache State via JetStream
+### Global KV Cache State Synchronization
 
-First, KV events from engines are sent to a persistent NATS JetStream. Each KV router/indexer replica acts as a durable consumer, pulling messages from this shared stream to maintain a global view of cached blocks across all engines. This architecture ensures consistency across router replicas and persistence across restarts.
+KV events from engines are collected by the router to maintain a global view of cached blocks across all workers. The router supports two event transport modes:
+
+#### Mode 1: JetStream (Default)
+
+KV events are sent to a persistent NATS JetStream. Each KV router/indexer replica acts as a durable consumer, pulling messages from this shared stream. This architecture ensures consistency across router replicas and persistence across restarts.
+
+- **Best for**: Production deployments requiring durability and multi-replica router consistency
+- **Tradeoffs**: Requires JetStream setup; slightly higher latency due to persistence guarantees
 
 ```mermaid
 graph TD
@@ -151,6 +161,60 @@ graph TD
     style R1 fill:#f3e5f5,color:#5a850f
     style R2 fill:#f3e5f5,color:#5a850f
 ```
+
+#### Mode 2: NATS Core with Local Indexer
+
+When workers are started with `--enable-local-indexer`, each worker maintains its own local radix tree (local indexer) and publishes events over NATS Core (fire-and-forget pub/sub) instead of JetStream. Each worker assigns monotonically increasing event IDs to its events. The router detects gaps in event sequences and recovers missed events by querying the worker's local indexer directly.
+
+- **Best for**: Lower-latency setups; simpler deployments without JetStream; single-router scenarios
+- **Tradeoffs**: State persists on workers (not centralized); recovery depends on workers being available
+- **Enable with**: `--enable-local-indexer` flag on workers (vLLM, mocker)
+
+```mermaid
+graph TD
+    subgraph Engines
+        E1[Engine 1<br/>LocalKvIndexer]
+        E2[Engine 2<br/>LocalKvIndexer]
+        E3[Engine 3<br/>LocalKvIndexer]
+    end
+
+    subgraph "NATS Core"
+        NC[KV Events Pub/Sub<br/>- Block created<br/>- Block removed]
+    end
+
+    subgraph "Router Replicas"
+        R1[Router 1<br/>KVIndexer]
+        R2[Router 2<br/>KVIndexer]
+    end
+
+    E1 -->|Publish Events| NC
+    E2 -->|Publish Events| NC
+    E3 -->|Publish Events| NC
+
+    NC -->|Subscribe| R1
+    NC -->|Subscribe| R2
+
+    style NC fill:#e1f5fe,color:#5a850f
+    style E1 fill:#fff3e0,color:#5a850f
+    style E2 fill:#fff3e0,color:#5a850f
+    style E3 fill:#fff3e0,color:#5a850f
+    style R1 fill:#f3e5f5,color:#5a850f
+    style R2 fill:#f3e5f5,color:#5a850f
+```
+
+**How gap detection works:**
+1. Each worker assigns monotonically increasing event IDs starting from 0
+2. The router tracks the last received event ID per worker
+3. If an event arrives with `event_id > last_id + 1`, the router detects a gap
+4. The router queries the worker's local indexer for the missing event range `[last_id+1, event_id-1]`
+5. On worker discovery (Added event), the router dumps the worker's entire local indexer state
+
+**Startup behavior:**
+- When a worker is discovered, the router queries and ingests its full local indexer state
+- When a worker is removed, the router removes all its blocks from the global radix tree
+
+>[!Note]
+> The router automatically selects the transport mode based on worker configuration. If all connected workers have `enable_local_indexer=true`, the router uses NATS Core mode. Otherwise, it uses JetStream mode.
 
 ### Local Active Block Management with Replica Sync
 
@@ -249,19 +313,26 @@ Without this flag, each replica maintains its own isolated view of active blocks
 
 ### Persistence and Recovery
 
-**Prefix blocks persist by default:**
-- Stored in NATS JetStream with 1-hour retention
+Persistence behavior depends on which event transport mode is active:
+
+**JetStream Mode (default):**
+- Prefix blocks are stored in NATS JetStream with 1-hour retention
 - Snapshots saved to NATS object store at configurable thresholds
 - New replicas automatically restore this state on startup
-
-You can a launch a third Router replica even if the first two Router replicas are down, and it will recover the full prefix state. (As mentioned above, the tracking of active blocks will not persist, but will become eventually consistent through request handling.)
+- You can launch a third Router replica even if the first two are down, and it will recover the full prefix state
 
 ```bash
 python -m dynamo.frontend --router-mode kv --port 8002 --router-replica-sync
 ```
 
+**NATS Core with Local Indexer Mode:**
+- State persists on workers—events are fire-and-forget but workers retain their local indexer state
+- On startup, the router queries each worker's local indexer to rebuild state
+- Recovery depends on workers being available; if a worker is down, its blocks cannot be recovered
+- Simpler infrastructure (no JetStream required) but less resilient
+
 >[!Note]
-> If you need to start with a fresh state, you have two options:
+> If you need to start with a fresh state in JetStream mode, you have two options:
 > 1. **Recommended**: Use a different namespace/component (see [Distributed Runtime](/docs/design_docs/distributed_runtime.md)) which will start a new stream and NATS object store path
 > 2. **Use with caution**: Launch a router with the `--router-reset-states` flag, which will purge the entire stream and radix snapshot. This should only be done when launching the first router replica in a component, as it can bring existing router replicas into an inconsistent state.
 
@@ -374,13 +445,6 @@ In distributed deployments with multiple routers, each router maintains visibili
 3. **Free**: Indicates request completion and resource release, enabling accurate block reference counting across all routers.
 
 Each event carries a unique router ID to prevent self-event processing. This asynchronous communication system ensures optimal routing decisions by maintaining consistent KV cache state across all routers, even as they handle different request streams.
-
-### Event Persistence and Recovery
-
-KV cache events are persisted in NATS JetStream, allowing router replicas to maintain their global view of KV blocks across restarts. By default, routers persist their state - they download any available snapshot from NATS object store and continue consuming events from their last acknowledged position in the stream. This default behavior ensures KV cache awareness is maintained across router restarts without any additional configuration.
-
-To manage stream growth, when the message count exceeds `--router-snapshot-threshold`, a router acquires an etcd-based distributed lock, purges acknowledged messages from the stream, and uploads the current radix tree state to NATS object store. This snapshot serves as a checkpoint for faster initialization of future router instances.
-
 
 ## Using KvPushRouter Python API
 
