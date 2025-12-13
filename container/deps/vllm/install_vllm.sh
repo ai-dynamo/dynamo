@@ -11,11 +11,7 @@
 
 set -euo pipefail
 
-<<<<<<< HEAD
 VLLM_REF="v0.11.1"
-=======
-VLLM_REF="v0.11.2"
->>>>>>> 22c07257b (chore: bump vLLM to 0.11.2 (#4476) (#4928))
 
 # Basic Configurations
 ARCH=$(uname -m)
