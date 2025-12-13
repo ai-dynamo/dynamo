@@ -1340,10 +1340,12 @@ mod tests_startup_helpers {
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
                         tokens_hash: LocalBlockHash(200),
+                        mm_extra_info: None,
                     },
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(101),
                         tokens_hash: LocalBlockHash(201),
+                        mm_extra_info: None,
                     },
                 ],
             }),
@@ -1428,6 +1430,7 @@ mod tests_startup_helpers {
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(100),
                     tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
                 }],
             }),
             dp_rank: 0,
@@ -1508,6 +1511,7 @@ mod tests_startup_helpers {
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(100),
                     tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
                 }],
             }),
             dp_rank: 0,
@@ -1743,10 +1747,12 @@ mod tests_startup_helpers {
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
                         tokens_hash: LocalBlockHash(200),
+                        mm_extra_info: None,
                     },
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(101),
                         tokens_hash: LocalBlockHash(201),
+                        mm_extra_info: None,
                     },
                 ],
             }),
@@ -1807,10 +1813,12 @@ mod tests_startup_helpers {
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100), // Shared prefix
                         tokens_hash: LocalBlockHash(200),
+                        mm_extra_info: None,
                     },
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(102), // New block
                         tokens_hash: LocalBlockHash(202),
+                        mm_extra_info: None,
                     },
                 ],
             }),

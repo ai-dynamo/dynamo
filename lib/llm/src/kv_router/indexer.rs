@@ -1758,6 +1758,7 @@ mod local_kv_indexer_tests {
                         blocks: vec![KvCacheStoredBlockData {
                             block_hash: ExternalSequenceBlockHash(id * 100),
                             tokens_hash: LocalBlockHash(id * 200),
+                            mm_extra_info: None,
                         }],
                     }),
                     dp_rank: 0,
@@ -3689,6 +3690,7 @@ mod tests_local_indexer {
             .map(|i| KvCacheStoredBlockData {
                 tokens_hash: LocalBlockHash(*i),
                 block_hash: ExternalSequenceBlockHash(*i * 100),
+                mm_extra_info: None,
             })
             .collect()
     }
@@ -3733,6 +3735,7 @@ mod tests_local_indexer {
                     blocks: vec![KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
                         tokens_hash: LocalBlockHash(200),
+                        mm_extra_info: None,
                     }],
                 }),
                 dp_rank: 0,
