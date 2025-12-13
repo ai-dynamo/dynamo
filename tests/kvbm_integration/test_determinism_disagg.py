@@ -181,19 +181,21 @@ class LLMServerManager:
             "/tmp/kvbm_llm_api_decode_config.yaml",
         )
 
+        KV_BLOCK_SIZE = 16
+
         llm_api_config: Dict[str, Any] = {}
         llm_api_config["kv_cache_config"] = {
             "enable_partial_reuse": False,
             "free_gpu_memory_fraction": 0.10,
-            "tokens_per_block": 16,
+            "tokens_per_block": KV_BLOCK_SIZE,
         }
 
         # GPU blocks override
         if gpu_cache_blocks is not None:
             del llm_api_config["kv_cache_config"]["free_gpu_memory_fraction"]
             llm_api_config["kv_cache_config"]["max_tokens"] = (
-                int(gpu_cache_blocks) * 32
-            )  # TRTLLM defaults 32 tokens per block
+                int(gpu_cache_blocks) * KV_BLOCK_SIZE
+            )
 
         prefill_config = deepcopy(llm_api_config)
         prefill_config["disable_overlap_scheduler"] = True
