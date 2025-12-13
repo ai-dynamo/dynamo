@@ -82,7 +82,11 @@ impl ResponderSession {
         // Use scan_matches instead of match_blocks to find all matching blocks
         // without stopping on first miss (supports partial sequence matching)
         let g2_matches_map = self.g2_manager.scan_matches(&sequence_hashes, true);
-        let g2_matches: Vec<_> = g2_matches_map.into_values().collect();
+        let mut g2_matches: Vec<_> = g2_matches_map.into_values().collect();
+
+        // Sort by position to ensure G2Results are in position order
+        // HashMap iteration order is arbitrary, so we must sort explicitly
+        g2_matches.sort_by_key(|block| block.sequence_hash().position());
 
         // Hold the G2 blocks using BlockHolder (RAII semantics)
         self.held_g2_blocks = BlockHolder::new(g2_matches);
@@ -125,7 +129,10 @@ impl ResponderSession {
             // Use scan_matches instead of match_blocks to find all matching blocks
             // without stopping on first miss (supports partial sequence matching)
             let g3_matches_map = g3_manager.scan_matches(&remaining_hashes, true);
-            let g3_matches: Vec<_> = g3_matches_map.into_values().collect();
+            let mut g3_matches: Vec<_> = g3_matches_map.into_values().collect();
+
+            // Sort by position to ensure G3Results are in position order
+            g3_matches.sort_by_key(|block| block.sequence_hash().position());
 
             if !g3_matches.is_empty() {
                 // Hold the G3 blocks using BlockHolder
@@ -169,12 +176,9 @@ impl ResponderSession {
                     };
                     self.transport.send(self.requester, ack).await?;
 
-                    // Check if we have G3 blocks to manage
-                    if self.held_g3_blocks.is_empty() {
-                        // No G3 blocks, session complete
-                        break;
-                    }
-                    // Otherwise, wait for StageBlocks message
+                    // Always wait for CloseSession, even if no G3 blocks
+                    // This ensures proper session lifecycle and avoids race conditions
+                    // where initiator sends CloseSession after we've already exited
                 }
 
                 OnboardMessage::StageBlocks { stage_hashes, .. } => {

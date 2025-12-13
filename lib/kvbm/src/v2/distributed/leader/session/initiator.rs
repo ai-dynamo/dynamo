@@ -23,6 +23,35 @@ use super::{
     transport::MessageTransport,
 };
 
+/// Validate that sequence hashes have contiguous positions (X, X+1, X+2, ...).
+///
+/// The positions don't need to start at 0, but they must be monotonically
+/// increasing with no gaps.
+fn validate_contiguous_positions(seq_hashes: &[SequenceHash]) -> Result<()> {
+    if seq_hashes.len() <= 1 {
+        return Ok(());
+    }
+
+    // Collect and sort positions
+    let mut positions: Vec<u64> = seq_hashes.iter().map(|h| h.position()).collect();
+    positions.sort();
+
+    // Check monotonically increasing with no holes: X, X+1, X+2, ...
+    for window in positions.windows(2) {
+        if window[1] != window[0] + 1 {
+            anyhow::bail!(
+                "Position gap detected in remote blocks: {} -> {} (expected {}). \
+                 This indicates a block ordering bug.",
+                window[0],
+                window[1],
+                window[0] + 1
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Initiator-side session for coordinating distributed block search.
 ///
 /// Supports three staging modes:
@@ -221,9 +250,9 @@ impl InitiatorSession {
 
         while let Some(msg) = rx.recv().await {
             eprintln!(
-                "[INITIATOR {}] process_search_responses received: {:?}",
+                "[INITIATOR {}] process_search_responses received: {}",
                 self.session_id,
-                std::mem::discriminant(&msg)
+                msg.variant_name()
             );
 
             match msg {
@@ -708,6 +737,19 @@ impl InitiatorSession {
                     remote_instance
                 );
             }
+
+            // Sort (block_id, seq_hash) pairs by position to ensure correct transfer order
+            // This is a safety net in case responder sent blocks in wrong order
+            let mut pairs: Vec<(BlockId, SequenceHash)> =
+                block_ids.into_iter().zip(seq_hashes.into_iter()).collect();
+            pairs.sort_by_key(|(_, hash)| hash.position());
+
+            let block_ids: Vec<BlockId> = pairs.iter().map(|(id, _)| *id).collect();
+            let seq_hashes: Vec<SequenceHash> = pairs.iter().map(|(_, hash)| *hash).collect();
+
+            // Validate positions are contiguous (X, X+1, X+2, ...)
+            // This catches any ordering bugs before data corruption occurs
+            debug_assert!(validate_contiguous_positions(&seq_hashes).is_ok());
 
             // Step 1: Import remote metadata if not already done
             if !parallel_worker.has_remote_metadata(remote_instance) {

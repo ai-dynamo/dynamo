@@ -545,6 +545,13 @@ impl ConnectorLeader {
             }
         }
 
+        // Log the instance_id for distributed discovery
+        // Operators can use this ID with the /register_leader endpoint on other instances
+        tracing::info!(
+            instance_id = %self.runtime.nova.instance_id(),
+            "KVBM leader instance started - use this ID for register_leader on remote instances"
+        );
+
         Ok(())
     }
 }

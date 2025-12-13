@@ -156,6 +156,22 @@ impl OnboardMessage {
             | OnboardMessage::Acknowledged { responder, .. } => *responder,
         }
     }
+
+    /// Get the variant name as a string for logging.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            OnboardMessage::CreateSession { .. } => "CreateSession",
+            OnboardMessage::SearchComplete { .. } => "SearchComplete",
+            OnboardMessage::G2Results { .. } => "G2Results",
+            OnboardMessage::G3Results { .. } => "G3Results",
+            OnboardMessage::HoldBlocks { .. } => "HoldBlocks",
+            OnboardMessage::StageBlocks { .. } => "StageBlocks",
+            OnboardMessage::BlocksReady { .. } => "BlocksReady",
+            OnboardMessage::Acknowledged { .. } => "Acknowledged",
+            OnboardMessage::ReleaseBlocks { .. } => "ReleaseBlocks",
+            OnboardMessage::CloseSession { .. } => "CloseSession",
+        }
+    }
 }
 
 // =============================================================================
@@ -329,6 +345,19 @@ impl RemoteSessionMessage {
             RemoteSessionMessage::SessionState { .. }
             | RemoteSessionMessage::BlocksStaged { .. }
             | RemoteSessionMessage::SessionError { .. } => None,
+        }
+    }
+
+    /// Get the variant name as a string for logging.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            RemoteSessionMessage::AttachSession { .. } => "AttachSession",
+            RemoteSessionMessage::SessionState { .. } => "SessionState",
+            RemoteSessionMessage::BlocksStaged { .. } => "BlocksStaged",
+            RemoteSessionMessage::TriggerStaging { .. } => "TriggerStaging",
+            RemoteSessionMessage::BlocksPulled { .. } => "BlocksPulled",
+            RemoteSessionMessage::DetachSession { .. } => "DetachSession",
+            RemoteSessionMessage::SessionError { .. } => "SessionError",
         }
     }
 }
@@ -542,6 +571,24 @@ impl SessionMessage {
             self,
             SessionMessage::StateResponse { .. } | SessionMessage::BlocksStaged { .. }
         )
+    }
+
+    /// Get the variant name as a string for logging.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            SessionMessage::Attach { .. } => "Attach",
+            SessionMessage::Detach { .. } => "Detach",
+            SessionMessage::YieldControl { .. } => "YieldControl",
+            SessionMessage::AcquireControl { .. } => "AcquireControl",
+            SessionMessage::TriggerStaging { .. } => "TriggerStaging",
+            SessionMessage::HoldBlocks { .. } => "HoldBlocks",
+            SessionMessage::ReleaseBlocks { .. } => "ReleaseBlocks",
+            SessionMessage::BlocksPulled { .. } => "BlocksPulled",
+            SessionMessage::StateResponse { .. } => "StateResponse",
+            SessionMessage::BlocksStaged { .. } => "BlocksStaged",
+            SessionMessage::Close { .. } => "Close",
+            SessionMessage::Error { .. } => "Error",
+        }
     }
 }
 

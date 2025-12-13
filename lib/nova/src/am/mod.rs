@@ -281,6 +281,45 @@ impl Nova {
         Ok(())
     }
 
+    /// Discover a peer by instance_id and register it for communication.
+    ///
+    /// This queries the discovery system for the peer's address information,
+    /// then registers the peer with the backend for transport.
+    ///
+    /// # Arguments
+    /// * `instance_id` - The instance ID of the remote peer to discover
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Discovery fails (peer not found or backend error)
+    /// - Peer registration fails
+    pub async fn discover_and_register_peer(&self, instance_id: InstanceId) -> anyhow::Result<()> {
+        tracing::debug!(
+            target: "dynamo_nova::discovery",
+            %instance_id,
+            "Discovering peer by instance_id"
+        );
+
+        // Query discovery by instance_id
+        let either = self._discovery.discover_by_instance_id(instance_id).await;
+        let result = match either {
+            futures::future::Either::Left(ready) => ready.await,
+            futures::future::Either::Right(shared_future) => shared_future.await,
+        };
+
+        let peer_info = result
+            .map_err(|e| anyhow::anyhow!("Discovery failed for instance {}: {:?}", instance_id, e))?;
+
+        tracing::info!(
+            target: "dynamo_nova::discovery",
+            %instance_id,
+            "Discovered peer, registering"
+        );
+
+        // Register with Nova
+        self.register_peer(peer_info)
+    }
+
     /// Get the list of handlers available on a remote instance.
     ///
     /// This may trigger a handshake if handler information hasn't been queried yet.

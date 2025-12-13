@@ -3,7 +3,8 @@
 
 //! HTTP control service for ConnectorLeader.
 //!
-//! Provides endpoints for runtime control operations such as resetting block managers.
+//! Provides endpoints for runtime control operations such as resetting block managers
+//! and registering remote leaders for distributed search.
 
 use std::sync::Arc;
 
@@ -16,8 +17,10 @@ use axum::{
 };
 use serde::Serialize;
 use tokio::net::TcpListener;
+use uuid::Uuid;
 
 use super::ConnectorLeader;
+use crate::InstanceId;
 
 /// Port for the control server.
 const CONTROL_SERVER_PORT: u16 = 9999;
@@ -154,10 +157,124 @@ async fn reset_handler(
     }
 }
 
+/// Response for register_leader success.
+#[derive(Debug, Serialize)]
+struct RegisterLeaderResponse {
+    status: &'static str,
+    instance_id: String,
+    remote_leaders_count: usize,
+}
+
+/// Handler for PUT /register_leader/{instance_id}
+///
+/// Discovers a remote leader by instance_id using nova-discovery,
+/// registers it with Nova for communication, and adds it to the
+/// list of remote leaders for distributed search.
+async fn register_leader_handler(
+    State(leader): State<Arc<ConnectorLeader>>,
+    Path(instance_id_str): Path<String>,
+) -> impl IntoResponse {
+    tracing::info!(instance_id = %instance_id_str, "Received register_leader request");
+
+    // Parse UUID from path
+    let uuid = match Uuid::parse_str(&instance_id_str) {
+        Ok(uuid) => uuid,
+        Err(e) => {
+            tracing::error!(
+                instance_id = %instance_id_str,
+                error = %e,
+                "Invalid UUID in register_leader request"
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Invalid UUID '{}': {}", instance_id_str, e),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let instance_id = InstanceId::from(uuid);
+
+    // Check if InstanceLeader is initialized
+    let instance_leader = match leader.instance_leader() {
+        Some(il) => il,
+        None => {
+            tracing::error!("register_leader request failed: InstanceLeader not initialized");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "InstanceLeader not initialized".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Check if already registered
+    if instance_leader.remote_leaders().contains(&instance_id) {
+        tracing::info!(
+            instance_id = %instance_id,
+            "Leader already registered"
+        );
+        return (
+            StatusCode::OK,
+            Json(RegisterLeaderResponse {
+                status: "already_registered",
+                instance_id: instance_id.to_string(),
+                remote_leaders_count: instance_leader.remote_leaders().len(),
+            }),
+        )
+            .into_response();
+    }
+
+    // Discover and register the peer with Nova
+    let nova = leader.runtime.nova();
+    if let Err(e) = nova.discover_and_register_peer(instance_id).await {
+        tracing::error!(
+            instance_id = %instance_id,
+            error = %e,
+            "Failed to discover and register peer"
+        );
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Failed to discover peer {}: {}", instance_id, e),
+            }),
+        )
+            .into_response();
+    }
+
+    // Add to remote leaders list
+    instance_leader.add_remote_leader(instance_id);
+    let remote_leaders_count = instance_leader.remote_leaders().len();
+
+    tracing::info!(
+        instance_id = %instance_id,
+        remote_leaders_count = remote_leaders_count,
+        "Successfully registered remote leader"
+    );
+
+    (
+        StatusCode::OK,
+        Json(RegisterLeaderResponse {
+            status: "registered",
+            instance_id: instance_id.to_string(),
+            remote_leaders_count,
+        }),
+    )
+        .into_response()
+}
+
 /// Build the control router.
 fn build_router(leader: Arc<ConnectorLeader>) -> Router {
     Router::new()
         .route("/reset/{logical_type}", put(reset_handler))
+        .route(
+            "/register_leader/{instance_id}",
+            put(register_leader_handler),
+        )
         .with_state(leader)
 }
 

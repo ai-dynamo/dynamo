@@ -155,8 +155,8 @@ impl NovaLeaderService {
                 let session_id = message.session_id();
 
                 eprintln!(
-                    "[HANDLER] Received message: {:?} for session {}",
-                    std::mem::discriminant(&message),
+                    "[HANDLER] Received message: {} for session {}",
+                    message.variant_name(),
                     session_id
                 );
 
@@ -211,8 +211,8 @@ impl NovaLeaderService {
                 let session_id = message.session_id();
 
                 eprintln!(
-                    "[HANDLER] Received remote session message: {:?} for session {}",
-                    std::mem::discriminant(&message),
+                    "[HANDLER] Received remote session message: {} for session {}",
+                    message.variant_name(),
                     session_id
                 );
 
@@ -250,8 +250,8 @@ impl NovaLeaderService {
                 let session_id = message.session_id();
 
                 eprintln!(
-                    "[HANDLER] Received session message: {:?} for session {}",
-                    std::mem::discriminant(&message),
+                    "[HANDLER] Received session message: {} for session {}",
+                    message.variant_name(),
                     session_id
                 );
 

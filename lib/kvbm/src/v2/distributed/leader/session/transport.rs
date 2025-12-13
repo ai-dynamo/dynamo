@@ -115,8 +115,8 @@ impl NovaTransport {
 
     pub async fn send(&self, target: InstanceId, message: OnboardMessage) -> Result<()> {
         eprintln!(
-            "[TRANSPORT] Sending {:?} to instance {}",
-            std::mem::discriminant(&message),
+            "[TRANSPORT] Sending {} to instance {}",
+            message.variant_name(),
             target
         );
 
@@ -141,8 +141,8 @@ impl NovaTransport {
         message: RemoteSessionMessage,
     ) -> Result<()> {
         eprintln!(
-            "[TRANSPORT] Sending RemoteSession {:?} to instance {}",
-            std::mem::discriminant(&message),
+            "[TRANSPORT] Sending RemoteSession {} to instance {}",
+            message.variant_name(),
             target
         );
 
@@ -194,8 +194,8 @@ impl NovaTransport {
     /// Uses the new unified "kvbm.leader.session" handler.
     pub async fn send_session(&self, target: InstanceId, message: SessionMessage) -> Result<()> {
         eprintln!(
-            "[TRANSPORT] Sending Session {:?} to instance {}",
-            std::mem::discriminant(&message),
+            "[TRANSPORT] Sending Session {} to instance {}",
+            message.variant_name(),
             target
         );
 
