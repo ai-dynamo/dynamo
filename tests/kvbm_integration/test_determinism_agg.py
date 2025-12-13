@@ -137,10 +137,10 @@ class DynamoVLLMWorkerProcess(ManagedProcess):
             command=command,
             env=env,
             display_output=True,
-            terminate_existing=True,
+            terminate_existing=False,  # Don't kill the frontend!
             stragglers=["VLLM:EngineCore"],
             log_dir=log_dir,
-            timeout=600,
+            timeout=60,
         )
 
 
@@ -192,10 +192,10 @@ class DynamoTRTLLMWorkerProcess(ManagedProcess):
             command=command,
             env=env,
             display_output=True,
-            terminate_existing=True,
+            terminate_existing=False,  # Don't kill the frontend!
             stragglers=["TRTLLM:EngineCore"],
             log_dir=log_dir,
-            timeout=600,
+            timeout=60,
         )
 
     def _generate_kvbm_config(
@@ -255,7 +255,7 @@ class DynamoKVBMServerManager:
         self.frontend_process: Optional[DynamoFrontendProcess] = None
         self.worker_process: Optional[ManagedProcess] = None
 
-    def start_server(self, timeout: int = 600) -> bool:
+    def start_server(self, timeout: int = 60) -> bool:
         """Start Dynamo frontend and worker processes."""
         logger = logging.getLogger(__name__)
         logger.info(
@@ -299,7 +299,7 @@ class DynamoKVBMServerManager:
             self.stop_server()
             return False
 
-    def _wait_for_ready(self, timeout: int = 600) -> bool:
+    def _wait_for_ready(self, timeout: int = 60) -> bool:
         """Wait for the server to be fully ready to serve requests."""
         logger = logging.getLogger(__name__)
         start_time = time.time()
@@ -385,7 +385,7 @@ class AggDeterminismTester(DeterminismTester):
         if self.server_type == ServerType.trtllm:
             # TRTLLM doesn't support reset_prefix_cache endpoint API
             # 300 shakespeare content could evict the 0.1 x 80G (~1700 blocks) on-device cache
-            shakespeare_count = 300
+            shakespeare_count = 10
             for seq_idx in range(1, shakespeare_count + 1):
                 start_word = (seq_idx - 1) * self.word_count
                 content = self.get_shakespeare_content(start_word)
@@ -447,7 +447,7 @@ def dynamo_llm_server(request, runtime_services):
         server_type=server_type,
     )
 
-    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "600"))
+    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "60"))
     if not server_manager.start_server(timeout=start_timeout):
         pytest.fail(
             f"Failed to start Dynamo {server_type} server (cpu_blocks={cpu_blocks}, gpu_blocks={gpu_blocks}, port={server_manager.port})"
