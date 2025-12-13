@@ -173,6 +173,8 @@ def _build_mocker_command(
         command.extend(["--watermark", str(mocker_args["watermark"])])
     if "dp_size" in mocker_args:
         command.extend(["--data-parallel-size", str(mocker_args["dp_size"])])
+    if mocker_args.get("enable_local_indexer"):
+        command.append("--enable-local-indexer")
 
     return command
 
@@ -559,22 +561,32 @@ def test_query_instance_id_returns_worker_and_tokens(
 
 
 @pytest.mark.parallel
-def test_router_decisions(request, runtime_services_session, predownload_tokenizers):
-    """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes."""
+@pytest.mark.parametrize("use_nats_core", [False, True], ids=["jetstream", "nats_core"])
+def test_router_decisions(
+    request, runtime_services_session, predownload_tokenizers, use_nats_core
+):
+    """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
+
+    Parameterized to test both JetStream (default) and NATS Core (local indexer) modes.
+    """
 
     # runtime_services starts etcd and nats
-    logger.info("Starting test router prefix reuse and KV events synchronization")
+    mode = "NATS Core (local indexer)" if use_nats_core else "JetStream"
+    logger.info(
+        f"Starting test router prefix reuse and KV events synchronization ({mode})"
+    )
 
     # Create mocker args dictionary with dp_size=4
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
         "dp_size": 4,
+        "enable_local_indexer": use_nats_core,
     }
 
     try:
         logger.info(
-            "Starting 2 mocker instances with dp_size=4 each (8 total dp ranks)"
+            f"Starting 2 mocker instances with dp_size=4 each (8 total dp ranks), {mode}"
         )
         mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=2)
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")

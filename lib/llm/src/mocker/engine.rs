@@ -309,6 +309,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             log_probs: None,
                             top_logprobs: None,
                             finish_reason: None,
+                            stop_reason: None,
                             index: None,
                             // Add dummy disaggregated_params for prefill workers
                             disaggregated_params: if is_prefill {
