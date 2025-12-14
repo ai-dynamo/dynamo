@@ -635,6 +635,7 @@ build_aws_with_header() {
         --build-arg EFA_VERSION="${EFA_VERSION}" \
         --target "$aws_target" \
         --file "$DOCKERFILE_AWS" \
+        $PLATFORM \
         $tags \
         "$SOURCE_DIR" || {
         { set +x; } 2>/dev/null
