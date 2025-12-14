@@ -11,7 +11,6 @@ pub const ZMQ_PING_MESSAGE: &str = "ping";
 pub const ZMQ_WORKER_METADATA_MESSAGE: &str = "worker_metadata";
 pub const ZMQ_LEADER_METADATA_MESSAGE: &str = "leader_metadata";
 pub const ZMQ_TRANSFER_BLOCKS_MESSAGE: &str = "transfer_blocks";
-pub const ZMQ_G4_ONBOARD_MESSAGE: &str = "g4_onboard";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerMetadata {
@@ -32,6 +31,7 @@ pub enum BlockTransferPool {
     Device,
     Host,
     Disk,
+    Object,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -56,34 +56,11 @@ pub struct BlockTransferRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connector_req: Option<LeaderTransferRequest>,
 
-    /// Sequence hashes for G4 write-through (only used for Device -> Host transfers).
-    /// When present, worker will also offload these blocks to object storage.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence_hashes: Option<Vec<u64>>,
-}
 
-/// Request to onboard blocks from G4 object storage directly to device.
-/// Worker handles the G4→Host→Device transfer atomically.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct G4OnboardRequest {
-    /// Request ID for correlation
-    pub request_id: String,
-
-    /// Operation ID for tracking
-    pub operation_id: uuid::Uuid,
-
-    /// Sequence hashes to onboard (lookup keys in object storage)
-    pub sequence_hashes: Vec<u64>,
-
-    /// Destination device block IDs
-    pub device_block_ids: Vec<usize>,
-
-    /// Host block IDs to use as bounce buffers (allocated by leader)
-    pub host_block_ids: Vec<usize>,
-
-    /// Optional connector request for scheduling
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub connector_req: Option<LeaderTransferRequest>,
+    #[serde(default)]
+    pub write_through: bool,
 }
 
 impl BlockTransferRequest {
@@ -99,6 +76,7 @@ impl BlockTransferRequest {
             blocks,
             connector_req: None,
             sequence_hashes: None,
+            write_through: false,
         }
     }
 
@@ -114,11 +92,11 @@ impl BlockTransferRequest {
             blocks,
             connector_req: Some(connector_req),
             sequence_hashes: None,
+            write_through: false,
         }
     }
 
-    /// Create a new request with sequence hashes for G4 write-through.
-    pub fn new_with_g4_hashes(
+    pub fn new_with_write_through(
         from_pool: BlockTransferPool,
         to_pool: BlockTransferPool,
         blocks: Vec<(usize, usize)>,
@@ -131,43 +109,66 @@ impl BlockTransferRequest {
             blocks,
             connector_req: Some(connector_req),
             sequence_hashes: Some(sequence_hashes),
+            write_through: true,
         }
     }
-}
 
-impl G4OnboardRequest {
-    pub fn new(
-        request_id: String,
-        operation_id: uuid::Uuid,
+    #[allow(dead_code)]
+    pub fn new_with_hashes(
+        from_pool: BlockTransferPool,
+        to_pool: BlockTransferPool,
+        blocks: Vec<(usize, usize)>,
         sequence_hashes: Vec<u64>,
-        device_block_ids: Vec<usize>,
-        host_block_ids: Vec<usize>,
     ) -> Self {
         Self {
-            request_id,
-            operation_id,
-            sequence_hashes,
-            device_block_ids,
-            host_block_ids,
+            from_pool,
+            to_pool,
+            blocks,
             connector_req: None,
+            sequence_hashes: Some(sequence_hashes),
+            write_through: false,
         }
     }
 
-    pub fn new_with_connector_req(
-        request_id: String,
-        operation_id: uuid::Uuid,
+    pub fn new_g4_onboard(
         sequence_hashes: Vec<u64>,
-        device_block_ids: Vec<usize>,
         host_block_ids: Vec<usize>,
+        device_block_ids: Vec<usize>,
         connector_req: LeaderTransferRequest,
     ) -> Self {
+        // blocks: (host_bounce_idx, device_dest_idx) pairs
+        let blocks: Vec<(usize, usize)> = host_block_ids
+            .iter()
+            .zip(device_block_ids.iter())
+            .map(|(&h, &d)| (h, d))
+            .collect();
+
         Self {
-            request_id,
-            operation_id,
-            sequence_hashes,
-            device_block_ids,
-            host_block_ids,
+            from_pool: BlockTransferPool::Object,
+            to_pool: BlockTransferPool::Device,
+            blocks,
             connector_req: Some(connector_req),
+            sequence_hashes: Some(sequence_hashes),
+            write_through: false,
+        }
+    }
+
+    pub fn new_g4_offload(
+        host_block_ids: Vec<usize>,
+        sequence_hashes: Vec<u64>,
+    ) -> Self {
+        let blocks: Vec<(usize, usize)> = host_block_ids
+            .iter()
+            .map(|&h| (h, 0))
+            .collect();
+
+        Self {
+            from_pool: BlockTransferPool::Host,
+            to_pool: BlockTransferPool::Object,
+            blocks,
+            connector_req: None,
+            sequence_hashes: Some(sequence_hashes),
+            write_through: false,
         }
     }
 }

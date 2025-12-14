@@ -58,7 +58,7 @@ impl ObjectStorage {
     /// * `size` - Size of the region in bytes
     ///
     /// # Returns
-    /// `Result<Self>` for API consistency with V2
+    /// `Result<Self>` for API consistency
     pub fn new(bucket: impl Into<String>, key: u64, size: usize) -> Result<Self> {
         Ok(Self {
             bucket: bucket.into(),

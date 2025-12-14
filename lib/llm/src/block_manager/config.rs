@@ -261,26 +261,45 @@ pub fn should_bypass_cpu_cache() -> bool {
     disk_cache_set && !cpu_cache_set
 }
 
+/// Object storage (G4) configuration.
+///
+/// All settings are read from `DYN_KVBM_OBJECT_*` environment variables.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectStorageConfig {
+    /// Bucket name template. Supports `{worker_id}` substitution.
     pub bucket_template: String,
+    /// S3 endpoint override (for MinIO, etc.)
     pub endpoint_override: Option<String>,
+    /// AWS region
     pub region: Option<String>,
+    /// S3 access key
+    pub access_key: Option<String>,
+    /// S3 secret key
+    pub secret_key: Option<String>,
 }
+
 impl ObjectStorageConfig {
     /// Create ObjectStorageConfig from environment variables.
     /// Returns None if required variables are not set.
+    ///
+    /// Required: `DYN_KVBM_OBJECT_BUCKET`
+    /// Optional: `DYN_KVBM_OBJECT_ENDPOINT`, `DYN_KVBM_OBJECT_REGION`,
+    ///           `DYN_KVBM_OBJECT_ACCESS_KEY`, `DYN_KVBM_OBJECT_SECRET_KEY`
     pub fn from_env() -> Option<Self> {
         use dynamo_runtime::config::environment_names::kvbm::object_storage;
 
         let bucket_template = std::env::var(object_storage::DYN_KVBM_OBJECT_BUCKET).ok()?;
         let endpoint_override = std::env::var(object_storage::DYN_KVBM_OBJECT_ENDPOINT).ok();
         let region = std::env::var(object_storage::DYN_KVBM_OBJECT_REGION).ok();
+        let access_key = std::env::var(object_storage::DYN_KVBM_OBJECT_ACCESS_KEY).ok();
+        let secret_key = std::env::var(object_storage::DYN_KVBM_OBJECT_SECRET_KEY).ok();
 
         Some(Self {
             bucket_template,
             endpoint_override,
             region,
+            access_key,
+            secret_key,
         })
     }
 
@@ -291,36 +310,42 @@ impl ObjectStorageConfig {
         self.bucket_template.replace("{worker_id}", &worker_id.to_string())
     }
 
-    /// Get the number of object blocks from environment variable.
-    /// This represents the maximum number of blocks that can be stored in object storage.
-    pub fn num_blocks_from_env() -> usize {
+    /// Check if object storage (G4) is enabled.
+    /// Returns true if `DYN_KVBM_OBJECT_ENABLED=1` or legacy `DYN_KVBM_USE_OBJECT_OFFLOAD=1`
+    pub fn is_enabled() -> bool {
         use dynamo_runtime::config::environment_names::kvbm::object_storage;
 
-        std::env::var(object_storage::DYN_KVBM_OBJECT_NUM_BLOCKS)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0)
-    }
-
-    /// Check if object storage offloading is enabled.
-    /// Returns true if DYN_KVBM_USE_OBJECT_OFFLOAD=1
-    pub fn is_offload_enabled() -> bool {
-        use dynamo_runtime::config::environment_names::kvbm::object_storage;
-
-        std::env::var(object_storage::DYN_KVBM_USE_OBJECT_OFFLOAD)
+        // Check new var first, fall back to legacy
+        std::env::var(object_storage::DYN_KVBM_OBJECT_ENABLED)
+            .or_else(|_| std::env::var(object_storage::DYN_KVBM_USE_OBJECT_OFFLOAD))
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(false)
     }
 
     /// Check if write-through caching is enabled for object storage.
     /// When enabled, blocks offloaded to object storage are ALSO kept in host cache.
-    /// Returns true if DYN_KVBM_OBJECT_WRITE_THROUGH=1
+    /// Default: true
     pub fn is_write_through_enabled() -> bool {
         use dynamo_runtime::config::environment_names::kvbm::object_storage;
 
         std::env::var(object_storage::DYN_KVBM_OBJECT_WRITE_THROUGH)
             .map(|v| v == "1" || v.to_lowercase() == "true")
-            .unwrap_or(false)
+            .unwrap_or(true) // Default to true
     }
 
+    // Legacy method - deprecated
+    #[doc(hidden)]
+    pub fn num_blocks_from_env() -> usize {
+        use dynamo_runtime::config::environment_names::kvbm::object_storage;
+        std::env::var(object_storage::DYN_KVBM_OBJECT_NUM_BLOCKS)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
+    // Legacy alias - deprecated
+    #[doc(hidden)]
+    pub fn is_offload_enabled() -> bool {
+        Self::is_enabled()
+    }
 }

@@ -14,7 +14,6 @@ pub(crate) mod builder;
 mod config;
 mod fully_contiguous;
 mod layer_separate;
-mod object_layout;
 mod physical;
 mod serialize;
 mod validation;
@@ -29,11 +28,9 @@ pub use builder::{LayoutKind, PhysicalLayoutBuilder};
 pub use config::{BlockDimension, LayoutConfig};
 pub use fully_contiguous::FullyContiguousLayout;
 pub use layer_separate::LayerSeparateLayout;
-pub use object_layout::ObjectLayout;
 pub use physical::{NixlMetadata, PhysicalLayout};
 pub use serialize::{
     BlockFormat, FullyContiguousDetails, LayerSeparateDetails, LayoutDescriptor, LayoutTypeDetails,
-    ObjectLayoutDetails,
 };
 pub use validation::{TensorFormat, validate_tensor_shapes, validate_tensor_strides};
 

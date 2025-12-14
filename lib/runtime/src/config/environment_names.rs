@@ -219,39 +219,41 @@ pub mod kvbm {
         pub const PREFIX: &str = "DYN_KVBM_NIXL_BACKEND_";
     }
 
-    /// Object storage (S3-compatible) configuration
+    /// Object storage configuration.
     ///
-    /// Objects are allocated dynamically - keys are derived from sequence hashes.
     pub mod object_storage {
-        /// S3 bucket name for object storage cache
+        /// Enable object storage. Set to "1" to enable.
+        pub const DYN_KVBM_OBJECT_ENABLED: &str = "DYN_KVBM_OBJECT_ENABLED";
+
+        /// Bucket name for object storage cache.
+        /// Supports `{worker_id}` template for per-worker buckets.
+        /// Example: "kv-cache-{worker_id}"
         pub const DYN_KVBM_OBJECT_BUCKET: &str = "DYN_KVBM_OBJECT_BUCKET";
 
-        /// S3 endpoint override (for MinIO or custom S3-compatible endpoints)
-        /// Example: "http://minio:9000"
+
+        /// Endpoint for object storage.
         pub const DYN_KVBM_OBJECT_ENDPOINT: &str = "DYN_KVBM_OBJECT_ENDPOINT";
 
-        /// Maximum number of blocks that can be stored in object storage
-        pub const DYN_KVBM_OBJECT_NUM_BLOCKS: &str = "DYN_KVBM_OBJECT_NUM_BLOCKS";
-
-        /// AWS region for object storage
+        /// Region for object storage.
         pub const DYN_KVBM_OBJECT_REGION: &str = "DYN_KVBM_OBJECT_REGION";
 
-        /// Enable offloading to object storage (set to "1" to enable)
-        /// When enabled, blocks are offloaded to S3 instead of host/disk
-        pub const DYN_KVBM_USE_OBJECT_OFFLOAD: &str = "DYN_KVBM_USE_OBJECT_OFFLOAD";
+        /// Access key for authentication.
+        pub const DYN_KVBM_OBJECT_ACCESS_KEY: &str = "DYN_KVBM_OBJECT_ACCESS_KEY";
+
+        /// Secret key for authentication.
+        pub const DYN_KVBM_OBJECT_SECRET_KEY: &str = "DYN_KVBM_OBJECT_SECRET_KEY";
 
         /// Enable write-through caching for object storage offloads.
-        /// When enabled, blocks offloaded to S3 are ALSO kept in host cache.
-        /// This provides faster cache hits while ensuring persistence to S3.
-        /// Default: false (pure staging, blocks not kept in host cache)
         pub const DYN_KVBM_OBJECT_WRITE_THROUGH: &str = "DYN_KVBM_OBJECT_WRITE_THROUGH";
+
+        /// Number of blocks to store in object storage.
+        pub const DYN_KVBM_OBJECT_NUM_BLOCKS: &str = "DYN_KVBM_OBJECT_NUM_BLOCKS";
     }
 
     /// Transfer configuration
     pub mod transfer {
         /// Maximum number of blocks per transfer batch.
         /// Larger batches reduce overhead but increase per-transfer latency.
-        /// For object storage (S3), larger batches (32-64) can improve throughput.
         /// Default: 16
         pub const DYN_KVBM_TRANSFER_BATCH_SIZE: &str = "DYN_KVBM_TRANSFER_BATCH_SIZE";
 

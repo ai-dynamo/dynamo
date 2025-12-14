@@ -6,7 +6,6 @@ use super::*;
 use async_trait::async_trait;
 use std::sync::OnceLock;
 use transfer::*;
-use super::g4_transfer::G4TransferHandler;
 use utils::*;
 use zmq::*;
 
@@ -25,13 +24,10 @@ use crate::block_manager::{
     v2::physical::{
         layout::{BlockDimension, LayoutConfig as LayoutConfigV2, builder::PhysicalLayoutBuilder},
         manager::TransportManager,
-        transfer::{LayoutHandle, NixlAgent as NixlAgentV2, TransferCapabilities},
+        transfer::{NixlAgent as NixlAgentV2, TransferCapabilities},
     },
 };
 
-use super::registry::{ObjectRegistry, create_registry_from_env};
-
-use super::transfer_object::ObjectTransferHandler;
 
 use derive_builder::Builder;
 use nixl_sys::{Agent as NixlAgent, Params};
@@ -116,9 +112,7 @@ fn build_agent(
     let (_, posix_params) = agent.get_plugin_params("POSIX")?;
     agent.create_backend("POSIX", &posix_params)?;
 
-    // Load OBJ backend for G4 object storage with proper config
     if let Some(config) = object_storage_config {
-        // Build OBJ params from config + credentials from env (same as V2 path)
         let resolved_bucket = config.resolve_bucket(worker_id as u32);
         tracing::info!("Resolved bucket for worker {}: {}", worker_id, resolved_bucket);
 
@@ -133,12 +127,12 @@ fn build_agent(
             obj_param_pairs.push(("region".to_string(), region.clone()));
         }
 
-        // Credentials from env vars (should not be in config for security)
-        if let Ok(access_key) = std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_ACCESS_KEY") {
-            obj_param_pairs.push(("access_key".to_string(), access_key));
+        // Credentials from ObjectStorageConfig (unified DYN_KVBM_OBJECT_* vars)
+        if let Some(access_key) = &config.access_key {
+            obj_param_pairs.push(("access_key".to_string(), access_key.clone()));
         }
-        if let Ok(secret_key) = std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_SECRET_KEY") {
-            obj_param_pairs.push(("secret_key".to_string(), secret_key));
+        if let Some(secret_key) = &config.secret_key {
+            obj_param_pairs.push(("secret_key".to_string(), secret_key.clone()));
         }
 
         match Params::from(obj_param_pairs.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
@@ -167,7 +161,6 @@ fn build_agent(
     Ok(agent)
 }
 
-// Helper: perform allocation and build transfer handler (factored from previous code)
 async fn perform_allocation_and_build_handler(
     device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
     mut layout_builder: LayoutConfigBuilder,
@@ -184,7 +177,7 @@ async fn perform_allocation_and_build_handler(
         .unwrap_or(false);
 
     if use_v2_transfer {
-        tracing::warn!("Using V2 transfer handler. This is experimental. Use at your own risk.");
+        tracing::warn!("Using experimental transfer handler. Use at your own risk.");
 
         // Build backend params list based on configuration
         let mut backend_params: Vec<(&str, Params)> = Vec::new();
@@ -221,12 +214,12 @@ async fn perform_allocation_and_build_handler(
                 obj_param_pairs.push(("region".to_string(), region.clone()));
             }
 
-            // Credentials still come from env vars (should not be in config for security)
-            if let Ok(access_key) = std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_ACCESS_KEY") {
-                obj_param_pairs.push(("access_key".to_string(), access_key));
+            // Credentials from ObjectStorageConfig (unified DYN_KVBM_OBJECT_* vars)
+            if let Some(access_key) = &config.access_key {
+                obj_param_pairs.push(("access_key".to_string(), access_key.clone()));
             }
-            if let Ok(secret_key) = std::env::var("DYN_KVBM_NIXL_BACKEND_OBJ_SECRET_KEY") {
-                obj_param_pairs.push(("secret_key".to_string(), secret_key));
+            if let Some(secret_key) = &config.secret_key {
+                obj_param_pairs.push(("secret_key".to_string(), secret_key.clone()));
             }
 
             let obj_params = Params::from(
@@ -250,7 +243,6 @@ async fn perform_allocation_and_build_handler(
             .dtype_width_bytes(device_layout.config().dtype_width_bytes)
             .build()?;
 
-        let layout_config_for_handler = layout_config.clone();
         let v2_device_layout =
             PhysicalLayoutBuilder::new(agent.clone()).with_config(layout_config.clone());
 
@@ -311,8 +303,6 @@ async fn perform_allocation_and_build_handler(
             disk_layout,
             transport_manager,
             scheduler_client,
-            Some(layout_config_for_handler),
-            Some(agent),
         )?;
 
         Ok(Arc::new(handler) as Arc<dyn BlockTransferHandler>)
@@ -376,57 +366,49 @@ async fn perform_allocation_and_build_handler(
             None
         };
 
-        let handler = BlockTransferHandlerV1::new(
-            device_blocks,
-            host_blocks,
-            disk_blocks,
-            transfer_context.clone(),
-            scheduler_client,
-        )?;
-
-        // Initialize G4 object storage on V1 path if configured
-        if let Some(config) = &leader_meta.object_storage_config {
+        let handler = if let Some(config) = &leader_meta.object_storage_config {
             if leader_meta.num_object_blocks > 0 {
-                // Get blocks from the handler (already converted to LocalBlockData)
-                let host_list = handler.host_blocks().ok_or_else(|| {
-                    anyhow::anyhow!("Host blocks required for G4 bounce buffers")
-                })?;
+                use crate::block_manager::block::transfer::context::{RemoteTransferContext, RemoteContextConfig};
 
-                let device_list = handler.device_blocks().ok_or_else(|| {
-                    anyhow::anyhow!("Device blocks required for G4")
-                })?;
+                let remote_ctx_config = RemoteContextConfig {
+                    object_config: config.clone(),
+                    worker_id: worker_id as u64,
+                };
 
-                // Create local registry
-                let local_registry = Arc::new(ObjectRegistry::new());
-
-                // Connect to distributed registry (if configured)
-                let distributed_registry = create_registry_from_env().await;
-
-                // Create the G4 handler
-                match G4TransferHandler::new(
-                    transfer_context.nixl_agent(),
-                    local_registry,
-                    distributed_registry,
-                    config.clone(),
-                    host_list.clone(),
-                    device_list.clone(),
+                let remote_context = Arc::new(RemoteTransferContext::for_object_with_config(
                     transfer_context.clone(),
-                    worker_id as u64,
-                    None, // TODO: wire up KvbmMetrics for object storage tracking
-                ) {
-                    Ok(obj_handler) => {
-                        handler.set_object_handler(Arc::new(obj_handler));
-                        tracing::info!("G4 object storage enabled on V1 path (write-through)");
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to create G4 handler on V1 path: {}. Continuing without G4.",
-                            e
-                        );
-                    }
-                }
+                    remote_ctx_config,
+                ));
+
+                let handler = BlockTransferHandlerV1::new_with_remote_context(
+                    device_blocks,
+                    host_blocks,
+                    disk_blocks,
+                    transfer_context.clone(),
+                    scheduler_client,
+                    remote_context,
+                )?;
+
+                tracing::info!("Object storage tier enabled (unified model)");
+                handler
+            } else {
+                BlockTransferHandlerV1::new(
+                    device_blocks,
+                    host_blocks,
+                    disk_blocks,
+                    transfer_context.clone(),
+                    scheduler_client,
+                )?
             }
-        }
+        } else {
+            BlockTransferHandlerV1::new(
+                device_blocks,
+                host_blocks,
+                disk_blocks,
+                transfer_context.clone(),
+                scheduler_client,
+            )?
+        };
 
         Ok(Arc::new(handler) as Arc<dyn BlockTransferHandler>)
     }
@@ -546,48 +528,26 @@ impl Handler for LeaderMetadataHandler {
             .await
             {
                 Ok(handler) => {
-                    // Initialize G4 object storage if configured
-                    if let Some(config) = &g4_config {
+                    // Initialize G4 object storage if configured (V1 only)
+                    if let Some(_config) = &g4_config {
                         if g4_num_blocks > 0 {
-                            // Try V2 handler first
-                            if let Some(v2_handler) = handler
-                                .as_any()
-                                .downcast_ref::<BlockTransferHandlerV2>()
-                            {
-                                // Create object handler using V2's resources
-                                let registry = Arc::new(ObjectRegistry::new());
-                                let distributed_registry = create_registry_from_env().await;
-                                if let Some(obj_handler) = v2_handler
-                                    .create_object_handler(config.clone(), registry, distributed_registry)
-                                {
-                                    let obj_handler = Arc::new(obj_handler);
-                                    v2_handler.set_object_handler(obj_handler);
-                                    tracing::info!(
-                                        "G4 object storage initialized on worker V2 (write-through enabled)"
-                                    );
-                                } else {
-                                    tracing::warn!(
-                                        "Failed to create G4 object handler V2 (host layout or resources missing)"
-                                    );
-                                }
-                            }
                             // V1 G4 initialization is done inside perform_allocation_and_build_handler
-                            // Check if V1 handler has G4 enabled
-                            else if let Some(v1_handler) = handler
+                            // Check if V1 handler has object storage tier enabled
+                            if let Some(v1_handler) = handler
                                 .as_any()
                                 .downcast_ref::<BlockTransferHandlerV1>()
                             {
-                                if v1_handler.has_g4() {
+                                if v1_handler.has_object_tier() {
                                     tracing::info!(
-                                        "G4 object storage initialized on worker V1 (write-through enabled)"
+                                        "Object storage tier initialized on worker (write-through enabled)"
                                     );
                                 } else {
                                     tracing::debug!(
-                                        "G4 not initialized on V1 handler (may have failed during allocation)"
+                                        "Object tier not initialized on V1 handler (may have failed during allocation)"
                                     );
                                 }
                             } else {
-                                tracing::debug!("Unknown handler type, G4 not initialized");
+                                tracing::debug!("Object storage tier requires V1 handler");
                             }
                         }
                     }
@@ -669,192 +629,6 @@ impl Handler for BlockTransferDispatch {
     }
 }
 
-/// Handler for G4 onboard requests (G4->Host->Device transfers).
-///
-/// This handler is responsible for:
-/// 1. Onboarding blocks from object storage to host bounce buffers
-/// 2. Transferring from host bounce buffers to device
-/// 3. Releasing bounce buffers
-///
-/// Supports both V1 and V2 transfer handlers.
-struct G4OnboardDispatch {
-    cell: Arc<RwLock<Option<Arc<dyn BlockTransferHandler>>>>,
-}
-
-#[async_trait]
-impl Handler for G4OnboardDispatch {
-    async fn handle(&self, mut message: MessageHandle) -> anyhow::Result<()> {
-        // Deserialize request first (before any async work)
-        if message.data.len() != 1 {
-            message.ack().await?;
-            return Err(anyhow::anyhow!(
-                "G4 onboard request must have exactly one data element"
-            ));
-        }
-
-        let request: G4OnboardRequest = match serde_json::from_slice(&message.data[0]) {
-            Ok(r) => r,
-            Err(e) => {
-                message.ack().await?;
-                return Err(anyhow::anyhow!("Failed to deserialize G4 onboard request: {}", e));
-            }
-        };
-
-        // Run the actual handler logic, capturing any error
-        let result = self.handle_inner(request).await;
-
-        // ALWAYS ack the message before returning, even on error
-        // This prevents the "Message was not acked!" panic
-        if let Err(ref e) = result {
-            tracing::error!("G4 onboard failed: {}", e);
-        }
-        message.ack().await?;
-
-        result
-    }
-}
-
-impl G4OnboardDispatch {
-    async fn handle_inner(&self, request: G4OnboardRequest) -> anyhow::Result<()> {
-        let maybe = { self.cell.read().await.clone() };
-        let handler = match maybe {
-            Some(h) => h,
-            None => {
-                tracing::warn!("G4 onboard handler not ready yet");
-                return Err(anyhow::anyhow!("G4 onboard handler not ready yet"));
-            }
-        };
-
-        tracing::info!(
-            request_id = %request.request_id,
-            operation_id = %request.operation_id,
-            num_blocks = request.sequence_hashes.len(),
-            "Processing G4 onboard request"
-        );
-
-        // Try V1 handler first
-        if let Some(v1_handler) = handler.as_any().downcast_ref::<BlockTransferHandlerV1>() {
-            let object_handler = v1_handler
-                .object_handler()
-                .ok_or_else(|| anyhow::anyhow!("G4 not configured on V1 handler"))?;
-
-            // If connector_req is present, schedule the transfer with the connector scheduler
-            let completion_handle = if let Some(connector_req) = request.connector_req {
-                let client = v1_handler
-                    .scheduler_client()
-                    .ok_or_else(|| anyhow::anyhow!(
-                        "scheduler client is required for G4 onboard with connector_req"
-                    ))?;
-
-                let handle = client.schedule_transfer(connector_req).await?;
-                assert_eq!(
-                    handle.scheduler_decision(),
-                    crate::block_manager::connector::scheduler::SchedulingDecision::Execute
-                );
-                Some(handle)
-            } else {
-                None
-            };
-
-            // Execute G4->H->D transfer (V1 path)
-            let result = object_handler
-                .onboard(
-                    &request.sequence_hashes,
-                    &request.host_block_ids,
-                    &request.device_block_ids,
-                )
-                .await;
-
-            // Mark the transfer as complete (success or failure)
-            if let Some(handle) = completion_handle {
-                match &result {
-                    Ok(_) => handle.mark_complete(Ok(())).await,
-                    Err(e) => handle.mark_complete(Err(anyhow::anyhow!("{}", e))).await,
-                }
-            }
-
-            let matched_hashes = result?;
-
-            tracing::debug!(
-                request_id = %request.request_id,
-                operation_id = %request.operation_id,
-                "G4 onboard complete: {} blocks",
-                matched_hashes.len()
-            );
-
-            return Ok(());
-        }
-
-        // Fall back to V2 handler
-        let v2_handler = handler
-            .as_any()
-            .downcast_ref::<BlockTransferHandlerV2>()
-            .ok_or_else(|| anyhow::anyhow!("G4 requires V1 or V2 transfer handler"))?;
-
-        // Get the object handler
-        let object_handler = v2_handler
-            .object_handler()
-            .ok_or_else(|| anyhow::anyhow!("Object handler not configured"))?;
-
-        let device_handle = v2_handler
-            .device_handle()
-            .ok_or_else(|| anyhow::anyhow!("Device handle not available"))?;
-
-        // If connector_req is present, schedule the transfer with the connector scheduler
-        // This allows the worker-side connector to track completion
-        let completion_handle = if let Some(connector_req) = request.connector_req {
-            let client = v2_handler
-                .scheduler_client()
-                .ok_or_else(|| anyhow::anyhow!(
-                    "scheduler client is required for G4 onboard with connector_req"
-                ))?;
-
-            let handle = client.schedule_transfer(connector_req).await?;
-            assert_eq!(
-                handle.scheduler_decision(),
-                crate::block_manager::connector::scheduler::SchedulingDecision::Execute
-            );
-            Some(handle)
-        } else {
-            None
-        };
-
-        // Execute G4->Host->Device transfer (Object->Host bounce->Device)
-        // Host blocks for bounce buffers are provided by the leader
-        let result = object_handler
-            .onboard(
-                &request.sequence_hashes,
-                &request.host_block_ids,
-                device_handle,
-                &request.device_block_ids,
-            )
-            .await;
-
-        // Note: The ObjectTransferHandler.onboard() already handles the H->D transfer
-        // internally as part of its implementation, so we don't need a separate step.
-        // The leader has already verified these hashes exist in the distributed registry.
-
-        // Mark the transfer as complete (success or failure) to notify the connector scheduler
-        if let Some(handle) = completion_handle {
-            match &result {
-                Ok(_) => handle.mark_complete(Ok(())).await,
-                Err(e) => handle.mark_complete(Err(anyhow::anyhow!("{}", e))).await,
-            }
-        }
-
-        let matched_hashes = result?;
-
-        tracing::debug!(
-            request_id = %request.request_id,
-            operation_id = %request.operation_id,
-            "G4 onboard complete: {} blocks",
-            matched_hashes.len()
-        );
-
-        Ok(())
-    }
-}
-
 #[derive(Builder, Clone)]
 #[builder(pattern = "owned")]
 pub struct KvbmWorkerConfig {
@@ -902,10 +676,6 @@ impl KvbmWorkerConfig {
 pub struct KvbmWorker {
     task: Option<CriticalTaskExecutionHandle>,
     block_transfer_handler_rx: Option<oneshot::Receiver<Arc<dyn BlockTransferHandler>>>,
-
-    // G4 resources (created lazily when first needed)
-    object_handler: OnceLock<Arc<ObjectTransferHandler>>,
-    device_handle: OnceLock<LayoutHandle>,
     transfer_handler: OnceLock<Arc<dyn BlockTransferHandler>>,
 }
 
@@ -1019,8 +789,6 @@ impl KvbmWorker {
         Ok(Self {
             task: Some(task),
             block_transfer_handler_rx: Some(handler_rx),
-            object_handler: OnceLock::new(),
-            device_handle: OnceLock::new(),
             transfer_handler: OnceLock::new(),
         })
     }
@@ -1157,196 +925,12 @@ impl KvbmWorker {
         self.block_transfer_handler_rx.take()
     }
 
-    // ===== G4 Object Storage Methods =====
-
-    /// Initialize G4 object storage support.
-    ///
-    /// Must be called after the transfer handler is ready.
-    /// Returns Ok(true) if G4 was enabled, Ok(false) if not configured or not supported.
-    ///
-    /// Supports both V1 and V2 transfer handlers:
-    /// - V2: Uses ObjectTransferHandler with newer architecture
-    /// - V1: Uses G4TransferHandler with legacy architecture
-    ///
-    /// # Arguments
-    /// * `handler` - The block transfer handler (V1 or V2)
-    /// * `config` - Object storage configuration
-    /// * `worker_id` - Worker ID for bucket resolution and identification
-    pub async fn init_g4(
-        &self,
-        handler: Arc<dyn BlockTransferHandler>,
-        config: ObjectStorageConfig,
-        worker_id: usize,
-    ) -> anyhow::Result<bool> {
-        // Store the transfer handler
-        let _ = self.transfer_handler.set(handler.clone());
-
-        // Try V2 handler first (preferred)
-        if let Some(v2_handler) = handler.as_any().downcast_ref::<BlockTransferHandlerV2>() {
-            return self.init_g4_v2(v2_handler, config).await;
-        }
-
-        // Fall back to V1 handler
-        if let Some(v1_handler) = handler.as_any().downcast_ref::<BlockTransferHandlerV1>() {
-            return self.init_g4_v1(v1_handler, config, worker_id).await;
-        }
-
-        Err(anyhow::anyhow!(
-            "G4 requires either V1 or V2 transfer handler"
-        ))
-    }
-
-    /// Initialize G4 with V2 transfer handler (preferred path).
-    async fn init_g4_v2(
-        &self,
-        v2_handler: &BlockTransferHandlerV2,
-        config: ObjectStorageConfig,
-    ) -> anyhow::Result<bool> {
-        // Store device handle for offload/onboard
-        if let Some(device_handle) = v2_handler.device_handle() {
-            let _ = self.device_handle.set(device_handle);
-        } else {
-            return Err(anyhow::anyhow!("No device layout configured"));
-        }
-
-        // Create object handler using V2's resources
-        let registry = Arc::new(ObjectRegistry::new());
-        let distributed_registry = create_registry_from_env().await;
-        let obj_handler = v2_handler
-            .create_object_handler(config, registry, distributed_registry)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Failed to create object handler (host layout or V2 resources missing)"
-                )
-            })?;
-
-        // Wrap in Arc to share between worker and V2 handler
-        let obj_handler = Arc::new(obj_handler);
-
-        // Wire up the object handler to V2 for write-through offloads
-        v2_handler.set_object_handler(obj_handler.clone());
-
-        self.object_handler
-            .set(obj_handler)
-            .map_err(|_| anyhow::anyhow!("Object handler already initialized"))?;
-
-        tracing::info!("G4 object storage initialized on worker via V2 handler (write-through enabled)");
-        Ok(true)
-    }
-
-    /// Initialize G4 with V1 transfer handler (legacy path).
-    async fn init_g4_v1(
-        &self,
-        v1_handler: &BlockTransferHandlerV1,
-        config: ObjectStorageConfig,
-        worker_id: usize,
-    ) -> anyhow::Result<bool> {
-        // Get host and device blocks from V1 handler
-        let host_blocks = v1_handler
-            .host_blocks()
-            .ok_or_else(|| anyhow::anyhow!("V1 handler has no host blocks for G4 bounce buffers"))?;
-
-        let device_blocks = v1_handler
-            .device_blocks()
-            .ok_or_else(|| anyhow::anyhow!("V1 handler has no device blocks"))?;
-
-        // Get the NIXL agent from the transfer context
-        let context = v1_handler.context();
-        let agent = context.nixl_agent();
-
-        // Create registries
-        let local_registry = Arc::new(ObjectRegistry::new());
-        let distributed_registry = create_registry_from_env().await;
-
-        // Create G4TransferHandler for V1
-        let g4_handler = G4TransferHandler::new(
-            agent,
-            local_registry,
-            distributed_registry,
-            config,
-            host_blocks.to_vec(),
-            device_blocks.to_vec(),
-            context.clone(),
-            worker_id as u64,
-            None, // kvbm_metrics - could be added if needed
-        )?;
-
-        let g4_handler = Arc::new(g4_handler);
-
-        // Wire up the G4 handler to V1
-        v1_handler.set_object_handler(g4_handler.clone());
-
-        // Note: V1 uses G4TransferHandler which is different from ObjectTransferHandler
-        // We can't store it in self.object_handler (wrong type), but V1 handler owns it
-        tracing::info!("G4 object storage initialized on worker via V1 handler (write-through enabled)");
-        Ok(true)
-    }
-
-    /// Check if G4 object storage is available.
-    pub fn has_g4(&self) -> bool {
-        self.object_handler.get().is_some()
-    }
-
-    /// Get the object transfer handler (if G4 is enabled).
-    pub fn object_handler(&self) -> Option<&Arc<ObjectTransferHandler>> {
-        self.object_handler.get()
-    }
-
-    /// Get the device handle (if G4 is enabled).
-    pub fn g4_device_handle(&self) -> Option<LayoutHandle> {
-        self.device_handle.get().copied()
-    }
-
-    /// Offload blocks to object storage.
-    pub async fn offload_to_g4(
-        &self,
-        block_ids: &[usize],
-        sequence_hashes: &[u64],
-    ) -> anyhow::Result<usize> {
-        let handler = self
-            .object_handler
+    pub fn has_object_tier(&self) -> bool {
+        self.transfer_handler
             .get()
-            .ok_or_else(|| anyhow::anyhow!("G4 not initialized"))?;
-        let device_handle = self
-            .device_handle
-            .get()
-            .ok_or_else(|| anyhow::anyhow!("Device handle not available"))?;
-
-        handler.offload(*device_handle, block_ids, sequence_hashes).await
-    }
-
-    /// Onboard blocks from object storage.
-    ///
-    /// # Arguments
-    /// * `sequence_hashes` - Sequence hashes to onboard (object keys)
-    /// * `host_block_ids` - Host block IDs to use as bounce buffers
-    /// * `device_block_ids` - Destination device block IDs
-    pub async fn onboard_from_g4(
-        &self,
-        sequence_hashes: &[u64],
-        host_block_ids: &[usize],
-        device_block_ids: &[usize],
-    ) -> anyhow::Result<Vec<u64>> {
-        let handler = self
-            .object_handler
-            .get()
-            .ok_or_else(|| anyhow::anyhow!("G4 not initialized"))?;
-        let device_handle = self
-            .device_handle
-            .get()
-            .ok_or_else(|| anyhow::anyhow!("Device handle not available"))?;
-
-        handler
-            .onboard(sequence_hashes, host_block_ids, *device_handle, device_block_ids)
-            .await
-    }
-
-    /// Lookup which hashes exist in object storage.
-    pub fn lookup_g4(&self, sequence_hashes: &[u64]) -> Vec<u64> {
-        self.object_handler
-            .get()
-            .map(|h| h.lookup(sequence_hashes))
-            .unwrap_or_default()
+            .and_then(|h| h.as_any().downcast_ref::<BlockTransferHandlerV1>())
+            .map(|h| h.has_object_tier())
+            .unwrap_or(false)
     }
 
     fn make_layout<S: Storage, M: BlockMetadata>(
@@ -1425,14 +1009,6 @@ impl KvbmWorker {
         handlers.insert(
             ZMQ_TRANSFER_BLOCKS_MESSAGE.to_string(),
             Arc::new(BlockTransferDispatch {
-                cell: transfer_handler_cell.clone(),
-            }) as Arc<dyn Handler>,
-        );
-
-        // G4 onboard requests get dispatched to the same handler cell
-        handlers.insert(
-            ZMQ_G4_ONBOARD_MESSAGE.to_string(),
-            Arc::new(G4OnboardDispatch {
                 cell: transfer_handler_cell.clone(),
             }) as Arc<dyn Handler>,
         );

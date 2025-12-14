@@ -617,3 +617,227 @@ pub mod v2 {
         }
     }
 }
+
+/// Configuration for remote storage backends.
+#[derive(Clone, Debug)]
+pub enum RemoteStorageConfig {
+    /// Object storage
+    Object {
+        /// Default bucket (can be overridden per-descriptor)
+        default_bucket: Option<String>,
+        /// Endpoint override
+        endpoint: Option<String>,
+        /// Region
+        region: Option<String>,
+    },
+    /// Remote disk
+    Disk {
+        /// Base path for all operations
+        base_path: String,
+        /// Use GDS (GPUDirect Storage) if available
+        use_gds: bool,
+    },
+    /// Hybrid: supports both object and disk
+    Hybrid {
+        object: Box<RemoteStorageConfig>,
+        disk: Box<RemoteStorageConfig>,
+    },
+}
+
+impl RemoteStorageConfig {
+    /// Create config for object storage with default bucket.
+    pub fn object(bucket: impl Into<String>) -> Self {
+        Self::Object {
+            default_bucket: Some(bucket.into()),
+            endpoint: None,
+            region: None,
+        }
+    }
+
+    /// Create config for object storage with full options.
+    pub fn object_with_options(
+        bucket: Option<String>,
+        endpoint: Option<String>,
+        region: Option<String>,
+    ) -> Self {
+        Self::Object {
+            default_bucket: bucket,
+            endpoint,
+            region,
+        }
+    }
+
+    /// Create config for remote disk.
+    pub fn disk(base_path: impl Into<String>, use_gds: bool) -> Self {
+        Self::Disk {
+            base_path: base_path.into(),
+            use_gds,
+        }
+    }
+}
+
+use crate::block_manager::config::ObjectStorageConfig;
+
+/// Extended context for remote storage transfers.
+/// Note: Registry management is handled at the leader level, not here.
+#[derive(Clone)]
+pub struct RemoteTransferContext {
+    base: Arc<TransferContext>,
+    config: RemoteStorageConfig,
+    object_config: Option<ObjectStorageConfig>,
+    worker_id: u64,
+}
+
+/// Configuration for creating a RemoteTransferContext with object storage support.
+#[derive(Clone)]
+pub struct RemoteContextConfig {
+    /// Object storage configuration (bucket template, endpoint, region).
+    pub object_config: ObjectStorageConfig,
+    /// Worker ID for bucket resolution.
+    pub worker_id: u64,
+}
+
+impl RemoteTransferContext {
+    /// Create context for object storage.
+    pub fn for_object(base: Arc<TransferContext>, default_bucket: Option<String>) -> Self {
+        Self {
+            base,
+            config: RemoteStorageConfig::Object {
+                default_bucket,
+                endpoint: None,
+                region: None,
+            },
+            object_config: None,
+            worker_id: 0,
+        }
+    }
+
+    /// Create context for object storage with full configuration.
+    pub fn for_object_with_config(
+        base: Arc<TransferContext>,
+        config: RemoteContextConfig,
+    ) -> Self {
+        let bucket = config.object_config.resolve_bucket(config.worker_id as u32);
+        Self {
+            base,
+            config: RemoteStorageConfig::Object {
+                default_bucket: Some(bucket),
+                endpoint: config.object_config.endpoint_override.clone(),
+                region: config.object_config.region.clone(),
+            },
+            object_config: Some(config.object_config),
+            worker_id: config.worker_id,
+        }
+    }
+
+    /// Create context for remote disk.
+    pub fn for_disk(base: Arc<TransferContext>, base_path: String, use_gds: bool) -> Self {
+        Self {
+            base,
+            config: RemoteStorageConfig::Disk { base_path, use_gds },
+            object_config: None,
+            worker_id: 0,
+        }
+    }
+
+    /// Create context with full configuration.
+    pub fn new(base: Arc<TransferContext>, config: RemoteStorageConfig) -> Self {
+        Self {
+            base,
+            config,
+            object_config: None,
+            worker_id: 0,
+        }
+    }
+
+    /// Create hybrid context supporting both object and disk.
+    pub fn hybrid(
+        base: Arc<TransferContext>,
+        object_config: RemoteStorageConfig,
+        disk_config: RemoteStorageConfig,
+    ) -> Self {
+        Self {
+            base,
+            config: RemoteStorageConfig::Hybrid {
+                object: Box::new(object_config),
+                disk: Box::new(disk_config),
+            },
+            object_config: None,
+            worker_id: 0,
+        }
+    }
+
+    /// Get reference to base transfer context.
+    pub fn base(&self) -> &Arc<TransferContext> {
+        &self.base
+    }
+
+    /// Get reference to remote storage config.
+    pub fn config(&self) -> &RemoteStorageConfig {
+        &self.config
+    }
+
+    /// Get NIXL agent if available.
+    pub fn nixl_agent(&self) -> Arc<Option<NixlAgent>> {
+        self.base.nixl_agent()
+    }
+
+    /// Get async runtime handle.
+    pub fn async_rt_handle(&self) -> &tokio::runtime::Handle {
+        self.base.async_rt_handle()
+    }
+
+    /// Get object storage config (if configured).
+    pub fn object_config(&self) -> Option<&ObjectStorageConfig> {
+        self.object_config.as_ref()
+    }
+
+    /// Get worker ID.
+    pub fn worker_id(&self) -> u64 {
+        self.worker_id
+    }
+
+    /// Resolve bucket name for this worker.
+    pub fn resolve_bucket(&self) -> Option<String> {
+        self.object_config.as_ref()
+            .map(|c| c.resolve_bucket(self.worker_id as u32))
+    }
+
+    /// Get default bucket (for object storage).
+    pub fn default_bucket(&self) -> Option<&str> {
+        match &self.config {
+            RemoteStorageConfig::Object { default_bucket, .. } => default_bucket.as_deref(),
+            RemoteStorageConfig::Hybrid { object, .. } => {
+                if let RemoteStorageConfig::Object { default_bucket, .. } = object.as_ref() {
+                    default_bucket.as_deref()
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Get base path (for disk storage).
+    pub fn base_path(&self) -> Option<&str> {
+        match &self.config {
+            RemoteStorageConfig::Disk { base_path, .. } => Some(base_path),
+            RemoteStorageConfig::Hybrid { disk, .. } => {
+                if let RemoteStorageConfig::Disk { base_path, .. } = disk.as_ref() {
+                    Some(base_path)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Debug for RemoteTransferContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteTransferContext")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}

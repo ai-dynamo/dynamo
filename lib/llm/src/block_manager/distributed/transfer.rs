@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use super::g4_transfer::G4TransferHandler;
-use super::transfer_object::ObjectTransferHandler;
 
 use futures::future::try_join_all;
 use nixl_sys::NixlDescriptor;
@@ -19,20 +17,22 @@ use crate::block_manager::{
         WritableBlock,
         data::local::LocalBlockData,
         locality,
-        transfer::{TransferContext, WriteTo, WriteToStrategy},
+        transfer::{
+            TransferContext, WriteTo, WriteToStrategy,
+            context::RemoteTransferContext,
+            handle_remote_transfer, RemoteBlockDescriptor, RemoteTransferPipeline,
+        },
     },
-    config::ObjectStorageConfig,
     connector::scheduler::{SchedulingDecision, TransferSchedulerClient},
     offload::MAX_TRANSFER_BATCH_SIZE,
     storage::{DeviceStorage, DiskStorage, Local, PinnedStorage},
     v2::physical::{
-        layout::{LayoutConfig, PhysicalLayout},
+        layout::PhysicalLayout,
         manager::TransportManager,
-        transfer::{LayoutHandle, NixlAgent},
+        transfer::LayoutHandle,
         transfer::options::TransferOptions,
     },
 };
-use super::registry::{DistributedRegistry, SequenceHashRegistry};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -71,6 +71,8 @@ impl ConnectorTransferBatcher {
         // sequence_hashes[i] corresponds to blocks[i]
         let hashes = request.sequence_hashes.as_ref();
 
+        let write_through = request.write_through;
+
         let batch_futures: Vec<_> = blocks
             .chunks(self.max_batch_size)
             .enumerate()
@@ -91,6 +93,7 @@ impl ConnectorTransferBatcher {
                     blocks: batch.to_vec(),
                     connector_req: None,
                     sequence_hashes: batch_hashes,
+                    write_through,
                 };
                 handler.execute_transfer_direct(batch_request)
             })
@@ -133,10 +136,7 @@ pub struct BlockTransferHandlerV1 {
     context: Arc<TransferContext>,
     scheduler_client: Option<TransferSchedulerClient>,
     batcher: ConnectorTransferBatcher,
-
-    /// V1 Object handler for G4 write-through and onboard operations.
-    /// Uses OnceLock for interior mutability (can set after Arc wrapping).
-    object_handler: std::sync::OnceLock<Arc<G4TransferHandler>>,
+    remote_context: Option<Arc<RemoteTransferContext>>,
 }
 
 #[async_trait]
@@ -166,53 +166,99 @@ impl BlockTransferDirectHandler for BlockTransferHandlerV1 {
 
         tracing::debug!("request: {request:#?}");
 
-        let is_device_to_host = matches!(
-            (request.from_pool(), request.to_pool()),
-            (Device, Host)
-        );
+        match (request.from_pool(), request.to_pool()) {
+            (Device, Host) => {
+                let notify = self.begin_transfer(&self.device, &self.host, request.clone()).await?;
+                notify.await?;
 
-        let notify = match (request.from_pool(), request.to_pool()) {
-            (Device, Host) => self.begin_transfer(&self.device, &self.host, request.clone()).await,
-            (Device, Disk) => self.begin_transfer(&self.device, &self.disk, request.clone()).await,
-            (Host, Device) => self.begin_transfer(&self.host, &self.device, request.clone()).await,
-            (Host, Disk) => self.begin_transfer(&self.host, &self.disk, request.clone()).await,
-            (Disk, Device) => self.begin_transfer(&self.disk, &self.device, request.clone()).await,
-            _ => {
-                return Err(anyhow::anyhow!("Invalid transfer type."));
-            }
-        }?;
+                if request.write_through {
+                    if let Some(hashes) = &request.sequence_hashes {
+                        if !hashes.is_empty() {
+                            let dst_block_ids: Vec<usize> = request.blocks()
+                                .iter()
+                                .map(|(_, to)| *to)
+                                .collect();
 
-        notify.await?;
-
-        // G4 write-through: After D->H transfer completes, also offload to object storage
-        if is_device_to_host {
-            if let (Some(obj_handler), Some(hashes)) =
-                (self.object_handler.get(), &request.sequence_hashes)
-            {
-                if !hashes.is_empty() {
-                    let dst_block_ids: Vec<usize> = request.blocks()
-                        .iter()
-                        .map(|(_, to)| *to)
-                        .collect();
-
-                    match obj_handler.offload(&dst_block_ids, hashes).await {
-                        Ok(count) => {
-                            tracing::debug!(
-                                "G4 write-through (V1): offloaded {} of {} blocks",
-                                count,
-                                dst_block_ids.len()
-                            );
-                        }
-                        Err(e) => {
-                            // G4 offload failure is non-fatal - log and continue
-                            tracing::warn!("G4 write-through failed (V1, non-fatal): {}", e);
+                            match self.execute_write_through(&dst_block_ids, hashes).await {
+                                Ok(count) => {
+                                    tracing::debug!(
+                                        "Write-through: offloaded {} of {} blocks to object storage",
+                                        count,
+                                        dst_block_ids.len()
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Write-through to object storage failed (non-fatal): {}", e);
+                                }
+                            }
                         }
                     }
                 }
+                Ok(())
             }
-        }
+            (Device, Disk) => {
+                let notify = self.begin_transfer(&self.device, &self.disk, request.clone()).await?;
+                notify.await?;
+                Ok(())
+            }
+            (Host, Device) => {
+                let notify = self.begin_transfer(&self.host, &self.device, request.clone()).await?;
+                notify.await?;
+                Ok(())
+            }
+            (Host, Disk) => {
+                let notify = self.begin_transfer(&self.host, &self.disk, request.clone()).await?;
+                notify.await?;
+                Ok(())
+            }
+            (Disk, Device) => {
+                let notify = self.begin_transfer(&self.disk, &self.device, request.clone()).await?;
+                notify.await?;
+                Ok(())
+            }
+            (Host, Object) => {
+                let hashes = request.sequence_hashes.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("sequence_hashes required for Host→Object transfer"))?;
+                let host_block_ids: Vec<usize> = request.blocks()
+                    .iter()
+                    .map(|(from, _)| *from)
+                    .collect();
 
-        Ok(())
+                self.execute_remote_offload(&host_block_ids, hashes).await
+            }
+            (Object, Host) => {
+                let hashes = request.sequence_hashes.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("sequence_hashes required for Object→Host transfer"))?;
+                let host_block_ids: Vec<usize> = request.blocks()
+                    .iter()
+                    .map(|(_, to)| *to)
+                    .collect();
+
+                self.execute_remote_onboard(&host_block_ids, hashes).await
+            }
+
+            (Object, Device) => {
+                let hashes = request.sequence_hashes.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("sequence_hashes required for Object→Device transfer"))?;
+                // blocks: (host_bounce_idx, device_dest_idx)
+                let host_block_ids: Vec<usize> = request.blocks()
+                    .iter()
+                    .map(|(from, _)| *from)
+                    .collect();
+                let device_block_ids: Vec<usize> = request.blocks()
+                    .iter()
+                    .map(|(_, to)| *to)
+                    .collect();
+
+                self.execute_remote_onboard_to_device(&host_block_ids, &device_block_ids, hashes).await
+            }
+
+            _ => Err(anyhow::anyhow!(
+                "Unsupported transfer: {:?} → {:?}",
+                request.from_pool(),
+                request.to_pool()
+            )),
+        }
     }
 }
 
@@ -223,7 +269,6 @@ impl BlockTransferHandlerV1 {
         disk_blocks: Option<Vec<LocalBlock<DiskStorage, BasicMetadata>>>,
         context: Arc<TransferContext>,
         scheduler_client: Option<TransferSchedulerClient>,
-        // add worker-connector scheduler client here
     ) -> Result<Self> {
         Ok(Self {
             device: Self::get_local_data(device_blocks),
@@ -232,39 +277,43 @@ impl BlockTransferHandlerV1 {
             context,
             scheduler_client,
             batcher: ConnectorTransferBatcher::new(),
-            object_handler: std::sync::OnceLock::new(),
+            remote_context: None,
         })
     }
 
-    /// Set the G4 object handler for write-through offloads.
-    ///
-    /// Must be called after handler creation if G4 is enabled.
-    /// Uses OnceLock so this can be called on &self (after Arc wrapping).
-    pub fn set_object_handler(&self, handler: Arc<G4TransferHandler>) {
-        let _ = self.object_handler.set(handler);
+    pub fn new_with_remote_context(
+        device_blocks: Option<Vec<LocalBlock<DeviceStorage, BasicMetadata>>>,
+        host_blocks: Option<Vec<LocalBlock<PinnedStorage, BasicMetadata>>>,
+        disk_blocks: Option<Vec<LocalBlock<DiskStorage, BasicMetadata>>>,
+        context: Arc<TransferContext>,
+        scheduler_client: Option<TransferSchedulerClient>,
+        remote_context: Arc<RemoteTransferContext>,
+    ) -> Result<Self> {
+        Ok(Self {
+            device: Self::get_local_data(device_blocks),
+            host: Self::get_local_data(host_blocks),
+            disk: Self::get_local_data(disk_blocks),
+            context,
+            scheduler_client,
+            batcher: ConnectorTransferBatcher::new(),
+            remote_context: Some(remote_context),
+        })
+    }
+    pub fn has_object_tier(&self) -> bool {
+        self.remote_context.is_some()
     }
 
-    /// Get a reference to the G4 object handler (if set).
-    pub fn object_handler(&self) -> Option<&Arc<G4TransferHandler>> {
-        self.object_handler.get()
-    }
-
-    /// Check if G4 object storage is enabled.
-    pub fn has_g4(&self) -> bool {
-        self.object_handler.get().is_some()
-    }
-
-    /// Get the transfer context.
     pub fn context(&self) -> &Arc<TransferContext> {
         &self.context
     }
+    pub fn remote_context(&self) -> Option<&Arc<RemoteTransferContext>> {
+        self.remote_context.as_ref()
+    }
 
-    /// Get the host blocks (needed for G4 bounce buffer setup).
     pub fn host_blocks(&self) -> Option<&LocalBlockDataList<PinnedStorage>> {
         self.host.as_ref()
     }
 
-    /// Get the device blocks (needed for G4 setup).
     pub fn device_blocks(&self) -> Option<&LocalBlockDataList<DeviceStorage>> {
         self.device.as_ref()
     }
@@ -333,6 +382,135 @@ impl BlockTransferHandlerV1 {
             }
         }
     }
+
+    /// Build remote descriptors from sequence hashes.
+    fn build_remote_descriptors(
+        bucket: &str,
+        hashes: &[u64],
+        block_size: usize,
+    ) -> Vec<RemoteBlockDescriptor> {
+        hashes.iter()
+            .map(|&hash| RemoteBlockDescriptor::object_from_hash(bucket, hash, block_size))
+            .collect()
+    }
+
+    async fn execute_write_through(
+        &self,
+        host_block_ids: &[usize],
+        sequence_hashes: &[u64],
+    ) -> Result<usize> {
+        self.execute_remote_offload(host_block_ids, sequence_hashes).await?;
+        Ok(sequence_hashes.len())
+    }
+
+    async fn execute_remote_offload(
+        &self,
+        host_block_ids: &[usize],
+        sequence_hashes: &[u64],
+    ) -> Result<()> {
+        use crate::block_manager::block::data::BlockDataViews;
+
+        if host_block_ids.len() != sequence_hashes.len() {
+            anyhow::bail!("block count mismatch: {} blocks, {} hashes",
+                host_block_ids.len(), sequence_hashes.len());
+        }
+        if sequence_hashes.is_empty() {
+            return Ok(());
+        }
+
+        let remote_ctx = self.remote_context.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Remote context not configured"))?;
+        let host_blocks = self.host.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Host blocks not configured"))?;
+        let bucket = remote_ctx.resolve_bucket()
+            .ok_or_else(|| anyhow::anyhow!("Could not resolve bucket"))?;
+
+        let block_size = host_blocks[host_block_ids[0]].local_block_view()?.size();
+        let descriptors = Self::build_remote_descriptors(&bucket, sequence_hashes, block_size);
+        let blocks: Vec<_> = host_block_ids.iter().map(|&id| host_blocks[id].clone()).collect();
+
+        let pipeline = RemoteTransferPipeline::offload_direct(descriptors);
+        handle_remote_transfer(pipeline, remote_ctx.clone(), &blocks, None::<&[LocalBlockData<DeviceStorage>]>, None)?
+            .wait().await?;
+
+        Ok(())
+    }
+
+    async fn execute_remote_onboard(
+        &self,
+        host_block_ids: &[usize],
+        sequence_hashes: &[u64],
+    ) -> Result<()> {
+        use crate::block_manager::block::data::BlockDataViews;
+
+        if host_block_ids.len() != sequence_hashes.len() {
+            anyhow::bail!("block count mismatch: {} blocks, {} hashes",
+                host_block_ids.len(), sequence_hashes.len());
+        }
+        if sequence_hashes.is_empty() {
+            return Ok(());
+        }
+
+        let remote_ctx = self.remote_context.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Remote context not configured"))?;
+        let host_blocks = self.host.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Host blocks not configured"))?;
+        let bucket = remote_ctx.resolve_bucket()
+            .ok_or_else(|| anyhow::anyhow!("Could not resolve bucket"))?;
+
+        let block_size = host_blocks[host_block_ids[0]].local_block_view()?.size();
+        let descriptors = Self::build_remote_descriptors(&bucket, sequence_hashes, block_size);
+        let blocks: Vec<_> = host_block_ids.iter().map(|&id| host_blocks[id].clone()).collect();
+
+        let pipeline = RemoteTransferPipeline::onboard_direct(descriptors);
+        handle_remote_transfer(pipeline, remote_ctx.clone(), &blocks, None::<&[LocalBlockData<DeviceStorage>]>, None)?
+            .wait().await?;
+
+        Ok(())
+    }
+
+    async fn execute_remote_onboard_to_device(
+        &self,
+        host_block_ids: &[usize],
+        device_block_ids: &[usize],
+        sequence_hashes: &[u64],
+    ) -> Result<()> {
+        use crate::block_manager::block::data::BlockDataViews;
+
+        let n = sequence_hashes.len();
+        if n > host_block_ids.len() || n > device_block_ids.len() {
+            anyhow::bail!("Not enough blocks: need {}, have {} host, {} device",
+                n, host_block_ids.len(), device_block_ids.len());
+        }
+        if n == 0 {
+            return Ok(());
+        }
+
+        let remote_ctx = self.remote_context.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Remote context not configured"))?;
+        let host_blocks = self.host.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Host blocks not configured"))?;
+        let device_blocks = self.device.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Device blocks not configured"))?;
+        let bucket = remote_ctx.resolve_bucket()
+            .ok_or_else(|| anyhow::anyhow!("Could not resolve bucket"))?;
+
+        let block_size = host_blocks[host_block_ids[0]].local_block_view()?.size();
+        let descriptors = Self::build_remote_descriptors(&bucket, sequence_hashes, block_size);
+
+        let host_batch: Vec<_> = host_block_ids[..n].iter().map(|&id| host_blocks[id].clone()).collect();
+        let device_batch: Vec<_> = device_block_ids[..n].iter().map(|&id| device_blocks[id].clone()).collect();
+
+        let pipeline = RemoteTransferPipeline::onboard_with_bounce(
+            descriptors,
+            (0..n).collect(),
+            (0..n).collect(),
+        );
+        handle_remote_transfer(pipeline, remote_ctx.clone(), &host_batch, Some(&device_batch), None)?
+            .wait().await?;
+
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -343,15 +521,6 @@ pub struct BlockTransferHandlerV2 {
     transport_manager: TransportManager,
     scheduler_client: Option<TransferSchedulerClient>,
     batcher: ConnectorTransferBatcher,
-
-    // G4 resources (for creating ObjectTransferHandler)
-    layout_config: Option<LayoutConfig>,
-    nixl_agent: Option<NixlAgent>,
-
-    /// Optional G4 object handler for write-through offloads.
-    /// Set via `set_object_handler()` after initialization.
-    /// Uses OnceLock for interior mutability (can set after Arc wrapping).
-    object_handler: std::sync::OnceLock<Arc<ObjectTransferHandler>>,
 }
 
 impl BlockTransferHandlerV2 {
@@ -361,8 +530,6 @@ impl BlockTransferHandlerV2 {
         disk_layout: Option<PhysicalLayout>,
         transport_manager: TransportManager,
         scheduler_client: Option<TransferSchedulerClient>,
-        layout_config: Option<LayoutConfig>,
-        nixl_agent: Option<NixlAgent>,
     ) -> Result<Self> {
         Ok(Self {
             device_handle: device_layout
@@ -374,23 +541,7 @@ impl BlockTransferHandlerV2 {
             transport_manager,
             scheduler_client,
             batcher: ConnectorTransferBatcher::new(),
-            layout_config,
-            nixl_agent,
-            object_handler: std::sync::OnceLock::new(),
         })
-    }
-
-    /// Set the object handler for G4 write-through.
-    ///
-    /// Must be called after handler creation if G4 is enabled.
-    /// Uses OnceLock so this can be called on &self (after Arc wrapping).
-    pub fn set_object_handler(&self, handler: Arc<ObjectTransferHandler>) {
-        let _ = self.object_handler.set(handler);
-    }
-
-    /// Get a reference to the object handler (if set).
-    pub fn object_handler(&self) -> Option<&Arc<ObjectTransferHandler>> {
-        self.object_handler.get()
     }
 
     /// Get the device layout handle.
@@ -406,43 +557,6 @@ impl BlockTransferHandlerV2 {
     /// Get a reference to the transport manager.
     pub fn transport_manager(&self) -> &TransportManager {
         &self.transport_manager
-    }
-
-    /// Get a reference to the layout config (if available).
-    pub fn layout_config(&self) -> Option<&LayoutConfig> {
-        self.layout_config.as_ref()
-    }
-
-    /// Get a reference to the NIXL agent (if available).
-    pub fn nixl_agent(&self) -> Option<&NixlAgent> {
-        self.nixl_agent.as_ref()
-    }
-
-    /// Create an ObjectTransferHandler using this handler's resources.
-    ///
-    /// Returns None if:
-    /// - Host layout is not configured (required for bounce buffers)
-    /// - Layout config or agent is not available (V1 mode)
-    pub fn create_object_handler(
-        &self,
-        config: ObjectStorageConfig,
-        local_registry: SequenceHashRegistry,
-        distributed_registry: Option<std::sync::Arc<dyn DistributedRegistry>>,
-    ) -> Option<ObjectTransferHandler> {
-        let host_handle = self.host_handle?;
-        let layout_config = self.layout_config.clone()?;
-        let agent = self.nixl_agent.clone()?;
-
-        ObjectTransferHandler::new(
-            self.transport_manager.clone(),
-            local_registry,
-            distributed_registry,
-            config,
-            host_handle,
-            layout_config,
-            agent,
-        )
-        .ok()
     }
 }
 
@@ -464,10 +578,6 @@ impl BlockTransferHandler for BlockTransferHandlerV2 {
 #[async_trait]
 impl BlockTransferDirectHandler for BlockTransferHandlerV2 {
     async fn execute_transfer_direct(&self, request: BlockTransferRequest) -> Result<()> {
-        let is_device_to_host = matches!(
-            (request.from_pool(), request.to_pool()),
-            (Device, Host)
-        );
 
         let (src, dst) = match (request.from_pool(), request.to_pool()) {
             (Device, Host) => (self.device_handle.as_ref(), self.host_handle.as_ref()),
@@ -500,34 +610,6 @@ impl BlockTransferDirectHandler for BlockTransferHandlerV2 {
                 )?
                 .await?;
 
-            // G4 write-through: After D→H transfer completes, also offload to object storage
-            if is_device_to_host {
-                if let (Some(obj_handler), Some(hashes)) =
-                    (self.object_handler.get(), &request.sequence_hashes)
-                {
-                    if !hashes.is_empty() {
-                        let host_handle = self.host_handle
-                            .ok_or_else(|| anyhow::anyhow!("Host handle required for G4 write-through"))?;
-
-                        match obj_handler.offload(host_handle, &dst_block_ids, hashes).await {
-                            Ok(count) => {
-                                tracing::debug!(
-                                    "G4 write-through: offloaded {} of {} blocks to object storage",
-                                    count,
-                                    dst_block_ids.len()
-                                );
-                            }
-                            Err(e) => {
-                                // G4 offload failure is non-fatal - log and continue
-                                tracing::warn!(
-                                    "G4 write-through failed (non-fatal): {}",
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
-            }
         } else {
             return Err(anyhow::anyhow!("Invalid transfer type."));
         }

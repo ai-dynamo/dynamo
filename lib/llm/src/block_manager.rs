@@ -56,13 +56,8 @@ use storage::nixl::MemType;
 use tokio::sync::oneshot;
 use validator::Validate;
 
-pub use v2::logical::registry::ObjectRegistry;
-pub use v2::logical::external_registry::{
-    ExternalRegistry, RegistryKey, SequenceHashRegistry, SharedExternalRegistry,
-};
-pub use v2::memory::ObjectStorage;
 pub use config::ObjectStorageConfig;
-
+pub use distributed::SequenceHashRegistry;
 
 pub type WorkerID = u64;
 
