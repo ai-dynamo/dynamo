@@ -180,24 +180,6 @@ def gen_config_file(
         worker_start_port: Start port for workers
         server_port: Server port
     """
-    gen_cuda_graph_batch_sizes = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        384,
-        512,
-        768,
-        1024,
-        2048,
-        gen_batch_size,
-    ]
-
     gen_moe_backend = "TRTLLM"
 
     prefill_config: Dict[str, Any] = {
@@ -225,9 +207,6 @@ def gen_config_file(
             "max_tokens_in_buffer": cache_transceiver_max_num_tokens,
             "backend": "UCX",
         },
-        "moe_config": {
-            "backend": "TRTLLM"
-        }
     }
 
     decode_config: Dict[str, Any] = {
@@ -241,7 +220,7 @@ def gen_config_file(
         "max_seq_len": gen_max_seq_len,
         "cuda_graph_config": {
             "enable_padding": True,
-            "batch_sizes": gen_cuda_graph_batch_sizes,
+            "max_batch_size": gen_batch_size
         },
         "print_iter_log": True,
         "kv_cache_config": {

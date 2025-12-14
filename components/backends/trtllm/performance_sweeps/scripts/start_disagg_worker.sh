@@ -46,6 +46,8 @@ export TLLM_LOG_LEVEL=INFO
 # NOTE: Set (or unset) these depending on what cluster you're using
 export TRTLLM_UCX_INTERFACE=enP6p9s0np0
 export UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_3:1,mlx5_4:1,enP6p9s0np0
+export OMPI_MCA_coll_ucc_enable=0
+export NCCL_GRAPH_REGISTER=0
 export OVERRIDE_QUANT_ALGO=W4A8_MXFP4_MXFP8
 export TRTLLM_ENABLE_PDL=1
 
