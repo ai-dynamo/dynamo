@@ -9,9 +9,13 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
+import boto3
 import requests
+from botocore.client import Config
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +70,20 @@ class MinioService:
         self.config = config
         self._logger = logging.getLogger(self.__class__.__name__)
         self._temp_download_dir: Optional[str] = None
+        self._s3_client = None
+
+    def _get_s3_client(self):
+        """Get or create boto3 S3 client for MinIO"""
+        if self._s3_client is None:
+            self._s3_client = boto3.client(
+                "s3",
+                endpoint_url=self.config.endpoint,
+                aws_access_key_id=self.config.access_key,
+                aws_secret_access_key=self.config.secret_key,
+                config=Config(signature_version="s3v4"),
+                region_name="us-east-1",
+            )
+        return self._s3_client
 
     def start(self) -> None:
         """Connect to MinIO service (started by CI workflow or manually)"""
@@ -175,48 +193,27 @@ class MinioService:
         )
 
     def create_bucket(self) -> None:
-        """Create the S3 bucket using AWS CLI"""
-        env = os.environ.copy()
-        env.update(
-            {
-                "AWS_ACCESS_KEY_ID": self.config.access_key,
-                "AWS_SECRET_ACCESS_KEY": self.config.secret_key,
-            }
-        )
+        """Create the S3 bucket using boto3"""
+        s3_client = self._get_s3_client()
 
         # Check if bucket exists
-        result = subprocess.run(
-            [
-                "aws",
-                "--endpoint-url",
-                self.config.endpoint,
-                "s3",
-                "ls",
-                f"s3://{self.config.bucket}",
-            ],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-
-        if result.returncode != 0:
-            # Create bucket
-            self._logger.info(f"Creating bucket: {self.config.bucket}")
-            result = subprocess.run(
-                [
-                    "aws",
-                    "--endpoint-url",
-                    self.config.endpoint,
-                    "s3",
-                    "mb",
-                    f"s3://{self.config.bucket}",
-                ],
-                capture_output=True,
-                text=True,
-                env=env,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(f"Failed to create bucket: {result.stderr}")
+        try:
+            s3_client.head_bucket(Bucket=self.config.bucket)
+            self._logger.info(f"Bucket already exists: {self.config.bucket}")
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            if error_code in ("404", "NoSuchBucket"):
+                # Create bucket
+                self._logger.info(f"Creating bucket: {self.config.bucket}")
+                try:
+                    s3_client.create_bucket(Bucket=self.config.bucket)
+                    self._logger.info(f"Bucket created: {self.config.bucket}")
+                except ClientError as create_error:
+                    raise RuntimeError(
+                        f"Failed to create bucket: {create_error}"
+                    ) from create_error
+            else:
+                raise RuntimeError(f"Failed to check bucket: {e}") from e
 
     def download_lora(self) -> str:
         """Download LoRA from Hugging Face Hub, returns temp directory path"""
@@ -250,38 +247,33 @@ class MinioService:
         return self._temp_download_dir
 
     def upload_lora(self, local_path: str) -> None:
-        """Upload LoRA to MinIO"""
+        """Upload LoRA to MinIO using boto3"""
         self._logger.info(
             f"Uploading LoRA to s3://{self.config.bucket}/{self.config.lora_name}"
         )
 
-        env = os.environ.copy()
-        env.update(
-            {
-                "AWS_ACCESS_KEY_ID": self.config.access_key,
-                "AWS_SECRET_ACCESS_KEY": self.config.secret_key,
-            }
-        )
+        s3_client = self._get_s3_client()
+        local_path = Path(local_path)
 
-        result = subprocess.run(
-            [
-                "aws",
-                "--endpoint-url",
-                self.config.endpoint,
-                "s3",
-                "sync",
-                local_path,
-                f"s3://{self.config.bucket}/{self.config.lora_name}",
-                "--exclude",
-                "*.git*",
-            ],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        # Walk through the directory and upload all files
+        for file_path in local_path.rglob("*"):
+            if file_path.is_file():
+                # Skip git files
+                if ".git" in str(file_path):
+                    continue
 
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to upload LoRA: {result.stderr}")
+                # Calculate the S3 key (relative path from local_path)
+                # Use as_posix() to ensure forward slashes in S3 key
+                relative_path = file_path.relative_to(local_path).as_posix()
+                s3_key = f"{self.config.lora_name}/{relative_path}"
+
+                self._logger.debug(f"Uploading {file_path} to {s3_key}")
+                try:
+                    s3_client.upload_file(str(file_path), self.config.bucket, s3_key)
+                except ClientError as e:
+                    raise RuntimeError(f"Failed to upload {file_path}: {e}") from e
+
+        self._logger.info("LoRA upload completed")
 
     def cleanup_download(self) -> None:
         """Clean up temporary download directory only"""
