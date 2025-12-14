@@ -43,15 +43,6 @@ pub struct LayerSeparateDetails {
     pub block_dim: BlockDimension,
 }
 
-/// Details specific to object storage layouts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ObjectLayoutDetails {
-    /// Number of objects in this layout
-    pub num_objects: usize,
-    /// Size of each complete object in bytes
-    pub object_size: usize,
-}
-
 /// Layout-type-specific details.
 ///
 /// This enum captures the information that differs between layout types
@@ -62,8 +53,6 @@ pub enum LayoutTypeDetails {
     FullyContiguous(FullyContiguousDetails),
     /// Layer-separate layout details
     LayerSeparate(LayerSeparateDetails),
-    /// Object storage layout details
-    ObjectLayout(ObjectLayoutDetails),
 }
 
 /// Serializable representation of a physical layout.

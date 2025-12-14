@@ -346,9 +346,7 @@ pub struct VllmConnectorSlot {
     /// We must hold these blocks in the slot state until the scheduler trigger the onboarding.
     staging_from_disk: Option<Vec<ImmutableBlock<DiskStorage, VllmLocality, BasicMetadata>>>,
 
-    /// Sequence hashes to be onboarded from G4 object storage.
-    /// Unlike host/disk, we only store hashes since the actual blocks
-    /// will be fetched from object storage during onboarding.
+    /// Sequence hashes to be onboarded from G4 storage
     staging_from_g4: Option<Vec<u64>>,
 
     /// The number of blocks cached from the device
@@ -943,7 +941,6 @@ impl Slot for VllmConnectorSlot {
         let num_matched_disk_blocks = disk_blocks.len();
         self.record_cached_disk_tokens(num_matched_disk_blocks * block_size);
 
-        // G4 lookup: check object storage after host/disk
         let search_offset_g4 = search_offset + num_matched_disk_blocks;
         let mut g4_hashes = if self.leader.g4_enabled() {
             let remaining_hashes = &sequence_hashes[search_offset_g4..];
@@ -1094,11 +1091,8 @@ impl Slot for VllmConnectorSlot {
             self.evaluated_blocks += num_disk_blocks;
         }
 
-        // Handle G4 staged blocks
         if let Some(g4_hashes) = self.staging_from_g4.take() {
             let num_g4_blocks = g4_hashes.len();
-
-            // get device block ids
             let dst_block_ids = self
                 .device_blocks
                 .iter()
@@ -1109,10 +1103,7 @@ impl Slot for VllmConnectorSlot {
 
             debug_assert_eq!(dst_block_ids.len(), num_g4_blocks);
 
-            // G4 onboard uses a different path - sends G4OnboardRequest to worker
             self.onboard_from_g4(g4_hashes, dst_block_ids)?;
-
-            // shift the evaluated blocks position to the end of the computed/cached blocks
             self.evaluated_blocks += num_g4_blocks;
         }
 
@@ -1229,7 +1220,7 @@ impl VllmConnectorSlot {
         let src_storage_pool = src_blocks.storage_pool();
         let operation_id = uuid::Uuid::new_v4();
 
-        let xfer_req = LocalTransferRequest::Onboard(LocalOnboardRequest::new(
+        let xfer_req = LocalTransferRequest::Onboard(LocalOnboardRequest::from_blocks(
             self.request_id.clone(),
             src_blocks,
             dst_block_ids,
@@ -1264,10 +1255,6 @@ impl VllmConnectorSlot {
         Ok(())
     }
 
-    /// Onboard blocks from G4 object storage.
-    ///
-    /// Unlike host/disk onboarding, G4 onboarding sends a G4OnboardRequest
-    /// to the worker, which handles the G4→Host→Device transfer atomically.
     fn onboard_from_g4(
         &mut self,
         sequence_hashes: Vec<u64>,
@@ -1278,7 +1265,7 @@ impl VllmConnectorSlot {
         let num_blocks = sequence_hashes.len();
         let operation_id = uuid::Uuid::new_v4();
 
-        let xfer_req = LocalTransferRequest::G4Onboard(LocalG4OnboardRequest::new(
+        let xfer_req = LocalTransferRequest::Onboard(LocalOnboardRequest::from_object_storage(
             self.request_id.clone(),
             sequence_hashes,
             device_block_ids,
@@ -1324,7 +1311,6 @@ impl VllmConnectorSlot {
 enum LocalTransferRequest {
     Offload(LocalOffloadRequest),
     Onboard(LocalOnboardRequest),
-    G4Onboard(LocalG4OnboardRequest),
 }
 
 struct LocalOffloadRequest {
@@ -1332,7 +1318,6 @@ struct LocalOffloadRequest {
     block_ids: Vec<BlockId>,
     token_blocks: Vec<TokenBlock>,
     operation_id: uuid::Uuid,
-    /// Sequence hashes for G4 write-through (extracted from token_blocks).
     sequence_hashes: Vec<u64>,
 }
 
@@ -1344,7 +1329,6 @@ impl LocalOffloadRequest {
         operation_id: uuid::Uuid,
     ) -> Self {
         debug_assert!(block_ids.len() == token_blocks.len());
-        // Extract sequence hashes from token blocks for G4 write-through
         let sequence_hashes = token_blocks
             .iter()
             .map(|tb| tb.sequence_hash())
@@ -1359,15 +1343,24 @@ impl LocalOffloadRequest {
     }
 }
 
+/// Source for onboard operations.
+enum OnboardSource {
+    /// Local blocks (Host or Disk)
+    Blocks(Box<dyn AnyBlocks>),
+    /// G4 storage (object storage) - identified by sequence hashes
+    ObjectStorage { sequence_hashes: Vec<u64> },
+}
+
 struct LocalOnboardRequest {
     request_id: String,
-    src_blocks: Box<dyn AnyBlocks>,
+    source: OnboardSource,
     dst_block_ids: Vec<BlockId>,
     operation_id: uuid::Uuid,
 }
 
 impl LocalOnboardRequest {
-    pub fn new(
+
+    pub fn from_blocks(
         request_id: String,
         src_blocks: Box<dyn AnyBlocks>,
         dst_block_ids: Vec<BlockId>,
@@ -1376,33 +1369,23 @@ impl LocalOnboardRequest {
         debug_assert!(src_blocks.len() == dst_block_ids.len());
         Self {
             request_id,
-            src_blocks,
+            source: OnboardSource::Blocks(src_blocks),
             dst_block_ids,
             operation_id,
         }
     }
-}
 
-/// Request to onboard blocks from G4 object storage.
-struct LocalG4OnboardRequest {
-    request_id: String,
-    sequence_hashes: Vec<u64>,
-    device_block_ids: Vec<BlockId>,
-    operation_id: uuid::Uuid,
-}
-
-impl LocalG4OnboardRequest {
-    pub fn new(
+    pub fn from_object_storage(
         request_id: String,
         sequence_hashes: Vec<u64>,
-        device_block_ids: Vec<BlockId>,
+        dst_block_ids: Vec<BlockId>,
         operation_id: uuid::Uuid,
     ) -> Self {
-        debug_assert!(sequence_hashes.len() == device_block_ids.len());
+        debug_assert!(sequence_hashes.len() == dst_block_ids.len());
         Self {
             request_id,
-            sequence_hashes,
-            device_block_ids,
+            source: OnboardSource::ObjectStorage { sequence_hashes },
+            dst_block_ids,
             operation_id,
         }
     }
@@ -1449,14 +1432,12 @@ impl LocalTransferEngine {
     ) -> anyhow::Result<()> {
         let (onboard_tx, mut onboard_rx) = mpsc::unbounded_channel::<LocalOnboardRequest>();
         let (offload_tx, mut offload_rx) = mpsc::unbounded_channel::<LocalOffloadRequest>();
-        let (g4_onboard_tx, mut g4_onboard_rx) = mpsc::unbounded_channel::<LocalG4OnboardRequest>();
 
         // Clone resources needed for tasks
+        let block_manager_onboard = self.block_manager.clone();
         let block_manager_offload = self.block_manager.clone();
-        let block_manager_g4 = self.block_manager.clone();
         let leader_offload = Arc::clone(&self.leader);
         let leader_onboard = Arc::clone(&self.leader);
-        let leader_g4_onboard = Arc::clone(&self.leader);
 
         let kvbm_metrics_onboard = kvbm_metrics.clone();
         let kvbm_metrics_offload = kvbm_metrics.clone();
@@ -1469,7 +1450,7 @@ impl LocalTransferEngine {
                         break;
                     }
                     if let Err(e) =
-                        process_onboard_request(req, &leader_onboard, kvbm_metrics_onboard.clone())
+                        process_onboard_request(req, &block_manager_onboard, &leader_onboard, kvbm_metrics_onboard.clone())
                             .await
                     {
                         tracing::error!("LocalOnboardTask: error processing request: {:?}", e);
@@ -1516,6 +1497,7 @@ impl LocalTransferEngine {
                                 request_type: RequestType::Immediate, // Immediate = completes instantly
                             }),
                             sequence_hashes: None,
+                            write_through: false,
                         };
 
                         match leader_offload.transfer_blocks_request(fake_xfer).await {
@@ -1533,34 +1515,6 @@ impl LocalTransferEngine {
             },
             task_token.clone(),
             "LocalOffloadTask",
-            &task_handle,
-        )
-        .unwrap();
-
-        let kvbm_metrics_g4 = kvbm_metrics.clone();
-        let g4_onboard_task = CriticalTaskExecutionHandle::new_with_runtime(
-            |cancellation_token_g4| async move {
-                while let Some(req) = g4_onboard_rx.recv().await {
-                    if cancellation_token_g4.is_cancelled() {
-                        tracing::debug!("LocalG4OnboardTask: received cancellation signal");
-                        break;
-                    }
-                    if let Err(e) =
-                        process_g4_onboard_request(
-                            req,
-                            &block_manager_g4,
-                            &leader_g4_onboard,
-                            kvbm_metrics_g4.clone(),
-                        )
-                        .await
-                    {
-                        tracing::error!("LocalG4OnboardTask: error processing request: {:?}", e);
-                    }
-                }
-                Ok(())
-            },
-            task_token,
-            "LocalG4OnboardTask",
             &task_handle,
         )
         .unwrap();
@@ -1585,11 +1539,6 @@ impl LocalTransferEngine {
                                         tracing::error!("LocalTransferEngine: error sending onboard request: {:?}", e);
                                     }
                                 }
-                                LocalTransferRequest::G4Onboard(g4_req) => {
-                                    if let Err(e) = g4_onboard_tx.send(g4_req) {
-                                        tracing::error!("LocalTransferEngine: error sending G4 onboard request: {:?}", e);
-                                    }
-                                }
                             }
                         }
                         None => {
@@ -1606,20 +1555,15 @@ impl LocalTransferEngine {
         // drop all tx channels
         drop(onboard_tx);
         drop(offload_tx);
-        drop(g4_onboard_tx);
 
         onboard_task.cancel();
         offload_task.cancel();
-        g4_onboard_task.cancel();
 
         if let Err(e) = onboard_task.join().await {
             tracing::error!("LocalOnboardTask failed: {:?}", e);
         }
         if let Err(e) = offload_task.join().await {
             tracing::error!("LocalOffloadTask failed: {:?}", e);
-        }
-        if let Err(e) = g4_onboard_task.join().await {
-            tracing::error!("LocalG4OnboardTask failed: {:?}", e);
         }
 
         tracing::debug!("LocalTransferEngine: shutdown complete");
@@ -1701,7 +1645,24 @@ where
     L: LocalityProvider,
     M: BlockMetadata,
 {
-    // 1. Acquire mutable blocks
+    let g4_enabled = transfer_pool == BlockTransferPool::Host && leader.g4_enabled();
+    let hashes_to_offload: Vec<u64> = if g4_enabled {
+        let filtered = leader.g4_filter_for_offload(&offload_req.sequence_hashes).await;
+        tracing::debug!(
+            request_id = request_id,
+            operation_id = %operation_id,
+            "G4 dedup: {} of {} hashes need offload",
+            filtered.len(),
+            offload_req.sequence_hashes.len()
+        );
+        filtered
+    } else {
+        offload_req.sequence_hashes.clone()
+    };
+
+    let hashes_to_offload_set: std::collections::HashSet<u64> =
+        hashes_to_offload.iter().copied().collect();
+
     let blocks = storage_pool
         .allocate_blocks(offload_req.block_ids.len())
         .await?;
@@ -1721,7 +1682,6 @@ where
         storage_name
     );
 
-    // 2. Apply token blocks
     let mut blocks_to_register = Vec::new();
     let zipped_blocks = blocks.into_iter().zip(token_blocks.into_iter());
 
@@ -1739,12 +1699,15 @@ where
         storage_name
     );
 
-    // 3. Issue the offload request using `leader`
-    // Include sequence_hashes for G4 write-through if offloading to host
-    let sequence_hashes = if transfer_pool == BlockTransferPool::Host && leader.g4_enabled() {
-        Some(offload_req.sequence_hashes.clone())
+    // Only enable write-through for hashes that passed the dedup filter
+    let (sequence_hashes, write_through) = if g4_enabled && !hashes_to_offload.is_empty() {
+        let filtered_hashes: Vec<u64> = offload_req.sequence_hashes.iter()
+            .filter(|h| hashes_to_offload_set.contains(h))
+            .copied()
+            .collect();
+        (Some(filtered_hashes), true)
     } else {
-        None
+        (None, false)
     };
 
     let block_xfer_req = BlockTransferRequest {
@@ -1757,7 +1720,8 @@ where
             requirement: None,
             request_type: RequestType::Scheduled,
         }),
-        sequence_hashes,
+        sequence_hashes: sequence_hashes.clone(),
+        write_through,
     };
     let notify_receiver = leader.transfer_blocks_request(block_xfer_req).await?;
     tracing::debug!(
@@ -1767,7 +1731,6 @@ where
         storage_name
     );
 
-    // 4. Wait for the offload request to complete
     match notify_receiver.await {
         Ok(_) => {
             tracing::debug!(
@@ -1788,7 +1751,6 @@ where
         storage_name
     );
 
-    // 5. Register the mutable blocks
     let immutable_blocks = storage_pool.register_blocks(blocks_to_register).await?;
 
     tracing::debug!(
@@ -1799,15 +1761,16 @@ where
         storage_name
     );
 
-    // 6. Update leader's G4 registry if we offloaded to host with G4 enabled
-    if transfer_pool == BlockTransferPool::Host && leader.g4_enabled() {
-        leader.g4_register_hashes(&offload_req.sequence_hashes);
-        tracing::debug!(
-            request_id = request_id,
-            operation_id = %operation_id,
-            "registered {} hashes in G4 registry",
-            offload_req.sequence_hashes.len()
-        );
+    if let Some(offloaded_hashes) = sequence_hashes {
+        if !offloaded_hashes.is_empty() {
+            leader.g4_register_hashes(&offloaded_hashes);
+            tracing::debug!(
+                request_id = request_id,
+                operation_id = %operation_id,
+                "registered {} hashes in G4 registry",
+                offloaded_hashes.len()
+            );
+        }
     }
 
     Ok(())
@@ -1815,132 +1778,102 @@ where
 
 async fn process_onboard_request(
     onboard_req: LocalOnboardRequest,
-    leader: &Arc<KvbmLeader>,
-    kvbm_metrics: KvbmMetrics,
-) -> anyhow::Result<()> {
-    if onboard_req.src_blocks.storage_pool() == BlockTransferPool::Host {
-        kvbm_metrics
-            .onboard_blocks_h2d
-            .inc_by(onboard_req.src_blocks.len() as u64);
-    } else if onboard_req.src_blocks.storage_pool() == BlockTransferPool::Disk {
-        kvbm_metrics
-            .onboard_blocks_d2d
-            .inc_by(onboard_req.src_blocks.len() as u64);
-    }
-
-    let request_id = &onboard_req.request_id;
-    let operation_id = &onboard_req.operation_id;
-
-    // extract source block ids
-    let src_block_ids = onboard_req.src_blocks.block_ids();
-
-    // create block pairs
-    let block_pairs = src_block_ids
-        .iter()
-        .zip(onboard_req.dst_block_ids.iter())
-        .map(|(src, dst)| (*src, *dst))
-        .collect::<Vec<_>>();
-
-    // create transfer request
-    let block_xfer_req = BlockTransferRequest {
-        from_pool: onboard_req.src_blocks.storage_pool(),
-        to_pool: BlockTransferPool::Device,
-        blocks: block_pairs,
-        connector_req: Some(LeaderTransferRequest {
-            request_id: request_id.clone(),
-            uuid: *operation_id,
-            requirement: None,
-            request_type: RequestType::Immediate,
-        }),
-        sequence_hashes: None, // Onboard doesn't need G4 write-through
-    };
-
-    let notify_receiver = leader.transfer_blocks_request(block_xfer_req).await?;
-
-    match notify_receiver.await {
-        Ok(_) => {
-            tracing::debug!("Onboarding transfer completed successfully");
-        }
-        Err(_) => {
-            return Err(anyhow::anyhow!(
-                "Onboarding transfer completion notification failed"
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-/// Process a G4 onboard request by sending it to the worker.
-async fn process_g4_onboard_request(
-    g4_req: LocalG4OnboardRequest,
     block_manager: &VllmBlockManager,
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
-    kvbm_metrics
-        .onboard_blocks_o2d
-        .inc_by(g4_req.sequence_hashes.len() as u64);
+    let request_id = &onboard_req.request_id;
+    let operation_id = &onboard_req.operation_id;
 
-    let request_id = &g4_req.request_id;
-    let operation_id = &g4_req.operation_id;
-    let num_blocks = g4_req.sequence_hashes.len();
+    match onboard_req.source {
+        OnboardSource::Blocks(src_blocks) => {
+            if src_blocks.storage_pool() == BlockTransferPool::Host {
+                kvbm_metrics.onboard_blocks_h2d.inc_by(src_blocks.len() as u64);
+            } else if src_blocks.storage_pool() == BlockTransferPool::Disk {
+                kvbm_metrics.onboard_blocks_d2d.inc_by(src_blocks.len() as u64);
+            }
 
-    tracing::debug!(
-        request_id = %request_id,
-        operation_id = %operation_id,
-        "Processing G4 onboard request for {} blocks",
-        num_blocks
-    );
+            let src_block_ids = src_blocks.block_ids();
+            let block_pairs: Vec<_> = src_block_ids
+                .iter()
+                .zip(onboard_req.dst_block_ids.iter())
+                .map(|(src, dst)| (*src, *dst))
+                .collect();
 
-    // Allocate host blocks for bounce buffers
-    let host_pool = block_manager
-        .host()
-        .ok_or_else(|| anyhow::anyhow!("Host pool not available for G4 bounce buffers"))?;
+            let block_xfer_req = BlockTransferRequest {
+                from_pool: src_blocks.storage_pool(),
+                to_pool: BlockTransferPool::Device,
+                blocks: block_pairs,
+                connector_req: Some(LeaderTransferRequest {
+                    request_id: request_id.clone(),
+                    uuid: *operation_id,
+                    requirement: None,
+                    request_type: RequestType::Immediate,
+                }),
+                sequence_hashes: None,
+                write_through: false,
+            };
 
-    let host_blocks = host_pool.allocate_blocks(num_blocks).await?;
-    let host_block_ids: Vec<usize> = host_blocks.iter().map(|b| b.block_id()).collect();
+            let notify_receiver = leader.transfer_blocks_request(block_xfer_req).await?;
+            notify_receiver.await.map_err(|_| {
+                anyhow::anyhow!("Onboarding transfer completion notification failed")
+            })?;
 
-    tracing::debug!(
-        request_id = %request_id,
-        operation_id = %operation_id,
-        "Allocated {} host blocks for G4 bounce buffers",
-        host_block_ids.len()
-    );
+            tracing::debug!("Onboarding transfer completed successfully");
+        }
 
-    // Create G4 onboard request for the worker (with host_block_ids)
-    let g4_onboard_req = dynamo_llm::block_manager::distributed::G4OnboardRequest::new_with_connector_req(
-        g4_req.request_id.clone(),
-        g4_req.operation_id,
-        g4_req.sequence_hashes,
-        g4_req.device_block_ids,
-        host_block_ids,
-        LeaderTransferRequest {
-            request_id: request_id.clone(),
-            uuid: *operation_id,
-            requirement: None,
-            request_type: RequestType::Immediate,
-        },
-    );
+        OnboardSource::ObjectStorage { sequence_hashes } => {
+            let num_blocks = sequence_hashes.len();
+            kvbm_metrics.onboard_blocks_o2d.inc_by(num_blocks as u64);
 
-    let notify_receiver = leader.g4_onboard_request(g4_onboard_req).await?;
-
-    match notify_receiver.await {
-        Ok(_) => {
             tracing::debug!(
                 request_id = %request_id,
                 operation_id = %operation_id,
-                "G4 onboard transfer completed successfully"
+                "Processing Object→Device onboard request for {} blocks",
+                num_blocks
+            );
+
+            let host_pool = block_manager
+                .host()
+                .ok_or_else(|| anyhow::anyhow!("Host pool not available for bounce buffers"))?;
+
+            let host_blocks = host_pool.allocate_blocks(num_blocks).await?;
+            let host_block_ids: Vec<usize> = host_blocks.iter().map(|b| b.block_id()).collect();
+
+            tracing::debug!(
+                request_id = %request_id,
+                operation_id = %operation_id,
+                "Allocated {} host blocks for bounce buffers",
+                host_block_ids.len()
+            );
+
+            let notify_receiver = leader
+                .transfer_blocks_request(
+                    BlockTransferRequest::new_g4_onboard(
+                        sequence_hashes,
+                        host_block_ids,
+                        onboard_req.dst_block_ids,
+                        LeaderTransferRequest {
+                            request_id: request_id.clone(),
+                            uuid: *operation_id,
+                            requirement: None,
+                            request_type: RequestType::Immediate,
+                        },
+                    ),
+                )
+                .await?;
+
+            notify_receiver.await.map_err(|_| {
+                anyhow::anyhow!("Object→Device transfer completion notification failed")
+            })?;
+
+            tracing::debug!(
+                request_id = %request_id,
+                operation_id = %operation_id,
+                "Object→Device transfer completed successfully"
             );
         }
-        Err(_) => {
-            return Err(anyhow::anyhow!(
-                "G4 onboard transfer completion notification failed"
-            ));
-        }
     }
-
-    // host_blocks (MutableBlocks) are released here when they go out of scope
 
     Ok(())
 }

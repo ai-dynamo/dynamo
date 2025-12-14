@@ -101,7 +101,7 @@ impl KvbmLeaderConfig {
                 • DYN_KVBM_OBJECT_BUCKET=<bucket_name>  (supports {{worker_id}} template)\n\
                 • DYN_KVBM_OBJECT_NUM_BLOCKS=<num_blocks>\n\
                 \n\
-                Optionally set DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL=1 for V2 handler."
+                Optionally set DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL=1 for experimental handler."
             );
         }
         Ok(())
@@ -337,9 +337,105 @@ impl KvbmLeader {
     }
 
     /// Register sequence hashes in the G4 registry after successful offload.
+    /// Updates both local cache and distributed registry.
     pub fn g4_register_hashes(&self, hashes: &[u64]) {
+        if hashes.is_empty() {
+            return;
+        }
+
+        // Register in local cache (sync, in-memory)
         if let Some(registry) = &self.g4_registry {
             registry.register(hashes);
+            tracing::debug!(
+                "Registered {} hashes in local G4 cache",
+                hashes.len()
+            );
+        }
+
+        // Register in distributed registry (async, network)
+        if let Some(distributed) = &self.distributed_registry {
+            let distributed = distributed.clone();
+            let bucket = self.g4_bucket.clone();
+            let hashes = hashes.to_vec();
+
+            // Spawn async registration - fire and forget, non-blocking
+            if let Some(handle) = &self.runtime_handle {
+                handle.spawn(async move {
+                    match distributed.register(&bucket, &hashes).await {
+                        Ok(()) => {
+                            tracing::debug!(
+                                "Registered {} hashes in distributed registry (bucket={})",
+                                hashes.len(),
+                                bucket
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to register {} hashes in distributed registry: {}",
+                                hashes.len(),
+                                e
+                            );
+                        }
+                    }
+                });
+            } else {
+                tracing::warn!(
+                    "No runtime handle - cannot register {} hashes in distributed registry",
+                    hashes.len()
+                );
+            }
+        }
+    }
+
+    /// Check which hashes need offloading (deduplication).
+    ///
+    /// Returns hashes that are NOT already in G4 storage.
+    /// Checks local registry first, then distributed registry.
+    pub async fn g4_filter_for_offload(&self, hashes: &[u64]) -> Vec<u64> {
+        if hashes.is_empty() {
+            return vec![];
+        }
+
+        // First filter out hashes already in local registry
+        let need_check: Vec<u64> = match &self.g4_registry {
+            Some(registry) => {
+                let existing: std::collections::HashSet<_> =
+                    registry.match_keys(hashes).into_iter().collect();
+                hashes.iter()
+                    .filter(|h| !existing.contains(h))
+                    .copied()
+                    .collect()
+            }
+            None => hashes.to_vec(),
+        };
+
+        if need_check.is_empty() {
+            tracing::debug!("g4_filter_for_offload: all {} hashes in local cache", hashes.len());
+            return vec![];
+        }
+
+        // Check distributed registry for remaining
+        if let Some(distributed) = &self.distributed_registry {
+            let bucket = self.g4_bucket.clone();
+            match distributed.can_offload(&bucket, &need_check).await {
+                Ok(result) => {
+                    tracing::debug!(
+                        "g4_filter_for_offload: {} can offload, {} already stored, {} leased",
+                        result.can_offload.len(),
+                        result.already_stored.len(),
+                        result.leased.len()
+                    );
+                    result.can_offload
+                }
+                Err(e) => {
+                    tracing::warn!("Distributed registry can_offload failed: {}", e);
+                    // Fall back to allowing all (no dedup)
+                    need_check
+                }
+            }
+        } else {
+            // No distributed registry, allow all that aren't in local
+            need_check
         }
     }
 
@@ -439,18 +535,4 @@ impl KvbmLeader {
         local_matched
     }
 
-    /// Send a G4 onboard request to workers.
-    ///
-    /// Workers will handle G4→Host→Device transfer atomically.
-    pub async fn g4_onboard_request(
-        &self,
-        request: G4OnboardRequest,
-    ) -> anyhow::Result<oneshot::Receiver<()>> {
-        let zmq = self
-            .zmq_leader
-            .get()
-            .ok_or_else(|| anyhow::anyhow!("ZMQ leader not ready"))?;
-        let data = vec![serde_json::to_vec(&request)?];
-        zmq.broadcast(ZMQ_G4_ONBOARD_MESSAGE, data).await
-    }
 }
