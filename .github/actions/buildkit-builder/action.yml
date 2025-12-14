@@ -55,6 +55,7 @@ runs:
           --driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }} \
           --driver-opt=namespace=${{ inputs.namespace }} \
           --driver-opt=loadbalance=sticky \
+          --driver-opt=timeout=300s \
           --driver-opt=replicas=${{ inputs.replicas }} \
           --driver-opt=requests.cpu=${{ inputs.requests_cpu }} \
           --driver-opt=requests.memory=${{ inputs.requests_memory }} \
