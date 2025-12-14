@@ -34,6 +34,8 @@ Examples:
 EOF
 }
 
+ARCH_ALT=$(uname -m)
+
 install_sccache() {
     if [ -z "${ARCH_ALT:-}" ]; then
         echo "Error: ARCH_ALT environment variable is required for sccache installation"
