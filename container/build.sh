@@ -630,31 +630,17 @@ build_aws_with_header() {
         set -x
     fi
 
-    if docker buildx version &>/dev/null; then
-        $RUN_PREFIX docker buildx build --progress=plain --load \
-            --build-arg BASE_IMAGE="$base_image" \
-            --build-arg EFA_VERSION="${EFA_VERSION}" \
-            --target "$aws_target" \
-            --file "$DOCKERFILE_AWS" \
-            $tags \
-            "$SOURCE_DIR" || {
-            { set +x; } 2>/dev/null
-            echo "ERROR: Failed to build AWS EFA image"
-            exit 1
-        }
-    else
-        DOCKER_BUILDKIT=1 $RUN_PREFIX docker build --progress=plain \
-            --build-arg BASE_IMAGE="$base_image" \
-            --build-arg EFA_VERSION="${EFA_VERSION}" \
-            --target "$aws_target" \
-            --file "$DOCKERFILE_AWS" \
-            $tags \
-            "$SOURCE_DIR" || {
-            { set +x; } 2>/dev/null
-            echo "ERROR: Failed to build AWS EFA image"
-            exit 1
-        }
-    fi
+    $RUN_PREFIX docker build --progress=plain \
+        --build-arg BASE_IMAGE="$base_image" \
+        --build-arg EFA_VERSION="${EFA_VERSION}" \
+        --target "$aws_target" \
+        --file "$DOCKERFILE_AWS" \
+        $tags \
+        "$SOURCE_DIR" || {
+        { set +x; } 2>/dev/null
+        echo "ERROR: Failed to build AWS EFA image"
+        exit 1
+    }
 
     { set +x; } 2>/dev/null
     echo "$success_msg"
