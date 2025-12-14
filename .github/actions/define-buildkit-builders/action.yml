@@ -51,9 +51,9 @@ runs:
         nodeselector: 'eks.amazonaws.com/nodegroup=gpu-l40-g6-4xlarge,kubernetes.io/arch=amd64'
         tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
         ephemeral_storage: '220Gi'
-        requests_cpu: '8'
-        requests_memory: '48Gi'
-        limits_memory: '52Gi'
+        requests_cpu: '15'
+        requests_memory: '50Gi'
+        limits_memory: '500Gi'
 
     - name: Define arm64 builder
       if: inputs.linux_arm64 == 'true'
@@ -65,10 +65,10 @@ runs:
         replicas: ${{ inputs.replicas }}
         nodeselector: 'eks.amazonaws.com/nodegroup=cpu-arm-r8g-4xlarge,kubernetes.io/arch=arm64'
         tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
-        ephemeral_storage: '140Gi'
-        requests_cpu: '8'
-        requests_memory: '48Gi'
-        limits_memory: '52Gi'
+        ephemeral_storage: '220Gi'
+        requests_cpu: '15'
+        requests_memory: '50Gi'
+        limits_memory: '500Gi'
 
     - name: Bootstrap buildkit builder
       shell: bash

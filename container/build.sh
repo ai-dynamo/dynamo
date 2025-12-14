@@ -135,6 +135,10 @@ USE_SCCACHE=""
 SCCACHE_BUCKET=""
 SCCACHE_REGION=""
 
+# Multi-arch build configuration
+MULTI_ARCH=""
+PUSH_IMAGE=""
+
 get_options() {
     while :; do
         case $1 in
@@ -331,6 +335,12 @@ get_options() {
         --no-tag-latest)
             NO_TAG_LATEST=true
             ;;
+        --multi-arch)
+            MULTI_ARCH=true
+            ;;
+        --push)
+            PUSH_IMAGE=true
+            ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
             ;;
@@ -407,6 +417,15 @@ get_options() {
             error "ERROR: --sccache-region is required when --use-sccache is specified"
         fi
     fi
+
+    # Handle multi-arch build configuration
+    if [ "$MULTI_ARCH" = true ]; then
+        PLATFORM="linux/amd64,linux/arm64"
+        echo "INFO: Multi-arch build enabled, using platform: $PLATFORM"
+        if [ "$PUSH_IMAGE" != true ]; then
+            echo "WARNING: Multi-arch builds cannot use --load. Use --push to push to a registry."
+        fi
+    fi
 }
 
 
@@ -422,6 +441,13 @@ show_image_options() {
     echo "   Build Context: '${BUILD_CONTEXT}'"
     echo "   Build Arguments: '${BUILD_ARGS}'"
     echo "   Framework: '${FRAMEWORK}'"
+    echo "   Dockerfile: '${DOCKERFILE}'"
+    if [ "$MULTI_ARCH" = true ]; then
+        echo "   Multi-Arch: Enabled (linux/amd64,linux/arm64)"
+    fi
+    if [ "$PUSH_IMAGE" = true ]; then
+        echo "   Push: Enabled"
+    fi
     if [ "$USE_SCCACHE" = true ]; then
         echo "   sccache: Enabled"
         echo "   sccache Bucket: '${SCCACHE_BUCKET}'"
@@ -463,6 +489,8 @@ show_help() {
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
     echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
     echo "  [--no-tag-latest do not add latest-{framework} tag to built image]"
+    echo "  [--multi-arch build for both amd64 and arm64 platforms (uses Dockerfile.*-multi)]"
+    echo "  [--push push the built image to a registry (required for multi-arch builds)]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -482,8 +510,9 @@ error() {
 get_options "$@"
 
 # Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64
+# Skip for multi-arch builds as the -multi Dockerfiles use TARGETARCH
 ARCH="amd64"
-if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
+if [[ "$MULTI_ARCH" != "true" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     ARCH="arm64"
     BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
 fi
@@ -493,7 +522,8 @@ DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA:-$(git rev-parse HEAD)}
 BUILD_ARGS+=" --build-arg DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA "
 
 # Special handling for vLLM on ARM64 - set required defaults if not already specified by user
-if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
+# Skip for multi-arch builds as the -multi Dockerfiles handle this automatically
+if [[ $FRAMEWORK == "VLLM" ]] && [[ "$MULTI_ARCH" != "true" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     # Set base image tag to CUDA 12.9 if using the default value (user didn't override)
     if [ "$BASE_IMAGE_TAG" == "$VLLM_BASE_IMAGE_TAG" ]; then
         BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
@@ -519,14 +549,27 @@ if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
 fi
 
 # Update DOCKERFILE if framework is VLLM
+# Use -multi Dockerfiles for multi-arch builds when available
 if [[ $FRAMEWORK == "VLLM" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
+    if [[ "$MULTI_ARCH" == "true" ]]; then
+        DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm-multi
+    else
+        DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
+    fi
 elif [[ $FRAMEWORK == "TRTLLM" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.trtllm
+    if [[ "$MULTI_ARCH" == "true" ]]; then
+        DOCKERFILE=${SOURCE_DIR}/Dockerfile.trtllm-multi
+    else
+        DOCKERFILE=${SOURCE_DIR}/Dockerfile.trtllm
+    fi
 elif [[ $FRAMEWORK == "NONE" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile
 elif [[ $FRAMEWORK == "SGLANG" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
+    if [[ "$MULTI_ARCH" == "true" ]]; then
+        DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang-multi
+    else
+        DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
+    fi
 fi
 
 # Add NIXL_REF as a build argument
@@ -842,8 +885,8 @@ if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID"
     BUILD_ARGS+=" --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY"
 fi
-if [[ "$PLATFORM" == *"linux/arm64"* && "${FRAMEWORK}" == "SGLANG" ]]; then
-    # Add arguments required for sglang blackwell build
+if [[ "$MULTI_ARCH" != "true" ]] && [[ "$PLATFORM" == *"linux/arm64"* && "${FRAMEWORK}" == "SGLANG" ]]; then
+    # Add arguments required for sglang blackwell build (single-platform arm64 only)
     BUILD_ARGS+=" --build-arg GRACE_BLACKWELL=true --build-arg BUILD_TYPE=blackwell_aarch64"
 fi
 LATEST_TAG=""
@@ -862,11 +905,20 @@ BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
 mkdir -p "${BUILD_LOG_DIR}"
 SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
 
+# Set push flag if requested
+PUSH_FLAG=""
+if [ "$PUSH_IMAGE" = true ]; then
+    PUSH_FLAG="--push"
+fi
+
 # Use BuildKit for enhanced metadata
 if docker buildx version &>/dev/null; then
-    $RUN_PREFIX docker buildx build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+    $RUN_PREFIX docker buildx build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE $PUSH_FLAG 2>&1 | tee "${SINGLE_BUILD_LOG}"
     BUILD_EXIT_CODE=${PIPESTATUS[0]}
 else
+    if [ "$PUSH_IMAGE" = true ]; then
+        error "ERROR: --push requires docker buildx. Please install docker buildx."
+    fi
     $RUN_PREFIX DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
     BUILD_EXIT_CODE=${PIPESTATUS[0]}
 fi
