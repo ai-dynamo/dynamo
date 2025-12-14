@@ -420,7 +420,7 @@ get_options() {
 
     # Handle multi-arch build configuration
     if [ "$MULTI_ARCH" = true ]; then
-        PLATFORM="linux/amd64,linux/arm64"
+        PLATFORM="--platform linux/amd64,linux/arm64"
         echo "INFO: Multi-arch build enabled, using platform: $PLATFORM"
         if [ "$PUSH_IMAGE" != true ]; then
             echo "WARNING: Multi-arch builds cannot use --load. Use --push to push to a registry."
