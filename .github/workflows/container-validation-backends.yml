@@ -253,7 +253,7 @@ jobs:
     #     platform:
     #       - { arch: amd64, runner: gpu-l40-amd64 }
     #       - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: vllm builder
+    name: vllm builder arm
     runs-on: builder-cpu-amd-runner
     env:
       BUILD_PLATFORMS: linux/amd64,linux/arm64
@@ -309,7 +309,7 @@ jobs:
     #     platform:
     #       - { arch: amd64, runner: gpu-l40-amd64 }
     #       - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: vllm builder
+    name: vllm builder amd
     runs-on: builder-cpu-amd-runner
     env:
       BUILD_PLATFORMS: linux/amd64,linux/arm64

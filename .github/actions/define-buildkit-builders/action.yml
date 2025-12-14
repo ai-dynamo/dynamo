@@ -33,7 +33,7 @@ runs:
         mode: create
         platform: linux/amd64
         replicas: ${{ inputs.replicas }}
-        nodeselector: 'eks.amazonaws.com/nodegroup=cpu-amd-m5-2xlarge,kubernetes.io/arch=amd64'
+        nodeselector: 'eks.amazonaws.com/nodegroup=cpu-amd-m5-4xlarge,kubernetes.io/arch=amd64'
         tolerations: 'key=nodepool,value=build-nodes,effect=NoSchedule'
         ephemeral_storage: '30Gi'
         requests_cpu: '5'
