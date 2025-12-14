@@ -291,22 +291,21 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
         maturin build --release --features dynamo-llm/media-nixl --out /opt/dynamo/dist; \
     else \
         maturin build --release --out /opt/dynamo/dist; \
-    fi
-    # fi && \
-    # if [ "$ENABLE_KVBM" == "true" ]; then \
-    #     cd /opt/dynamo/lib/bindings/kvbm && \
-    #     maturin build --release --out target/wheels && \
-    #     # Derive ARCH_ALT_COMPUTED from ARCH for auditwheel platform
-    #     ARCH_ALT_COMPUTED=$([ "$ARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") && \
-    #     auditwheel repair \
-    #         --exclude libnixl.so \
-    #         --exclude libnixl_build.so \
-    #         --exclude libnixl_common.so \
-    #         --plat manylinux_2_28_${ARCH_ALT_COMPUTED} \
-    #         --wheel-dir /opt/dynamo/dist \
-    #         target/wheels/*.whl; \
-    # fi && \
-    # /tmp/use-sccache.sh show-stats "Dynamo"
+    fi && \
+    if [ "$ENABLE_KVBM" == "true" ]; then \
+        cd /opt/dynamo/lib/bindings/kvbm && \
+        maturin build --release --out target/wheels && \
+        # Derive ARCH_ALT_COMPUTED from ARCH for auditwheel platform
+        ARCH_ALT_COMPUTED=$([ "$ARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") && \
+        auditwheel repair \
+            --exclude libnixl.so \
+            --exclude libnixl_build.so \
+            --exclude libnixl_common.so \
+            --plat manylinux_2_28_${ARCH_ALT_COMPUTED} \
+            --wheel-dir /opt/dynamo/dist \
+            target/wheels/*.whl; \
+    fi && \
+    /tmp/use-sccache.sh show-stats "Dynamo"
 
 # ########################################################
 # ########## Framework Development Image ################

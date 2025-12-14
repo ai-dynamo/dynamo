@@ -911,9 +911,15 @@ if [ "$PUSH_IMAGE" = true ]; then
     PUSH_FLAG="--push"
 fi
 
+echo "*********************"
+echo "$RUN_PREFIX docker buildx build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE $PUSH_FLAG $MULTI_ARCH_FLAG"
+echo "*********************" 
+
+
 # Use BuildKit for enhanced metadata
 if docker buildx version &>/dev/null; then
-    $RUN_PREFIX docker buildx build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE $PUSH_FLAG 2>&1 | tee "${SINGLE_BUILD_LOG}"
+
+    $RUN_PREFIX docker buildx build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE $PUSH_FLAG $MULTI_ARCH_FLAG 2>&1 | tee "${SINGLE_BUILD_LOG}"
     BUILD_EXIT_CODE=${PIPESTATUS[0]}
 else
     if [ "$PUSH_IMAGE" = true ]; then
