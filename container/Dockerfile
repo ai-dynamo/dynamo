@@ -38,11 +38,9 @@ ARG CARGO_BUILD_JOBS
 #
 # For arm64/aarch64, build with:
 #   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
-# For multi-arch builds, TARGETARCH is automatically set by buildx (amd64 or arm64)
-# For single-arch builds, pass --build-arg ARCH=amd64 (or arm64)
-ARG TARGETARCH
-ARG ARCH=${TARGETARCH:-amd64}
-ARG ARCH_ALT
+#TODO OPS-592: Leverage uname -m to determine ARCH instead of passing it as an arg
+ARG ARCH=amd64
+ARG ARCH_ALT=x86_64
 
 # SCCACHE configuration
 ARG USE_SCCACHE
@@ -105,19 +103,13 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
 ##### Wheel Build Image ##########
 ##################################
 
-# Platform-specific base images for wheel building
-# These are selected automatically based on TARGETARCH for multi-arch builds
-FROM quay.io/pypa/manylinux_2_28_x86_64 AS wheel_builder_base_amd64
-FROM quay.io/pypa/manylinux_2_28_aarch64 AS wheel_builder_base_arm64
+# Redeclare ARCH_ALT ARG so it's available for interpolation in the FROM instruction
+ARG ARCH_ALT
 
-# Select the correct base image based on target architecture
-# TARGETARCH is automatically set by buildkit (amd64 or arm64)
-ARG TARGETARCH
-FROM wheel_builder_base_${TARGETARCH} AS wheel_builder
+FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 
 # Redeclare ARGs for this stage
-ARG TARGETARCH
-ARG ARCH=${TARGETARCH}
+ARG ARCH
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
 
@@ -257,8 +249,11 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
-    export CC=$(which gcc) && \
-    export CXX=$(which g++) && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
     git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
@@ -284,8 +279,11 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
-    export CC=$(which gcc) && \
-    export CXX=$(which g++) && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
     cd /workspace/nixl && \
     uv build . --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
@@ -300,8 +298,11 @@ ARG ENABLE_KVBM
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
-    export CC=$(which gcc) && \
-    export CXX=$(which g++) && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export RUSTC_WRAPPER="sccache"; \
+    fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
@@ -314,13 +315,11 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out target/wheels && \
-        # Derive ARCH_ALT from ARCH for auditwheel platform
-        ARCH_ALT_COMPUTED=$([ "$ARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") && \
         auditwheel repair \
             --exclude libnixl.so \
             --exclude libnixl_build.so \
             --exclude libnixl_common.so \
-            --plat manylinux_2_28_${ARCH_ALT_COMPUTED} \
+            --plat manylinux_2_28_${ARCH_ALT} \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \
     fi && \

@@ -131,7 +131,6 @@ The `build.sh` script is responsible for building Docker images for different AI
 
 **Key Features:**
 - **Framework Support**: vLLM (default when --framework not specified), TensorRT-LLM, SGLang, or NONE
-- **Multi-Architecture Builds**: Optional `--multi-arch` flag for building AMD64 and ARM64 images (requires buildx)
 - **Multi-stage Builds**: Build process with base images
 - **Development Targets**: Supports `dev` target and `local-dev` target
 - **Build Caching**: Docker layer caching and sccache support
@@ -160,40 +159,6 @@ The `build.sh` script is responsible for building Docker images for different AI
 
 # Build with build arguments
 ./build.sh --build-arg CUSTOM_ARG=value
-```
-
-### Multi-Architecture Builds
-
-The `build.sh` script supports building multi-architecture images for both AMD64 and ARM64 platforms. This is useful for creating images that can run on different hardware architectures.
-
-**Prerequisites:**
-- Docker Buildx must be installed and available
-- A container registry to push the multi-arch images (multi-arch images cannot be loaded locally)
-
-**Usage:**
-
-```bash
-# Build and push multi-arch image to a registry
-./build.sh --framework vllm --multi-arch --push --tag myregistry.io/dynamo:latest
-
-# Build multi-arch with TensorRT-LLM and push
-./build.sh --framework trtllm --multi-arch --push --tag myregistry.io/dynamo:trtllm-latest
-```
-
-**Important Notes:**
-- Multi-arch builds cannot use `--load` (loading multi-platform images locally is not supported by Docker)
-- Use `--push` to push the image to a registry when building multi-arch
-- `--multi-arch` and `--platform` are mutually exclusive
-- The `--target local-dev` is not supported with multi-arch builds (local-dev requires host UID/GID matching)
-- When building single-arch images (default), the existing `docker build` workflow continues to work unchanged
-
-**Single-Architecture ARM64 Build:**
-
-For ARM64-only builds without multi-arch, you can still use the `--platform` flag:
-
-```bash
-# Build ARM64-only image (loads locally)
-./build.sh --framework vllm --platform linux/arm64
 ```
 
 ### Building the Frontend Image
