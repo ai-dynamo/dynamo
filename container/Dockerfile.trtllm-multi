@@ -277,6 +277,7 @@ COPY components/ /opt/dynamo/components/
 
 # Build dynamo wheels
 ARG ENABLE_KVBM='true'
+ARG ENABLE_MEDIA_NIXL='true'
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
@@ -340,6 +341,11 @@ RUN apt-get update && \
         ca-certificates && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+# Fix libmlx5.so symlink for RDMA/InfiniBand support
+# If libmlx5.so not shipped with 24.04 rdma-core packaging, CMAKE will fail when looking for
+# generic dev name .so so we symlink .so.1 -> .so
+RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so || true
 
 # Create virtual environment
 RUN mkdir -p /opt/dynamo/venv && \

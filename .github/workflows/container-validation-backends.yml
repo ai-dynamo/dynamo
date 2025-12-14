@@ -265,37 +265,55 @@ jobs:
           echo ${K8S_NODE_NAME}
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Define buildkit builders
-        uses: ./.github/actions/define-buildkit-builders
-        with:
-          builder_name: ${{ env.BUILDER_NAME }}-vllm
-          replicas: '1'
-          linux_amd64: 'false'
-          linux_arm64: 'true'
-          linux_amd64_gpu: 'true'
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Build Container
-        id: build-image
-        uses: ./.github/actions/docker-build
-        with:
-          framework: vllm
-          target: runtime
-          multi_arch_build: 'true'
-          multi_arch_push: 'false'
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      # - name: Define buildkit builders
+      #   uses: ./.github/actions/define-buildkit-builders
+      #   with:
+      #     builder_name: ${{ env.BUILDER_NAME }}-vllm
+      #     replicas: '1'
+      #     linux_amd64: 'false'
+      #     linux_arm64: 'true'
+      #     linux_amd64_gpu: 'true'
+      - name: TEMP define remote builder fot desting
+        shell: bash
+        run: |
+            docker buildx create \
+              --name k8s-builder \
+              --driver remote \
+              --platform linux/amd64 \
+              tcp://10.0.43.160:1234
+
+            docker buildx create \
+              --append \
+              --name k8s-builder \
+              --driver remote \
+              --platform linux/arm64 \
+              tcp://10.0.13.128:1234
+
+            docker buildx use k8s-builder
+            docker buildx inspect --bootstrap
+      # - name: Docker Login
+      #   uses: ./.github/actions/docker-login
+      #   with:
+      #     ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      # - name: Build Container
+      #   id: build-image
+      #   uses: ./.github/actions/docker-build
+      #   with:
+      #     framework: vllm
+      #     target: runtime
+      #     multi_arch_build: 'true'
+      #     multi_arch_push: 'false'
+      #     ci_token: ${{ secrets.CI_TOKEN }}
+      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      #     sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      #     aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       # - name: Login to Container Registries
       #   uses: ./.github/actions/docker-login
       #   with:
