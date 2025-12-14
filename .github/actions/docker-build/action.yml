@@ -148,16 +148,13 @@ runs:
           PLATFORM_ARG="--platform ${{ inputs.platform }}"
         fi
 
-        echo "******************* EXTRA_ARGS: $EXTRA_ARGS"
-        echo "******************* PLATFORM_ARG: $PLATFORM_ARG"
-        echo "******************* IMAGE_TAG: $IMAGE_TAG"
-        echo "******************* TARGET: ${{ inputs.target }}"
-        echo "******************* FRAMEWORK: ${{ inputs.framework }}"
-        echo "******************* PLATFORM: ${{ inputs.platform }}"
-        echo "******************* GITHUB_REF_NAME: $GITHUB_REF_NAME"
-        echo "******************* GITHUB_RUN_ID: $GITHUB_RUN_ID"
-        echo "******************* GITHUB_JOB: $GITHUB_JOB"
-
+        # Execute build and capture output (show on console AND save to file)
+        ./container/build.sh --tag "$IMAGE_TAG" \
+          --target ${{ inputs.target }} \
+          --vllm-max-jobs 10 \
+          --framework ${{ inputs.framework }} \
+          $PLATFORM_ARG \
+          $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 
