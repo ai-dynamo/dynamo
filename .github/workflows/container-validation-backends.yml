@@ -723,22 +723,22 @@ jobs:
         path: test-results/deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log
         retention-days: 7
 
-    - name: Cleanup
-      if: always()
-      timeout-minutes: 5
-      env:
-        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-      run: |
-        set -x
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE
+    # - name: Cleanup
+    #   if: always()
+    #   timeout-minutes: 5
+    #   env:
+    #     NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+    #   run: |
+    #     set -x
+    #     export KUBECONFIG=$(pwd)/.kubeconfig
+    #     kubectl config set-context --current --namespace=$NAMESPACE
 
-        # For debugging purposes, list all the resources before we delete
-        kubectl get dynamographdeployments
-        kubectl get all
+    #     # For debugging purposes, list all the resources before we delete
+    #     kubectl get dynamographdeployments
+    #     kubectl get all
 
-        echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
-        kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE || true
+    #     echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
+    #     kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE || true
 
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
@@ -784,52 +784,52 @@ jobs:
       MODEL_NAME: "Qwen/Qwen3-0.6B"
     steps: *deploy-test-steps
 
-  cleanup:
-    runs-on: cpu-amd-m5-2xlarge
-    if: always()
-    needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
-    steps:
-    - name: Output Node Name
-      shell: bash
-      run: |
-        echo ${K8S_NODE_NAME}
-    - uses: actions/checkout@v4
-    - name: Setup Kubeconfig
-      env:
-        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-      run: |
-        set -x
-        # Setup kubeconfig
-        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-        chmod 600 .kubeconfig
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-        kubectl config current-context
-    - name: Cleanup
-      timeout-minutes: 5
-      env:
-        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-      run: |
-        set -x
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE
+  # cleanup:
+  #   runs-on: cpu-amd-m5-2xlarge
+  #   if: always()
+  #   needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
+  #   steps:
+  #   - name: Output Node Name
+  #     shell: bash
+  #     run: |
+  #       echo ${K8S_NODE_NAME}
+  #   - uses: actions/checkout@v4
+  #   - name: Setup Kubeconfig
+  #     env:
+  #       NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+  #     run: |
+  #       set -x
+  #       # Setup kubeconfig
+  #       echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+  #       chmod 600 .kubeconfig
+  #       export KUBECONFIG=$(pwd)/.kubeconfig
+  #       kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+  #       kubectl config current-context
+  #   - name: Cleanup
+  #     timeout-minutes: 5
+  #     env:
+  #       NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+  #     run: |
+  #       set -x
+  #       export KUBECONFIG=$(pwd)/.kubeconfig
+  #       kubectl config set-context --current --namespace=$NAMESPACE
 
-        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-        chmod 600 .kubeconfig
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+  #       echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+  #       chmod 600 .kubeconfig
+  #       export KUBECONFIG=$(pwd)/.kubeconfig
+  #       kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
 
-        # For debugging purposes, list all the resources before we uninstall
-        kubectl get dynamographdeployments
-        kubectl get all
+  #       # For debugging purposes, list all the resources before we uninstall
+  #       kubectl get dynamographdeployments
+  #       kubectl get all
 
-        echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
-        kubectl delete dynamographdeployments --all -n $NAMESPACE || true
+  #       echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
+  #       kubectl delete dynamographdeployments --all -n $NAMESPACE || true
 
-        # Uninstall the helm chart
-        helm ls
-        helm uninstall dynamo-platform --namespace $NAMESPACE || true
+  #       # Uninstall the helm chart
+  #       helm ls
+  #       helm uninstall dynamo-platform --namespace $NAMESPACE || true
 
-        echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
-        kubectl delete namespace $NAMESPACE || true
-        echo "Namespace $NAMESPACE completed."
+  #       echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
+  #       kubectl delete namespace $NAMESPACE || true
+  #       echo "Namespace $NAMESPACE completed."
