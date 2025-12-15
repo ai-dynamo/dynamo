@@ -910,7 +910,7 @@ impl Client {
         let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let request_json: serde_json::Value = Bridge::global().from_py(request_py).await?;
+            let request_json: serde_json::Value = Bridge::global().depythonize(request_py).await?;
 
             let request_ctx = create_request_context(request_json, &context);
 
@@ -952,7 +952,7 @@ impl Client {
         let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let request_json: serde_json::Value = Bridge::global().from_py(request_py).await?;
+            let request_json: serde_json::Value = Bridge::global().depythonize(request_py).await?;
 
             let request_ctx = create_request_context(request_json, &context);
 
@@ -995,7 +995,7 @@ impl Client {
         let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let request_json: serde_json::Value = Bridge::global().from_py(request_py).await?;
+            let request_json: serde_json::Value = Bridge::global().depythonize(request_py).await?;
 
             let request_ctx = create_request_context(request_json, &context);
 
@@ -1037,7 +1037,7 @@ async fn process_stream(
         let annotated: RsAnnotated<PyObject> = annotated
             .map_data_async(|data| async move {
                 Bridge::global()
-                    .to_py(data) // runs on bridge worker thread
+                    .pythonize(data) // runs on bridge worker thread
                     .await
                     .map_err(|e| e.to_string())
             })

@@ -136,9 +136,8 @@ enum ResponseProcessingError {
 
     #[error("deserialize error: {0}")]
     DeserializeError(String),
-
-    #[error("gil offload error: {0}")]
-    OffloadError(String),
+    // #[error("gil offload error: {0}")]
+    // OffloadError(String),
 }
 
 #[async_trait::async_trait]
@@ -255,13 +254,6 @@ where
                                 );
                                 msg
                             }
-                            ResponseProcessingError::OffloadError(e) => {
-                                let msg = format!(
-                                    "critical error: failed to offload the python async generator to a new thread: {}",
-                                    e
-                                );
-                                msg
-                            }
                         };
 
                         Annotated::from_error(msg)
@@ -327,7 +319,7 @@ where
     };
 
     let response: Resp = bridge
-        .from_py::<Resp>(item)
+        .depythonize::<Resp>(item)
         .await
         .map_err(|e| ResponseProcessingError::DeserializeError(e.to_string()))?;
 

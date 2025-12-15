@@ -1,6 +1,9 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{
     sync::{OnceLock, mpsc},
-    thread::{self},
+    thread,
 };
 
 use crossbeam_channel::{Sender, bounded};
@@ -41,7 +44,7 @@ impl Bridge {
         })
     }
 
-    pub async fn to_py<T>(&self, value: T) -> Result<Py<PyAny>, PyErr>
+    pub async fn pythonize<T>(&self, value: T) -> Result<Py<PyAny>, PyErr>
     where
         T: Serialize + Send + 'static,
     {
@@ -67,7 +70,7 @@ impl Bridge {
         }
     }
 
-    pub async fn from_py<T>(&self, obj: Py<PyAny>) -> Result<T, PyErr>
+    pub async fn depythonize<T>(&self, obj: Py<PyAny>) -> Result<T, PyErr>
     where
         T: DeserializeOwned + Send + 'static,
     {
@@ -114,6 +117,7 @@ impl Bridge {
     }
 
     /// Sync/blocking version (blocks the caller thread)
+    #[allow(dead_code)]
     pub fn sync_with_gil<T, F>(&self, f: F) -> Result<T, PyErr>
     where
         T: Send + 'static,
