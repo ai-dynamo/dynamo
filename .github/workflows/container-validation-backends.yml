@@ -9,7 +9,6 @@ on:
       - main
       - "pull-request/[0-9]+"
       - release/*.*.*
-      - feat/support-multi-arch-builds
   workflow_dispatch:
     inputs:
       run_deploy_operator:
