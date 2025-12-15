@@ -1281,7 +1281,7 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	name := "test-component"
-	namespace := "default"
+	namespace := defaultNamespace
 
 	// Create DynamoComponentDeployment
 	replicaCount := int32(3)
