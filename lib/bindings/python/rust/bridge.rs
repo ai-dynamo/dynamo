@@ -15,6 +15,9 @@ use serde::{Serialize, de::DeserializeOwned};
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
+/// A bridge for performing Python <-> Rust conversions on a dedicated thread.
+/// single-worker design is appropriate given Python's GIL is itself a global singleton - multiple threads would just contend on the GIL. 
+// The bounded channel (1024) provides backpressure and async interface.
 pub struct Bridge {
     tx: Sender<Job>,
 }

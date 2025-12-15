@@ -4,6 +4,7 @@
 use super::maybe_error::MaybeError;
 use anyhow::{Result, anyhow as error};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 
 pub trait AnnotationsProvider {
     fn annotations(&self) -> Option<Vec<String>>;
