@@ -53,7 +53,7 @@ use crate::{
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         sequence::SequenceError,
-        subscriber::{recover_from_all_workers, start_kv_router_background},
+        subscriber::{start_kv_router_background, start_kv_router_background_nats_core},
     },
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
@@ -69,7 +69,7 @@ use crate::{
 pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
 // for metric publishing (push-based)
-pub const KV_EVENT_SUBJECT: &str = "kv_events";
+pub const KV_EVENT_SUBJECT: &str = "kv-events";
 pub const KV_HIT_RATE_SUBJECT: &str = "kv-hit-rate";
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
 
@@ -357,66 +357,90 @@ impl KvRouter {
         tracing::info!("Worker query client initialized");
 
         // Start KV event subscriber background process (only when use_kv_events is enabled)
+        // This is spawned as a background task to avoid blocking router startup.
+        // The task waits for runtime_configs to determine whether to use NATS Core or JetStream.
         if kv_router_config.use_kv_events
             && let Indexer::KvIndexer(ref kv_indexer) = indexer
         {
-            start_kv_router_background(
-                component.clone(),
-                consumer_id,
-                kv_indexer.event_sender(),
-                kv_indexer.remove_worker_sender(),
-                kv_router_config
-                    .router_snapshot_threshold
-                    .map(|_| kv_indexer.get_workers_sender()),
-                kv_router_config
-                    .router_snapshot_threshold
-                    .map(|_| kv_indexer.snapshot_event_sender()),
-                cancellation_token.clone(),
-                kv_router_config.router_snapshot_threshold,
-                kv_router_config.router_reset_states,
-            )
-            .await?;
+            // Clone everything needed for the background task
+            let component_clone = component.clone();
+            let kv_indexer_clone = kv_indexer.clone();
+            let cancellation_token_clone = cancellation_token.clone();
+            let mut runtime_configs_rx_clone = runtime_configs_rx.clone();
+            let worker_query_client_clone =
+                worker_query::WorkerQueryClient::new(component.clone(), runtime_configs_rx.clone());
 
-            // Perform startup recovery from workers with local indexers
-            // This catches up on any events missed while the router was offline
-            let last_event_ids = kv_indexer
-                .get_last_received_event_ids()
-                .await
-                .unwrap_or_default();
-            let instances = client.instance_source.as_ref().borrow().clone();
-            let worker_ids: Vec<WorkerId> = instances.iter().map(|i| i.instance_id).collect();
+            tokio::spawn(async move {
+                // Wait for runtime_configs to have at least one entry
+                let (all_local_indexer, count) = loop {
+                    {
+                        let configs = runtime_configs_rx_clone.borrow();
+                        if !configs.is_empty() {
+                            let all_local_indexer =
+                                configs.values().all(|c| c.enable_local_indexer);
+                            break (all_local_indexer, configs.len());
+                        }
+                    }
 
-            if !worker_ids.is_empty() {
-                tracing::info!(
-                    worker_count = worker_ids.len(),
-                    "Starting recovery from workers with local indexers"
-                );
+                    // Wait for changes to runtime_configs
+                    tokio::select! {
+                        _ = cancellation_token_clone.cancelled() => {
+                            tracing::debug!("Subscriber selection task cancelled");
+                            return;
+                        }
+                        result = runtime_configs_rx_clone.changed() => {
+                            if result.is_err() {
+                                tracing::debug!("Runtime configs channel closed");
+                                return;
+                            }
+                        }
+                    }
+                };
 
-                // NOTE: recover_from_all_workers() is a no-op if
-                // Worker with worker_id is not associated with a
-                // local indexer instance.
-                let recovered = recover_from_all_workers(
-                    &worker_query_client,
-                    &last_event_ids,
-                    &worker_ids,
-                    &kv_indexer.event_sender(),
-                )
-                .await;
-
-                if recovered > 0 {
+                if all_local_indexer {
+                    // All workers have local_indexer enabled - use NATS Core
                     tracing::info!(
-                        recovered_events = recovered,
-                        "KV Router startup: Recovered {} KV events from workers {:?}",
-                        recovered,
-                        worker_ids
+                        "All {count} workers have local_indexer enabled, using NATS Core subscription"
                     );
+
+                    if let Err(e) = start_kv_router_background_nats_core(
+                        component_clone.clone(),
+                        kv_indexer_clone.event_sender(),
+                        kv_indexer_clone.remove_worker_sender(),
+                        cancellation_token_clone.clone(),
+                        worker_query_client_clone,
+                    )
+                    .await
+                    {
+                        tracing::error!("Failed to start NATS Core subscriber: {e}");
+                    }
                 } else {
+                    // Not all workers have local_indexer - use JetStream
                     tracing::info!(
-                        "KV Router startup: No KV events recovered from workers {:?}",
-                        worker_ids
+                        "Not all workers have local_indexer enabled, using JetStream subscription"
                     );
+
+                    if let Err(e) = start_kv_router_background(
+                        component_clone.clone(),
+                        consumer_id,
+                        kv_indexer_clone.event_sender(),
+                        kv_indexer_clone.remove_worker_sender(),
+                        kv_router_config
+                            .router_snapshot_threshold
+                            .map(|_| kv_indexer_clone.get_workers_sender()),
+                        kv_router_config
+                            .router_snapshot_threshold
+                            .map(|_| kv_indexer_clone.snapshot_event_sender()),
+                        cancellation_token_clone.clone(),
+                        kv_router_config.router_snapshot_threshold,
+                        kv_router_config.router_reset_states,
+                    )
+                    .await
+                    {
+                        tracing::error!("Failed to start JetStream subscriber: {e}");
+                    }
                 }
-            }
+            });
         }
 
         tracing::info!("KV Routing initialized");

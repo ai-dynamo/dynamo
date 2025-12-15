@@ -21,7 +21,7 @@ import numpy as np
 from matplotlib import cm
 from scipy.interpolate import griddata
 
-from benchmarks.profiler.utils.defaults import GPU_COST_PER_HOUR
+from benchmarks.profiler.utils.defaults import DEFAULT_GPU_COST_PER_HOUR
 from benchmarks.profiler.utils.pareto import compute_pareto
 
 logger = logging.getLogger(__name__)
@@ -315,14 +315,16 @@ def plot_pd_joint_results(isl, osl, prefill_data, decode_data, output_dir):
     ttft = []
     for _p_ttft, _p_thpt in zip(p_ttft, p_thpt):
         ttft.append(_p_ttft)
-        prefill_cost = isl * 1000 / _p_thpt * GPU_COST_PER_HOUR / 3600
+        prefill_cost = isl * 1000 / _p_thpt * DEFAULT_GPU_COST_PER_HOUR / 3600
         tokens_per_user.append(1000 / d_itl)
-        cost.append(osl * 1000 / d_thpt * GPU_COST_PER_HOUR / 3600 + prefill_cost)
+        cost.append(
+            osl * 1000 / d_thpt * DEFAULT_GPU_COST_PER_HOUR / 3600 + prefill_cost
+        )
 
     # plot
     plt.figure(figsize=(12, 10))
     plt.title(
-        f"Cost Per 1000 i{isl}o{osl} requests (GPU/hour = ${GPU_COST_PER_HOUR}) Under Different SLA"
+        f"Cost Per 1000 i{isl}o{osl} requests (GPU/hour = ${DEFAULT_GPU_COST_PER_HOUR}) Under Different SLA"
     )
     for _tokens_per_user, _cost, _ttft in zip(tokens_per_user, cost, ttft):
         line = plt.plot(_tokens_per_user, _cost, label=f"TTFT: {_ttft:.2f}ms")[0]

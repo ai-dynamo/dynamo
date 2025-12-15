@@ -57,19 +57,16 @@ impl WorkerQueryClient {
         // Check if worker has local indexer enabled
         if !self.has_local_indexer(worker_id) {
             anyhow::bail!(
-                "Worker {} does not have local indexer enabled (enable_local_indexer=false or not set in MDC user_data)",
-                worker_id
+                "Worker {worker_id} does not have local indexer enabled (enable_local_indexer=false or not set in MDC user_data)"
             );
         }
 
         // Match worker's subscribe format
-        let subject_str = format!("{}.{}", WORKER_KV_INDEXER_QUERY_SUBJECT, worker_id); // see publisher.rs/start_worker_kv_query_service()
-        let subject = format!("{}.{}", self.component.subject(), subject_str);
+        let subject_str = format!("{}.{worker_id}", WORKER_KV_INDEXER_QUERY_SUBJECT); // see publisher.rs/start_worker_kv_query_service()
+        let subject = format!("{}.{subject_str}", self.component.subject());
 
         tracing::debug!(
-            "Router sending query request to worker {} on NATS subject: {}",
-            worker_id,
-            subject
+            "Router sending query request to worker {worker_id} on NATS subject: {subject}"
         );
 
         // Create and serialize request
@@ -89,10 +86,7 @@ impl WorkerQueryClient {
             .kv_router_nats_request(subject.clone(), request_bytes.into(), timeout)
             .await
             .with_context(|| {
-                format!(
-                    "Failed to send request to worker {} on subject {}",
-                    worker_id, subject
-                )
+                format!("Failed to send request to worker {worker_id} on subject {subject}")
             })?;
 
         // Deserialize response

@@ -9,7 +9,7 @@ use dynamo_runtime::{
     config::environment_names::nats as env_nats,
     discovery::{DiscoveryEvent, DiscoveryQuery},
     prelude::*,
-    traits::events::EventPublisher,
+    traits::events::{EventPublisher, EventSubscriber},
     transports::nats::{NatsQueue, Slug},
 };
 use futures::StreamExt;
@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
-    indexer::{DumpRequest, GetWorkersRequest, RouterEvent},
+    indexer::{DumpRequest, GetWorkersRequest, RouterEvent, WorkerKvQueryResponse},
     protocols::WorkerId,
     router_discovery_query,
     worker_query::WorkerQueryClient,
@@ -140,8 +140,8 @@ pub async fn recover_from_worker(
         );
     } else {
         tracing::warn!(
-            "Worker {} does not have local indexer enabled, skipping recovery",
-            worker_id
+            worker_id,
+            "Worker does not have local indexer enabled, skipping recovery"
         );
         return Ok(0);
     }
@@ -151,13 +151,46 @@ pub async fn recover_from_worker(
         .query_worker(worker_id, start_event_id, end_event_id)
         .await?;
 
-    let events_count = response.events.len();
+    // Handle response variants
+    let events = match response {
+        WorkerKvQueryResponse::Events(events) => {
+            tracing::debug!(worker_id, count = events.len(), "Got buffered events");
+            events
+        }
+        WorkerKvQueryResponse::TreeDump(events) => {
+            tracing::info!(
+                worker_id,
+                count = events.len(),
+                "Got tree dump (range too old or unspecified)"
+            );
+            events
+        }
+        WorkerKvQueryResponse::TooNew {
+            requested_start,
+            requested_end,
+            newest_available,
+        } => {
+            tracing::warn!(
+                worker_id,
+                ?requested_start,
+                ?requested_end,
+                newest_available,
+                "Requested range is newer than available data"
+            );
+            return Ok(0);
+        }
+        WorkerKvQueryResponse::InvalidRange { start_id, end_id } => {
+            anyhow::bail!("Invalid range: end_id ({end_id}) < start_id ({start_id})");
+        }
+    };
+
+    let events_count = events.len();
 
     if events_count == 0 {
         tracing::debug!(
             worker_id,
             start_event_id = ?start_event_id,
-            "No missed events to recover from worker"
+            "No events to recover from worker"
         );
         return Ok(0);
     }
@@ -166,19 +199,14 @@ pub async fn recover_from_worker(
         worker_id,
         start_event_id = ?start_event_id,
         events_count,
-        "Recovered {} missed events from worker",
-        events_count
+        "Recovered {events_count} events from worker"
     );
 
     // Apply recovered events to the indexer
-    for event in response.events {
+    for event in events {
         if let Err(e) = event_tx.send(event).await {
-            tracing::error!(
-                worker_id,
-                error = %e,
-                "Failed to send recovered event to indexer"
-            );
-            anyhow::bail!("Failed to send recovered event: {}", e);
+            tracing::error!(worker_id, error = %e, "Failed to send recovered event to indexer");
+            anyhow::bail!("Failed to send recovered event: {e}");
         }
     }
 
@@ -601,6 +629,187 @@ pub async fn start_kv_router_background(
         if let Err(e) = nats_queue.shutdown(None).await {
             tracing::warn!("Failed to shutdown NatsQueue: {e}");
         }
+    });
+
+    Ok(())
+}
+
+/// Start a simplified background task for event consumption using NATS Core.
+///
+/// This is used when local indexer mode is enabled. Unlike `start_kv_router_background`,
+/// this function:
+/// - Uses NATS Core pub/sub instead of JetStream
+/// - Does not support snapshots, purging, or durable consumers
+/// - On worker Added: dumps worker's local indexer into router
+/// - On worker Removed: removes worker from router indexer
+///
+/// This is appropriate when workers have local indexers enabled.
+pub async fn start_kv_router_background_nats_core(
+    component: Component,
+    kv_events_tx: mpsc::Sender<RouterEvent>,
+    remove_worker_tx: mpsc::Sender<WorkerId>,
+    cancellation_token: CancellationToken,
+    worker_query_client: WorkerQueryClient,
+) -> Result<()> {
+    // Subscribe to KV events using NATS Core
+    let mut subscriber = component.subscribe(KV_EVENT_SUBJECT).await?;
+
+    tracing::info!(
+        "KV Router using NATS Core subscription on subject: {}.{} (local_indexer mode)",
+        component.subject(),
+        KV_EVENT_SUBJECT
+    );
+
+    // Get the generate endpoint and watch for instance events (add/remove)
+    let discovery_client = component.drt().discovery();
+    let generate_discovery_key = DiscoveryQuery::Endpoint {
+        namespace: component.namespace().name().to_string(),
+        component: component.name().to_string(),
+        endpoint: "generate".to_string(),
+    };
+    let mut instance_event_stream = discovery_client
+        .list_and_watch(generate_discovery_key, Some(cancellation_token.clone()))
+        .await?;
+
+    tokio::spawn(async move {
+        // Track last received event ID per worker for gap detection
+        let mut last_event_ids: HashMap<WorkerId, u64> = HashMap::new();
+
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = cancellation_token.cancelled() => {
+                    tracing::debug!("KV Router NATS Core background task received cancellation signal");
+                    break;
+                }
+
+                // Handle generate endpoint instance add/remove events
+                Some(discovery_event_result) = instance_event_stream.next() => {
+                    let Ok(discovery_event) = discovery_event_result else {
+                        continue;
+                    };
+
+                    match discovery_event {
+                        DiscoveryEvent::Added(_instance) => {
+                            // Extract worker_id from the instance
+                            let worker_id = _instance.instance_id();
+
+                            tracing::info!(
+                                worker_id = worker_id,
+                                "DISCOVERY: Worker added, dumping local indexer into router"
+                            );
+
+                            // Query worker's local indexer and dump all events
+                            match recover_from_worker(
+                                &worker_query_client,
+                                worker_id,
+                                None, // Start from beginning
+                                None, // Get all events
+                                &kv_events_tx,
+                            )
+                            .await
+                            {
+                                Ok(count) => {
+                                    tracing::info!(
+                                        worker_id = worker_id,
+                                        events_recovered = count,
+                                        "Successfully dumped worker's local indexer"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        worker_id = worker_id,
+                                        error = %e,
+                                        "Failed to dump worker's local indexer (may not have local indexer enabled)"
+                                    );
+                                }
+                            }
+                        }
+                        DiscoveryEvent::Removed(worker_id) => {
+                            tracing::warn!(
+                                worker_id = worker_id,
+                                "DISCOVERY: Worker removed, removing from router indexer"
+                            );
+
+                            if let Err(e) = remove_worker_tx.send(worker_id).await {
+                                tracing::warn!("Failed to send worker removal for worker {worker_id}: {e}");
+                            }
+                        }
+                    }
+                }
+
+                // Handle event consumption from NATS Core subscription
+                Some(msg) = subscriber.next() => {
+                    let event: RouterEvent = match serde_json::from_slice(&msg.payload) {
+                        Ok(event) => event,
+                        Err(e) => {
+                            tracing::warn!("Failed to deserialize RouterEvent from NATS Core: {e:?}");
+                            continue;
+                        }
+                    };
+
+                    let worker_id = event.worker_id;
+                    let event_id = event.event.event_id;
+
+                    // Gap detection: check if event ID is monotonically increasing per worker
+                    // Note: event_id <= last_id is duplicate/out-of-order, apply anyway (idempotent)
+                    if let Some(&last_id) = last_event_ids.get(&worker_id)
+                        && event_id > last_id + 1
+                    {
+                        // Gap detected - recover missing events before processing current
+                        let gap_start = last_id + 1;
+                        let gap_end = event_id - 1;
+                        tracing::warn!(
+                            worker_id,
+                            gap_start,
+                            gap_end,
+                            gap_size = gap_end - gap_start + 1,
+                            "Event ID gap detected, recovering events [{gap_start}, {gap_end}]"
+                        );
+
+                        // Note: While recovering, new events may queue in the NATS subscriber's
+                        // internal buffer. We don't explicitly buffer them here for simplicity.
+                        // The subscriber will process them in order after recovery completes.
+                        if let Err(e) = recover_from_worker(
+                            &worker_query_client,
+                            worker_id,
+                            Some(gap_start),
+                            Some(gap_end),
+                            &kv_events_tx,
+                        ).await {
+                            tracing::error!(
+                                worker_id,
+                                gap_start,
+                                gap_end,
+                                error = %e,
+                                "Failed to recover gap events; proceeding with current event anyway"
+                            );
+                            // Note: If recovery fails, we still apply the current event.
+                            // The tree will have a gap, but it's better than dropping the event.
+                        }
+                    }
+                    // First event from this worker is always valid - we accept whatever ID it has.
+                    // This handles initial startup and worker restarts without requiring event 0.
+
+                    // Update last seen event ID (use max to handle out-of-order)
+                    last_event_ids
+                        .entry(worker_id)
+                        .and_modify(|id| *id = (*id).max(event_id))
+                        .or_insert(event_id);
+
+                    // Forward the RouterEvent to the indexer
+                    if let Err(e) = kv_events_tx.send(event).await {
+                        tracing::warn!(
+                            "failed to send kv event to indexer; shutting down: {e:?}"
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+
+        tracing::debug!("KV Router NATS Core background task exiting");
     });
 
     Ok(())
