@@ -52,7 +52,7 @@ impl
 
             // Generate 5 response chunks
             for i in 0..5 {
-                let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None);
+                let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None, None);
                 yield Annotated::from_data(output);
             }
         };
@@ -378,6 +378,7 @@ mod integration_tests {
                 &test_endpoint,
                 dynamo_llm::model_type::ModelType::Chat,
                 dynamo_llm::model_type::ModelInput::Text,
+                None,
             )
             .await
             .unwrap();

@@ -448,9 +448,16 @@ class ManagedProcess:
             elapsed = time.time() - start_time
 
         self._logger.error(
-            "FAILED: Check URL: %s (attempts=%d, elapsed=%.1fs)", url, attempt, elapsed
+            "TIMEOUT: Check URL: %s failed after %.1fs (attempts=%d, timeout=%.1fs)",
+            url,
+            elapsed,
+            attempt,
+            timeout,
         )
-        raise RuntimeError("FAILED: Check URL: %s" % url)
+        raise RuntimeError(
+            "TIMEOUT: Check URL: %s failed after %.1fs (timeout=%.1fs)"
+            % (url, elapsed, timeout)
+        )
 
     def _check_funcs(self, timeout):
         elapsed = 0.0
@@ -552,6 +559,10 @@ class ManagedProcess:
             hasattr(self, "proc") and self.proc is not None and self.proc.poll() is None
         )
 
+    def get_pid(self) -> int | None:
+        """Get the PID of the managed process."""
+        return self.proc.pid if self.proc else None
+
     def subprocesses(self) -> list[psutil.Process]:
         """Find child processes of the current process."""
         if (
@@ -597,10 +608,6 @@ class DynamoFrontendProcess(ManagedProcess):
             terminate_existing=True,
             log_dir=log_dir,
         )
-
-    def get_pid(self) -> int | None:
-        """Get the PID of the worker process"""
-        return self.proc.pid if self.proc else None
 
 
 def main():

@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import string
 import time
@@ -37,6 +38,9 @@ class KVRouterProcess(ManagedProcess):
         namespace: str,
         store_backend: str = "etcd",
         enforce_disagg: bool = False,
+        blocks_threshold: float | None = None,
+        tokens_threshold: float | None = None,
+        request_plane: str = "nats",
     ):
         command = [
             "python3",
@@ -57,8 +61,18 @@ class KVRouterProcess(ManagedProcess):
         if enforce_disagg:
             command.append("--enforce-disagg")
 
+        if blocks_threshold is not None:
+            command.extend(["--active-decode-blocks-threshold", str(blocks_threshold)])
+
+        if tokens_threshold is not None:
+            command.extend(["--active-prefill-tokens-threshold", str(tokens_threshold)])
+
+        env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = request_plane
+
         super().__init__(
             command=command,
+            env=env,
             timeout=60,
             display_output=True,
             health_check_ports=[frontend_port],
@@ -81,6 +95,64 @@ class KVRouterProcess(ManagedProcess):
 def generate_random_suffix() -> str:
     """Generate a 10-character random alphabetic suffix for namespace isolation."""
     return "".join(random.choices(string.ascii_lowercase, k=10))  # noqa: S311
+
+
+def verify_response_worker_ids(
+    response_worker_ids: list[dict[str, Optional[int]]],
+    key: str,
+    expected_worker_id: int,
+) -> None:
+    """Verify that all responses have the same worker ID for a given key.
+
+    Args:
+        response_worker_ids: List of dicts with worker ID info from responses.
+        key: The key to check (e.g., "decode_worker_id" or "prefill_worker_id").
+        expected_worker_id: The expected worker ID value.
+
+    Raises:
+        AssertionError: If any response is missing the key, values differ, or don't match expected.
+    """
+    worker_ids = [r.get(key) for r in response_worker_ids]
+    logger.info(f"Response {key}s: {worker_ids}")
+
+    # All responses should have the key
+    assert all(
+        wid is not None for wid in worker_ids
+    ), f"Expected all {len(response_worker_ids)} responses to have {key}, got: {worker_ids}"
+
+    # All values should be the same (due to prefix reuse routing)
+    unique_ids = set(worker_ids)
+    assert len(unique_ids) == 1, (
+        f"Expected all responses to have the same {key} (due to prefix reuse), "
+        f"but found {len(unique_ids)} unique values: {unique_ids}"
+    )
+
+    # The value should match the expected worker ID
+    actual_worker_id = worker_ids[0]
+    assert actual_worker_id == expected_worker_id, (
+        f"Expected {key}={expected_worker_id} (forced in first request), "
+        f"but got {key}={actual_worker_id}"
+    )
+    logger.info(
+        f"✓ Verified all {len(response_worker_ids)} responses have {key}={actual_worker_id}"
+    )
+
+
+def verify_response_timing(timing_info: dict[str, Any]) -> None:
+    """Verify timing info has valid values (ttft_ms > 0, total_time_ms > 0)."""
+    ttft_ms = timing_info.get("ttft_ms")
+    total_time_ms = timing_info.get("total_time_ms")
+
+    assert ttft_ms is not None and ttft_ms > 0, f"Expected ttft_ms > 0, got: {ttft_ms}"
+    assert (
+        total_time_ms is not None and total_time_ms > 0
+    ), f"Expected total_time_ms > 0, got: {total_time_ms}"
+    assert (
+        total_time_ms >= ttft_ms
+    ), f"Expected total_time_ms >= ttft_ms, got {total_time_ms} < {ttft_ms}"
+    logger.info(
+        f"✓ Verified timing: ttft_ms={ttft_ms:.2f}, total_time_ms={total_time_ms:.2f}"
+    )
 
 
 ########################################################
@@ -416,9 +488,17 @@ async def send_request_via_python_kv_router(
         int
     ] = None,  # If None, Router will select the best available worker
     dp_rank: Optional[int] = None,  # Data parallel rank (defaults to 0)
-) -> bool:
+    return_worker_ids: bool = False,  # If True, return worker IDs from response
+) -> bool | dict[str, Optional[int]]:
     """Send a request to the specified worker instance.
-    Returns True if workers respond, otherwise raises or returns False.
+
+    Args:
+        return_worker_ids: If True, returns a dict with prefill_worker_id and decode_worker_id.
+                          If False, returns True on success or False on failure.
+
+    Returns:
+        If return_worker_ids=False: True if workers respond, otherwise raises or returns False.
+        If return_worker_ids=True: Dict with 'prefill_worker_id' and 'decode_worker_id' keys.
     """
 
     wait_time = initial_wait
@@ -459,8 +539,11 @@ async def send_request_via_python_kv_router(
                     f"Failed to connect to workers after {max_retries + 1} attempts"
                 ) from e
 
-    # Collect tokens from the SSE stream
+    # Collect tokens and worker IDs from the SSE stream
     generated_tokens = []
+    prefill_worker_id: Optional[int] = None
+    decode_worker_id: Optional[int] = None
+
     async for response in stream:
         if isinstance(response, dict):
             # Check if response has token_ids
@@ -475,6 +558,17 @@ async def send_request_via_python_kv_router(
                 logger.debug(
                     f"Stream finished with reason: {response['finish_reason']}"
                 )
+
+            # Extract worker IDs from disaggregated_params if present
+            if return_worker_ids and "disaggregated_params" in response:
+                disagg_params = response["disaggregated_params"]
+                if isinstance(disagg_params, dict) and "worker_id" in disagg_params:
+                    worker_id_info = disagg_params["worker_id"]
+                    if isinstance(worker_id_info, dict):
+                        if "prefill_worker_id" in worker_id_info:
+                            prefill_worker_id = worker_id_info["prefill_worker_id"]
+                        if "decode_worker_id" in worker_id_info:
+                            decode_worker_id = worker_id_info["decode_worker_id"]
 
     # Verify if expected number of tokens are generated if max_tokens specified and ignore_eos is True
     logger.debug(f"Total generated tokens: {len(generated_tokens)}")
@@ -493,9 +587,14 @@ async def send_request_via_python_kv_router(
         logger.debug(
             f"Successfully verified {max_tokens} tokens generated as expected via KvPushRouter with ignore_eos=True"
         )
-        return True
 
-    return False
+    if return_worker_ids:
+        return {
+            "prefill_worker_id": prefill_worker_id,
+            "decode_worker_id": decode_worker_id,
+        }
+
+    return True
 
 
 ########################################################
@@ -521,7 +620,7 @@ def _test_router_basic(
     Always waits for workers to be properly registered before sending requests to avoid flakiness.
 
     Args:
-        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
+        engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
         block_size: Block size for KV cache
         request: Pytest request fixture for managing resources
         frontend_port: Port to start the frontend HTTP server on
@@ -903,7 +1002,6 @@ def _test_router_query_instance_id(
     Raises:
         AssertionError: If annotation response structure is incorrect or contains generation content
     """
-    import aiohttp
 
     try:
         # Start KV router (frontend)
@@ -1062,7 +1160,7 @@ def _test_router_overload_503(
     request,
     frontend_port: int,
     test_payload: dict,
-    busy_threshold: float = 0.2,
+    blocks_threshold: float = 0.2,
 ):
     """Test that KV router returns 503 when all workers are busy.
 
@@ -1075,14 +1173,11 @@ def _test_router_overload_503(
         request: Pytest request fixture for managing resources
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload to send to /v1/chat/completions
-        busy_threshold: Busy threshold for the router (default 0.2)
+        blocks_threshold: Active decode blocks threshold for the router (default 0.2)
 
     Raises:
         AssertionError: If 503 response is not received when expected
     """
-    import aiohttp
-
-    from tests.utils.managed_process import ManagedProcess
 
     try:
         logger.info(
@@ -1094,8 +1189,8 @@ def _test_router_overload_503(
             "python",
             "-m",
             "dynamo.frontend",
-            "--busy-threshold",
-            str(busy_threshold),
+            "--active-decode-blocks-threshold",
+            str(blocks_threshold),
             "--kv-cache-block-size",
             str(block_size),
             "--router-mode",
@@ -1239,7 +1334,7 @@ def _test_router_indexers_sync(
     This validates that the snapshot mechanism works and routers can sync state from NATS.
 
     Args:
-        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
+        engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
         block_size: Block size for KV cache
         model_name: Model name to use for requests
         num_workers: Expected number of workers
@@ -1248,7 +1343,6 @@ def _test_router_indexers_sync(
     Raises:
         AssertionError: If router states don't synchronize correctly or snapshot is missing
     """
-    import nats
 
     # Use async to manage the test flow
     async def test_sync():
@@ -1494,7 +1588,7 @@ def _test_router_indexers_sync(
     logger.info("Indexers sync test completed successfully")
 
 
-def _test_router_disagg_decisions(
+def _test_router_decisions_disagg(
     prefill_workers,
     decode_workers,
     block_size: int,
@@ -1573,7 +1667,7 @@ def _test_router_disagg_decisions(
                     # Each iteration adds more content to extend the prefix
                     progressive_content = " ".join([base_content] * (i + 1))
 
-                    # Create payload with worker_id in extra_fields to get prefill/decode worker IDs
+                    # Create payload with worker_id and timing in extra_fields
                     payload = {
                         **test_payload,
                         "messages": [
@@ -1582,7 +1676,7 @@ def _test_router_disagg_decisions(
                                 "content": progressive_content,
                             }
                         ],
-                        "nvext": {"extra_fields": ["worker_id"]},
+                        "nvext": {"extra_fields": ["worker_id", "timing"]},
                         "stream": True,
                     }
 
@@ -1596,9 +1690,10 @@ def _test_router_disagg_decisions(
                             response.status == 200
                         ), f"Request {i + 1} failed with status {response.status}"
 
-                        # Collect all chunks and look for nvext with worker_id
+                        # Collect all chunks and look for nvext with worker_id and timing
                         prefill_wid = None
                         decode_wid = None
+                        timing_info = None
 
                         async for line in response.content:
                             if not line:
@@ -1614,30 +1709,41 @@ def _test_router_disagg_decisions(
 
                             try:
                                 data = json.loads(data_str)
-                                # Check for nvext.worker_id in the response
+                                # Check for nvext in the response
                                 nvext = data.get("nvext", {})
-                                worker_id_info = nvext.get("worker_id", {})
-
-                                if worker_id_info:
-                                    if "prefill_worker_id" in worker_id_info:
-                                        prefill_wid = worker_id_info[
-                                            "prefill_worker_id"
-                                        ]
-                                    if "decode_worker_id" in worker_id_info:
-                                        decode_wid = worker_id_info["decode_worker_id"]
+                                if nvext:
+                                    worker_id_info = nvext.get("worker_id", {})
+                                    if worker_id_info:
+                                        if "prefill_worker_id" in worker_id_info:
+                                            prefill_wid = worker_id_info[
+                                                "prefill_worker_id"
+                                            ]
+                                        if "decode_worker_id" in worker_id_info:
+                                            decode_wid = worker_id_info[
+                                                "decode_worker_id"
+                                            ]
+                                    # Timing info appears in final chunk
+                                    if "timing" in nvext:
+                                        timing_info = nvext["timing"]
 
                             except json.JSONDecodeError:
                                 continue
 
                         logger.info(
                             f"Request {i + 1}: prefill_worker_id={prefill_wid}, "
-                            f"decode_worker_id={decode_wid}"
+                            f"decode_worker_id={decode_wid}, timing={timing_info}"
                         )
 
                         if prefill_wid is not None:
                             prefill_worker_ids.append(prefill_wid)
                         if decode_wid is not None:
                             decode_worker_ids.append(decode_wid)
+
+                        # Verify timing info is present and valid
+                        assert (
+                            timing_info is not None
+                        ), f"Request {i + 1}: Expected timing info in final chunk, got None"
+                        verify_response_timing(timing_info)
 
                     # Small delay between requests
                     await asyncio.sleep(0.5)
@@ -1690,15 +1796,16 @@ def _test_router_decisions(
     model_name: str,
     request,
     test_dp_rank: bool = False,
+    block_size: int = BLOCK_SIZE,
 ):
     """Validate KV cache prefix reuse and worker routing by sending progressive requests with overlapping prefixes.
 
     Assumes engine workers are already initialized. Sends 4 progressive requests where each extends
-    the previous tokens by BLOCK_SIZE. The first request is forced to a specific worker (and optionally
+    the previous tokens by `block_size`. The first request is forced to a specific worker (and optionally
     dp_rank), and subsequent requests should naturally route to the same worker due to prefix reuse.
 
     Args:
-        engine_workers: MockerProcess or VLLMProcess instance (already initialized with __enter__())
+        engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
         endpoint: Endpoint of the engine workers
         model_name: Name of the model
         request: Pytest request fixture
@@ -1711,7 +1818,7 @@ def _test_router_decisions(
     kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
     kv_push_router = KvPushRouter(
         endpoint=endpoint,
-        block_size=BLOCK_SIZE,
+        block_size=block_size,
         kv_router_config=kv_router_config,
     )
 
@@ -1739,10 +1846,11 @@ def _test_router_decisions(
 
         # Send 4 progressive requests with overlapping prefixes
         cumulative_tokens = []
+        response_worker_ids: list[dict[str, Optional[int]]] = []
 
         for i in range(4):
-            # Add BLOCK_SIZE new random tokens
-            new_tokens = [random.randint(1, 10000) for _ in range(BLOCK_SIZE)]
+            # Add `block_size` new random tokens
+            new_tokens = [random.randint(1, 10000) for _ in range(block_size)]
             cumulative_tokens.extend(new_tokens)
 
             # Force first request to specific worker_id (and dp_rank if testing DP), let subsequent requests follow naturally
@@ -1760,7 +1868,7 @@ def _test_router_decisions(
                     log_msg += f" - FORCING worker_id={worker_id_override}"
             logger.info(log_msg)
 
-            await send_request_via_python_kv_router(
+            result = await send_request_via_python_kv_router(
                 kv_python_router=kv_push_router,
                 model_name=model_name,
                 token_ids=cumulative_tokens.copy(),
@@ -1772,6 +1880,13 @@ def _test_router_decisions(
                 },
                 worker_id=worker_id_override,
                 dp_rank=dp_rank_override,
+                return_worker_ids=True,
+            )
+            assert isinstance(result, dict), f"Expected dict result, got {type(result)}"
+            response_worker_ids.append(result)
+            logger.info(
+                f"Request {i + 1} response: prefill_worker_id={result.get('prefill_worker_id')}, "
+                f"decode_worker_id={result.get('decode_worker_id')}"
             )
 
             # Wait a bit between requests
@@ -1783,10 +1898,23 @@ def _test_router_decisions(
 
         # Dump events from the router
         events_json = await kv_push_router.dump_events()
-        return events_json, forced_worker_id, forced_dp_rank
+        return events_json, forced_worker_id, forced_dp_rank, response_worker_ids
 
     # Run the async test
-    events_json, expected_worker_id, expected_dp_rank = asyncio.run(test_sync())
+    (
+        events_json,
+        expected_worker_id,
+        expected_dp_rank,
+        response_worker_ids,
+    ) = asyncio.run(test_sync())
+
+    # Verify worker IDs from responses
+    verify_response_worker_ids(
+        response_worker_ids, "decode_worker_id", expected_worker_id
+    )
+    verify_response_worker_ids(
+        response_worker_ids, "prefill_worker_id", expected_worker_id
+    )
 
     # Parse events and count by worker routing key (worker_id or (worker_id, dp_rank))
     events = json.loads(events_json)
@@ -1882,3 +2010,271 @@ def _test_router_decisions(
             f"All events correctly routed to worker_id={expected_worker_id} as expected. "
             f"KV events synchronized correctly."
         )
+
+
+def _test_busy_threshold_endpoint(
+    engine_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    store_backend: str = "etcd",
+    request_plane: str = "nats",
+):
+    """Test that the /busy_threshold endpoint can be hit and responds correctly.
+
+    TODO: This doesn't actually test any e2e rejection for now. A proper test would:
+    1. Set a very low threshold
+    2. Send enough requests to exceed the threshold
+    3. Verify that subsequent requests are rejected with 503
+
+    For now, this test only verifies the endpoint is accessible and returns valid responses.
+
+    Args:
+        engine_workers: MockerProcess instance (already initialized with __enter__())
+        block_size: Block size for KV cache
+        request: Pytest request fixture for managing resources
+        frontend_port: Port for the frontend HTTP server
+        test_payload: Base test payload (used to extract model name)
+        store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        request_plane: Request plane to use ("nats" or "tcp"). Defaults to "nats".
+
+    Raises:
+        AssertionError: If endpoint responses are incorrect
+    """
+    # Initial thresholds - we need to start with these so the monitor is created
+    initial_active_decode_blocks_threshold = 0.9
+    initial_active_prefill_tokens_threshold = 1000  # Literal token count threshold
+
+    try:
+        # Start KV router frontend with initial thresholds to create monitor
+        logger.info(f"Starting KV router frontend on port {frontend_port}")
+        kv_router = KVRouterProcess(
+            request,
+            block_size,
+            frontend_port,
+            engine_workers.namespace,
+            store_backend,
+            blocks_threshold=initial_active_decode_blocks_threshold,
+            tokens_threshold=initial_active_prefill_tokens_threshold,
+            request_plane=request_plane,
+        )
+        kv_router.__enter__()
+
+        frontend_url = f"http://localhost:{frontend_port}"
+        busy_threshold_url = f"{frontend_url}/busy_threshold"
+
+        # Wait for workers to register with frontend
+        logger.info("Waiting for workers to register with frontend...")
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=engine_workers.num_workers,
+                timeout=120,
+            )
+        )
+
+        model_name = test_payload.get("model", "test-model")
+
+        async def test_busy_threshold_api():
+            async with aiohttp.ClientSession() as session:
+                # Test 1: GET /busy_threshold - list all thresholds
+                logger.info("Testing GET /busy_threshold (list all)")
+                async with session.get(busy_threshold_url) as response:
+                    assert (
+                        response.status == 200
+                    ), f"GET /busy_threshold failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        "thresholds" in data
+                    ), f"Expected 'thresholds' key in response: {data}"
+                    logger.info(f"GET /busy_threshold response: {data}")
+
+                # Test 2: POST /busy_threshold with model only (get thresholds)
+                logger.info(
+                    f"Testing POST /busy_threshold to get thresholds for model '{model_name}'"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={"model": model_name},
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold (get) failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("active_decode_blocks_threshold")
+                        == initial_active_decode_blocks_threshold
+                    ), f"Expected initial active_decode_blocks_threshold={initial_active_decode_blocks_threshold}: {data}"
+                    assert (
+                        data.get("active_prefill_tokens_threshold")
+                        == initial_active_prefill_tokens_threshold
+                    ), f"Expected initial active_prefill_tokens_threshold={initial_active_prefill_tokens_threshold}: {data}"
+                    logger.info(
+                        f"POST /busy_threshold (get) response: status={response.status}, data={data}"
+                    )
+
+                # Test 3: POST /busy_threshold to set active_decode_blocks_threshold only
+                test_active_decode_blocks_threshold = 0.75
+                logger.info(
+                    f"Testing POST /busy_threshold to set active_decode_blocks_threshold={test_active_decode_blocks_threshold}"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={
+                        "model": model_name,
+                        "active_decode_blocks_threshold": test_active_decode_blocks_threshold,
+                    },
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold (set blocks) failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("model") == model_name
+                    ), f"Expected model={model_name}: {data}"
+                    assert (
+                        data.get("active_decode_blocks_threshold")
+                        == test_active_decode_blocks_threshold
+                    ), f"Expected active_decode_blocks_threshold={test_active_decode_blocks_threshold}: {data}"
+                    logger.info(f"POST /busy_threshold (set blocks) response: {data}")
+
+                # Test 4: POST /busy_threshold to set active_prefill_tokens_threshold only
+                test_active_prefill_tokens_threshold = (
+                    2000  # Literal token count threshold
+                )
+                logger.info(
+                    f"Testing POST /busy_threshold to set active_prefill_tokens_threshold={test_active_prefill_tokens_threshold}"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={
+                        "model": model_name,
+                        "active_prefill_tokens_threshold": test_active_prefill_tokens_threshold,
+                    },
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold (set tokens) failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("active_prefill_tokens_threshold")
+                        == test_active_prefill_tokens_threshold
+                    ), f"Expected active_prefill_tokens_threshold={test_active_prefill_tokens_threshold}: {data}"
+                    logger.info(f"POST /busy_threshold (set tokens) response: {data}")
+
+                # Test 5: POST /busy_threshold to set both thresholds
+                new_active_decode_blocks_threshold = 0.5
+                new_active_prefill_tokens_threshold = (
+                    1200  # Literal token count threshold
+                )
+                logger.info(
+                    f"Testing POST /busy_threshold to set both thresholds: "
+                    f"active_decode_blocks={new_active_decode_blocks_threshold}, active_prefill_tokens={new_active_prefill_tokens_threshold}"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={
+                        "model": model_name,
+                        "active_decode_blocks_threshold": new_active_decode_blocks_threshold,
+                        "active_prefill_tokens_threshold": new_active_prefill_tokens_threshold,
+                    },
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold (set both) failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("active_decode_blocks_threshold")
+                        == new_active_decode_blocks_threshold
+                    ), f"Expected active_decode_blocks_threshold={new_active_decode_blocks_threshold}: {data}"
+                    assert (
+                        data.get("active_prefill_tokens_threshold")
+                        == new_active_prefill_tokens_threshold
+                    ), f"Expected active_prefill_tokens_threshold={new_active_prefill_tokens_threshold}: {data}"
+                    logger.info(f"POST /busy_threshold (set both) response: {data}")
+
+                # Test 6: GET /busy_threshold - verify thresholds appear in list
+                logger.info("Testing GET /busy_threshold to verify thresholds in list")
+                async with session.get(busy_threshold_url) as response:
+                    assert (
+                        response.status == 200
+                    ), f"GET /busy_threshold failed with status {response.status}"
+                    data = await response.json()
+                    thresholds = data.get("thresholds", [])
+                    model_entry = next(
+                        (t for t in thresholds if t["model"] == model_name), None
+                    )
+                    assert (
+                        model_entry is not None
+                    ), f"Expected model '{model_name}' in thresholds: {data}"
+                    assert (
+                        model_entry.get("active_decode_blocks_threshold")
+                        == new_active_decode_blocks_threshold
+                    ), f"Expected active_decode_blocks_threshold={new_active_decode_blocks_threshold}: {data}"
+                    assert (
+                        model_entry.get("active_prefill_tokens_threshold")
+                        == new_active_prefill_tokens_threshold
+                    ), f"Expected active_prefill_tokens_threshold={new_active_prefill_tokens_threshold}: {data}"
+                    logger.info(f"GET /busy_threshold (after set) response: {data}")
+
+                # Test 7: Invalid active_decode_blocks_threshold value (should fail validation)
+                logger.info(
+                    "Testing POST /busy_threshold with invalid active_decode_blocks_threshold (>1.0)"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={"model": model_name, "active_decode_blocks_threshold": 1.5},
+                ) as response:
+                    assert (
+                        response.status == 400
+                    ), f"Expected 400 for invalid active_decode_blocks_threshold, got {response.status}"
+                    data = await response.json()
+                    logger.info(
+                        f"POST /busy_threshold (invalid blocks) response: {data}"
+                    )
+
+                # Test 8: active_prefill_tokens_threshold accepts large values (should be valid)
+                logger.info(
+                    "Testing POST /busy_threshold with large active_prefill_tokens_threshold (valid)"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={"model": model_name, "active_prefill_tokens_threshold": 5000},
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"Expected 200 for large active_prefill_tokens_threshold, got {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("active_prefill_tokens_threshold") == 5000
+                    ), f"Expected active_prefill_tokens_threshold=5000: {data}"
+                    logger.info(
+                        f"POST /busy_threshold (large tokens threshold) response: {data}"
+                    )
+
+                # Test 9: Invalid active_prefill_tokens_threshold value (should fail validation for < 0)
+                # Note: Returns 422 because -1.0 can't be deserialized into u64 (type validation)
+                # vs Test 7 which returns 400 because 1.5 is a valid f64 but fails range validation
+                logger.info(
+                    "Testing POST /busy_threshold with invalid active_prefill_tokens_threshold (< 0)"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={"model": model_name, "active_prefill_tokens_threshold": -1.0},
+                ) as response:
+                    assert (
+                        response.status == 422
+                    ), f"Expected 422 for negative active_prefill_tokens_threshold, got {response.status}"
+                    data = await response.json()
+                    logger.info(
+                        f"POST /busy_threshold (invalid tokens) response: {data}"
+                    )
+
+                logger.info("All busy_threshold endpoint tests passed!")
+
+        asyncio.run(test_busy_threshold_api())
+
+    finally:
+        if "kv_router" in locals():
+            kv_router.__exit__(None, None, None)

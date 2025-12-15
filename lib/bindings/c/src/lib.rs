@@ -6,10 +6,12 @@ use libc::c_char;
 use once_cell::sync::OnceCell;
 use std::borrow::Cow;
 use std::ffi::CStr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use dynamo_llm::kv_router::{
-    indexer::compute_block_hash_for_seq, protocols::*, publisher::KvEventPublisher,
+use dynamo_llm::{
+    discovery::{KvWorkerMonitor, ModelWatcher},
+    kv_router::{indexer::compute_block_hash_for_seq, protocols::*, publisher::KvEventPublisher},
 };
 use dynamo_runtime::{DistributedRuntime, Worker};
 static WK: OnceCell<Worker> = OnceCell::new();
@@ -960,12 +962,13 @@ pub async fn create_worker_selection_pipeline_chat(
     tracing::debug!("Looking for model: {}", model_name);
     tracing::debug!("Namespace: {}", namespace);
 
-    use dynamo_llm::discovery::ModelWatcher;
-    let model_manager = std::sync::Arc::new(ModelManager::new());
+    let model_manager = Arc::new(ModelManager::new());
     let router_config = dynamo_llm::entrypoint::RouterConfig {
         router_mode,
         kv_router_config: kv_router_config.unwrap_or_default(),
-        busy_threshold,
+        // C bindings only support active_decode_blocks_threshold for now (via busy_threshold param)
+        active_decode_blocks_threshold: busy_threshold,
+        active_prefill_tokens_threshold: None,
         enforce_disagg: false,
     };
     let watcher = ModelWatcher::new(
@@ -1028,6 +1031,11 @@ pub async fn create_worker_selection_pipeline_chat(
         .tokenizer_hf()
         .with_context(|| format!("Failed to load tokenizer for: {}", card.display_name))?;
 
+    // Create worker monitor if busy_threshold is set
+    // Note: C bindings don't register with ModelManager, so HTTP endpoint won't see this
+    // C bindings only support active_decode_blocks_threshold for now (active_prefill_tokens_threshold defaults to 1000000 tokens = effectively disabled)
+    let worker_monitor = busy_threshold.map(|t| KvWorkerMonitor::new(client.clone(), t, 1000000));
+
     let engine = build_routed_pipeline::<
         NvCreateChatCompletionRequest,
         NvCreateChatCompletionStreamResponse,
@@ -1035,7 +1043,7 @@ pub async fn create_worker_selection_pipeline_chat(
         &card_with_local_files,
         &client,
         router_mode,
-        busy_threshold,
+        worker_monitor,
         chooser,
         hf_tokenizer,
         None,  // prefill_chooser

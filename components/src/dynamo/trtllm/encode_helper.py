@@ -241,7 +241,7 @@ class EncodeHelper:
 
         # Create readable operation with main embeddings tensor (works for both formats)
         descriptor = nixl_connect.Descriptor(encodings)
-        with connector.create_readable(descriptor) as readable_op:
+        with await connector.create_readable(descriptor) as readable_op:
             # Get the metadata for the readable operation
             op_metadata = readable_op.metadata()
 

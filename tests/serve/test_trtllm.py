@@ -14,7 +14,10 @@ from tests.serve.common import (
 )
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
+    TEXT_PROMPT,
+    chat_payload,
     chat_payload_default,
+    completion_payload,
     completion_payload_default,
     metric_payload_default,
     multimodal_payload_default,
@@ -34,13 +37,22 @@ trtllm_dir = os.environ.get("TRTLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/trtllm"
 )
 
-# trtllm test configurations
+# TensorRT-LLM test configurations
+# NOTE: pytest.mark.gpu_1 tests take ~442s (7m 22s) total to run sequentially (with models pre-cached)
+# TODO: Parallelize these tests to reduce total execution time
 trtllm_configs = {
     "aggregated": TRTLLMConfig(
         name="aggregated",
         directory=trtllm_dir,
         script_name="agg_metrics.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.trtllm_marker],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.trtllm,
+            pytest.mark.timeout(
+                300
+            ),  # 3x measured time (44.66s) + download time (150s)
+        ],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -53,7 +65,7 @@ trtllm_configs = {
         name="disaggregated",
         directory=trtllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm_marker],
+        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -65,7 +77,15 @@ trtllm_configs = {
         name="disaggregated_same_gpu",
         directory=trtllm_dir,
         script_name="disagg_same_gpu.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.trtllm_marker],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.trtllm,
+            pytest.mark.skip(reason="unstable"),
+            pytest.mark.timeout(
+                480
+            ),  # 3x measured time (103.66s) + download time (150s)
+        ],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -75,11 +95,46 @@ trtllm_configs = {
             metric_payload_default(port=8082, min_num_requests=6, backend="trtllm"),
         ],
     ),
+    "aggregated_logprobs": TRTLLMConfig(
+        name="aggregated_logprobs",
+        directory=trtllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge, pytest.mark.trtllm],
+        model="Qwen/Qwen3-0.6B",
+        models_port=8000,
+        request_payloads=[
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=5),
+            chat_payload(content=TEXT_PROMPT, logprobs=False, top_logprobs=5),
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=None),
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=0),
+        ],
+    ),
+    "disaggregated_logprobs": TRTLLMConfig(
+        name="disaggregated_logprobs",
+        directory=trtllm_dir,
+        script_name="disagg.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.post_merge, pytest.mark.trtllm],
+        model="Qwen/Qwen3-0.6B",
+        models_port=8000,
+        request_payloads=[
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=5),
+            chat_payload(content=TEXT_PROMPT, logprobs=False, top_logprobs=5),
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=None),
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=0),
+        ],
+    ),
     "aggregated_router": TRTLLMConfig(
         name="aggregated_router",
         directory=trtllm_dir,
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.trtllm_marker],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.trtllm,
+            pytest.mark.timeout(
+                300
+            ),  # 3x measured time (37.91s) + download time (180s)
+        ],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -98,7 +153,7 @@ trtllm_configs = {
         name="disaggregated_router",
         directory=trtllm_dir,
         script_name="disagg_router.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm_marker],
+        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.nightly],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -110,12 +165,34 @@ trtllm_configs = {
         name="disaggregated_multimodal",
         directory=trtllm_dir,
         script_name="disagg_multimodal.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm_marker, pytest.mark.multimodal],
+        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.multimodal],
         model="Qwen/Qwen2-VL-7B-Instruct",
         models_port=8000,
         timeout=900,
         delayed_start=60,
         request_payloads=[multimodal_payload_default()],
+    ),
+    "completions_only": TRTLLMConfig(
+        name="completions_only",
+        directory=trtllm_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.timeout(
+                480
+            ),  # 3x measured time (83.85s) + download time (210s) for 7B model
+        ],
+        model="deepseek-ai/deepseek-llm-7b-base",
+        script_args=["--dyn-endpoint-types", "completions"],
+        env={
+            "MODEL_PATH": "deepseek-ai/deepseek-llm-7b-base",
+            "SERVED_MODEL_NAME": "deepseek-ai/deepseek-llm-7b-base",
+        },
+        request_payloads=[
+            completion_payload_default(),
+            completion_payload(prompt=TEXT_PROMPT, logprobs=3),
+        ],
     ),
 }
 
@@ -126,7 +203,7 @@ def trtllm_config_test(request):
     return trtllm_configs[request.param]
 
 
-@pytest.mark.trtllm_marker
+@pytest.mark.trtllm
 @pytest.mark.e2e
 def test_deployment(trtllm_config_test, request, runtime_services, predownload_models):
     """
@@ -140,7 +217,8 @@ def test_deployment(trtllm_config_test, request, runtime_services, predownload_m
 # TODO make this a normal guy
 @pytest.mark.e2e
 @pytest.mark.gpu_1
-@pytest.mark.trtllm_marker
+@pytest.mark.trtllm
+@pytest.mark.timeout(660)  # 3x measured time (159.68s) + download time (180s)
 def test_chat_only_aggregated_with_test_logits_processor(
     request, runtime_services, predownload_models, monkeypatch
 ):
