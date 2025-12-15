@@ -19,6 +19,7 @@ from dynamo.vllm.multimodal_utils.model import (
     load_vision_model,
 )
 from dynamo.vllm.multimodal_utils.protocol import (
+    MultiModalGroup,
     MultiModalInput,
     MultiModalRequest,
     MyRequestOutput,
@@ -37,6 +38,7 @@ __all__ = [
     "construct_mm_data",
     "load_vision_model",
     "MultiModalInput",
+    "MultiModalGroup",
     "get_embedding_hash",
     "MultiModalRequest",
     "MyRequestOutput",
