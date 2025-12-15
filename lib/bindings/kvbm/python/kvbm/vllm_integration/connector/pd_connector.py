@@ -124,6 +124,9 @@ class PdConnector(MultiConnector):
         return metadata
 
     def bind_connector_metadata(self, connector_metadata: PdConnectorMetadata) -> None:
+        # Must call super() to set _connector_metadata so has_connector_metadata() returns True
+        # This is required for save_kv_layer to be called during the forward pass
+        super().bind_connector_metadata(connector_metadata)
         assert isinstance(connector_metadata, PdConnectorMetadata)
         if connector_metadata.extra_async_saves:
             self._extra_async_saves.update(connector_metadata.extra_async_saves)
