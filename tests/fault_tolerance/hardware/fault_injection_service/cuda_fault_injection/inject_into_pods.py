@@ -27,10 +27,31 @@ import os
 import subprocess
 import sys
 import time
+import warnings
+from contextlib import contextmanager
 from pathlib import Path
 
-from kubernetes import client, config
-from kubernetes.client.rest import ApiException
+# Suppress urllib3 deprecation warnings that break kubernetes client error handling
+# This is a known issue with kubernetes python client and urllib3 v2.x
+warnings.filterwarnings(
+    "ignore", message=".*HTTPResponse.getheaders.*", category=DeprecationWarning
+)
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="urllib3")
+
+from kubernetes import client, config  # noqa: E402
+from kubernetes.client.rest import ApiException  # noqa: E402
+
+
+@contextmanager
+def suppress_deprecation_warnings():
+    """Context manager to suppress deprecation warnings during kubernetes API calls.
+
+    The kubernetes client's exception handling calls deprecated urllib3 methods,
+    which can cause issues in certain Python/urllib3 version combinations.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        yield
 
 
 def get_library_path():
@@ -97,15 +118,22 @@ def create_cuda_fault_configmap(namespace, lib_path=None):
         )
 
         # Delete existing if present
-        try:
-            core_api.delete_namespaced_config_map("cuda-fault-injection-lib", namespace)
-            print("    → Deleted existing ConfigMap")
-            time.sleep(2)
-        except ApiException as e:
-            if e.status != 404:
-                print(f"    ⚠ Failed to delete existing ConfigMap: {e}")
+        with suppress_deprecation_warnings():
+            try:
+                core_api.delete_namespaced_config_map(
+                    "cuda-fault-injection-lib", namespace
+                )
+                print("    → Deleted existing ConfigMap")
+                time.sleep(2)
+            except ApiException as e:
+                if e.status != 404:
+                    print(f"    ⚠ Failed to delete existing ConfigMap: {e}")
+            except Exception:
+                # Ignore any other errors during cleanup (e.g., deprecation warnings raised as exceptions)
+                pass
         # Create new
-        core_api.create_namespaced_config_map(namespace, configmap)
+        with suppress_deprecation_warnings():
+            core_api.create_namespaced_config_map(namespace, configmap)
         print("[✓] ConfigMap created: cuda-fault-injection-lib")
         print("    → Source code will be compiled in init container (Linux-compatible)")
         return True
@@ -122,7 +150,8 @@ def delete_cuda_fault_configmap(namespace):
     """Delete the CUDA fault injection ConfigMap."""
     try:
         core_api = client.CoreV1Api()
-        core_api.delete_namespaced_config_map("cuda-fault-injection-lib", namespace)
+        with suppress_deprecation_warnings():
+            core_api.delete_namespaced_config_map("cuda-fault-injection-lib", namespace)
         print("[✓] ConfigMap deleted: cuda-fault-injection-lib")
         return True
     except ApiException as e:
@@ -369,13 +398,14 @@ def patch_deployment_env(
     dgd = None
     try:
         print(f"    → Attempting to get DynamoGraphDeployment: {deployment_name}")
-        dgd = custom_api.get_namespaced_custom_object(
-            group="nvidia.com",
-            version="v1alpha1",
-            namespace=namespace,
-            plural="dynamographdeployments",
-            name=deployment_name,
-        )
+        with suppress_deprecation_warnings():
+            dgd = custom_api.get_namespaced_custom_object(
+                group="nvidia.com",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="dynamographdeployments",
+                name=deployment_name,
+            )
         is_dgd = True
         print("    ✓ Found DynamoGraphDeployment")
 
@@ -472,13 +502,14 @@ def patch_deployment_env(
                         print(f"      → Retry attempt {attempt + 1}/{max_retries}")
                         time.sleep(0.5 * attempt)  # Exponential backoff
                         # Re-fetch the latest version
-                        dgd = custom_api.get_namespaced_custom_object(
-                            group="nvidia.com",
-                            version="v1alpha1",
-                            namespace=namespace,
-                            plural="dynamographdeployments",
-                            name=deployment_name,
-                        )
+                        with suppress_deprecation_warnings():
+                            dgd = custom_api.get_namespaced_custom_object(
+                                group="nvidia.com",
+                                version="v1alpha1",
+                                namespace=namespace,
+                                plural="dynamographdeployments",
+                                name=deployment_name,
+                            )
                         # Re-apply the patches to fresh copy
                         for service_name in patched_services:
                             if service_name in dgd.get("spec", {}).get("services", {}):
@@ -492,14 +523,15 @@ def patch_deployment_env(
                                     lib_path,
                                 )
 
-                    custom_api.patch_namespaced_custom_object(
-                        group="nvidia.com",
-                        version="v1alpha1",
-                        namespace=namespace,
-                        plural="dynamographdeployments",
-                        name=deployment_name,
-                        body=dgd,
-                    )
+                    with suppress_deprecation_warnings():
+                        custom_api.patch_namespaced_custom_object(
+                            group="nvidia.com",
+                            version="v1alpha1",
+                            namespace=namespace,
+                            plural="dynamographdeployments",
+                            name=deployment_name,
+                            body=dgd,
+                        )
                     break  # Success!
                 except ApiException as e:
                     if e.status == 409 and attempt < max_retries - 1:
@@ -526,18 +558,20 @@ def patch_deployment_env(
                 )
                 core_api = client.CoreV1Api()
                 try:
-                    worker_pods = core_api.list_namespaced_pod(
-                        namespace=namespace,
-                        label_selector=f"nvidia.com/dynamo-graph-deployment-name={deployment_name},nvidia.com/dynamo-component-type=worker",
-                    )
+                    with suppress_deprecation_warnings():
+                        worker_pods = core_api.list_namespaced_pod(
+                            namespace=namespace,
+                            label_selector=f"nvidia.com/dynamo-graph-deployment-name={deployment_name},nvidia.com/dynamo-component-type=worker",
+                        )
                     deleted_count = 0
                     for pod in worker_pods.items:
                         try:
-                            core_api.delete_namespaced_pod(
-                                name=pod.metadata.name,
-                                namespace=namespace,
-                                grace_period_seconds=0,
-                            )
+                            with suppress_deprecation_warnings():
+                                core_api.delete_namespaced_pod(
+                                    name=pod.metadata.name,
+                                    namespace=namespace,
+                                    grace_period_seconds=0,
+                                )
                             deleted_count += 1
                         except Exception as e:
                             print(
@@ -570,7 +604,8 @@ def patch_deployment_env(
     print("    → Not a DynamoGraphDeployment, trying standard Deployment...")
 
     try:
-        deployment = apps_api.read_namespaced_deployment(deployment_name, namespace)
+        with suppress_deprecation_warnings():
+            deployment = apps_api.read_namespaced_deployment(deployment_name, namespace)
     except ApiException as e:
         print(f"  Failed to read deployment {deployment_name}: {e}")
         return False
@@ -605,7 +640,8 @@ def patch_deployment_env(
             )
 
     try:
-        apps_api.patch_namespaced_deployment(deployment_name, namespace, deployment)
+        with suppress_deprecation_warnings():
+            apps_api.patch_namespaced_deployment(deployment_name, namespace, deployment)
         action = "enabled" if enable else "disabled"
         print(f"[✓] Deployment patched - CUDA fault injection {action}")
         return True
@@ -637,11 +673,12 @@ def get_worker_pods(deployment_name, namespace, node_name=None):
     dgd_label_selector = f"nvidia.com/dynamo-graph-deployment-name={deployment_name},nvidia.com/dynamo-component-type=worker"
 
     try:
-        pods = core_api.list_namespaced_pod(
-            namespace=namespace,
-            label_selector=dgd_label_selector,
-            field_selector=field_selector,
-        )
+        with suppress_deprecation_warnings():
+            pods = core_api.list_namespaced_pod(
+                namespace=namespace,
+                label_selector=dgd_label_selector,
+                field_selector=field_selector,
+            )
         if pods.items:
             return pods.items
     except ApiException as e:
@@ -650,7 +687,8 @@ def get_worker_pods(deployment_name, namespace, node_name=None):
     # Fallback: Try standard Deployment
     # Get the deployment to find its label selector
     try:
-        deployment = apps_api.read_namespaced_deployment(deployment_name, namespace)
+        with suppress_deprecation_warnings():
+            deployment = apps_api.read_namespaced_deployment(deployment_name, namespace)
 
         # Extract match labels from deployment spec
         if deployment.spec.selector and deployment.spec.selector.match_labels:
@@ -659,11 +697,12 @@ def get_worker_pods(deployment_name, namespace, node_name=None):
             ]
             std_label_selector = ",".join(label_parts)
 
-            pods = core_api.list_namespaced_pod(
-                namespace=namespace,
-                label_selector=std_label_selector,
-                field_selector=field_selector,
-            )
+            with suppress_deprecation_warnings():
+                pods = core_api.list_namespaced_pod(
+                    namespace=namespace,
+                    label_selector=std_label_selector,
+                    field_selector=field_selector,
+                )
             if pods.items:
                 return pods.items
     except ApiException as e:
@@ -713,7 +752,7 @@ def inject_into_running_pods(deployment_name, namespace, node_name=None):
 
 
 def inject_via_deployment_patch(
-    deployment_name, namespace, target_node=None, xid_type=79
+    deployment_name, namespace, target_node=None, xid_type=79, passthrough_mode=False
 ):
     """Inject by patching deployment and rolling restart (persistent).
 
@@ -722,6 +761,7 @@ def inject_via_deployment_patch(
         namespace: Kubernetes namespace
         target_node: Optional node to pin pods to (simulates real XID behavior)
         xid_type: XID error type to simulate (79, 48, 94, 95, 43, 74)
+        passthrough_mode: If True, library loads but doesn't inject faults until toggled
     """
     print("\n" + "=" * 80)
     print("Method 2: Patch Deployment (Persistent)")
@@ -754,38 +794,24 @@ def inject_via_deployment_patch(
         copy_library_to_pod(pod.metadata.name, namespace, lib_path)
 
     # Step 3: Patch deployment
-    print("\n[3/4] Patching deployment to enable CUDA fault injection...")
+    mode_str = (
+        "passthrough (toggle-controlled)"
+        if passthrough_mode
+        else "active (immediate crash)"
+    )
+    print(f"\n[3/4] Patching deployment to enable CUDA fault injection ({mode_str})...")
     if not patch_deployment_env(
         deployment_name,
         namespace,
         enable=True,
         target_node=target_node,
         xid_type=xid_type,
+        passthrough_mode=passthrough_mode,
     ):
         return False
 
-    # Step 4: Trigger rolling restart
-    print("\n[4/4] Triggering pod restart...")
-
-    # For DynamoGraphDeployment, we need to delete pods to trigger restart
-    # (kubectl rollout restart doesn't work with custom resources)
-    core_api = client.CoreV1Api()
-
-    print(
-        f"[→] Deleting {len(pods)} worker pods to trigger restart with new env vars..."
-    )
-    for pod in pods:
-        try:
-            core_api.delete_namespaced_pod(
-                name=pod.metadata.name,
-                namespace=namespace,
-                grace_period_seconds=30,  # Graceful shutdown
-            )
-            print(f"    ✓ Deleted: {pod.metadata.name}")
-        except ApiException as e:
-            print(f"    ✗ Failed to delete {pod.metadata.name}: {e}")
-
-    print("\n[→] Waiting for new pods to start with CUDA fault injection...")
+    # Step 4: Wait for new pods (pods already deleted in step 3 by patch function)
+    print("\n[4/4] Waiting for new pods to start with CUDA fault injection...")
     time.sleep(10)
 
     # Wait for pods to be recreated
@@ -802,9 +828,18 @@ def inject_via_deployment_patch(
 
             if all_running:
                 print(f"\n[✓] All {len(new_pods)} pods restarted successfully")
-                print("[✓] CUDA fault injection is now ACTIVE")
-                print("\n⚠ Pods will crash with 'No CUDA-capable device' error")
-                print("   This simulates XID 79 (GPU falls off bus)")
+                if passthrough_mode:
+                    print("[✓] CUDA fault injection is in PASSTHROUGH mode")
+                    print(
+                        "\n   Pods are running normally. Use toggle to activate faults:"
+                    )
+                    print(
+                        "   curl -X POST 'http://localhost:8080/api/v1/faults/gpu/toggle-cuda?namespace=<ns>&enable=true'"
+                    )
+                else:
+                    print("[✓] CUDA fault injection is now ACTIVE")
+                    print("\n⚠ Pods will crash with 'No CUDA-capable device' error")
+                    print("   This simulates XID 79 (GPU falls off bus)")
                 return True
 
         time.sleep(5)
@@ -840,9 +875,10 @@ def remove_injection(deployment_name, namespace):
 
     for pod in pods:
         try:
-            core_api.delete_namespaced_pod(
-                name=pod.metadata.name, namespace=namespace, grace_period_seconds=30
-            )
+            with suppress_deprecation_warnings():
+                core_api.delete_namespaced_pod(
+                    name=pod.metadata.name, namespace=namespace, grace_period_seconds=30
+                )
             print(f"    ✓ Deleted: {pod.metadata.name}")
         except ApiException as e:
             print(f"    ✗ Failed to delete {pod.metadata.name}: {e}")
@@ -977,6 +1013,12 @@ Examples:
     )
     parser.add_argument("--remove", action="store_true", help="Remove injection")
     parser.add_argument("--verify", action="store_true", help="Verify injection status")
+    parser.add_argument(
+        "--passthrough",
+        action="store_true",
+        help="Load library in passthrough mode (CUDA_FAULT_INJECTION_ENABLED=0). "
+        "Use toggle file or API to enable faults later.",
+    )
 
     args = parser.parse_args()
 
@@ -1004,7 +1046,7 @@ Examples:
         remove_injection(args.deployment, args.namespace)
     elif args.patch_deployment:
         inject_via_deployment_patch(
-            args.deployment, args.namespace, args.node, args.xid_type
+            args.deployment, args.namespace, args.node, args.xid_type, args.passthrough
         )
     else:
         inject_into_running_pods(args.deployment, args.namespace, args.node)
