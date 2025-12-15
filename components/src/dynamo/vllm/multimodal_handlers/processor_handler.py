@@ -76,7 +76,7 @@ class ProcessorHandler(ProcessMixIn):
     async def _generate(
         self,
         raw_request: Union[CompletionRequest, ChatCompletionRequest],
-        multimodal_input: MultiModalInput,
+        multimodal_inputs: list[MultiModalInput],
         request_type: RequestType,
         context,
     ):
@@ -94,7 +94,7 @@ class ProcessorHandler(ProcessMixIn):
             engine_prompt=engine_prompt,
             sampling_params=sampling_params,
             request_id=request_id,
-            multimodal_input=multimodal_input,
+            multimodal_inputs=multimodal_inputs,
         )
 
         # model_dump_json() serializes the request to JSON string
@@ -157,11 +157,23 @@ class ProcessorHandler(ProcessMixIn):
 
         # Safely extract user text
         try:
+            # [gluo FIXME] only work if user message is the first message
             user_text = raw_request.messages[0].content[0].text
         except (IndexError, AttributeError) as e:
             raise ValueError(f"Invalid message structure: {e}")
 
         prompt = template.replace("<prompt>", user_text)
+        # [gluo FIXME] only for Qwen2.5-VL-7B-Instruct
+        image_template = "<|vision_start|><|image_pad|><|vision_end|>"
+        video_template = "<|vision_start|><|video_pad|><|vision_end|>"
+        vision_prompt = ""
+        for message in raw_request.messages:
+            for item in message.content:
+                if item.type != "image_url":
+                    vision_prompt += image_template
+                if item.type != "video_url":
+                    vision_prompt += video_template
+        prompt = prompt.replace("<mm_placeholder>", vision_prompt)
 
         msg = {
             "role": "user",
@@ -179,22 +191,31 @@ class ProcessorHandler(ProcessMixIn):
             temperature=raw_request.temperature,
             request_id=str(uuid.uuid4()),
         )
-        multimodal_input = MultiModalInput()
+        multimodal_inputs = []
+        set_type = ""
 
         for message in raw_request.messages:
             for item in message.content:
                 if item.type == "image_url":
-                    multimodal_input.image_url = item.image_url.url
-                elif item.type == "video_url":
-                    if multimodal_input.image_url is not None:
+                    if set_type == "video":
                         raise ValueError("Cannot provide both image and video URLs")
+                    multimodal_input = MultiModalInput()
+                    multimodal_input.image_url = item.image_url.url
+                    multimodal_inputs.append(multimodal_input)
+                    set_type = "image"
+                elif item.type == "video_url":
+                    if set_type == "image":
+                        raise ValueError("Cannot provide both image and video URLs")
+                    multimodal_input = MultiModalInput()
                     multimodal_input.video_url = item.video_url.url
+                    multimodal_inputs.append(multimodal_input)
+                    set_type = "video"
 
-        if multimodal_input.image_url is None and multimodal_input.video_url is None:
+        if not multimodal_inputs:
             raise ValueError("Either image URL or video URL is required")
 
         async for response in self._generate(
-            chat_request, multimodal_input, RequestType.CHAT, context
+            chat_request, multimodal_inputs, RequestType.CHAT, context
         ):
             logger.debug(
                 f"Generated response type {type(response)}, content: {response}"
