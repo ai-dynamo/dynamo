@@ -198,7 +198,19 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                         image_embeds=embeddings,
                         image_grid_thw=mi.image_grid_thw,
                     )
-                    multi_modal_data["image"].append(mm_data["image"])
+                    if isinstance(mm_data["image"], dict):
+                        if multi_modal_data["image"] == []:
+                            multi_modal_data["image"] = mm_data["image"]
+                        else:
+                            # Merging tensors
+                            multi_modal_data["image"]["image_embeds"].cat(
+                                mm_data["image"]["image_embeds"]
+                            )
+                            multi_modal_data["image"]["image_grid_thw"].cat(
+                                mm_data["image"]["image_grid_thw"]
+                            )
+                    else:
+                        multi_modal_data["image"].append(mm_data["image"])
             else:
                 # Use PIL image instead of image embeddings
                 multi_modal_data["image"].append(
