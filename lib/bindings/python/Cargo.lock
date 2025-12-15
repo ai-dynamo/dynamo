@@ -1648,6 +1648,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "crossbeam-channel",
  "cudarc",
  "derive-getters",
  "dlpark",
