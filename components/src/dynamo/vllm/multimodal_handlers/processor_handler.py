@@ -18,6 +18,7 @@ from dynamo.runtime import Client
 from ..multimodal_utils import (
     ChatProcessor,
     CompletionsProcessor,
+    MultiModalGroup,
     MultiModalInput,
     MultiModalRequest,
     MyRequestOutput,
@@ -201,14 +202,18 @@ class ProcessorHandler(ProcessMixIn):
                         raise ValueError("Cannot provide both image and video URLs")
                     multimodal_input = MultiModalInput()
                     multimodal_input.image_url = item.image_url.url
-                    multimodal_inputs.append(multimodal_input)
+                    multimodal_inputs.append(
+                        MultiModalGroup(multimodal_input=multimodal_input)
+                    )
                     set_type = "image"
                 elif item.type == "video_url":
                     if set_type == "image":
                         raise ValueError("Cannot provide both image and video URLs")
                     multimodal_input = MultiModalInput()
                     multimodal_input.video_url = item.video_url.url
-                    multimodal_inputs.append(multimodal_input)
+                    multimodal_inputs.append(
+                        MultiModalGroup(multimodal_input=multimodal_input)
+                    )
                     set_type = "video"
 
         if not multimodal_inputs:
