@@ -40,7 +40,7 @@ except ImportError as e:
 
 CACHE_SIZE_MAXIMUM = 8
 
-TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 0))
+TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
 
 
 class EncodeWorkerHandler:

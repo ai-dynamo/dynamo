@@ -24,7 +24,7 @@ from ..multimodal_utils import (
 
 logger = logging.getLogger(__name__)
 
-TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 0))
+TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
 
 
 class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
@@ -154,21 +154,21 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
 
         multi_modal_data = defaultdict(list)
-        for multimodal_input in request.multimodal_inputs:
+        for mi in request.multimodal_inputs:
             if (
-                multimodal_input.image_url is None
-                and multimodal_input.video_url is None
+                mi.multimodal_input.image_url is None
+                and mi.multimodal_input.video_url is None
             ):
                 # Process embeddings using the connector
                 # Create a descriptor based on the embedding shape.
                 if TRANSFER_LOCAL:
                     logger.info("PD: Loading local safetensors file")
-                    embeddings = safetensors.torch.load_file(
-                        request.serialized_request
-                    )["ec_cache"]
+                    embeddings = safetensors.torch.load_file(mi.serialized_request)[
+                        "ec_cache"
+                    ]
                 else:
                     embeddings = torch.empty(
-                        request.embeddings_shape,
+                        mi.embeddings_shape,
                         dtype=self.EMBEDDINGS_DTYPE,
                         device=self.EMBEDDINGS_DEVICE,
                     )
@@ -180,7 +180,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                         )
 
                     read_op = await self._connector.begin_read(
-                        request.serialized_request, descriptor
+                        mi.serialized_request, descriptor
                     )
                     await read_op.wait_for_completion()
                 if "video" in self.config.model.lower():
@@ -196,13 +196,13 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                         self.config.model,
                         self.EMBEDDINGS_DTYPE,
                         image_embeds=embeddings,
-                        image_grid_thw=request.image_grid_thw,
+                        image_grid_thw=mi.image_grid_thw,
                     )
                     multi_modal_data["image"].append(mm_data["image"])
             else:
                 # Use PIL image instead of image embeddings
                 multi_modal_data["image"].append(
-                    await self.image_loader.load_image(multimodal_input.image_url)
+                    await self.image_loader.load_image(mi.multimodal_input.image_url)
                 )
 
         # Remove the image features from the request as they are not required
