@@ -566,9 +566,9 @@ def create_selection_handler(
                     )
                     _selection_complete.set()
                     selection_queue.put((row_idx, decode_selection["idx"]))
-                    return f"✅ Configuration selected! Prefill config #{row_idx}, Decode config #{decode_selection['idx']}. Processing..."
+                    return f"✅  Configuration selected! Prefill config #{row_idx}, Decode config #{decode_selection['idx']}. Processing..."
                 else:
-                    return f"ℹ️ Prefill config #{row_idx} selected. Please select a Decode configuration."
+                    return f"ℹ️  Prefill config #{row_idx} selected. Please select a Decode configuration."
             elif plot_type == PlotType.DECODE:
                 decode_selection["idx"] = row_idx
                 logger.info(f"Decode selected: {row_idx}")
@@ -579,15 +579,15 @@ def create_selection_handler(
                     )
                     _selection_complete.set()
                     selection_queue.put((prefill_selection["idx"], row_idx))
-                    return f"✅ Configuration selected! Prefill config #{prefill_selection['idx']}, Decode config #{row_idx}. Processing..."
+                    return f"✅  Configuration selected! Prefill config #{prefill_selection['idx']}, Decode config #{row_idx}. Processing..."
                 else:
-                    return f"ℹ️ Decode config #{row_idx} selected. Please select a Prefill configuration."
+                    return f"ℹ️  Decode config #{row_idx} selected. Please select a Prefill configuration."
 
             return ""
 
         except Exception as e:
             logger.error(f"Error handling selection: {e}")
-            return f"❌ Error: {str(e)}"
+            return f"❌  Error: {str(e)}"
 
     return handle_selection
 
