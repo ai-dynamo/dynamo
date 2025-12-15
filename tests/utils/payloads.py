@@ -14,13 +14,16 @@
 # limitations under the License.
 
 import logging
+import math
 import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from dynamo import prometheus_names
+import requests
+
+from dynamo import prometheus_names  # type: ignore[attr-defined]
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +159,47 @@ class ChatPayload(BasePayload):
 
 
 @dataclass
+class ChatPayloadWithLogprobs(ChatPayload):
+    """Chat payload that validates logprobs in response."""
+
+    def validate(self, response: Any, content: str) -> None:
+        """Validate response contains logprobs fields."""
+        super().validate(response, content)
+
+        result = response.json()
+        choice = result["choices"][0]
+
+        # Validate logprobs field exists
+        assert "logprobs" in choice, "Missing 'logprobs' in choice"
+
+        logprobs_data = choice["logprobs"]
+        if logprobs_data is not None:
+            assert "content" in logprobs_data, "Missing 'content' in logprobs"
+            content_logprobs = logprobs_data["content"]
+
+            if content_logprobs:
+                # Validate structure of logprobs
+                for item in content_logprobs:
+                    assert "token" in item, "Missing 'token' in logprobs content"
+                    assert "logprob" in item, "Missing 'logprob' in logprobs content"
+                    assert (
+                        "top_logprobs" in item
+                    ), "Missing 'top_logprobs' in logprobs content"
+
+                    # Sanity check: logprob should be valid (not nan/inf/positive)
+                    logprob_val = item["logprob"]
+                    assert not math.isnan(logprob_val), "logprob is NaN"
+                    assert not math.isinf(logprob_val), "logprob is infinite"
+                    assert (
+                        logprob_val <= 0
+                    ), f"logprob should be <= 0, got {logprob_val}"
+
+                logger.info(
+                    f"✓ Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
+                )
+
+
+@dataclass
 class ToolCallingChatPayload(ChatPayload):
     """ChatPayload that validates tool calls in the response."""
 
@@ -199,6 +243,93 @@ class ToolCallingChatPayload(ChatPayload):
 
 
 @dataclass
+class LoraTestChatPayload(ChatPayload):
+    """
+    Chat payload that loads a LoRA adapter before sending inference requests.
+
+    This payload first loads the specified LoRA adapter via the system API,
+    then sends chat completion requests using the LoRA model.
+    """
+
+    def __init__(
+        self,
+        body: dict,
+        lora_name: str,
+        s3_uri: str,
+        system_port: int = 8081,
+        repeat_count: int = 1,
+        expected_response: Optional[list] = None,
+        expected_log: Optional[list] = None,
+        timeout: int = 60,
+    ):
+        super().__init__(
+            body=body,
+            repeat_count=repeat_count,
+            expected_response=expected_response or [],
+            expected_log=expected_log or [],
+            timeout=timeout,
+        )
+        self.system_port = system_port
+        self.lora_name = lora_name
+        self.s3_uri = s3_uri
+        self._lora_loaded = False
+
+    def _ensure_lora_loaded(self) -> None:
+        """Ensure the LoRA adapter is loaded before making inference requests"""
+        if not self._lora_loaded:
+            # Import the load_lora_adapter function
+            # Note: This import is done here to avoid circular dependencies
+            from tests.serve.lora_utils import load_lora_adapter
+
+            load_lora_adapter(
+                system_port=self.system_port,
+                lora_name=self.lora_name,
+                s3_uri=self.s3_uri,
+                timeout=self.timeout,
+            )
+
+            # Wait for the LoRA model to appear in /v1/models
+            models_url = f"http://{self.host}:{self.port}/v1/models"
+            start_time = time.time()
+
+            logger.info(
+                f"Waiting for LoRA model '{self.lora_name}' to appear in /v1/models..."
+            )
+
+            while time.time() - start_time < self.timeout:
+                try:
+                    response = requests.get(models_url, timeout=5)
+                    if response.status_code == 200:
+                        data = response.json()
+                        models = data.get("data", [])
+                        model_ids = [m.get("id", "") for m in models]
+
+                        if self.lora_name in model_ids:
+                            logger.info(
+                                f"LoRA model '{self.lora_name}' is now available"
+                            )
+                            self._lora_loaded = True
+                            return
+
+                        logger.debug(
+                            f"Available models: {model_ids}, waiting for '{self.lora_name}'..."
+                        )
+                except requests.RequestException as e:
+                    logger.debug(f"Error checking /v1/models: {e}")
+
+                time.sleep(1)
+
+            raise RuntimeError(
+                f"Timeout: LoRA model '{self.lora_name}' did not appear in /v1/models within {self.timeout}s"
+            )
+
+    def url(self) -> str:
+        """Load LoRA before first request, then return URL"""
+        self._ensure_lora_loaded()
+        return super().url()
+
+
+@dataclass
 class CompletionPayload(BasePayload):
     """Payload for completions endpoint."""
 
@@ -218,6 +349,53 @@ class CompletionPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return CompletionPayload.extract_text(response)
+
+
+@dataclass
+class CompletionPayloadWithLogprobs(CompletionPayload):
+    """Completion payload that validates logprobs in response."""
+
+    def validate(self, response: Any, content: str) -> None:
+        """Validate response contains logprobs fields."""
+        super().validate(response, content)
+
+        result = response.json()
+        choice = result["choices"][0]
+
+        # Validate logprobs field exists
+        assert "logprobs" in choice, "Missing 'logprobs' in choice"
+
+        logprobs_data = choice["logprobs"]
+        if logprobs_data is not None:
+            assert (
+                "token_logprobs" in logprobs_data
+            ), "Missing 'token_logprobs' in logprobs"
+            assert "tokens" in logprobs_data, "Missing 'tokens' in logprobs"
+
+            token_logprobs = logprobs_data["token_logprobs"]
+            tokens = logprobs_data["tokens"]
+
+            if token_logprobs:
+                assert len(token_logprobs) == len(
+                    tokens
+                ), "Mismatch between token_logprobs and tokens length"
+
+                # Sanity check: each logprob should be valid (not nan/inf/positive)
+                for i, logprob_val in enumerate(token_logprobs):
+                    if logprob_val is not None:  # First token can be None
+                        assert not math.isnan(
+                            logprob_val
+                        ), f"logprob at index {i} is NaN"
+                        assert not math.isinf(
+                            logprob_val
+                        ), f"logprob at index {i} is infinite"
+                        assert (
+                            logprob_val <= 0
+                        ), f"logprob at index {i} should be <= 0, got {logprob_val}"
+
+                logger.info(
+                    f"✓ Logprobs validation passed: found {len(token_logprobs)} tokens with logprobs"
+                )
 
 
 @dataclass

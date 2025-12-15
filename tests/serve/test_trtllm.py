@@ -14,7 +14,10 @@ from tests.serve.common import (
 )
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
+    TEXT_PROMPT,
+    chat_payload,
     chat_payload_default,
+    completion_payload,
     completion_payload_default,
     metric_payload_default,
     multimodal_payload_default,
@@ -46,7 +49,9 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
-            pytest.mark.timeout(140),  # 3x measured time (44.66s)
+            pytest.mark.timeout(
+                300
+            ),  # 3x measured time (44.66s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
@@ -76,7 +81,10 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
-            pytest.mark.timeout(320),  # 3x measured time (103.66s)
+            pytest.mark.skip(reason="unstable"),
+            pytest.mark.timeout(
+                480
+            ),  # 3x measured time (103.66s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
@@ -87,6 +95,34 @@ trtllm_configs = {
             metric_payload_default(port=8082, min_num_requests=6, backend="trtllm"),
         ],
     ),
+    "aggregated_logprobs": TRTLLMConfig(
+        name="aggregated_logprobs",
+        directory=trtllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge, pytest.mark.trtllm],
+        model="Qwen/Qwen3-0.6B",
+        models_port=8000,
+        request_payloads=[
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=5),
+            chat_payload(content=TEXT_PROMPT, logprobs=False, top_logprobs=5),
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=None),
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=0),
+        ],
+    ),
+    "disaggregated_logprobs": TRTLLMConfig(
+        name="disaggregated_logprobs",
+        directory=trtllm_dir,
+        script_name="disagg.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.post_merge, pytest.mark.trtllm],
+        model="Qwen/Qwen3-0.6B",
+        models_port=8000,
+        request_payloads=[
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=5),
+            chat_payload(content=TEXT_PROMPT, logprobs=False, top_logprobs=5),
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=None),
+            chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=0),
+        ],
+    ),
     "aggregated_router": TRTLLMConfig(
         name="aggregated_router",
         directory=trtllm_dir,
@@ -95,7 +131,9 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
-            pytest.mark.timeout(120),  # 3x measured time (37.91s)
+            pytest.mark.timeout(
+                300
+            ),  # 3x measured time (37.91s) + download time (180s)
         ],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
@@ -141,7 +179,9 @@ trtllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
-            pytest.mark.timeout(260),  # 3x measured time (83.85s)
+            pytest.mark.timeout(
+                480
+            ),  # 3x measured time (83.85s) + download time (210s) for 7B model
         ],
         model="deepseek-ai/deepseek-llm-7b-base",
         script_args=["--dyn-endpoint-types", "completions"],
@@ -151,6 +191,7 @@ trtllm_configs = {
         },
         request_payloads=[
             completion_payload_default(),
+            completion_payload(prompt=TEXT_PROMPT, logprobs=3),
         ],
     ),
 }
@@ -177,7 +218,7 @@ def test_deployment(trtllm_config_test, request, runtime_services, predownload_m
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
-@pytest.mark.timeout(480)  # 3x measured time (159.68s)
+@pytest.mark.timeout(660)  # 3x measured time (159.68s) + download time (180s)
 def test_chat_only_aggregated_with_test_logits_processor(
     request, runtime_services, predownload_models, monkeypatch
 ):

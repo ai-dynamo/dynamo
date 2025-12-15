@@ -69,13 +69,15 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker
-      - name: Login to ECR
+      - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Linter
         shell: bash
         env:
@@ -90,7 +92,6 @@ jobs:
         run: |
           cd deploy/cloud/operator
           docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
@@ -122,11 +123,7 @@ jobs:
           push_tags: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
           aws_push: 'false'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   vllm:
     needs: changed-files
@@ -146,6 +143,15 @@ jobs:
           echo ${K8S_NODE_NAME}
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Build Container
         id: build-image
         uses: ./.github/actions/docker-build
@@ -157,7 +163,6 @@ jobs:
           runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
           cuda_version: ${{ matrix.platform.arch == 'arm64' && '129' || '' }}
           torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -176,21 +181,18 @@ jobs:
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
           push_tags: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
-          # OPS-1145: Switch aws_push to true
-          aws_push: 'false'
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-vllm-{0}', matrix.platform.arch) || '' }}
+          aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
       - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "pre_merge and vllm"
+          pytest_marks: "pre_merge and vllm and (gpu_0 or gpu_1)"
           framework: "vllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
@@ -213,7 +215,15 @@ jobs:
           echo ${K8S_NODE_NAME}
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Build Container
         id: build-image
         uses: ./.github/actions/docker-build
@@ -221,41 +231,29 @@ jobs:
           framework: sglang
           target: runtime
           platform: 'linux/${{ matrix.platform.arch }}'
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-      - name: Login to Container Registries
-        uses: ./.github/actions/docker-login
-        with:
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
           push_tags: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
-          # OPS-1145: Switch aws_push to true
-          aws_push: 'false'
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-sglang-{0}', matrix.platform.arch) || '' }}
+          aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
       - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "pre_merge and sglang"
+          pytest_marks: "pre_merge and sglang and (gpu_0 or gpu_1)"
           framework: "sglang"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
@@ -278,7 +276,15 @@ jobs:
           echo ${K8S_NODE_NAME}
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Build Container
         id: build-image
         uses: ./.github/actions/docker-build
@@ -286,41 +292,29 @@ jobs:
           framework: trtllm
           target: runtime
           platform: 'linux/${{ matrix.platform.arch }}'
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-      - name: Login to Container Registries
-        uses: ./.github/actions/docker-login
-        with:
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
           push_tags: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
-          # OPS-1145: Switch aws_push to true
-          aws_push: 'false'
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-trtllm-{0}', matrix.platform.arch) || '' }}
+          aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
       - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "pre_merge and trtllm"
+          pytest_marks: "pre_merge and trtllm and (gpu_0 or gpu_1)"
           framework: "trtllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
@@ -416,6 +410,7 @@ jobs:
           export KUBECONFIG=$(pwd)/.kubeconfig
           kubectl config set-context --current --namespace=$NAMESPACE
       - name: Run Fault Tolerance Tests
+        id: run-ft-tests
         run: |
           set -x
           export KUBECONFIG=$(pwd)/.kubeconfig
@@ -437,14 +432,49 @@ jobs:
           pip install -r container/deps/requirements.test.txt
           pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
 
-          # Run the pytest command (tests orchestrate K8s, don't need dynamo package)
+          # Create test-results directory
+          mkdir -p test-results
+
+          # Run the pytest command with JUnit XML output
+          set +e  # Don't exit on test failures
           pytest tests/fault_tolerance/deploy/test_deployment.py \
             -m 'k8s and fault_tolerance' \
             -k '${{ matrix.framework.test_scenario }}' \
             -s -v \
             --namespace ${NAMESPACE} \
             --image ${IMAGE} \
-            --client-type legacy
+            --client-type legacy \
+            --junitxml=test-results/pytest_ft_report.xml \
+            --tb=short
+
+          TEST_EXIT_CODE=$?
+          echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+          echo "🧪 Fault tolerance tests completed with exit code: ${TEST_EXIT_CODE}"
+
+          exit ${TEST_EXIT_CODE}
+        continue-on-error: true
+
+      - name: Process Fault Tolerance Test Results
+        if: always()
+        run: |
+          set -x
+
+          # Rename JUnit XML with unique naming if it exists
+          if [ -f "test-results/pytest_ft_report.xml" ]; then
+            mv "test-results/pytest_ft_report.xml" "test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml"
+            echo "✅ JUnit XML report renamed with unique identifier"
+          else
+            echo "⚠️  JUnit XML report not found"
+          fi
+
+      - name: Upload Fault Tolerance Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.framework.name }}-fault_tolerance-amd64-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml
+          retention-days: 7
+
       - name: Cleanup
         if: always()
         timeout-minutes: 5
@@ -467,56 +497,6 @@ jobs:
           echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
           kubectl delete namespace $NAMESPACE || true
           echo "Namespace $NAMESPACE completed."
-
-  # Upload metrics for this workflow and all its jobs
-  upload-workflow-metrics:
-    name: Upload Workflow Metrics
-    runs-on: gitlab
-    if: always()  # Always run, even if other jobs fail
-    needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-
-      - name: Download build metrics
-        uses: actions/download-artifact@v4
-        with:
-          pattern: build-metrics-*
-          path: build-metrics/
-          merge-multiple: true
-        continue-on-error: true  # Don't fail if artifacts don't exist
-
-      - name: Download test results
-        uses: actions/download-artifact@v4
-        with:
-          pattern: test-results-*
-          path: test-results/
-          merge-multiple: true
-        continue-on-error: true  # Don't fail if artifacts don't exist
-
-      - name: Upload Complete Workflow Metrics
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WORKFLOW_INDEX: ${{ secrets.WORKFLOW_INDEX }}
-          JOB_INDEX: ${{ secrets.JOB_INDEX }}
-          STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
-          # Container and test index configuration
-          CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
-          TEST_INDEX: ${{ secrets.TEST_INDEX }}
-        run: |
-          # Upload complete workflow metrics including container metrics
-          python3 .github/workflows/upload_complete_workflow_metrics.py
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
@@ -637,12 +617,16 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
         kubectl config get-contexts
     - name: Run Tests
+      id: run-tests
       env:
         NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
       run: |
         set -x
         export KUBECONFIG=$(pwd)/.kubeconfig
         kubectl config set-context --current --namespace=$NAMESPACE
+
+        # Redirect all output to a log file while still showing it
+        exec > >(tee -a test-output.log) 2>&1
 
         cd examples/backends/$FRAMEWORK
         export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
@@ -736,6 +720,32 @@ jobs:
           echo "Test passed: Response matches expected format and content"
         fi
         exit $TEST_RESULT
+      continue-on-error: true
+
+    - name: Process Deployment Test Results
+      if: always()
+      run: |
+        set -x
+
+        # Create test-results directory
+        mkdir -p test-results
+
+        # Copy and rename the test output log with unique naming
+        if [ -f "test-output.log" ]; then
+          cp test-output.log "test-results/deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log"
+          echo "✅ Test output log copied to test-results/"
+        else
+          echo "⚠️  test-output.log not found"
+        fi
+
+    - name: Upload Deployment Test Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results-${{ env.FRAMEWORK }}-deploy-${{ matrix.profile }}-amd64-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log
+        retention-days: 7
+
     - name: Cleanup
       if: always()
       timeout-minutes: 5
