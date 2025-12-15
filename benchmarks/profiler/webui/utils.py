@@ -592,6 +592,13 @@ def create_selection_handler(
     return handle_selection
 
 
+def _load_webui_css() -> str:
+    """Load custom CSS for the WebUI from styles.css."""
+    css_path = Path(__file__).parent / "styles.css"
+    with open(css_path) as f:
+        return f.read()
+
+
 def create_gradio_interface(
     json_data_str,
     handle_selection,
@@ -605,67 +612,7 @@ def create_gradio_interface(
     Returns:
         gr.Blocks: Configured Gradio demo
     """
-    # Custom CSS to fix spacing and width consistency
-    custom_css = """
-    /* Make Gradio use more screen width */
-    .gradio-container {
-        max-width: 100% !important;
-        padding: 20px 40px !important;
-    }
-
-    /* Ensure DataTables controls have consistent styling */
-    .dataTables_wrapper {
-        width: 100% !important;
-    }
-
-    .dataTables_wrapper .dataTables_length,
-    .dataTables_wrapper .dataTables_filter {
-        margin-bottom: 16px !important;
-    }
-
-    /* Consistent height for dropdown and search input */
-    .dataTables_wrapper .dataTables_length select,
-    .dataTables_wrapper .dataTables_filter input {
-        height: 36px !important;
-        padding: 6px 12px !important;
-        font-size: 14px !important;
-        line-height: 1.5 !important;
-        border-radius: 4px !important;
-        border: 1px solid var(--border-color-primary, #ccc) !important;
-    }
-
-    /* Ensure tables take full width */
-    .dataTables_wrapper table.dataTable {
-        width: 100% !important;
-        margin-top: 12px !important;
-        margin-bottom: 12px !important;
-    }
-
-    /* Table wrapper containers should be full width */
-    #cost_table_wrapper,
-    #prefill_table_wrapper,
-    #decode_table_wrapper {
-        width: 100% !important;
-        overflow-x: auto !important;
-    }
-
-    /* Consistent spacing for chart containers */
-    .chart-container {
-        width: 100% !important;
-        margin-bottom: 16px !important;
-    }
-
-    /* Accordion content full width */
-    .gradio-accordion {
-        width: 100% !important;
-    }
-
-    /* Tab content full width */
-    .gradio-tabitem {
-        width: 100% !important;
-        padding: 16px 0 !important;
-    }
-    """
+    custom_css = _load_webui_css()
 
     with gr.Blocks(title="Configuration Selection", css=custom_css) as demo:
         # Create hidden UI components (reused from AIC profiling module)

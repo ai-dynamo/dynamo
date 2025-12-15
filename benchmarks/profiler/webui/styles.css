@@ -1,0 +1,50 @@
+/*
+SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Custom styles for the profiler WebUI.
+These supplement the aiconfigurator styles.
+*/
+
+/* Make Gradio use full screen width */
+.gradio-container {
+    max-width: 100% !important;
+}
+
+/* Ensure the main content area uses full width */
+.gradio-container > .main {
+    max-width: 100% !important;
+}
+
+/* Fix table wrapper to prevent horizontal scroll cutoff */
+#cost_table_wrapper,
+#prefill_table_wrapper,
+#decode_table_wrapper {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+}
+
+/* Ensure DataTables use full container width */
+.dataTables_wrapper {
+    width: 100% !important;
+    max-width: 100% !important;
+}
+
+/* Fix table to not exceed container */
+table.dataTable {
+    width: 100% !important;
+    max-width: 100% !important;
+}
+
+/* Consistent vertical spacing for DataTables controls */
+.dataTables_wrapper .dataTables_length,
+.dataTables_wrapper .dataTables_filter {
+    margin-bottom: 12px !important;
+}
+
+/* Ensure search input matches dropdown styling */
+.dataTables_wrapper .dataTables_filter input {
+    padding: 6px 12px !important;
+    margin-bottom: 8px !important;
+}
