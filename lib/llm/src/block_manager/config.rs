@@ -317,7 +317,7 @@ impl ObjectStorageConfig {
 
         // Check new var first, fall back to legacy
         std::env::var(object_storage::DYN_KVBM_OBJECT_ENABLED)
-            .or_else(|_| std::env::var(object_storage::DYN_KVBM_USE_OBJECT_OFFLOAD))
+            .or_else(|_| std::env::var(object_storage::DYN_KVBM_OBJECT_ENABLED))
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(false)
     }
