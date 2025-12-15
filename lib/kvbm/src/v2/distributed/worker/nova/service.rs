@@ -5,9 +5,11 @@ use crate::physical::manager::SerializedLayout;
 
 use super::{
     Arc, ConnectRemoteMessage, DirectWorker, ExecuteRemoteOnboardForInstanceMessage,
-    LocalTransferMessage, RemoteOffloadMessage, RemoteOnboardMessage, Result, TransferOptions,
-    WorkerTransfers,
+    LocalTransferMessage, ObjectGetBlocksMessage, ObjectHasBlocksMessage, ObjectHasBlocksResponse,
+    ObjectPutBlocksMessage, ObjectPutGetBlocksResponse, RemoteOffloadMessage, RemoteOnboardMessage,
+    Result, TransferOptions, WorkerTransfers,
 };
+use crate::v2::distributed::object::ObjectBlockOps;
 
 use bytes::Bytes;
 use derive_builder::Builder;
@@ -54,6 +56,10 @@ impl NovaWorkerService {
         self.register_export_metadata_handler()?;
         self.register_connect_remote_handler()?;
         self.register_execute_remote_onboard_for_instance_handler()?;
+        // Object storage handlers
+        self.register_object_has_blocks_handler()?;
+        self.register_object_put_blocks_handler()?;
+        self.register_object_get_blocks_handler()?;
         Ok(())
     }
 
@@ -254,6 +260,92 @@ impl NovaWorkerService {
             },
         )
         .build();
+
+        self.nova.register_handler(handler)?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // Object Storage Handlers
+    // ========================================================================
+
+    /// Register handler for object_has_blocks - check if blocks exist in object storage
+    fn register_object_has_blocks_handler(&self) -> Result<()> {
+        let worker = self.worker.clone();
+
+        let handler =
+            NovaHandler::unary_handler_async("kvbm.worker.object_has_blocks", move |ctx| {
+                let worker = worker.clone();
+
+                async move {
+                    let message: ObjectHasBlocksMessage = serde_json::from_slice(&ctx.payload)?;
+
+                    // Call DirectWorker's ObjectBlockOps implementation
+                    let results = worker.has_blocks(message.keys).await;
+
+                    let response = ObjectHasBlocksResponse { results };
+                    Ok(Some(Bytes::from(serde_json::to_vec(&response)?)))
+                }
+            })
+            .build();
+
+        self.nova.register_handler(handler)?;
+        Ok(())
+    }
+
+    /// Register handler for object_put_blocks - upload blocks to object storage
+    fn register_object_put_blocks_handler(&self) -> Result<()> {
+        let worker = self.worker.clone();
+
+        let handler =
+            NovaHandler::unary_handler_async("kvbm.worker.object_put_blocks", move |ctx| {
+                let worker = worker.clone();
+
+                async move {
+                    let message: ObjectPutBlocksMessage = serde_json::from_slice(&ctx.payload)?;
+
+                    // Resolve logical handle to physical layout
+                    let layout = worker.resolve_layout(message.layout)?;
+
+                    // Call DirectWorker's ObjectBlockOps implementation
+                    let results = worker
+                        .put_blocks(message.keys, layout, message.block_ids)
+                        .await;
+
+                    let response = ObjectPutGetBlocksResponse::from_results(results);
+                    Ok(Some(Bytes::from(serde_json::to_vec(&response)?)))
+                }
+            })
+            .build();
+
+        self.nova.register_handler(handler)?;
+        Ok(())
+    }
+
+    /// Register handler for object_get_blocks - download blocks from object storage
+    fn register_object_get_blocks_handler(&self) -> Result<()> {
+        let worker = self.worker.clone();
+
+        let handler =
+            NovaHandler::unary_handler_async("kvbm.worker.object_get_blocks", move |ctx| {
+                let worker = worker.clone();
+
+                async move {
+                    let message: ObjectGetBlocksMessage = serde_json::from_slice(&ctx.payload)?;
+
+                    // Resolve logical handle to physical layout
+                    let layout = worker.resolve_layout(message.layout)?;
+
+                    // Call DirectWorker's ObjectBlockOps implementation
+                    let results = worker
+                        .get_blocks(message.keys, layout, message.block_ids)
+                        .await;
+
+                    let response = ObjectPutGetBlocksResponse::from_results(results);
+                    Ok(Some(Bytes::from(serde_json::to_vec(&response)?)))
+                }
+            })
+            .build();
 
         self.nova.register_handler(handler)?;
         Ok(())

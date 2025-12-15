@@ -35,6 +35,7 @@ use crate::v2::logical::blocks::{BlockMetadata, BlockRegistry, ImmutableBlock};
 use crate::v2::{BlockId, SequenceHash};
 
 use super::pending::PendingTracker;
+use crate::v2::distributed::object::{ObjectBlockOps, ObjectLockManager};
 
 /// Boxed future type for async policy evaluation.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -80,6 +81,74 @@ where
 {
     Either::Right(Box::pin(future))
 }
+
+// ============================================================================
+// Presence Checker Trait
+// ============================================================================
+
+/// Async presence checker for object storage or other external destinations.
+///
+/// This trait abstracts presence checking for destinations that require async
+/// operations (like S3, caching services). Unlike `BlockRegistry::check_presence`
+/// which is synchronous, this is designed for remote/external destinations.
+///
+/// # Implementations
+///
+/// - `S3PresenceChecker`: Wraps `ObjectBlockOps::has_blocks()` for S3/object storage
+/// - Future: `CachedPresenceChecker` - local bloom filter / LRU cache layer
+/// - Future: `DistributedCacheChecker` - remote caching service
+pub trait PresenceChecker: Send + Sync {
+    /// Check if blocks exist at the destination.
+    ///
+    /// Returns a vector of (SequenceHash, exists: bool) pairs.
+    fn check_presence(
+        &self,
+        keys: Vec<SequenceHash>,
+    ) -> BoxFuture<'static, Vec<(SequenceHash, bool)>>;
+}
+
+/// S3/Object storage presence checker.
+///
+/// Wraps `ObjectBlockOps::has_blocks()` and converts `Option<usize>` → `bool`.
+/// This is the default presence checker for G2→G4 (object storage) pipelines.
+///
+/// # Example
+/// ```ignore
+/// let object_ops: Arc<dyn ObjectBlockOps> = ...;
+/// let checker = S3PresenceChecker::new(object_ops);
+/// let results = checker.check_presence(keys).await;
+/// ```
+pub struct S3PresenceChecker {
+    object_ops: Arc<dyn ObjectBlockOps>,
+}
+
+impl S3PresenceChecker {
+    /// Create a new S3 presence checker wrapping the given object operations.
+    pub fn new(object_ops: Arc<dyn ObjectBlockOps>) -> Self {
+        Self { object_ops }
+    }
+}
+
+impl PresenceChecker for S3PresenceChecker {
+    fn check_presence(
+        &self,
+        keys: Vec<SequenceHash>,
+    ) -> BoxFuture<'static, Vec<(SequenceHash, bool)>> {
+        let future = self.object_ops.has_blocks(keys);
+        Box::pin(async move {
+            let results = future.await;
+            // Convert Option<usize> (size) → bool (exists)
+            results
+                .into_iter()
+                .map(|(hash, size_opt)| (hash, size_opt.is_some()))
+                .collect()
+        })
+    }
+}
+
+// ============================================================================
+// Evaluation Context
+// ============================================================================
 
 /// Context provided to policies for block evaluation.
 #[derive(Debug)]
@@ -430,6 +499,340 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceAndL
             .collect();
 
         sync_batch_result(Ok(results))
+    }
+}
+
+/// G2→G4 filter: async presence check for object storage destinations.
+///
+/// Unlike `PresenceFilter` which checks local `BlockRegistry` synchronously,
+/// this filter queries object storage (S3, etc.) asynchronously via a
+/// `PresenceChecker` implementation.
+///
+/// # Duplicate Prevention
+///
+/// When a `PendingTracker` is configured, this filter also checks for blocks
+/// that are currently in-flight through the pipeline before querying object storage.
+///
+/// # Performance
+///
+/// This policy returns `Either::Right(BoxFuture)` since it requires async I/O.
+/// The pending tracker check is done synchronously first to avoid unnecessary
+/// object storage queries.
+///
+/// # Example
+/// ```ignore
+/// let object_ops: Arc<dyn ObjectBlockOps> = ...;
+/// let checker = Arc::new(S3PresenceChecker::new(object_ops));
+/// let tracker = Arc::new(PendingTracker::new());
+/// let filter = ObjectPresenceFilter::<G2>::new(checker)
+///     .with_pending_tracker(tracker);
+/// // Blocks already in object storage OR in-flight will be filtered out
+/// ```
+pub struct ObjectPresenceFilter<Src: BlockMetadata> {
+    presence_checker: Arc<dyn PresenceChecker>,
+    /// Optional tracker for pending (in-flight) transfers.
+    pending_tracker: Option<Arc<PendingTracker>>,
+    _marker: PhantomData<Src>,
+}
+
+impl<Src: BlockMetadata> ObjectPresenceFilter<Src> {
+    /// Create a new object presence filter.
+    pub fn new(presence_checker: Arc<dyn PresenceChecker>) -> Self {
+        Self {
+            presence_checker,
+            pending_tracker: None,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Add a pending tracker for duplicate prevention.
+    ///
+    /// When set, blocks that are currently in-flight (passed policy but not
+    /// yet stored in object storage) will be filtered out.
+    pub fn with_pending_tracker(mut self, tracker: Arc<PendingTracker>) -> Self {
+        self.pending_tracker = Some(tracker);
+        self
+    }
+
+    /// Get a reference to the pending tracker if configured.
+    pub fn pending_tracker(&self) -> Option<&Arc<PendingTracker>> {
+        self.pending_tracker.as_ref()
+    }
+}
+
+impl<Src: BlockMetadata> OffloadPolicy<Src> for ObjectPresenceFilter<Src> {
+    fn name(&self) -> &str {
+        "ObjectPresenceFilter"
+    }
+
+    fn evaluate<'a>(&'a self, ctx: &'a EvalContext<Src>) -> PolicyFuture<'a> {
+        // 1. Synchronous check: skip if currently pending
+        if self
+            .pending_tracker
+            .as_ref()
+            .is_some_and(|tracker| tracker.is_pending(&ctx.sequence_hash))
+        {
+            return sync_result(Ok(false)); // Already being transferred
+        }
+
+        // 2. Async check: query object storage for presence
+        let checker = self.presence_checker.clone();
+        let hash = ctx.sequence_hash;
+
+        async_result(async move {
+            let results = checker.check_presence(vec![hash]).await;
+            // If present in object storage, filter out
+            let exists = results
+                .into_iter()
+                .next()
+                .map(|(_, exists)| exists)
+                .unwrap_or(false);
+            Ok(!exists) // Pass if NOT present
+        })
+    }
+
+    fn evaluate_batch<'a>(&'a self, contexts: &'a [EvalContext<Src>]) -> PolicyBatchFuture<'a> {
+        if contexts.is_empty() {
+            return sync_batch_result(Ok(Vec::new()));
+        }
+
+        // Collect hashes, filtering out pending ones first (sync)
+        let mut pending_status: Vec<bool> = Vec::with_capacity(contexts.len());
+        let mut hashes_to_check: Vec<SequenceHash> = Vec::new();
+        let mut hash_indices: Vec<usize> = Vec::new();
+
+        for (i, ctx) in contexts.iter().enumerate() {
+            let is_pending = self
+                .pending_tracker
+                .as_ref()
+                .is_some_and(|tracker| tracker.is_pending(&ctx.sequence_hash));
+
+            if is_pending {
+                pending_status.push(true); // Mark as pending (will be filtered)
+            } else {
+                pending_status.push(false);
+                hashes_to_check.push(ctx.sequence_hash);
+                hash_indices.push(i);
+            }
+        }
+
+        // If all are pending, return immediately
+        if hashes_to_check.is_empty() {
+            return sync_batch_result(Ok(vec![false; contexts.len()]));
+        }
+
+        let checker = self.presence_checker.clone();
+        let num_contexts = contexts.len();
+
+        async_batch_result(async move {
+            // Query object storage for non-pending hashes
+            let presence_results = checker.check_presence(hashes_to_check).await;
+
+            // Build final results
+            let mut results = vec![false; num_contexts]; // Default: filtered out
+
+            // Map presence results back to original indices
+            for (check_idx, original_idx) in hash_indices.into_iter().enumerate() {
+                if let Some((_, exists)) = presence_results.get(check_idx) {
+                    // Pass if NOT present in object storage
+                    results[original_idx] = !*exists;
+                }
+            }
+
+            Ok(results)
+        })
+    }
+}
+
+/// G2→G4 filter with distributed locking: check meta, acquire lock, track acquired locks.
+///
+/// This filter implements the full locking protocol for object storage offloads:
+/// 1. Check if `.meta` file exists (block already offloaded) - skip if yes
+/// 2. Check if currently pending (in-flight transfer) - skip if yes
+/// 3. Try to acquire `.lock` file with conditional PUT
+///    - If lock doesn't exist, create it atomically
+///    - If lock exists and expired, overwrite it
+///    - If lock exists and valid (owned by another instance), skip
+/// 4. If we own the lock (either just acquired or already owned), pass the block
+///
+/// # Lock Management
+///
+/// Locks acquired during policy evaluation are tracked and must be:
+/// - Released after successful transfer (via `ObjectTransferExecutor`)
+/// - Released on error/cancellation (via guard or explicit cleanup)
+///
+/// # Duplicate Prevention
+///
+/// When a `PendingTracker` is configured, blocks currently in-flight are filtered
+/// out before checking object storage, avoiding redundant network calls.
+///
+/// # Example
+/// ```ignore
+/// let lock_manager = Arc::new(S3LockManager::new(s3_client, instance_id));
+/// let tracker = Arc::new(PendingTracker::new());
+/// let filter = ObjectLockPresenceFilter::<G2>::new(lock_manager)
+///     .with_pending_tracker(tracker);
+/// // Blocks already offloaded, in-flight, or locked by others will be filtered out
+/// ```
+pub struct ObjectLockPresenceFilter<Src: BlockMetadata> {
+    lock_manager: Arc<dyn ObjectLockManager>,
+    /// Optional tracker for pending (in-flight) transfers.
+    pending_tracker: Option<Arc<PendingTracker>>,
+    _marker: PhantomData<Src>,
+}
+
+impl<Src: BlockMetadata> ObjectLockPresenceFilter<Src> {
+    /// Create a new object lock presence filter.
+    pub fn new(lock_manager: Arc<dyn ObjectLockManager>) -> Self {
+        Self {
+            lock_manager,
+            pending_tracker: None,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Add a pending tracker for duplicate prevention.
+    ///
+    /// When set, blocks that are currently in-flight (passed policy but not
+    /// yet stored in object storage) will be filtered out.
+    pub fn with_pending_tracker(mut self, tracker: Arc<PendingTracker>) -> Self {
+        self.pending_tracker = Some(tracker);
+        self
+    }
+
+    /// Get a reference to the pending tracker if configured.
+    pub fn pending_tracker(&self) -> Option<&Arc<PendingTracker>> {
+        self.pending_tracker.as_ref()
+    }
+
+    /// Get a reference to the lock manager.
+    pub fn lock_manager(&self) -> &Arc<dyn ObjectLockManager> {
+        &self.lock_manager
+    }
+}
+
+impl<Src: BlockMetadata> OffloadPolicy<Src> for ObjectLockPresenceFilter<Src> {
+    fn name(&self) -> &str {
+        "ObjectLockPresenceFilter"
+    }
+
+    fn evaluate<'a>(&'a self, ctx: &'a EvalContext<Src>) -> PolicyFuture<'a> {
+        // 1. Synchronous check: skip if currently pending
+        if self
+            .pending_tracker
+            .as_ref()
+            .is_some_and(|tracker| tracker.is_pending(&ctx.sequence_hash))
+        {
+            return sync_result(Ok(false)); // Already being transferred
+        }
+
+        // 2. Async checks: meta presence, then lock acquisition
+        let lock_manager = self.lock_manager.clone();
+        let hash = ctx.sequence_hash;
+
+        async_result(async move {
+            // Check if meta file exists (already offloaded)
+            match lock_manager.has_meta(hash).await {
+                Ok(true) => {
+                    tracing::debug!(?hash, "Block already offloaded (meta exists)");
+                    return Ok(false); // Already offloaded, skip
+                }
+                Ok(false) => {
+                    // Continue to lock acquisition
+                }
+                Err(e) => {
+                    tracing::warn!(?hash, error = %e, "Error checking meta file");
+                    return Ok(false); // Error, skip to be safe
+                }
+            }
+
+            // Try to acquire lock
+            match lock_manager.try_acquire_lock(hash).await {
+                Ok(true) => {
+                    tracing::debug!(?hash, "Lock acquired");
+                    Ok(true) // Pass - we own the lock
+                }
+                Ok(false) => {
+                    tracing::debug!(?hash, "Lock held by another instance");
+                    Ok(false) // Skip - another instance owns the lock
+                }
+                Err(e) => {
+                    tracing::warn!(?hash, error = %e, "Error acquiring lock");
+                    Ok(false) // Error, skip to be safe
+                }
+            }
+        })
+    }
+
+    fn evaluate_batch<'a>(&'a self, contexts: &'a [EvalContext<Src>]) -> PolicyBatchFuture<'a> {
+        if contexts.is_empty() {
+            return sync_batch_result(Ok(Vec::new()));
+        }
+
+        // Filter out pending blocks first (sync)
+        let mut pending_mask: Vec<bool> = Vec::with_capacity(contexts.len());
+        let mut to_check: Vec<(usize, SequenceHash)> = Vec::new();
+
+        for (i, ctx) in contexts.iter().enumerate() {
+            let is_pending = self
+                .pending_tracker
+                .as_ref()
+                .is_some_and(|tracker| tracker.is_pending(&ctx.sequence_hash));
+
+            if is_pending {
+                pending_mask.push(true);
+            } else {
+                pending_mask.push(false);
+                to_check.push((i, ctx.sequence_hash));
+            }
+        }
+
+        // If all are pending, return immediately
+        if to_check.is_empty() {
+            return sync_batch_result(Ok(vec![false; contexts.len()]));
+        }
+
+        let lock_manager = self.lock_manager.clone();
+        let num_contexts = contexts.len();
+
+        async_batch_result(async move {
+            let mut results = vec![false; num_contexts]; // Default: filtered out
+
+            // Process each non-pending block
+            for (original_idx, hash) in to_check {
+                // Check meta first
+                let has_meta = match lock_manager.has_meta(hash).await {
+                    Ok(has) => has,
+                    Err(e) => {
+                        tracing::warn!(?hash, error = %e, "Error checking meta file");
+                        continue; // Skip this block
+                    }
+                };
+
+                if has_meta {
+                    tracing::debug!(?hash, "Block already offloaded (meta exists)");
+                    continue; // Already offloaded
+                }
+
+                // Try to acquire lock
+                match lock_manager.try_acquire_lock(hash).await {
+                    Ok(true) => {
+                        tracing::debug!(?hash, "Lock acquired");
+                        results[original_idx] = true; // Pass
+                    }
+                    Ok(false) => {
+                        tracing::debug!(?hash, "Lock held by another instance");
+                        // Skip - another instance owns the lock
+                    }
+                    Err(e) => {
+                        tracing::warn!(?hash, error = %e, "Error acquiring lock");
+                        // Skip on error
+                    }
+                }
+            }
+
+            Ok(results)
+        })
     }
 }
 

@@ -5,6 +5,7 @@ mod spmd;
 
 use std::sync::Arc;
 
+use super::object::ObjectBlockOps;
 use super::worker::{
     ImportMetadataResponse, SerializedLayout, SerializedLayoutResponse, Worker, WorkerTransfers, *,
 };
@@ -12,7 +13,7 @@ use anyhow::Result;
 
 pub use spmd::ReplicatedWorker;
 
-pub trait ParallelWorker: WorkerTransfers + Send + Sync {
+pub trait ParallelWorker: WorkerTransfers + ObjectBlockOps + Send + Sync {
     /// Export the local metadata for a set of workers.
     ///
     /// Layouts will be returned in rank order.

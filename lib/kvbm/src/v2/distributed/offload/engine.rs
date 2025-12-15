@@ -36,13 +36,18 @@ use dashmap::DashMap;
 use tokio::task::JoinHandle;
 
 use crate::v2::distributed::leader::InstanceLeader;
+use crate::v2::distributed::object::ObjectBlockOps;
 use crate::v2::logical::LogicalLayoutHandle;
 use crate::v2::logical::blocks::{BlockMetadata, BlockRegistry, WeakBlock};
 use crate::v2::logical::manager::BlockManager;
-use crate::v2::{BlockId, G1, G2, G3, G4};
+use crate::v2::physical::transfer::PhysicalLayout;
+use crate::v2::{BlockId, G1, G2, G3};
 
 use super::handle::{TransferHandle, TransferId, TransferState};
-use super::pipeline::{ChainOutput, ChainOutputRx, Pipeline, PipelineConfig, PipelineInput};
+use super::pipeline::{
+    ChainOutput, ChainOutputRx, ObjectPipeline, ObjectPipelineConfig, Pipeline, PipelineConfig,
+    PipelineInput,
+};
 use super::queue::CancellableQueue;
 use super::source::SourceBlocks;
 
@@ -50,18 +55,24 @@ use super::source::SourceBlocks;
 ///
 /// The engine manages multiple pipelines (G1→G2, G2→G3, G2→G4) and provides
 /// a unified interface for enqueueing blocks for offload.
+///
+/// # Storage Tier Model
+///
+/// - G1→G2: BlockManager<G2> destination (host memory)
+/// - G2→G3: BlockManager<G3> destination (disk/NVMe)
+/// - G2→G4: ObjectBlockOps destination (object storage like S3)
 #[allow(dead_code)]
 pub struct OffloadEngine {
     /// Reference to the instance leader for transfers
     leader: Arc<InstanceLeader>,
     /// Block registry for policy evaluation
     registry: Arc<BlockRegistry>,
-    /// G1→G2 pipeline
+    /// G1→G2 pipeline (BlockManager destination)
     g1_to_g2: Option<Pipeline<G1, G2>>,
-    /// G2→G3 pipeline
+    /// G2→G3 pipeline (BlockManager destination)
     g2_to_g3: Option<Pipeline<G2, G3>>,
-    /// G2→G4 pipeline
-    g2_to_g4: Option<Pipeline<G2, G4>>,
+    /// G2→G4 pipeline (Object storage destination)
+    g2_to_g4: Option<ObjectPipeline<G2>>,
     /// Active transfer tracking
     transfers: Arc<DashMap<TransferId, Arc<std::sync::Mutex<TransferState>>>>,
     /// Chain router task handle (routes G1→G2 output to downstream pipelines)
@@ -117,7 +128,7 @@ impl OffloadEngine {
         self.enqueue_to_pipeline(pipeline, blocks.into())
     }
 
-    /// Enqueue blocks for G2→G4 offload.
+    /// Enqueue blocks for G2→G4 offload (object storage).
     ///
     /// Returns a `TransferHandle` for tracking progress and cancellation.
     pub fn enqueue_g2_to_g4(&self, blocks: impl Into<SourceBlocks<G2>>) -> Result<TransferHandle> {
@@ -126,7 +137,7 @@ impl OffloadEngine {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("G2→G4 pipeline not configured"))?;
 
-        self.enqueue_to_pipeline(pipeline, blocks.into())
+        self.enqueue_to_object_pipeline(pipeline, blocks.into())
     }
 
     /// Internal: enqueue to a specific pipeline.
@@ -193,6 +204,28 @@ impl OffloadEngine {
         Ok(handle)
     }
 
+    /// Internal: enqueue to an object pipeline (G2→G4).
+    fn enqueue_to_object_pipeline(
+        &self,
+        pipeline: &ObjectPipeline<G2>,
+        source: SourceBlocks<G2>,
+    ) -> Result<TransferHandle> {
+        let input_block_ids = self.extract_block_ids(&source);
+
+        let transfer_id = TransferId::new();
+        let (state, handle) = TransferState::new(transfer_id, input_block_ids);
+        let state = Arc::new(std::sync::Mutex::new(state));
+
+        self.transfers.insert(transfer_id, state.clone());
+
+        let queued = pipeline.enqueue(transfer_id, source, state);
+        if !queued {
+            tracing::warn!("Transfer {} was cancelled before enqueueing", transfer_id);
+        }
+
+        Ok(handle)
+    }
+
     /// Extract block IDs from source blocks.
     ///
     /// For External/Strong blocks, returns the known block IDs.
@@ -241,10 +274,14 @@ pub struct OffloadEngineBuilder {
     g1_manager: Option<Arc<BlockManager<G1>>>,
     g2_manager: Option<Arc<BlockManager<G2>>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
-    g4_manager: Option<Arc<BlockManager<G4>>>,
+    /// Object storage operations for G4 (replaces BlockManager<G4>)
+    object_ops: Option<Arc<dyn ObjectBlockOps>>,
+    /// G2 physical layout for object transfers (needed by ObjectTransferExecutor)
+    g2_physical_layout: Option<PhysicalLayout>,
     g1_to_g2_config: Option<PipelineConfig<G1, G2>>,
     g2_to_g3_config: Option<PipelineConfig<G2, G3>>,
-    g2_to_g4_config: Option<PipelineConfig<G2, G4>>,
+    /// G2→G4 uses ObjectPipelineConfig (no destination BlockManager)
+    g2_to_g4_config: Option<ObjectPipelineConfig<G2>>,
     /// Optional runtime handle override (defaults to leader.runtime())
     runtime: Option<tokio::runtime::Handle>,
 }
@@ -258,7 +295,8 @@ impl OffloadEngineBuilder {
             g1_manager: None,
             g2_manager: None,
             g3_manager: None,
-            g4_manager: None,
+            object_ops: None,
+            g2_physical_layout: None,
             g1_to_g2_config: None,
             g2_to_g3_config: None,
             g2_to_g4_config: None,
@@ -299,9 +337,21 @@ impl OffloadEngineBuilder {
         self
     }
 
-    /// Set the G4 block manager.
-    pub fn with_g4_manager(mut self, manager: Arc<BlockManager<G4>>) -> Self {
-        self.g4_manager = Some(manager);
+    /// Set object storage operations for G4.
+    ///
+    /// G4 is object storage (S3, MinIO, etc.) and uses `ObjectBlockOps`
+    /// instead of a `BlockManager`. This replaces `with_g4_manager`.
+    pub fn with_object_ops(mut self, object_ops: Arc<dyn ObjectBlockOps>) -> Self {
+        self.object_ops = Some(object_ops);
+        self
+    }
+
+    /// Set the G2 physical layout for object transfers.
+    ///
+    /// Required when using G2→G4 pipeline. The ObjectTransferExecutor needs
+    /// the physical layout to read block data for upload to object storage.
+    pub fn with_g2_physical_layout(mut self, layout: PhysicalLayout) -> Self {
+        self.g2_physical_layout = Some(layout);
         self
     }
 
@@ -317,8 +367,11 @@ impl OffloadEngineBuilder {
         self
     }
 
-    /// Configure G2→G4 pipeline.
-    pub fn with_g2_to_g4_pipeline(mut self, config: PipelineConfig<G2, G4>) -> Self {
+    /// Configure G2→G4 pipeline (object storage).
+    ///
+    /// Uses `ObjectPipelineConfig` instead of `PipelineConfig` since G4
+    /// is object storage, not a BlockManager destination.
+    pub fn with_g2_to_g4_pipeline(mut self, config: ObjectPipelineConfig<G2>) -> Self {
         self.g2_to_g4_config = Some(config);
         self
     }
@@ -374,19 +427,20 @@ impl OffloadEngineBuilder {
             None
         };
 
-        // Build G2→G4 pipeline if configured
+        // Build G2→G4 pipeline if configured (object storage destination)
         let g2_to_g4 = if let Some(config) = self.g2_to_g4_config {
-            let g4_manager = self
-                .g4_manager
-                .ok_or_else(|| anyhow::anyhow!("G4 manager required for G2→G4 pipeline"))?;
+            let object_ops = self
+                .object_ops
+                .ok_or_else(|| anyhow::anyhow!("ObjectBlockOps required for G2→G4 pipeline"))?;
+            let g2_layout = self
+                .g2_physical_layout
+                .ok_or_else(|| anyhow::anyhow!("G2 physical layout required for G2→G4 pipeline"))?;
 
-            Some(Pipeline::new(
+            Some(ObjectPipeline::new(
                 config,
-                registry.clone(),
-                g4_manager,
+                object_ops,
+                g2_layout,
                 self.leader.clone(),
-                LogicalLayoutHandle::G2,
-                LogicalLayoutHandle::G4,
                 runtime.clone(),
             ))
         } else {

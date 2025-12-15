@@ -142,3 +142,63 @@ struct ExecuteRemoteOnboardForInstanceMessage {
     dst_block_ids: Vec<BlockId>,
     options: SerializableTransferOptions,
 }
+
+// ============================================================================
+// Object Storage Message Types
+// ============================================================================
+
+/// Message for object_has_blocks RPC - check if blocks exist in object storage
+#[derive(Serialize, Deserialize)]
+struct ObjectHasBlocksMessage {
+    keys: Vec<SequenceHash>,
+}
+
+/// Response for object_has_blocks RPC
+#[derive(Serialize, Deserialize)]
+struct ObjectHasBlocksResponse {
+    results: Vec<(SequenceHash, Option<usize>)>,
+}
+
+/// Message for object_put_blocks RPC - upload blocks to object storage
+#[derive(Serialize, Deserialize)]
+struct ObjectPutBlocksMessage {
+    keys: Vec<SequenceHash>,
+    layout: LogicalLayoutHandle,
+    block_ids: Vec<BlockId>,
+}
+
+/// Message for object_get_blocks RPC - download blocks from object storage
+#[derive(Serialize, Deserialize)]
+struct ObjectGetBlocksMessage {
+    keys: Vec<SequenceHash>,
+    layout: LogicalLayoutHandle,
+    block_ids: Vec<BlockId>,
+}
+
+/// Response for object put/get operations
+#[derive(Serialize, Deserialize)]
+struct ObjectPutGetBlocksResponse {
+    /// Ok(key) for success, Err(key) for failure - serialized as (bool, key)
+    results: Vec<(bool, SequenceHash)>,
+}
+
+impl ObjectPutGetBlocksResponse {
+    fn from_results(results: Vec<Result<SequenceHash, SequenceHash>>) -> Self {
+        Self {
+            results: results
+                .into_iter()
+                .map(|r| match r {
+                    Ok(k) => (true, k),
+                    Err(k) => (false, k),
+                })
+                .collect(),
+        }
+    }
+
+    fn into_results(self) -> Vec<Result<SequenceHash, SequenceHash>> {
+        self.results
+            .into_iter()
+            .map(|(ok, k)| if ok { Ok(k) } else { Err(k) })
+            .collect()
+    }
+}

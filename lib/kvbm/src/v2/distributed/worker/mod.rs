@@ -171,17 +171,31 @@ pub enum RemoteDescriptor {
     },
 }
 
-/// Configuration sent from leader to workers for G2/G3 layout creation.
+/// Configuration sent from leader to workers for G2/G3/G4 layout creation.
 ///
 /// This message is sent via Nova RPC during Phase 3 coordination.
 /// Workers use this to create additional cache tiers beyond G1 (GPU KV).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeaderLayoutConfig {
+    /// Leader provided rank of this worker
+    ///
+    /// The Connector framework provides us with an ordered list of workers. To ensure
+    /// leaders and workers are all in-sync on this information, the leader will send
+    /// each worker the rank provided by the Connector framework.
+    pub rank: usize,
+
     /// Number of host/pinned blocks for G2 tier.
     pub host_block_count: usize,
 
     /// Number of disk blocks for G3 tier (None = no disk tier).
     pub disk_block_count: Option<usize>,
+
+    /// Object storage configuration for G4 tier (None = no object tier).
+    ///
+    /// When present, workers should instantiate object clients for storing
+    /// blocks in external object storage (S3/MinIO).
+    #[serde(default)]
+    pub object: Option<dynamo_kvbm_config::ObjectConfig>,
 }
 
 /// Worker's response after configuring additional layouts (G2, G3).
@@ -308,7 +322,7 @@ pub trait WorkerTransfers: Send + Sync {
     ) -> Result<TransferCompleteNotification>;
 }
 
-pub trait Worker: WorkerTransfers + Send + Sync {
+pub trait Worker: WorkerTransfers + super::object::ObjectBlockOps + Send + Sync {
     /// Get the G1 layout handle for this worker (if configured).
     ///
     /// Returns None if no G1 layout has been registered with this worker.

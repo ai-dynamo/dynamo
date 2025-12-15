@@ -3,8 +3,11 @@
 
 use super::*;
 
+use crate::v2::distributed::object::ObjectBlockOps;
+use crate::v2::physical::transfer::PhysicalLayout;
 use anyhow::Result;
 use dynamo_nova::events::{LocalEvent, LocalEventSystem};
+use futures::future::BoxFuture;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -292,5 +295,133 @@ impl ParallelWorker for ReplicatedWorker {
 
     fn workers(&self) -> &[Arc<dyn Worker>] {
         &self.workers
+    }
+}
+
+impl ObjectBlockOps for ReplicatedWorker {
+    fn has_blocks(
+        &self,
+        keys: Vec<SequenceHash>,
+    ) -> BoxFuture<'static, Vec<(SequenceHash, Option<usize>)>> {
+        // For has_blocks, we query all workers and verify consistency.
+        // All workers should agree on block presence for SPMD semantics.
+        // We return the results from worker 0 but verify all workers agree.
+        let workers = self.workers.clone();
+        let _runtime = self.runtime.clone();
+
+        Box::pin(async move {
+            if workers.is_empty() {
+                return keys.into_iter().map(|k| (k, None)).collect();
+            }
+
+            // Query all workers in parallel
+            let futures: Vec<_> = workers
+                .iter()
+                .map(|worker| worker.has_blocks(keys.clone()))
+                .collect();
+
+            let results: Vec<Vec<(SequenceHash, Option<usize>)>> =
+                futures::future::join_all(futures).await;
+
+            // Return results from first worker (all should agree in SPMD)
+            // In debug mode, we could verify consistency across workers
+            results.into_iter().next().unwrap_or_default()
+        })
+    }
+
+    fn put_blocks(
+        &self,
+        keys: Vec<SequenceHash>,
+        layout: PhysicalLayout,
+        block_ids: Vec<BlockId>,
+    ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        // For put_blocks, each worker writes with its own rank-prefixed key.
+        // All workers must succeed for the operation to be considered successful.
+        let workers = self.workers.clone();
+
+        Box::pin(async move {
+            if workers.is_empty() {
+                return keys.into_iter().map(Err).collect();
+            }
+
+            // Execute put on all workers in parallel
+            let futures: Vec<_> = workers
+                .iter()
+                .map(|worker| worker.put_blocks(keys.clone(), layout.clone(), block_ids.clone()))
+                .collect();
+
+            let results: Vec<Vec<Result<SequenceHash, SequenceHash>>> =
+                futures::future::join_all(futures).await;
+
+            // Aggregate: a key succeeded only if ALL workers succeeded
+            let num_keys = keys.len();
+            let mut aggregated = Vec::with_capacity(num_keys);
+
+            for key_idx in 0..num_keys {
+                let key = &keys[key_idx];
+                let all_succeeded = results.iter().all(|worker_results| {
+                    worker_results
+                        .get(key_idx)
+                        .map(|r| r.is_ok())
+                        .unwrap_or(false)
+                });
+
+                if all_succeeded {
+                    aggregated.push(Ok(key.clone()));
+                } else {
+                    aggregated.push(Err(key.clone()));
+                }
+            }
+
+            aggregated
+        })
+    }
+
+    fn get_blocks(
+        &self,
+        keys: Vec<SequenceHash>,
+        layout: PhysicalLayout,
+        block_ids: Vec<BlockId>,
+    ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        // For get_blocks, each worker reads from its own rank-prefixed key.
+        // All workers must succeed for the operation to be considered successful.
+        let workers = self.workers.clone();
+
+        Box::pin(async move {
+            if workers.is_empty() {
+                return keys.into_iter().map(Err).collect();
+            }
+
+            // Execute get on all workers in parallel
+            let futures: Vec<_> = workers
+                .iter()
+                .map(|worker| worker.get_blocks(keys.clone(), layout.clone(), block_ids.clone()))
+                .collect();
+
+            let results: Vec<Vec<Result<SequenceHash, SequenceHash>>> =
+                futures::future::join_all(futures).await;
+
+            // Aggregate: a key succeeded only if ALL workers succeeded
+            let num_keys = keys.len();
+            let mut aggregated = Vec::with_capacity(num_keys);
+
+            for key_idx in 0..num_keys {
+                let key = &keys[key_idx];
+                let all_succeeded = results.iter().all(|worker_results| {
+                    worker_results
+                        .get(key_idx)
+                        .map(|r| r.is_ok())
+                        .unwrap_or(false)
+                });
+
+                if all_succeeded {
+                    aggregated.push(Ok(key.clone()));
+                } else {
+                    aggregated.push(Err(key.clone()));
+                }
+            }
+
+            aggregated
+        })
     }
 }

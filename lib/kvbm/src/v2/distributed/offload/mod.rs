@@ -90,10 +90,14 @@ pub use cancel::{CancelConfirmation, CancelState, CancellationToken};
 pub use engine::{OffloadEngine, OffloadEngineBuilder};
 pub use handle::{TransferHandle, TransferId, TransferResult, TransferStatus};
 pub use pending::{PendingGuard, PendingTracker};
-pub use pipeline::{Pipeline, PipelineBuilder, PipelineConfig};
+pub use pipeline::{
+    ObjectPipeline, ObjectPipelineBuilder, ObjectPipelineConfig, Pipeline, PipelineBuilder,
+    PipelineConfig, ResolvedBatch, ResolvedBlock, upgrade_batch,
+};
 pub use policy::{
-    AllOfPolicy, AnyOfPolicy, BoxFuture, EvalContext, OffloadPolicy, PassAllPolicy,
-    PolicyBatchFuture, PolicyFuture, PresenceAndLFUFilter, PresenceFilter, async_batch_result,
+    AllOfPolicy, AnyOfPolicy, BoxFuture, EvalContext, ObjectLockPresenceFilter,
+    ObjectPresenceFilter, OffloadPolicy, PassAllPolicy, PolicyBatchFuture, PolicyFuture,
+    PresenceAndLFUFilter, PresenceChecker, PresenceFilter, S3PresenceChecker, async_batch_result,
     async_result, create_policy_from_config, sync_batch_result, sync_result,
 };
 pub use queue::CancellableQueue;

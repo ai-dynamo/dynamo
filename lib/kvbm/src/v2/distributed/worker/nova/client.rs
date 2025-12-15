@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::v2::distributed::object::ObjectBlockOps;
+use crate::v2::physical::transfer::PhysicalLayout;
+use futures::future::BoxFuture;
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -416,5 +419,128 @@ impl NovaWorkerClient {
             .send();
 
         Ok(awaiter)
+    }
+}
+
+impl ObjectBlockOps for NovaWorkerClient {
+    fn has_blocks(
+        &self,
+        keys: Vec<SequenceHash>,
+    ) -> BoxFuture<'static, Vec<(SequenceHash, Option<usize>)>> {
+        let message = ObjectHasBlocksMessage { keys: keys.clone() };
+        let bytes = match serde_json::to_vec(&message) {
+            Ok(b) => Bytes::from(b),
+            Err(_) => {
+                return Box::pin(async move { keys.into_iter().map(|k| (k, None)).collect() });
+            }
+        };
+
+        let nova = self.nova.clone();
+        let remote = self.remote;
+
+        Box::pin(async move {
+            let result = nova
+                .unary("kvbm.worker.object_has_blocks")
+                .ok()
+                .map(|u| u.raw_payload(bytes).instance(remote).send());
+
+            match result {
+                Some(unary_result) => match unary_result.await {
+                    Ok(response_bytes) => {
+                        match serde_json::from_slice::<ObjectHasBlocksResponse>(&response_bytes) {
+                            Ok(response) => response.results,
+                            Err(_) => keys.into_iter().map(|k| (k, None)).collect(),
+                        }
+                    }
+                    Err(_) => keys.into_iter().map(|k| (k, None)).collect(),
+                },
+                None => keys.into_iter().map(|k| (k, None)).collect(),
+            }
+        })
+    }
+
+    fn put_blocks(
+        &self,
+        keys: Vec<SequenceHash>,
+        _layout: PhysicalLayout,
+        block_ids: Vec<BlockId>,
+    ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        // For remote workers, we send the logical layout handle - they resolve it locally
+        // The layout parameter here is for DirectWorker; NovaWorkerClient ignores it
+        // and expects the caller to have already resolved the handle on the service side
+        let message = ObjectPutBlocksMessage {
+            keys: keys.clone(),
+            layout: LogicalLayoutHandle::G2, // Default to G2 for object storage
+            block_ids,
+        };
+        let bytes = match serde_json::to_vec(&message) {
+            Ok(b) => Bytes::from(b),
+            Err(_) => return Box::pin(async move { keys.into_iter().map(Err).collect() }),
+        };
+
+        let nova = self.nova.clone();
+        let remote = self.remote;
+
+        Box::pin(async move {
+            let result = nova
+                .unary("kvbm.worker.object_put_blocks")
+                .ok()
+                .map(|u| u.raw_payload(bytes).instance(remote).send());
+
+            match result {
+                Some(unary_result) => match unary_result.await {
+                    Ok(response_bytes) => {
+                        match serde_json::from_slice::<ObjectPutGetBlocksResponse>(&response_bytes)
+                        {
+                            Ok(response) => response.into_results(),
+                            Err(_) => keys.into_iter().map(Err).collect(),
+                        }
+                    }
+                    Err(_) => keys.into_iter().map(Err).collect(),
+                },
+                None => keys.into_iter().map(Err).collect(),
+            }
+        })
+    }
+
+    fn get_blocks(
+        &self,
+        keys: Vec<SequenceHash>,
+        _layout: PhysicalLayout,
+        block_ids: Vec<BlockId>,
+    ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        let message = ObjectGetBlocksMessage {
+            keys: keys.clone(),
+            layout: LogicalLayoutHandle::G2, // Default to G2 for object storage
+            block_ids,
+        };
+        let bytes = match serde_json::to_vec(&message) {
+            Ok(b) => Bytes::from(b),
+            Err(_) => return Box::pin(async move { keys.into_iter().map(Err).collect() }),
+        };
+
+        let nova = self.nova.clone();
+        let remote = self.remote;
+
+        Box::pin(async move {
+            let result = nova
+                .unary("kvbm.worker.object_get_blocks")
+                .ok()
+                .map(|u| u.raw_payload(bytes).instance(remote).send());
+
+            match result {
+                Some(unary_result) => match unary_result.await {
+                    Ok(response_bytes) => {
+                        match serde_json::from_slice::<ObjectPutGetBlocksResponse>(&response_bytes)
+                        {
+                            Ok(response) => response.into_results(),
+                            Err(_) => keys.into_iter().map(Err).collect(),
+                        }
+                    }
+                    Err(_) => keys.into_iter().map(Err).collect(),
+                },
+                None => keys.into_iter().map(Err).collect(),
+            }
+        })
     }
 }

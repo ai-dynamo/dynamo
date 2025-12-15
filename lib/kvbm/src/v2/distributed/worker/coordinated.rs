@@ -11,10 +11,12 @@ use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
 use anyhow::Result;
+use futures::future::BoxFuture;
 
 use crate::physical::manager::LayoutHandle;
-use crate::physical::transfer::TransferOptions;
-use crate::v2::{BlockId, InstanceId};
+use crate::physical::transfer::{PhysicalLayout, TransferOptions};
+use crate::v2::distributed::object::ObjectBlockOps;
+use crate::v2::{BlockId, InstanceId, SequenceHash};
 
 use super::{
     LogicalLayoutHandle, RemoteDescriptor, SerializedLayout, TransferCompleteNotification, Worker,
@@ -352,6 +354,36 @@ impl CoordinatedWorker {
         };
         self.inner
             .execute_remote_onboard(src, dst_logical, dst_block_ids, options)
+    }
+}
+
+impl ObjectBlockOps for CoordinatedWorker {
+    fn has_blocks(
+        &self,
+        keys: Vec<SequenceHash>,
+    ) -> BoxFuture<'static, Vec<(SequenceHash, Option<usize>)>> {
+        // Delegate to inner worker - Worker trait now extends ObjectBlockOps
+        self.inner.has_blocks(keys)
+    }
+
+    fn put_blocks(
+        &self,
+        keys: Vec<SequenceHash>,
+        layout: PhysicalLayout,
+        block_ids: Vec<BlockId>,
+    ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        // Delegate to inner worker - Worker trait now extends ObjectBlockOps
+        self.inner.put_blocks(keys, layout, block_ids)
+    }
+
+    fn get_blocks(
+        &self,
+        keys: Vec<SequenceHash>,
+        layout: PhysicalLayout,
+        block_ids: Vec<BlockId>,
+    ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        // Delegate to inner worker - Worker trait now extends ObjectBlockOps
+        self.inner.get_blocks(keys, layout, block_ids)
     }
 }
 

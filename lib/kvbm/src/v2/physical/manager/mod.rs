@@ -333,6 +333,21 @@ impl TransferManager {
         self.registry.read().unwrap().remote_handles()
     }
 
+    /// Get a clone of the physical layout for a given handle.
+    ///
+    /// # Arguments
+    /// * `handle` - Handle to a registered layout (local or remote)
+    ///
+    /// # Returns
+    /// A clone of the physical layout, or None if the handle is not found.
+    pub fn get_physical_layout(&self, handle: LayoutHandle) -> Option<PhysicalLayout> {
+        self.registry
+            .read()
+            .unwrap()
+            .get_layout(handle)
+            .map(|l| l.clone())
+    }
+
     /// Create a bounce buffer specification from a layout handle and block IDs.
     ///
     /// This resolves the layout handle to a physical layout and wraps it in a

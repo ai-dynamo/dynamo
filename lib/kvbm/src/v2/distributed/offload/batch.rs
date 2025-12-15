@@ -74,7 +74,7 @@ pub struct QueuedBlock<T: BlockMetadata> {
     /// Source block - Strong/External pass through, Weak upgraded just before transfer
     pub source: SourceBlock<T>,
     /// Transfer state for completion tracking
-    pub state: Arc<std::sync::Mutex<TransferState>>,
+    pub(crate) state: Arc<std::sync::Mutex<TransferState>>,
     /// RAII guard that removes this block from pending set on drop.
     ///
     /// This ensures duplicate prevention tracking is automatically cleaned up
@@ -206,7 +206,7 @@ pub struct EvalResult<T: BlockMetadata> {
     /// Block IDs that were filtered out
     pub filtered_ids: Vec<BlockId>,
     /// Transfer state for completion tracking
-    pub state: Arc<std::sync::Mutex<TransferState>>,
+    pub(crate) state: Arc<std::sync::Mutex<TransferState>>,
 }
 
 /// Input to the batch collector from policy evaluator.

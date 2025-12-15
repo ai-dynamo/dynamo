@@ -28,7 +28,10 @@ use crate::{
     logical::LogicalLayoutHandle,
     physical::transfer::context::TokioRuntime,
     v2::{
-        distributed::worker::{DirectWorker, LeaderLayoutConfig, WorkerLayoutResponse},
+        distributed::{
+            object::create_object_client,
+            worker::{DirectWorker, LeaderLayoutConfig, WorkerLayoutResponse},
+        },
         physical::{
             TransferManager,
             layout::{BlockDimension, LayoutConfig, PhysicalLayoutBuilder},
@@ -205,9 +208,20 @@ impl PendingWorkerState {
         let g1_handle = transfer_manager.register_layout(physical_layout)?;
         tracing::info!(?g1_handle, "G1 (device) layout registered successfully");
 
-        // 5. Build DirectWorker and set G1 handle
-        let direct_worker = Arc::new(DirectWorker::new(transfer_manager.clone()));
-        direct_worker.set_g1_handle(g1_handle)?;
+        // 5. Build optional object client with rank-based key formatting
+        // Uses object config from leader to ensure all workers have consistent settings
+        let object_client = if let Some(object_config) = &config.object {
+            let client = runtime
+                .handle()
+                .block_on(create_object_client(object_config, Some(config.rank)))?;
+            tracing::info!(
+                rank = config.rank,
+                "Object storage client configured from leader config"
+            );
+            Some(client)
+        } else {
+            None
+        };
 
         // 6. Create G2/G3 layouts based on leader config (G2 is REQUIRED)
         tracing::info!(
@@ -225,11 +239,10 @@ impl PendingWorkerState {
             .build()?;
 
         let g2_handle = transfer_manager.register_layout(host_layout)?;
-        direct_worker.set_g2_handle(g2_handle)?;
         created_layouts.push(LogicalLayoutHandle::G2);
 
         // todo: we need to get a path from the the config and create a unique file based on the nova instance_id
-        if let Some(disk_blocks) = config.disk_block_count {
+        let g3_handle = if let Some(disk_blocks) = config.disk_block_count {
             let mut disk_layout = self.layout_config.clone();
             disk_layout.num_blocks = disk_blocks;
             let disk_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
@@ -241,10 +254,31 @@ impl PendingWorkerState {
                 ))))
                 .build()?;
 
-            let g3_handle = transfer_manager.register_layout(disk_layout)?;
-            direct_worker.set_g3_handle(g3_handle)?;
+            let handle = transfer_manager.register_layout(disk_layout)?;
             created_layouts.push(LogicalLayoutHandle::G3);
+            Some(handle)
+        } else {
+            None
+        };
+
+        // 7. Build DirectWorker with all handles via builder pattern
+        let mut builder = DirectWorker::builder()
+            .manager(transfer_manager.clone())
+            .g1_handle(g1_handle)
+            .g2_handle(g2_handle)
+            .rank(config.rank);
+
+        // optional g3 handle
+        if let Some(g3) = g3_handle {
+            builder = builder.g3_handle(g3);
         }
+
+        // optional g4/object client
+        if let Some(client) = object_client {
+            builder = builder.object_client(client);
+        }
+
+        let direct_worker = Arc::new(builder.build()?);
 
         let response = WorkerLayoutResponse {
             metadata: direct_worker.export_metadata()?,

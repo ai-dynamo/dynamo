@@ -2,12 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 
+use derive_builder::Builder;
+use futures::future::BoxFuture;
+
+use crate::physical::layout::PhysicalLayout;
 use crate::physical::{
     manager::{SerializedLayout, TransferManager},
     transfer::{BounceBuffer, TransferOptions, context::TransferCompleteNotification},
 };
+use crate::v2::distributed::object::ObjectBlockOps;
 
 use super::*;
 
@@ -30,31 +35,35 @@ use super::*;
 /// # Usage
 ///
 /// DirectWorker is typically:
-/// 1. Created during deferred initialization (see [`PendingWorkerState`])
+/// 1. Created via `DirectWorker::builder()` during deferred initialization
 /// 2. Wrapped by [`NovaWorkerService`] to expose RPC handlers
 /// 3. Wrapped by [`CoordinatedWorker`] for leader coordination
 ///
 /// [`CoordinatedWorker`]: super::CoordinatedWorker
-/// [`PendingWorkerState`]: crate::v2::integrations::connector::worker::PendingWorkerState
 /// [`NovaWorkerService`]: super::NovaWorkerService
+#[derive(Builder)]
+#[builder(pattern = "owned")]
 pub struct DirectWorker {
     // =========================================================================
     // Execution State - needed by TransferManager to perform operations
     // =========================================================================
-    /// G1 (GPU KV cache) layout handle - set during Phase 2 registration.
-    /// Required for GPU-to-GPU and GPU-to-Host transfers.
-    g1_handle: OnceLock<LayoutHandle>,
-
-    /// G2 (Host/pinned cache) layout handle - set during Phase 3 coordination.
-    /// Required for Host-to-GPU and Host-to-Disk transfers.
-    g2_handle: OnceLock<LayoutHandle>,
-
-    /// G3 (Disk cache) layout handle - set during Phase 3 coordination if disk tier enabled.
-    /// Required for Disk-to-Host transfers.
-    g3_handle: OnceLock<LayoutHandle>,
-
     /// The transfer manager that executes actual data movement.
     manager: TransferManager,
+
+    /// G1 (GPU KV cache) layout handle - set during initialization.
+    /// Required for GPU-to-GPU and GPU-to-Host transfers.
+    #[builder(default, setter(strip_option))]
+    g1_handle: Option<LayoutHandle>,
+
+    /// G2 (Host/pinned cache) layout handle - set during initialization.
+    /// Required for Host-to-GPU and Host-to-Disk transfers.
+    #[builder(default, setter(strip_option))]
+    g2_handle: Option<LayoutHandle>,
+
+    /// G3 (Disk cache) layout handle - set during initialization if disk tier enabled.
+    /// Required for Disk-to-Host transfers.
+    #[builder(default, setter(strip_option))]
+    g3_handle: Option<LayoutHandle>,
 
     /// Remote handle mappings for peer-to-peer transfers.
     /// Key: (InstanceId, LogicalLayoutHandle) → remote LayoutHandle
@@ -66,65 +75,95 @@ pub struct DirectWorker {
     /// Note: This is per-instance mapping (no rank), suitable for single-worker
     /// scenarios. For multi-worker asymmetric TP, use CoordinatedWorker's
     /// rank-aware remote_handles instead.
+    #[builder(default = "RwLock::new(HashMap::new())")]
     remote_handles: RwLock<HashMap<(InstanceId, LogicalLayoutHandle), LayoutHandle>>,
+
+    // =========================================================================
+    // Object Storage State
+    // =========================================================================
+    /// Worker rank (set during initialization from LeaderLayoutConfig).
+    /// Used to augment object keys for unique storage across SPMD workers.
+    #[builder(default, setter(strip_option))]
+    rank: Option<usize>,
+
+    /// Optional object storage client for G4 tier operations.
+    /// Set during initialization if object storage is enabled.
+    #[builder(default, setter(strip_option))]
+    object_client: Option<Arc<dyn ObjectBlockOps>>,
 }
 
 impl DirectWorker {
-    pub fn new(manager: TransferManager) -> Self {
-        Self {
-            g1_handle: OnceLock::new(),
-            g2_handle: OnceLock::new(),
-            g3_handle: OnceLock::new(),
-            manager,
-            remote_handles: RwLock::new(HashMap::new()),
-        }
+    /// Create a new builder for DirectWorker.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let worker = DirectWorker::builder()
+    ///     .manager(manager)
+    ///     .g1_handle(g1_handle)
+    ///     .g2_handle(g2_handle)
+    ///     .g3_handle(g3_handle)
+    ///     .build();
+    /// ```
+    pub fn builder() -> DirectWorkerBuilder {
+        DirectWorkerBuilder::default()
     }
 
-    /// Set the G1 layout handle (once only).
-    ///
-    /// This is called during Phase 2 when GPU KV cache tensors are registered with NIXL.
-    pub fn set_g1_handle(&self, handle: LayoutHandle) -> Result<()> {
-        self.g1_handle
-            .set(handle)
-            .map_err(|_| anyhow::anyhow!("G1 handle already set"))
+    /// Get the worker rank (if set).
+    pub fn rank(&self) -> Option<usize> {
+        self.rank
     }
 
-    /// Set the G2 layout handle (once only).
-    ///
-    /// This is called during Phase 3 when host/pinned cache is created.
-    pub fn set_g2_handle(&self, handle: LayoutHandle) -> Result<()> {
-        self.g2_handle
-            .set(handle)
-            .map_err(|_| anyhow::anyhow!("G2 handle already set"))
-    }
-
-    /// Set the G3 layout handle (once only).
-    ///
-    /// This is called during Phase 3 when disk cache is created (if enabled).
-    pub fn set_g3_handle(&self, handle: LayoutHandle) -> Result<()> {
-        self.g3_handle
-            .set(handle)
-            .map_err(|_| anyhow::anyhow!("G3 handle already set"))
+    /// Get the object storage client (if set).
+    pub fn object_client(&self) -> Option<&Arc<dyn ObjectBlockOps>> {
+        self.object_client.as_ref()
     }
 
     /// Get the G1 layout handle (if set).
     pub fn g1_handle(&self) -> Option<LayoutHandle> {
-        self.g1_handle.get().copied()
+        self.g1_handle
     }
 
     /// Get the G2 layout handle (if set).
     pub fn g2_handle(&self) -> Option<LayoutHandle> {
-        self.g2_handle.get().copied()
+        self.g2_handle
     }
 
     /// Get the G3 layout handle (if set).
     pub fn g3_handle(&self) -> Option<LayoutHandle> {
-        self.g3_handle.get().copied()
+        self.g3_handle
     }
 
     /// Get a reference to the TransferManager.
     pub fn transfer_manager(&self) -> &TransferManager {
         &self.manager
+    }
+
+    /// Resolve a logical layout handle to a physical layout.
+    ///
+    /// # Arguments
+    /// * `logical` - The logical layout handle (G1, G2, G3)
+    ///
+    /// # Returns
+    /// The physical layout for the given logical handle, or an error if not found.
+    pub fn resolve_layout(&self, logical: LogicalLayoutHandle) -> Result<PhysicalLayout> {
+        use LogicalLayoutHandle::*;
+
+        let physical_handle = match logical {
+            G1 => self.g1_handle(),
+            G2 => self.g2_handle(),
+            G3 => self.g3_handle(),
+            _ => None,
+        }
+        .ok_or_else(|| anyhow::anyhow!("No layout registered for {:?}", logical))?;
+
+        self.manager
+            .get_physical_layout(physical_handle)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Layout handle {:?} not found in TransferManager",
+                    physical_handle
+                )
+            })
     }
 
     /// Create a bounce buffer specification from a layout handle and block IDs.
@@ -237,6 +276,7 @@ impl WorkerTransfers for DirectWorker {
 
         match src {
             RemoteDescriptor::Layout { handle, block_ids } => {
+                // RDMA onboard from remote layout
                 let block_ids_arc: Arc<[BlockId]> = block_ids.into();
                 self.manager.execute_transfer(
                     handle,
@@ -246,21 +286,119 @@ impl WorkerTransfers for DirectWorker {
                     options,
                 )
             }
-            RemoteDescriptor::Object { keys: _ } => {
-                todo!("implement remote object transfer")
+            RemoteDescriptor::Object { keys } => {
+                // Object storage onboard (e.g., S3 → G2)
+                let object_client = self
+                    .object_client
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Object client not configured"))?
+                    .clone();
+
+                // Resolve destination physical layout
+                let dst_physical = self.resolve_layout(dst)?;
+                let block_ids_vec: Vec<BlockId> = dst_block_ids.to_vec();
+
+                // Create event for completion notification
+                let ctx = self.manager.context();
+                let event = ctx.event_system().new_event()?;
+                let handle = event.handle();
+                let awaiter = ctx.event_system().awaiter(handle)?;
+
+                // Spawn task to execute object storage read
+                ctx.tokio().spawn(async move {
+                    let results = object_client
+                        .get_blocks(keys.clone(), dst_physical, block_ids_vec)
+                        .await;
+
+                    // Check if any failed
+                    let failed: Vec<_> = results.iter().filter(|r| r.is_err()).collect();
+                    if failed.is_empty() {
+                        let _ = event.trigger();
+                    } else {
+                        let error_msg = format!(
+                            "{} of {} blocks failed to download",
+                            failed.len(),
+                            results.len()
+                        );
+                        let _ = event.poison(error_msg);
+                    }
+                });
+
+                Ok(TransferCompleteNotification::from_awaiter(awaiter))
             }
         }
     }
 
-    #[expect(unused_variables)]
     fn execute_remote_offload(
         &self,
         src: LogicalLayoutHandle,
         src_block_ids: Arc<[BlockId]>,
         dst: RemoteDescriptor,
-        options: TransferOptions,
+        _options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
-        todo!("implement remote offload")
+        match dst {
+            RemoteDescriptor::Layout { handle, block_ids } => {
+                // RDMA offload to remote layout
+                let src_layout = match &src {
+                    LogicalLayoutHandle::G1 => self.g1_handle(),
+                    LogicalLayoutHandle::G2 => self.g2_handle(),
+                    LogicalLayoutHandle::G3 => self.g3_handle(),
+                    LogicalLayoutHandle::G4 => {
+                        return Err(anyhow::anyhow!("G4 cannot be used as source for offload"));
+                    }
+                }
+                .ok_or_else(|| anyhow::anyhow!("Source layout not registered: {:?}", src))?;
+
+                let block_ids_arc: Arc<[BlockId]> = block_ids.into();
+                self.manager.execute_transfer(
+                    src_layout,
+                    &src_block_ids,
+                    handle,
+                    &block_ids_arc,
+                    _options,
+                )
+            }
+            RemoteDescriptor::Object { keys } => {
+                // Object storage offload (e.g., G2 → S3)
+                let object_client = self
+                    .object_client
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Object client not configured"))?
+                    .clone();
+
+                // Resolve source physical layout
+                let src_layout = self.resolve_layout(src)?;
+                let block_ids_vec: Vec<BlockId> = src_block_ids.to_vec();
+
+                // Create event for completion notification
+                let ctx = self.manager.context();
+                let event = ctx.event_system().new_event()?;
+                let handle = event.handle();
+                let awaiter = ctx.event_system().awaiter(handle)?;
+
+                // Spawn task to execute object storage write
+                ctx.tokio().spawn(async move {
+                    let results = object_client
+                        .put_blocks(keys.clone(), src_layout, block_ids_vec)
+                        .await;
+
+                    // Check if any failed
+                    let failed: Vec<_> = results.iter().filter(|r| r.is_err()).collect();
+                    if failed.is_empty() {
+                        let _ = event.trigger();
+                    } else {
+                        let error_msg = format!(
+                            "{} of {} blocks failed to upload",
+                            failed.len(),
+                            results.len()
+                        );
+                        let _ = event.poison(error_msg);
+                    }
+                });
+
+                Ok(TransferCompleteNotification::from_awaiter(awaiter))
+            }
+        }
     }
 
     fn connect_remote(
@@ -335,15 +473,15 @@ impl WorkerTransfers for DirectWorker {
 
 impl Worker for DirectWorker {
     fn g1_handle(&self) -> Option<LayoutHandle> {
-        self.g1_handle.get().copied()
+        self.g1_handle
     }
 
     fn g2_handle(&self) -> Option<LayoutHandle> {
-        self.g2_handle.get().copied()
+        self.g2_handle
     }
 
     fn g3_handle(&self) -> Option<LayoutHandle> {
-        self.g3_handle.get().copied()
+        self.g3_handle
     }
 
     fn export_metadata(&self) -> Result<SerializedLayoutResponse> {
@@ -356,5 +494,50 @@ impl Worker for DirectWorker {
         self.manager
             .import_metadata(metadata)
             .map(ImportMetadataResponse::ready)
+    }
+}
+
+impl ObjectBlockOps for DirectWorker {
+    fn has_blocks(
+        &self,
+        keys: Vec<SequenceHash>,
+    ) -> BoxFuture<'static, Vec<(SequenceHash, Option<usize>)>> {
+        // Object client handles rank-based key prefixing internally
+        if let Some(client) = self.object_client.as_ref() {
+            client.has_blocks(keys)
+        } else {
+            // No object client configured - return all keys as not found
+            Box::pin(async move { keys.into_iter().map(|k| (k, None)).collect() })
+        }
+    }
+
+    fn put_blocks(
+        &self,
+        keys: Vec<SequenceHash>,
+        layout: crate::v2::physical::transfer::PhysicalLayout,
+        block_ids: Vec<BlockId>,
+    ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        // Object client handles rank-based key prefixing internally
+        if let Some(client) = self.object_client.as_ref() {
+            client.put_blocks(keys, layout, block_ids)
+        } else {
+            // No object client configured - return all keys as failed
+            Box::pin(async move { keys.into_iter().map(Err).collect() })
+        }
+    }
+
+    fn get_blocks(
+        &self,
+        keys: Vec<SequenceHash>,
+        layout: crate::v2::physical::transfer::PhysicalLayout,
+        block_ids: Vec<BlockId>,
+    ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        // Object client handles rank-based key prefixing internally
+        if let Some(client) = self.object_client.as_ref() {
+            client.get_blocks(keys, layout, block_ids)
+        } else {
+            // No object client configured - return all keys as failed
+            Box::pin(async move { keys.into_iter().map(Err).collect() })
+        }
     }
 }

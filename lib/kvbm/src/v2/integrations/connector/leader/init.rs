@@ -11,8 +11,12 @@ use crate::distributed::worker::{LeaderLayoutConfig, NovaWorkerClient, Worker};
 use crate::integrations::connector::worker::ConnectorWorkerClient;
 use crate::logical::blocks::{BlockDuplicationPolicy, BlockRegistry};
 use crate::logical::manager::{BlockManager, FrequencyTrackingCapacity};
+use crate::v2::distributed::object::{
+    ObjectLockManager, create_lock_manager, create_object_client,
+};
 use crate::v2::distributed::offload::{
-    OffloadEngine, PendingTracker, PipelineBuilder, create_policy_from_config,
+    ObjectLockPresenceFilter, ObjectPipelineBuilder, OffloadEngine, PendingTracker,
+    PipelineBuilder, create_policy_from_config,
 };
 use crate::{G1, G2, G3, InstanceId};
 
@@ -221,19 +225,13 @@ impl ConnectorLeader {
             "Computed block counts for G2/G3 tiers"
         );
 
-        // Step 4: Build leader config and send to workers
-        tracing::debug!("Step 4: Building leader config");
-        let leader_config = LeaderLayoutConfig {
+        tracing::debug!(
             host_block_count,
             disk_block_count,
-        };
-        tracing::debug!(
-            host_block_count = leader_config.host_block_count,
-            disk_block_count = ?leader_config.disk_block_count,
-            "Leader config built"
+            "Issuing leader config to workers"
         );
 
-        // Step 5: Initialize all workers in parallel
+        // Step 4: Initialize all workers in parallel
         tracing::debug!("Step 5: Acquiring lock to create initialize futures");
         let initialize_futures = {
             tracing::debug!("Lock acquired for creating initialize futures");
@@ -243,8 +241,15 @@ impl ConnectorLeader {
                 "Creating initialize futures for all workers"
             );
             let mut futures = Vec::with_capacity(state.worker_connector_clients.len());
+            let object_config = self.runtime.config().object.clone();
             for (idx, worker) in state.worker_connector_clients.iter().enumerate() {
-                tracing::debug!(worker_idx = idx, "Creating initialize future for worker");
+                tracing::trace!(worker_idx = idx, "Creating initialize future for worker");
+                let leader_config = LeaderLayoutConfig {
+                    rank: idx,
+                    host_block_count,
+                    disk_block_count,
+                    object: object_config.clone(),
+                };
                 futures.push(worker.initialize(leader_config.clone())?);
             }
             tracing::debug!(
@@ -264,11 +269,11 @@ impl ConnectorLeader {
         let mut collected_metadata = Vec::new();
 
         for (i, future) in initialize_futures.into_iter().enumerate() {
-            tracing::debug!(worker_idx = i, "Awaiting initialization for worker");
+            tracing::trace!(worker_idx = i, "Awaiting initialization for worker");
             let worker_layout = future
                 .await
                 .with_context(|| format!("Failed to initialize worker {}", i))?;
-            tracing::debug!(worker_idx = i, "Worker initialization completed");
+            tracing::trace!(worker_idx = i, "Worker initialization completed");
 
             // Collect metadata for later storage
             collected_metadata.push(worker_layout.metadata.clone());
@@ -282,12 +287,12 @@ impl ConnectorLeader {
         // Store all metadata and configure worker handles
         tracing::debug!("Acquiring lock to store metadata and configure handles");
         {
-            tracing::debug!("Lock acquired for storing metadata");
-            let mut state = self.init.lock();
-            tracing::debug!(
+            tracing::trace!(
                 num_metadata = collected_metadata.len(),
                 "Storing worker metadata"
             );
+            tracing::trace!("Lock acquired for storing metadata");
+            let mut state = self.init.lock();
             state.worker_metadata = collected_metadata.clone();
 
             // Configure layout handles for each NovaWorkerClient from their metadata
@@ -298,11 +303,11 @@ impl ConnectorLeader {
                 .zip(collected_metadata.iter())
                 .enumerate()
             {
-                tracing::debug!(worker_idx = i, "Configuring layout handles for worker");
+                tracing::trace!(worker_idx = i, "Configuring layout handles for worker");
                 client
                     .configure_layout_handles(metadata)
                     .with_context(|| format!("Failed to configure handles for worker {}", i))?;
-                tracing::debug!(worker_idx = i, "Layout handles configured for worker");
+                tracing::trace!(worker_idx = i, "Layout handles configured for worker");
             }
         }
         tracing::debug!("Lock released, configured layout handles for all workers");
@@ -455,6 +460,42 @@ impl ConnectorLeader {
             .pending_tracker(g2_to_g3_pending)
             .build();
 
+        // Build G2→G4 object storage infrastructure if configured
+        // The leader handles lock management and policy; workers handle actual data transfer
+        let (_object_lock_manager, g2_to_g4_pipeline) =
+            if let Some(object_config) = &self.runtime.config().object {
+                tracing::debug!("Object storage configured, creating lock manager");
+
+                // Create lock manager for distributed locking
+                let instance_id = self.runtime.nova.instance_id().to_string();
+                let lock_manager: Arc<dyn ObjectLockManager> =
+                    create_lock_manager(object_config, instance_id).await?;
+
+                // Create object client for leader (no rank prefix for lock/meta files)
+                let object_ops = create_object_client(object_config, None).await?;
+
+                // Create G2→G4 policy using lock manager
+                let g2_to_g4_pending = Arc::new(PendingTracker::new());
+                let g2_to_g4_policy = Arc::new(
+                    ObjectLockPresenceFilter::<G2>::new(lock_manager.clone())
+                        .with_pending_tracker(g2_to_g4_pending.clone()),
+                );
+
+                // Build G2→G4 object pipeline
+                // Note: The leader creates this pipeline for policy evaluation and coordination.
+                // Actual data transfers are executed by workers writing to their rank-prefixed keys.
+                let g2_to_g4_pipeline = ObjectPipelineBuilder::<G2>::new()
+                    .policy(g2_to_g4_policy)
+                    .pending_tracker(g2_to_g4_pending)
+                    .lock_manager(lock_manager.clone())
+                    .build();
+
+                tracing::info!("Object storage infrastructure created");
+                (Some((lock_manager, object_ops)), Some(g2_to_g4_pipeline))
+            } else {
+                (None, None)
+            };
+
         let mut engine_builder = OffloadEngine::builder(Arc::new(leader))
             .with_registry(registry_for_offload)
             .with_g2_manager(g2_manager_for_offload)
@@ -466,6 +507,11 @@ impl ConnectorLeader {
             engine_builder = engine_builder
                 .with_g3_manager(g3_mgr)
                 .with_g2_to_g3_pipeline(g2_to_g3_pipeline);
+        }
+
+        // Conditionally add G4 pipeline if object lock manager exists
+        if let Some(g2_to_g4_pipeline) = g2_to_g4_pipeline {
+            engine_builder = engine_builder.with_g2_to_g4_pipeline(g2_to_g4_pipeline);
         }
 
         match engine_builder.build() {

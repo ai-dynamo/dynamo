@@ -10,6 +10,7 @@ mod cache;
 mod discovery;
 mod nixl;
 mod nova;
+mod object;
 mod offload;
 mod rayon;
 mod tokio;
@@ -20,6 +21,7 @@ pub use discovery::{
 };
 pub use nixl::NixlConfig;
 pub use nova::{NovaBackendConfig, NovaConfig};
+pub use object::{NixlObjectConfig, ObjectClientConfig, ObjectConfig, S3ObjectConfig};
 pub use offload::{
     OffloadConfig, PolicyType, PresenceFilterConfig, PresenceLfuFilterConfig, TierOffloadConfig,
 };
@@ -78,6 +80,12 @@ pub struct KvbmConfig {
     #[validate(nested)]
     #[serde(default)]
     pub offload: OffloadConfig,
+
+    /// Object storage configuration (G4 tier).
+    /// None = object storage disabled.
+    #[validate(nested)]
+    #[serde(default)]
+    pub object: Option<ObjectConfig>,
 }
 
 impl KvbmConfig {
