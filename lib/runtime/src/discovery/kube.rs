@@ -5,6 +5,7 @@ mod daemon;
 mod utils;
 
 pub use utils::hash_pod_name;
+pub use utils::LOCALHOST_TEST_ANNOTATION;
 
 use daemon::DiscoveryDaemon;
 use utils::PodInfo;

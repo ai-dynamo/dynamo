@@ -17,7 +17,7 @@ mod kv_store;
 pub use kv_store::KVStoreDiscovery;
 
 mod kube;
-pub use kube::{KubeDiscoveryClient, hash_pod_name};
+pub use kube::{KubeDiscoveryClient, hash_pod_name, LOCALHOST_TEST_ANNOTATION};
 
 pub mod utils;
 use crate::component::TransportType;
