@@ -38,6 +38,7 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
     pytest.mark.post_merge,  # post_merge to pinpoint failure commit
+    pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
 ]
 
 
@@ -137,19 +138,8 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.timeout(290)  # 3x average
-@pytest.mark.parametrize(
-    "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
-    indirect=True,
-)
 def test_request_migration_trtllm_worker_failure(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
     """
     End-to-end test for worker fault tolerance with migration support using TRT-LLM.
@@ -201,19 +191,8 @@ def test_request_migration_trtllm_worker_failure(
 
 
 @pytest.mark.skip(reason="TRT-LLM graceful shutdown not yet implemented")
-@pytest.mark.parametrize(
-    "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
-    indirect=True,
-)
 def test_request_migration_trtllm_graceful_shutdown(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration support using TRT-LLM.
@@ -269,19 +248,8 @@ def test_request_migration_trtllm_graceful_shutdown(
 
 
 @pytest.mark.timeout(185)  # 3x average
-@pytest.mark.parametrize(
-    "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
-    indirect=True,
-)
 def test_no_request_migration_trtllm_worker_failure(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
     """
     End-to-end test for worker fault tolerance with migration disabled using TRT-LLM.
@@ -357,19 +325,8 @@ def test_no_request_migration_trtllm_worker_failure(
 
 
 @pytest.mark.skip(reason="TRT-LLM graceful shutdown not yet implemented")
-@pytest.mark.parametrize(
-    "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
-    indirect=True,
-)
 def test_no_request_migration_trtllm_graceful_shutdown(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
     """
     End-to-end test for worker fault tolerance with graceful shutdown and migration disabled using TRT-LLM.
