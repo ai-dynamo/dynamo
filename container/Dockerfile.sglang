@@ -6,7 +6,7 @@ ARG SGLANG_IMAGE_TAG="v0.5.6.post2"
 # Either 12 or 13
 ARG CUDA_VERSION="12"
 ARG BRANCH_TYPE
-# PyPI version to install when BRANCH_TYPE is not set 
+# PyPI version to install when BRANCH_TYPE is not set
 ARG DYNAMO_VERSION=""
 ARG CARGO_BUILD_JOBS
 
@@ -57,7 +57,7 @@ ARG DYNAMO_VERSION
 
 # SGLang does not use a venv in their container
 # BRANCH_TYPE=local  -> build from local repo with maturin
-# BRANCH_TYPE=remote -> build from github with maturin  
+# BRANCH_TYPE=remote -> build from github with maturin
 # otherwise          -> pip install ai-dynamo (with optional version)
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     if [ "$BRANCH_TYPE" = "local" ]; then \
