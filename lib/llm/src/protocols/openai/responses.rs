@@ -368,6 +368,7 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
+                stop_reason: None,
                 logprobs: None,
             }],
             created: now,

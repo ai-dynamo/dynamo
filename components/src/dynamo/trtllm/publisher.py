@@ -276,6 +276,7 @@ class Publisher:
         kv_block_size,
         metrics_labels,
         zmq_endpoint: Optional[str] = None,
+        enable_local_indexer: bool = False,
     ):
         self.component = component
         self.engine = engine
@@ -284,6 +285,7 @@ class Publisher:
         self.kv_block_size = kv_block_size
         self.max_window_size = None
         self.metrics_labels = metrics_labels
+        self.enable_local_indexer = enable_local_indexer
 
         # The first few kv events from the model engine are always "created" type events.
         # Use these events to capture the max_window_size of the model.
@@ -348,7 +350,11 @@ class Publisher:
         else:
             # No consolidator: use NATS publisher (router subscribes directly)
             self.kv_event_publisher = KvEventPublisher(
-                self.kv_listener, self.worker_id, self.kv_block_size, dp_rank=0
+                self.kv_listener,
+                self.worker_id,
+                self.kv_block_size,
+                dp_rank=0,
+                enable_local_indexer=self.enable_local_indexer,
             )
 
         # Always initialize the thread - it routes to either ZMQ or NATS publisher
@@ -685,6 +691,7 @@ async def get_publisher(
     kv_block_size,
     metrics_labels,
     zmq_endpoint: Optional[str] = None,
+    enable_local_indexer: bool = False,
 ):
     publisher = Publisher(
         component,
@@ -694,6 +701,7 @@ async def get_publisher(
         kv_block_size,
         metrics_labels,
         zmq_endpoint=zmq_endpoint,
+        enable_local_indexer=enable_local_indexer,
     )
     try:
         publisher.initialize()

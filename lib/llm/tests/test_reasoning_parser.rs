@@ -24,6 +24,7 @@ fn create_mock_response_chunk(
             reasoning_content,
         },
         finish_reason: None,
+        stop_reason: None,
         logprobs: None,
     };
 

@@ -216,6 +216,7 @@ mod tests {
             log_probs: None,
             top_logprobs: None,
             finish_reason: None,
+            stop_reason: None,
             index: None,
             disaggregated_params: None,
             completion_usage: None,

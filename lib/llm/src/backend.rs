@@ -42,6 +42,7 @@ use crate::protocols::{
     },
 };
 use crate::tokenizers::{DecodeStream, HuggingFaceTokenizer, Tokenizer};
+use dynamo_async_openai::types::StopReason;
 use tokenizers::Tokenizer as HfTokenizer;
 
 /// Represents the output stream from the execution engine
@@ -63,6 +64,8 @@ struct DecoderUnfoldState {
     stream: ManyOut<ExecutionOutputStream>,
     decoder: Decoder,
     validate_engine_decode: bool,
+    /// Set to true when a local stop condition is detected, causing the stream to end
+    finished: bool,
 }
 
 impl Backend {
@@ -95,6 +98,7 @@ impl Backend {
         prompt_token_ids: &[TokenIdType],
         stop_conditions: StopConditions,
         skip_special_tokens: bool,
+        include_stop_str_in_output: bool,
     ) -> anyhow::Result<DecoderUnfoldState> {
         let Some(tokenizer) = self.tokenizer.as_ref() else {
             anyhow::bail!("Backend built from blank ModelDeploymentCard, no tokenizer");
@@ -102,12 +106,14 @@ impl Backend {
         let decoder = Decoder::new(
             tokenizer.decode_stream(prompt_token_ids, skip_special_tokens),
             stop_conditions,
+            include_stop_str_in_output,
         );
 
         Ok(DecoderUnfoldState {
             stream,
             decoder,
             validate_engine_decode: self.validate_engine_decode,
+            finished: false,
         })
     }
 }
@@ -133,6 +139,12 @@ impl
         // TODO: Consider updating default to true to match behavior of other frameworks
         let skip_special_tokens = request.output_options.skip_special_tokens.unwrap_or(false);
 
+        // Extract include_stop_str_in_output from sampling_options (defaults to false)
+        let include_stop_str_in_output = request
+            .sampling_options
+            .include_stop_str_in_output
+            .unwrap_or(false);
+
         let next_stream = next.generate(request).await?;
 
         let context = next_stream.context();
@@ -141,9 +153,15 @@ impl
             &prompt_token_ids,
             stop_conditions,
             skip_special_tokens,
+            include_stop_str_in_output,
         )?;
 
         let processed_stream = stream::unfold(state, |mut state| async move {
+            // If we've already detected a local stop condition, end the stream
+            if state.finished {
+                return None;
+            }
+
             match state.stream.next().await {
                 Some(output) => {
                     // move to state.process_output
@@ -169,21 +187,38 @@ impl
                     // NOTE: the `finish_reason` is computed from the generated `token_ids` alone.
                     // The `data` field can have a `finish_reason` set, coming from the underlying
                     // LLM inference `Engine`, and empty `token_ids`. See comment below for more details.
-                    let finish_reason = match &result.stop_trigger {
-                        Some(StopTrigger::MaxTokensLimit) => Some(FinishReason::Length),
-                        Some(StopTrigger::HiddenStopTokenDetected(_)) => Some(FinishReason::Stop),
-                        Some(StopTrigger::HiddenStopSequenceDetected(_)) => {
-                            Some(FinishReason::Stop)
+                    //
+                    // stop_reason is only set for user-provided stop sequences, not for system
+                    // EOS tokens (HiddenStopTokenDetected). This matches OpenAI API behavior where
+                    // stop_reason is only present when a user-specified stop sequence is matched.
+                    let (finish_reason, stop_reason) = match &result.stop_trigger {
+                        Some(StopTrigger::MaxTokensLimit) => (Some(FinishReason::Length), None),
+                        Some(StopTrigger::HiddenStopTokenDetected(_)) => {
+                            // System EOS token - no stop_reason (user didn't request this stop)
+                            (Some(FinishReason::Stop), None)
                         }
-                        None => None,
+                        Some(StopTrigger::HiddenStopSequenceDetected(seq)) => {
+                            // User-provided stop sequence (hidden from output)
+                            (
+                                Some(FinishReason::Stop),
+                                Some(StopReason::String(seq.clone())),
+                            )
+                        }
+                        Some(StopTrigger::VisibleStopSequenceDetected(seq)) => {
+                            // User-provided stop sequence (included in output)
+                            (
+                                Some(FinishReason::Stop),
+                                Some(StopReason::String(seq.clone())),
+                            )
+                        }
+                        None => (None, None),
                     };
 
-                    if data.finish_reason.is_none() && finish_reason.is_some() {
-                        tracing::debug!(
-                            ?result.stop_trigger,
-                            "upstream did not provide a finish reason; issuing a stop_generation request to free resources",
-                        );
+                    // If we detected a local stop condition, mark stream as finished
+                    // so we stop iterating (upstream may keep generating, but we ignore it)
+                    if finish_reason.is_some() && data.finish_reason.is_none() {
                         state.stream.context().stop_generating();
+                        state.finished = true;
                     }
 
                     let text = result.text;
@@ -215,6 +250,7 @@ impl
                     // which we don't want to propagate to `data.finish_reason`.
                     if finish_reason.is_some() {
                         data.finish_reason = finish_reason;
+                        data.stop_reason = stop_reason;
                     }
                     data.text = text;
                     data.tokens = Some(tokens);
@@ -240,6 +276,7 @@ impl
                     log_probs: data.log_probs,
                     top_logprobs: data.top_logprobs,
                     finish_reason: data.finish_reason,
+                    stop_reason: data.stop_reason,
                     //mdcsum: mdcsum.clone(),
                     index: data.index,
                     completion_usage: data.completion_usage,
@@ -282,10 +319,6 @@ impl
     }
 }
 
-// todo - add visible stop conditions
-// visible_stop_ids: HashSet<TokenIdType>,
-// visible_stop_sequences: Vec<String>,
-
 /// The [`Decoder`] object could be a member of either the internal LLM engine or part of the
 /// postprocessor. If in the postprocessor, should be minimally in the same process or at very minimum
 /// on the same physical machine connected by an IPC.
@@ -301,8 +334,12 @@ pub struct Decoder {
     hidden_stop_ids: HashSet<TokenIdType>,
 
     // text sequences that if found in the response will trigger a stop condition after the
-    // minimum number of tokens have been generated
+    // minimum number of tokens have been generated (excluded from output)
     hidden_stop_sequences: Vec<String>,
+
+    // text sequences that if found in the response will trigger a stop condition after the
+    // minimum number of tokens have been generated (included in output)
+    visible_stop_sequences: Vec<String>,
 
     // number of generated tokens
     generated_tokens: u32,
@@ -315,8 +352,6 @@ pub struct Decoder {
 
     // the number of bytes currently jailed
     jailed_bytes: usize,
-    // mdcsum
-    //mdcsum: String,
 }
 
 #[allow(dead_code)]
@@ -325,16 +360,7 @@ pub enum StopTrigger {
     MaxTokensLimit,
     HiddenStopTokenDetected(TokenIdType),
     HiddenStopSequenceDetected(String),
-}
-
-impl StopTrigger {
-    pub fn should_hide_text(&self) -> bool {
-        match self {
-            StopTrigger::MaxTokensLimit => false,
-            StopTrigger::HiddenStopTokenDetected(_) => true,
-            StopTrigger::HiddenStopSequenceDetected(_) => true,
-        }
-    }
+    VisibleStopSequenceDetected(String),
 }
 
 pub struct StepResult {
@@ -370,7 +396,7 @@ impl Decoder {
     pub fn new(
         decode_stream: DecodeStream,
         stop_condition: StopConditions,
-        //mdcsum: String,
+        include_stop_str_in_output: bool,
     ) -> Self {
         let hidden_stop_ids: HashSet<TokenIdType> = stop_condition
             .stop_token_ids_hidden
@@ -379,15 +405,19 @@ impl Decoder {
             .copied()
             .collect();
 
-        let hidden_stop_sequences: Vec<String> = stop_condition
-            .stop
-            .unwrap_or_default()
-            .iter()
-            .map(|x| x.to_string())
-            .collect();
+        // Categorize stop sequences based on include_stop_str_in_output:
+        // - When true: user-provided stop sequences go to visible (included in output)
+        // - When false: user-provided stop sequences go to hidden (excluded from output)
+        let (hidden_stop_sequences, visible_stop_sequences) = if include_stop_str_in_output {
+            (Vec::new(), stop_condition.stop.unwrap_or_default())
+        } else {
+            (stop_condition.stop.unwrap_or_default(), Vec::new())
+        };
 
+        // Calculate jail_max_bytes considering both hidden and visible stop sequences
         let jail_max_bytes = hidden_stop_sequences
             .iter()
+            .chain(visible_stop_sequences.iter())
             .map(|x| x.len())
             .max()
             .unwrap_or(0);
@@ -396,8 +426,7 @@ impl Decoder {
             decode_stream,
             hidden_stop_ids,
             hidden_stop_sequences,
-            //visible_stop_ids: HashSet::new(),
-            //visible_stop_sequences: Vec::new(),
+            visible_stop_sequences,
             min_tokens: stop_condition.min_tokens.unwrap_or(0),
             generated_tokens: 0,
             jail: String::new(),
@@ -444,12 +473,13 @@ impl Decoder {
             log::debug!("post_append: {}", self.jail.len());
             log::debug!("jail: {}", self.jail);
 
+            // Check hidden stop sequences first (excluded from output)
             for seq in &self.hidden_stop_sequences {
                 log::debug!("stop seq: {}", seq);
                 if let Some(offset) = galil_seiferas::gs_find(self.jail.as_bytes(), seq.as_bytes())
                 {
                     log::debug!("offset: {}", offset);
-                    // return only new bytes after pre_append .. offset+seq.len()
+                    // return only new bytes after pre_append .. offset (excluding stop sequence)
                     // example: seq = "ox", token = "boxes", return "b"
                     // note: this changes when we start jailing tokens for partial matches
                     // on the suffix of the jail with prefixes of the stop sequences
@@ -464,6 +494,26 @@ impl Decoder {
                     return Ok(StepResult::with_stop_trigger(
                         Some(partial_token),
                         StopTrigger::HiddenStopSequenceDetected(seq.to_string()),
+                    ));
+                }
+            }
+
+            // Check visible stop sequences (included in output)
+            for seq in &self.visible_stop_sequences {
+                if let Some(offset) = galil_seiferas::gs_find(self.jail.as_bytes(), seq.as_bytes())
+                {
+                    // For visible stop sequences, include the stop string in the output
+                    // Return all text from pre_append up to and including the stop sequence
+                    let stop_end = offset + seq.len();
+                    let token_with_stop = if stop_end > pre_append {
+                        self.jail[pre_append..stop_end].to_string()
+                    } else {
+                        // Stop sequence was entirely in previously returned text
+                        "".to_string()
+                    };
+                    return Ok(StepResult::with_stop_trigger(
+                        Some(token_with_stop),
+                        StopTrigger::VisibleStopSequenceDetected(seq.to_string()),
                     ));
                 }
             }
@@ -484,12 +534,8 @@ impl Decoder {
                 stop_trigger,
             } = self.step(*token_id)?;
 
-            let hide_text = stop_trigger
-                .as_ref()
-                .map(|x| x.should_hide_text())
-                .unwrap_or(false);
-
-            if !hide_text && let Some(token) = &token {
+            // Always include token text (for visible stops, the stop string is already in the token)
+            if let Some(token) = &token {
                 text.get_or_insert_with(|| String::with_capacity(token_ids.len()))
                     .push_str(token);
             }
@@ -509,24 +555,6 @@ impl Decoder {
             text,
             stop_trigger: None,
         })
-    }
-
-    fn return_token(&self, token: Option<String>) -> StepResult {
-        StepResult {
-            token,
-            stop_trigger: None,
-        }
-    }
-
-    fn return_with_stop_trigger(
-        &self,
-        token: Option<String>,
-        stop_trigger: StopTrigger,
-    ) -> StepResult {
-        StepResult {
-            token,
-            stop_trigger: Some(stop_trigger),
-        }
     }
 
     fn jailed_string(&self) -> Option<String> {

@@ -60,6 +60,17 @@ vllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            chat_payload(
+                "Can you write me a song?",
+                repeat_count=1,
+                expected_response=["song"],
+                temperature=0.0,
+                max_tokens=32,
+                extra_body={
+                    "stop": ["song"],
+                    "include_stop_str_in_output": True,
+                },
+            ),
             metric_payload_default(min_num_requests=6, backend="vllm"),
         ],
     ),

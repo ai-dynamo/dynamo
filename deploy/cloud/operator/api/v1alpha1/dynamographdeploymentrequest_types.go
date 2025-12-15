@@ -129,11 +129,20 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:validation:Required
 	Model string `json:"model"`
 
-	// Backend specifies the inference backend to use.
+	// Backend specifies the inference backend for profiling.
 	// The controller automatically sets this value in profilingConfig.config.engine.backend.
+	// Profiling runs on real GPUs or via AIC simulation to collect performance data.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	Backend string `json:"backend"`
+
+	// UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of
+	// a real backend deployment. When true, the deployment uses simulated engines that
+	// don't require GPUs, using the profiling data to simulate realistic timing behavior.
+	// Mocker is available in all backend images and useful for large-scale experiments.
+	// Profiling still runs against the real backend (specified above) to collect performance data.
+	// +kubebuilder:default=false
+	UseMocker bool `json:"useMocker,omitempty"`
 
 	// EnableGpuDiscovery controls whether the profiler should automatically discover GPU
 	// resources from the Kubernetes cluster nodes. When enabled, the profiler will override
@@ -213,6 +222,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// including metadata, based on profiling results. Users can extract this to create
 	// a DGD manually, or it's used automatically when autoApply is true.
 	// Stored as RawExtension to preserve all fields including metadata.
+	// For mocker backends, this contains the mocker DGD spec.
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:EmbeddedResource

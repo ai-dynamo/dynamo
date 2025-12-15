@@ -234,6 +234,7 @@ impl DeltaGenerator {
     /// * `text` - The text content for the response.
     /// * `finish_reason` - The reason why the response finished (e.g., stop, length, etc.).
     /// * `logprobs` - Optional log probabilities of the generated tokens.
+    /// * `stop_reason` - Optional stop string or token that triggered the stop.
     ///
     /// # Returns
     /// * An [`dynamo_async_openai::types::CreateChatCompletionStreamResponse`] instance representing the choice.
@@ -244,6 +245,7 @@ impl DeltaGenerator {
         text: Option<String>,
         finish_reason: Option<dynamo_async_openai::types::FinishReason>,
         logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
+        stop_reason: Option<dynamo_async_openai::types::StopReason>,
     ) -> NvCreateChatCompletionStreamResponse {
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
             content: text,
@@ -262,6 +264,7 @@ impl DeltaGenerator {
             index,
             delta,
             finish_reason,
+            stop_reason,
             logprobs,
         };
 
@@ -384,7 +387,13 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Create the streaming response.
         let index = 0;
-        let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
+        let mut stream_response = self.create_choice(
+            index,
+            delta.text,
+            finish_reason,
+            logprobs,
+            delta.stop_reason,
+        );
 
         // Record first token time (only succeeds on first call due to OnceLock)
         if let Some(ref tracker) = self.timing_tracker {

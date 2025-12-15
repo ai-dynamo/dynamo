@@ -275,6 +275,7 @@ impl Scheduler {
                 args.block_size,
                 component,
                 dp_rank,
+                args.enable_local_indexer,
             );
             let mut hit_rates = RunningMean::new(1000);
 

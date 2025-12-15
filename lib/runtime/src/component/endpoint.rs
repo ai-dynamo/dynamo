@@ -89,30 +89,6 @@ impl EndpointConfigBuilder {
         let request_plane_mode = endpoint.drt().request_plane();
         tracing::info!("Endpoint starting with request plane mode: {request_plane_mode}",);
 
-        // Register health check target in SystemHealth if provided
-        if let Some(health_check_payload) = &health_check_payload {
-            // Build transport based on request plane mode
-            let transport = build_transport_type(request_plane_mode, &endpoint_id, connection_id);
-
-            let instance = Instance {
-                component: endpoint_id.component.clone(),
-                endpoint: endpoint_id.name.clone(),
-                namespace: endpoint_id.namespace.clone(),
-                instance_id: connection_id,
-                transport,
-            };
-            tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
-            let guard = system_health.lock();
-            guard.register_health_check_target(
-                &endpoint.name,
-                instance,
-                health_check_payload.clone(),
-            );
-            if let Some(notifier) = guard.get_endpoint_health_check_notifier(&endpoint.name) {
-                handler.set_endpoint_health_check_notifier(notifier)?;
-            }
-        }
-
         // Register with graceful shutdown tracker if needed
         if graceful_shutdown {
             tracing::debug!(
@@ -137,8 +113,32 @@ impl EndpointConfigBuilder {
         let component_name_for_task = endpoint_id.component.clone();
         let endpoint_name_for_task = endpoint_id.name.clone();
 
-        // Get the unified request plane server (works for all transport types)
+        // Get the unified request plane server
         let server = endpoint.drt().request_plane_server().await?;
+
+        // Register health check target in SystemHealth if provided
+        if let Some(health_check_payload) = &health_check_payload {
+            // Build transport based on request plane mode
+            let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
+
+            let instance = Instance {
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+                namespace: endpoint_id.namespace.clone(),
+                instance_id: connection_id,
+                transport,
+            };
+            tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
+            let guard = system_health.lock();
+            guard.register_health_check_target(
+                &endpoint.name,
+                instance,
+                health_check_payload.clone(),
+            );
+            if let Some(notifier) = guard.get_endpoint_health_check_notifier(&endpoint.name) {
+                handler.set_endpoint_health_check_notifier(notifier)?;
+            }
+        }
 
         tracing::info!(
             endpoint = %endpoint_name_for_task,
@@ -198,7 +198,7 @@ impl EndpointConfigBuilder {
         let discovery = endpoint.drt().discovery();
 
         // Build transport for discovery service based on request plane mode
-        let transport = build_transport_type(request_plane_mode, &endpoint_id, connection_id);
+        let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
 
         let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
             namespace: endpoint_id.namespace.clone(),
@@ -232,11 +232,14 @@ impl EndpointConfigBuilder {
 /// - HTTP: Uses full URL path including endpoint name (e.g., http://host:port/v1/rpc/endpoint_name)
 /// - TCP: Includes endpoint name for routing (e.g., host:port/endpoint_name)
 /// - NATS: Uses subject-based addressing (unique per endpoint)
-pub fn build_transport_type(
+///
+/// # Errors
+/// Returns an error if TCP mode is used but the TCP server hasn't been started yet.
+fn build_transport_type_inner(
     mode: RequestPlaneMode,
     endpoint_id: &EndpointId,
     connection_id: u64,
-) -> TransportType {
+) -> Result<TransportType> {
     match mode {
         RequestPlaneMode::Http => {
             let http_host = crate::utils::get_http_rpc_host_from_env();
@@ -252,23 +255,54 @@ pub fn build_transport_type(
                 endpoint_id.name
             );
 
-            TransportType::Http(http_endpoint)
+            Ok(TransportType::Http(http_endpoint))
         }
         RequestPlaneMode::Tcp => {
             let tcp_host = crate::utils::get_tcp_rpc_host_from_env();
+            // If a fixed port is explicitly configured, use it directly (no init ordering dependency).
+            // Otherwise, use the actual bound port (set by TCP server after binding when port 0 is used).
             let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(9999);
+                .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
 
             // Include endpoint name for proper TCP routing
             // TCP client parses this format and adds x-endpoint-path header for server-side routing
             let tcp_endpoint = format!("{}:{}/{}", tcp_host, tcp_port, endpoint_id.name);
 
-            TransportType::Tcp(tcp_endpoint)
+            Ok(TransportType::Tcp(tcp_endpoint))
         }
-        RequestPlaneMode::Nats => {
-            TransportType::Nats(nats::instance_subject(endpoint_id, connection_id))
+        RequestPlaneMode::Nats => Ok(TransportType::Nats(nats::instance_subject(
+            endpoint_id,
+            connection_id,
+        ))),
+    }
+}
+
+/// Build transport type, ensuring TCP server is initialized when needed.
+///
+/// In TCP mode with an OS-assigned port (`DYN_TCP_RPC_PORT` unset or invalid), the server must bind
+/// before we can construct a correct transport address. This helper ensures that initialization
+/// occurs, then delegates to the internal builder.
+pub async fn build_transport_type(
+    endpoint: &Endpoint,
+    endpoint_id: &EndpointId,
+    connection_id: u64,
+) -> Result<TransportType> {
+    let mode = endpoint.drt().request_plane();
+
+    if mode == RequestPlaneMode::Tcp {
+        // Only force server init when we *don't* have a valid explicit port.
+        let has_fixed_port = std::env::var("DYN_TCP_RPC_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .is_some();
+
+        if !has_fixed_port {
+            // Ensure request plane server is initialized before building transport.
+            let _ = endpoint.drt().request_plane_server().await?;
         }
     }
+
+    build_transport_type_inner(mode, endpoint_id, connection_id)
 }

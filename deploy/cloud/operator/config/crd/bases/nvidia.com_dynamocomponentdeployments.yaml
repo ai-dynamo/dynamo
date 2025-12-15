@@ -10400,6 +10400,59 @@ spec:
                     PodSelector contains the labels that can be used to select Pods belonging to
                     this component deployment.
                   type: object
+                service:
+                  description: Service contains replica status information for this service.
+                  properties:
+                    availableReplicas:
+                      description: |-
+                        AvailableReplicas is the number of available replicas.
+                        For Deployment: replicas ready for >= minReadySeconds.
+                        For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.
+                        Not available for PodClique or LeaderWorkerSet.
+                        When nil, the field is omitted from the API response.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    componentKind:
+                      description: ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet").
+                      enum:
+                        - PodClique
+                        - PodCliqueScalingGroup
+                        - Deployment
+                        - LeaderWorkerSet
+                      type: string
+                    componentName:
+                      description: ComponentName is the name of the underlying resource.
+                      type: string
+                    readyReplicas:
+                      description: |-
+                        ReadyReplicas is the number of ready replicas.
+                        Populated for PodClique, Deployment, and LeaderWorkerSet.
+                        Not available for PodCliqueScalingGroup.
+                        When nil, the field is omitted from the API response.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    replicas:
+                      description: |-
+                        Replicas is the total number of non-terminated replicas.
+                        Required for all component kinds.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    updatedReplicas:
+                      description: |-
+                        UpdatedReplicas is the number of replicas at the current/desired revision.
+                        Required for all component kinds.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                  required:
+                    - componentKind
+                    - componentName
+                    - replicas
+                    - updatedReplicas
+                  type: object
               required:
                 - conditions
               type: object

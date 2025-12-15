@@ -74,6 +74,7 @@ class DynamoSglangPublisher:
         """
         self.engine = engine
         self.server_args = config.server_args
+        self.dynamo_args = config.dynamo_args
         self.generate_endpoint = generate_endpoint
         self.component = component
         self.metrics_publisher = WorkerMetricsPublisher()
@@ -151,6 +152,7 @@ class DynamoSglangPublisher:
                 worker_id=self.generate_endpoint.connection_id(),
                 kv_block_size=self.server_args.page_size,
                 zmq_endpoint=zmq_ep,
+                enable_local_indexer=self.dynamo_args.enable_local_indexer,
             )
             logging.info(f"Setting up ZMQ kv event publisher at {zmq_ep}")
             self.kv_publisher = ZmqKvEventPublisher(

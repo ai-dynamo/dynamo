@@ -179,6 +179,10 @@ type DynamoComponentDeploymentStatus struct {
 	// PodSelector contains the labels that can be used to select Pods belonging to
 	// this component deployment.
 	PodSelector map[string]string `json:"podSelector,omitempty"`
+
+	// Service contains replica status information for this service.
+	// +optional
+	Service ServiceReplicaStatus `json:"service,omitempty"`
 }
 
 // +genclient
@@ -216,6 +220,10 @@ func init() {
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {
 	ready, reason := s.Status.IsReady()
 	return ready, reason
+}
+
+func (s *DynamoComponentDeployment) GetServiceStatuses() map[string]ServiceReplicaStatus {
+	return map[string]ServiceReplicaStatus{s.Spec.ServiceName: s.Status.Service}
 }
 
 func (s *DynamoComponentDeploymentStatus) IsReady() (bool, string) {

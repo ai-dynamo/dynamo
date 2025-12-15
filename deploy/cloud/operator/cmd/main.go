@@ -208,6 +208,7 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	if restrictedNamespace == "" && plannerClusterRoleName == "" {
 		setupLog.Error(nil, "planner-cluster-role-name is required in cluster-wide mode")
@@ -277,7 +278,6 @@ func main() {
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will

@@ -106,6 +106,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             log_probs: None,
             top_logprobs: None,
             finish_reason: None,
+            stop_reason: None,
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
@@ -118,6 +119,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             log_probs: None,
             top_logprobs: None,
             finish_reason: None,
+            stop_reason: None,
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
@@ -130,6 +132,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             log_probs: None,
             top_logprobs: None,
             finish_reason: Some(FinishReason::Stop),
+            stop_reason: None,
             index: Some(0),
             completion_usage: cached_tokens.map(|ct| AoaiCompletionUsage {
                 prompt_tokens: 0,

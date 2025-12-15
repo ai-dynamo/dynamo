@@ -1007,6 +1007,13 @@ pub struct ChatChoiceLogprobs {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum StopReason {
+    String(String), // matched user-provided stop sequence
+    Int(i64),       // matched stop token id (requires stop_token_id support)
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ChatChoice {
     /// The index of the choice in the list of choices.
     pub index: u32,
@@ -1017,6 +1024,10 @@ pub struct ChatChoice {
     /// `tool_calls` if the model called a tool, or `function_call` (deprecated) if the model called a function.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<FinishReason>,
+    /// Which stop string matched (if any).
+    /// This is only set when `finish_reason` is `"stop"` because a user-provided stop sequence was hit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
     /// Log probability information for the choice.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<ChatChoiceLogprobs>,
@@ -1112,6 +1123,10 @@ pub struct ChatChoiceStream {
     /// (deprecated) if the model called a function.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<FinishReason>,
+    /// Which stop string matched (if any).
+    /// This is only set when `finish_reason` is `"stop"` because a user-provided stop sequence was hit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
     /// Log probability information for the choice.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<ChatChoiceLogprobs>,

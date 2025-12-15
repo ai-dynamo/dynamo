@@ -40,6 +40,7 @@ class Config:
     custom_jinja_template: Optional[str] = None
     store_kv: str
     request_plane: str
+    enable_local_indexer: bool = False
 
     # mirror vLLM
     model: str
@@ -205,6 +206,13 @@ def parse_args() -> Config:
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
     parser.add_argument(
+        "--enable-local-indexer",
+        type=str,
+        choices=["true", "false"],
+        default=os.environ.get("DYN_LOCAL_INDEXER", "false"),
+        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
+    )
+    parser.add_argument(
         "--use-vllm-tokenizer",
         action="store_true",
         default=False,
@@ -214,6 +222,7 @@ def parse_args() -> Config:
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
+    args.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
     # Workaround for vLLM GIL contention bug with NIXL connector when using UniProcExecutor.
@@ -312,6 +321,7 @@ def parse_args() -> Config:
     config.mm_prompt_template = args.mm_prompt_template
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
+    config.enable_local_indexer = args.enable_local_indexer
     config.use_vllm_tokenizer = args.use_vllm_tokenizer
 
     # Validate custom Jinja template file exists if provided

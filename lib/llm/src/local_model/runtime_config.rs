@@ -23,6 +23,10 @@ pub struct ModelRuntimeConfig {
     #[serde(default = "default_data_parallel_size")]
     pub data_parallel_size: u32,
 
+    /// Enable worker-local KV indexer for tracking this worker's own KV cache state
+    #[serde(default)]
+    pub enable_local_indexer: bool,
+
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtime_data: HashMap<String, serde_json::Value>,
@@ -51,6 +55,7 @@ impl Default for ModelRuntimeConfig {
             tool_call_parser: None,
             reasoning_parser: None,
             data_parallel_size: default_data_parallel_size(),
+            enable_local_indexer: false,
             runtime_data: HashMap::new(),
             tensor_model_config: None,
         }

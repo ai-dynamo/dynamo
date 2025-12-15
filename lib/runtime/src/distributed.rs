@@ -397,7 +397,7 @@ impl DistributedRuntime {
 
     /// TODO: This is a temporary KV router measure for component/component.rs EventPublisher impl for
     /// Component, to allow it to publish to NATS. KV Router is the only user.
-    pub(crate) async fn kv_router_nats_publish(
+    pub async fn kv_router_nats_publish(
         &self,
         subject: String,
         payload: bytes::Bytes,
@@ -418,6 +418,25 @@ impl DistributedRuntime {
             anyhow::bail!("KV router's EventSubscriber requires NATS");
         };
         Ok(nats_client.client().subscribe(subject).await?)
+    }
+
+    /// TODO (karenc): This is a temporary KV router measure for worker query requests.
+    /// Allows KV Router to perform request/reply with workers. (versus the pub/sub pattern above)
+    /// KV Router is the only user, made public for use in dynamo-llm crate
+    pub async fn kv_router_nats_request(
+        &self,
+        subject: String,
+        payload: bytes::Bytes,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<async_nats::Message> {
+        let Some(nats_client) = self.nats_client.as_ref() else {
+            anyhow::bail!("KV router's request requires NATS");
+        };
+        let response =
+            tokio::time::timeout(timeout, nats_client.client().request(subject, payload))
+                .await
+                .map_err(|_| anyhow::anyhow!("Request timed out after {:?}", timeout))??;
+        Ok(response)
     }
 
     /// DEPRECATED: This method exists only for NATS request plane support.
@@ -628,6 +647,26 @@ pub mod distributed_test_utils {
         let rt = crate::Runtime::from_current().unwrap();
         let config = super::DistributedConfig {
             store_backend: kv::Selector::Memory,
+            nats_config: Some(nats::ClientOptions::default()),
+            request_plane: crate::distributed::RequestPlaneMode::default(),
+        };
+        super::DistributedRuntime::new(rt, config).await.unwrap()
+    }
+
+    /// Helper function to create a DRT instance which points at
+    /// a (shared) file-backed KV store and ephemeral NATS transport so that
+    /// multiple DRT instances may observe the same registration state.
+    /// NOTE: This gets around the fact that create_test_drt_async() is
+    /// hardcoded to spin up a memory-backed discovery store
+    /// which means we can't share discovery state across runtimes.
+    pub async fn create_test_shared_drt_async(
+        store_path: &std::path::Path,
+    ) -> super::DistributedRuntime {
+        use crate::{storage::kv, transports::nats};
+
+        let rt = crate::Runtime::from_current().unwrap();
+        let config = super::DistributedConfig {
+            store_backend: kv::Selector::File(store_path.to_path_buf()),
             nats_config: Some(nats::ClientOptions::default()),
             request_plane: crate::distributed::RequestPlaneMode::default(),
         };

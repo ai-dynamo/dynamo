@@ -351,6 +351,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config.max_num_batched_tokens = config.max_num_tokens
         runtime_config.reasoning_parser = config.reasoning_parser
         runtime_config.tool_call_parser = config.tool_call_parser
+        runtime_config.enable_local_indexer = config.enable_local_indexer
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(
@@ -458,6 +459,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 config.kv_block_size,
                 metrics_labels,
                 zmq_endpoint=trtllm_zmq_bind_endpoint,
+                enable_local_indexer=config.enable_local_indexer,
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)

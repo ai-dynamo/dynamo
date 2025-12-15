@@ -82,6 +82,7 @@ async def _get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.tool_call_parser
+    runtime_config.enable_local_indexer = dynamo_args.enable_local_indexer
 
     # In SGLang, these are server_args, not scheduler_info (unlike vLLM)
     # Note: If --max-running-requests is not specified, SGLang uses an internal default
