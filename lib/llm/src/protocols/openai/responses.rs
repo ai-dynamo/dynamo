@@ -22,9 +22,7 @@ use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateResponse {
     /// Flattened CreateResponse fields (model, input, temperature, etc.)
-    /// Using value_type = Object to prevent infinite schema recursion from deeply nested types.
     #[serde(flatten)]
-    #[schema(value_type = Object)]
     pub inner: dynamo_async_openai::types::responses::CreateResponse,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -34,9 +32,7 @@ pub struct NvCreateResponse {
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvResponse {
     /// Flattened Response fields.
-    /// Using value_type = Object to prevent infinite schema recursion.
     #[serde(flatten)]
-    #[schema(value_type = Object)]
     pub inner: dynamo_async_openai::types::responses::Response,
 
     /// NVIDIA extension field for response metadata (worker IDs, etc.)

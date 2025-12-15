@@ -203,6 +203,8 @@ pub struct InputFile {
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct CreateResponse {
     /// Text, image, or file inputs to the model, used to generate a response.
+    /// Using value_type to prevent deep schema recursion from Input's nested content types.
+    #[schema(value_type = Object)]
     pub input: Input,
 
     /// Model ID used to generate the response, like `gpt-4o`.
@@ -320,12 +322,14 @@ pub struct CreateResponse {
     /// How the model should select which tool (or tools) to use when generating
     /// a response.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
     pub tool_choice: Option<ToolChoice>,
 
     /// An array of tools the model may call while generating a response.
     /// Can include built-in tools (file_search, web_search_preview,
     /// computer_use_preview) or custom function definitions.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Vec<Object>)]
     pub tools: Option<Vec<ToolDefinition>>,
 
     /// An integer between 0 and 20 specifying the number of most likely tokens to return
