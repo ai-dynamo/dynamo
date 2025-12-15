@@ -50,7 +50,7 @@ ARG SCCACHE_REGION=""
 ##################################
 ##### Rust Source Image ##########
 ##################################
-# [RECOMMENDED] Pulls official image. 
+# [RECOMMENDED] Pulls official image.
 # ARM Node pulls arm64 image, AMD pulls amd64 image.
 FROM rust:1.90 AS rust_source
 
