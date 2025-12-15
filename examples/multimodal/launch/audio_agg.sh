@@ -91,7 +91,7 @@ python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_T
 
 # run E/P/D workers
 CUDA_VISIBLE_DEVICES=0 python3 components/audio_encode_worker.py --model $MODEL_NAME &
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model $MODEL_NAME --worker-type prefill &
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=0 python3 components/worker.py --model $MODEL_NAME --worker-type prefill &
 
 # Wait for all background processes to complete
 wait

@@ -25,7 +25,7 @@ import torch
 import uvloop
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 import dynamo.nixl_connect as connect
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
@@ -201,7 +201,6 @@ class VllmEncodeWorker:
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.
         self._connector = connect.Connector()
-        await self._connector.initialize()
 
         logger.info("Startup completed.")
 
