@@ -25,6 +25,7 @@ DEEPGEMM_REF=""
 CUDA_VERSION="13.0"
 FLASHINF_REF="v0.5.3"
 # LMCache version - 0.3.9+ required for vLLM 0.11.2 compatibility
+# LMCache doesn't support CUDA 13 yet (as of 0.3.11)
 LMCACHE_REF="0.3.10"
 
 while [[ $# -gt 0 ]]; do
@@ -102,6 +103,7 @@ TORCH_BACKEND="cu$(echo $CUDA_VERSION | tr -d '.')"
 echo "=== Installing prerequisites ==="
 uv pip install --no-cache pip cuda-python
 echo "\n=== Configuration Summary ==="
+echo "  LMCache doesn't support CUDA 13 yet (as of 0.3.11)"
 echo "  VLLM_REF=$VLLM_REF | ARCH=$ARCH | CUDA_VERSION=$CUDA_VERSION | TORCH_BACKEND=$TORCH_BACKEND"
 echo "  FLASHINF_REF=$FLASHINF_REF | LMCACHE_REF=$LMCACHE_REF | DEEPGEMM_REF=$DEEPGEMM_REF"
 echo "  TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST | INSTALLATION_DIR=$INSTALLATION_DIR"
