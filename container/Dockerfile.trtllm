@@ -36,8 +36,8 @@
 # This section contains build arguments that are common and shared across various
 # Dockerfile.<frameworks>, so they should NOT have a default. The source of truth is from build.sh.
 
-ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-ARG BASE_IMAGE_TAG="25.04-cuda12.9-devel-ubuntu24.04"
+ARG BASE_IMAGE
+ARG BASE_IMAGE_TAG
 
 ARG PYTORCH_BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG PYTORCH_BASE_IMAGE_TAG="25.10-py3"
@@ -168,14 +168,14 @@ ENV CUDA_PATH=/usr/local/cuda \
     LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH \
     NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 
-ARG PYTHON_VERSION="3.12"
+ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
 RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
     uv pip install --upgrade meson pybind11 patchelf maturin[patchelf]
 
-ARG NIXL_UCX_REF="v1.19.0"
-ARG NIXL_REF="0.7.1"
-ARG NIXL_GDRCOPY_REF="v2.5.1"
+ARG NIXL_UCX_REF
+ARG NIXL_REF
+ARG NIXL_GDRCOPY_REF
 
 # Build and install gdrcopy
 RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git && \
@@ -186,7 +186,7 @@ RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/g
     rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
 
 # Install SCCACHE if requested
-ARG USE_SCCACHE='false'
+ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
 COPY container/use-sccache.sh /tmp/use-sccache.sh
@@ -276,8 +276,8 @@ COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
 # Build dynamo wheels
-ARG ENABLE_KVBM='true'
-ARG ENABLE_MEDIA_NIXL='true'
+ARG ENABLE_KVBM
+ARG ENABLE_MEDIA_NIXL
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
@@ -330,7 +330,7 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
 # Install minimal dependencies needed for TensorRT-LLM installation
-ARG PYTHON_VERSION="3.12"
+ARG PYTHON_VERSION
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         python${PYTHON_VERSION}-dev \
@@ -512,9 +512,6 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-
-ARG PYTHON_VERSION="3.12"
-
 #########################################################################
 #  Branch & Merge Pattern to handle architecture naming
 #    This maps TARGETARCH (amd64/arm64) to the formatted string we need (x86_64/aarch64)
@@ -533,7 +530,7 @@ ENV SYSTEM_ARCH_NAME="aarch64"
 ARG TARGETARCH
 FROM runtime_${TARGETARCH} AS runtime
 
-ARG PYTHON_VERSION="3.12"
+ARG PYTHON_VERSION
 
 # Copy OpenMPI from PyTorch base image
 COPY --from=pytorch_base /opt/hpcx/ompi /opt/hpcx/ompi
@@ -643,7 +640,7 @@ COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
-ARG ENABLE_KVBM='true'
+ARG ENABLE_KVBM
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 RUN uv pip install \
       --no-cache \
@@ -696,8 +693,7 @@ RUN chmod g+w ${VIRTUAL_ENV} /workspace /workspace/* /opt/dynamo /opt/dynamo/* &
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
 USER dynamo
-# todo: remove hard coded commit after debug
-ARG DYNAMO_COMMIT_SHA="51bd6e5479d2afefb00ab4b6a2ed0190105cff14"
+ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]

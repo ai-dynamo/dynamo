@@ -36,14 +36,14 @@
 # This section contains build arguments that are common and shared across various
 # Dockerfile.<frameworks>, so they should NOT have a default. The source of truth is from build.sh.
 
-ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-ARG BASE_IMAGE_TAG="25.04-cuda12.9-devel-ubuntu24.04"
+ARG BASE_IMAGE
+ARG BASE_IMAGE_TAG
 
-ARG FRAMEWORK_IMAGE="nvcr.io/nvidia/cuda"
-ARG FRAMEWORK_IMAGE_TAG="12.9.1-cudnn-devel-ubuntu24.04"
+ARG FRAMEWORK_IMAGE
+ARG FRAMEWORK_IMAGE_TAG
 
 # sccache configuration - inherit from base build
-ARG USE_SCCACHE='false'
+ARG USE_SCCACHE
 ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
 
@@ -162,14 +162,14 @@ ENV CUDA_PATH=/usr/local/cuda \
     LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH \
     NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 
-ARG PYTHON_VERSION="3.10"
+ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
 RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
     uv pip install --upgrade meson pybind11 patchelf maturin[patchelf]
 
-ARG NIXL_UCX_REF="v1.19.0"
-ARG NIXL_REF="0.7.1"
-ARG NIXL_GDRCOPY_REF="v2.5.1"
+ARG NIXL_UCX_REF
+ARG NIXL_REF
+ARG NIXL_GDRCOPY_REF
 
 # Build and install gdrcopy
 RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git && \
@@ -180,7 +180,7 @@ RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/g
     rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
 
 # Install SCCACHE if requested
-ARG USE_SCCACHE=''
+ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
 COPY container/use-sccache.sh /tmp/use-sccache.sh
@@ -271,8 +271,8 @@ COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
 # Build dynamo wheels
-ARG ENABLE_KVBM='true'
-ARG ENABLE_MEDIA_NIXL='true'
+ARG ENABLE_KVBM
+ARG ENABLE_MEDIA_NIXL
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
@@ -338,9 +338,9 @@ ARG GDRCOPY_COMMIT=v2.4.4
 ARG NVSHMEM_VERSION=3.3.9
 ARG GRACE_BLACKWELL=false
 ARG TARGETARCH
-ARG PYTHON_VERSION="3.10"
+ARG PYTHON_VERSION
 ARG CARGO_BUILD_JOBS
-ARG CUDA_VERSION="12.9.1"
+ARG CUDA_VERSION
 
 # Set all environment variables
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -576,7 +576,7 @@ FROM framework AS runtime_base
 
 WORKDIR /workspace
 
-ARG PYTHON_VERSION="3.10"
+ARG PYTHON_VERSION
 
 ENV DYNAMO_HOME=/opt/dynamo
 ENV NVSHMEM_DIR=/sgl-workspace/nvshmem/install
@@ -600,7 +600,7 @@ ENV SYSTEM_ARCH_NAME="aarch64"
 ARG TARGETARCH
 FROM runtime_${TARGETARCH} AS runtime
 
-ARG PYTHON_VERSION="3.10"
+ARG PYTHON_VERSION
 
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/${SYSTEM_ARCH_NAME}-linux-gnu
 ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
@@ -672,8 +672,7 @@ RUN chmod g+w /workspace /workspace/* /opt/dynamo /opt/dynamo/* && \
 USER dynamo
 
 # Copy tests, benchmarks, deploy and components for CI with correct ownership
-# todo: remove hard coded commit after debug
-ARG DYNAMO_COMMIT_SHA="51bd6e5479d2afefb00ab4b6a2ed0190105cff14"
+ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
@@ -695,7 +694,7 @@ CMD []
 FROM runtime AS dev
 
 ARG WORKSPACE_DIR=/sgl-workspace/dynamo
-ARG PYTHON_VERSION="3.10"
+ARG PYTHON_VERSION
 
 # NOTE: SGLang uses system Python (not a virtualenv in framework/runtime stages) to align with
 # upstream SGLang Dockerfile: https://github.com/sgl-project/sglang/blob/main/docker/Dockerfile
