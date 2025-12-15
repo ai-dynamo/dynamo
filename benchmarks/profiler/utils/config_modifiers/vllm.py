@@ -89,7 +89,7 @@ class VllmV1ConfigModifier:
         _ = is_moe_model
 
         # set metadata name
-        cfg.metadata.name = "vllm-agg"
+        cfg.metadata.name = "agg"
 
         # disable planner
         if "Planner" in cfg.spec.services:
