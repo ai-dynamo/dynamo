@@ -16,6 +16,21 @@ These supplement the aiconfigurator styles.
     max-width: 100% !important;
 }
 
+/* Fix all Gradio column/row containers to use full width */
+.gradio-row,
+.gradio-column {
+    max-width: 100% !important;
+    width: 100% !important;
+}
+
+/* Ensure tab content uses full width */
+.tabitem,
+.tab-nav + div,
+div[data-testid="tabitem"] {
+    width: 100% !important;
+    max-width: 100% !important;
+}
+
 /* Fix table wrapper to prevent horizontal scroll cutoff */
 #cost_table_wrapper,
 #prefill_table_wrapper,
@@ -23,18 +38,27 @@ These supplement the aiconfigurator styles.
     width: 100% !important;
     max-width: 100% !important;
     box-sizing: border-box !important;
+    overflow-x: visible !important;
 }
 
 /* Ensure DataTables use full container width */
 .dataTables_wrapper {
     width: 100% !important;
     max-width: 100% !important;
+    overflow-x: visible !important;
 }
 
 /* Fix table to not exceed container */
 table.dataTable {
     width: 100% !important;
     max-width: 100% !important;
+    table-layout: auto !important;
+}
+
+/* Cost table specific - ensure columns don't get too compressed */
+#cost_table_wrapper table.dataTable th,
+#cost_table_wrapper table.dataTable td {
+    padding: 8px 10px !important;
 }
 
 /* Consistent vertical spacing for DataTables controls */
