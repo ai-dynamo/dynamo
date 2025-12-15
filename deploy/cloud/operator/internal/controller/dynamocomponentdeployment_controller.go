@@ -31,6 +31,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	"emperror.dev/errors"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
@@ -1110,7 +1111,7 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 	var replicas *int32
 	replicas = opt.dynamoComponentDeployment.Spec.Replicas
 	if opt.isStealingTrafficDebugModeEnabled {
-		replicas = &[]int32{int32(1)}[0]
+		replicas = ptr.To[int32](1)
 	}
 
 	kubeDeployment.Spec = appsv1.DeploymentSpec{
