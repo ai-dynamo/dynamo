@@ -12,13 +12,14 @@ use kube::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
+use tokio::time::{timeout, Duration};
 
 use super::utils::{PodInfo, extract_endpoint_info, hash_pod_name};
 
-const SNAPSHOT_POLL_INTERVAL_MS: u64 = 5000;
 const MAX_CONCURRENT_FETCHES: usize = 20;
 const METADATA_FETCH_TIMEOUT_SECS: u64 = 5;
+const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
 
 /// Discovers and aggregates metadata from pods in the cluster
 #[derive(Clone)]
@@ -76,20 +77,27 @@ impl DiscoveryDaemon {
             "Daemon watching EndpointSlices with labels: nvidia.com/dynamo-discovery-backend=kubernetes, nvidia.com/dynamo-discovery-enabled=true"
         );
 
-        // Spawn reflector task (runs independently)
+        // Create notify for watch-driven updates
+        let notify = Arc::new(Notify::new());
+        let notify_clone = notify.clone();
+
+        // Spawn reflector task - notifies on each change
         let reflector_stream = reflector(writer, watcher(endpoint_slices, watch_config))
             .default_backoff()
             .touched_objects()
-            .for_each(|res| {
+            .for_each(move |res| {
                 match res {
                     Ok(obj) => {
                         tracing::debug!(
                             slice_name = obj.metadata.name.as_deref().unwrap_or("unknown"),
                             "Daemon reflector updated EndpointSlice"
                         );
+                        notify_clone.notify_one();
                     }
                     Err(e) => {
                         tracing::warn!("Daemon reflector error: {}", e);
+                        // Still notify on errors to trigger a refresh attempt
+                        notify_clone.notify_one();
                     }
                 }
                 futures::future::ready(())
@@ -97,16 +105,23 @@ impl DiscoveryDaemon {
 
         tokio::spawn(reflector_stream);
 
-        // Polling loop
+        // Event-driven loop with debouncing
         let mut sequence = 0u64;
         let mut prev_instance_ids: HashSet<u64> = HashSet::new();
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_millis(SNAPSHOT_POLL_INTERVAL_MS));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
-                _ = interval.tick() => {
+                // Wait for notification from the reflector
+                _ = notify.notified() => {
+                    // Debounce: wait fixed duration to batch rapid events
+                    tokio::time::sleep(DEBOUNCE_DURATION).await;
+
+                    // Drain any permit that accumulated during the sleep
+                    // (Notify stores at most one permit, so one drain is sufficient)
+                    let _ = timeout(Duration::ZERO, notify.notified()).await;
+
+                    tracing::trace!("Debounce window elapsed, processing snapshot");
+
                     match self.aggregate_snapshot(&reader, sequence).await {
                         Ok(snapshot) => {
                             // Compare instance IDs to detect changes
