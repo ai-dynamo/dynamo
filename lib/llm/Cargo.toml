@@ -22,6 +22,7 @@ testing-cuda = ["dep:cudarc"]
 testing-nixl = ["dep:nixl-sys"]
 testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
+block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
 media-nixl = ["dep:nixl-sys", "dep:dynamo-memory"]
@@ -105,6 +106,10 @@ nixl-sys = { version = "=0.7.1", optional = true }
 cudarc = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
 
+# block_manager_bench
+clap = { version = "4.5.49", features = ["derive"], optional = true }
+indicatif = { version = "0.18.0", optional = true }
+
 
 # protocols
 unicode-segmentation = "1.12"
@@ -144,8 +149,8 @@ toktrie_hf_tokenizers = { version = "1.1" }
 bs62 = { version = "0.1" }
 erased-serde = { version = "0.4" }
 itertools = { version = "0.14.0" }
-minijinja = { version = "2.10.2", features = ["loader"] }
-minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
+minijinja = { version = "2.14.0", features = ["loader"] }
+minijinja-contrib = { version = "2.14.0", features = ["pycompat"] }
 json-five = { version = "0.3" }
 
 # media loading in the preprocessor
@@ -188,3 +193,8 @@ mockito = "1.7.0"
 
 [build-dependencies]
 tonic-build = { version = "0.13.1" }
+
+[[bin]]
+name = "bench_local_transfer_v2"
+path = "bin/bench_local_transfer_v2.rs"
+required-features = ["block-manager-bench"]

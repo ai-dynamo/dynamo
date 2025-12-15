@@ -59,19 +59,20 @@ static const xid_mapping_t xid_mappings[] = {
 };
 
 // Get XID type and corresponding CUDA error
+// Supports runtime toggling via /tmp/cuda_fault_enabled file
 static void
 get_fault_config(int* inject, int* xid_type, cudaError_t* error_code)
 {
   static int initialized = 0;
-  static int cached_inject = 0;
+  static int env_inject = 0;   // From environment variable
   static int cached_xid = 79;  // Default to XID 79
   static cudaError_t cached_error = cudaErrorNoDevice;
 
   if (!initialized) {
-    // Check if injection is enabled
+    // Check if injection is enabled via environment
     char* env = getenv("CUDA_FAULT_INJECTION_ENABLED");
     if (env) {
-      cached_inject = (strcmp(env, "1") == 0 || strcmp(env, "true") == 0);
+      env_inject = (strcmp(env, "1") == 0 || strcmp(env, "true") == 0);
     }
 
     // Get XID type
@@ -85,8 +86,7 @@ get_fault_config(int* inject, int* xid_type, cudaError_t* error_code)
         if (xid_mappings[i].xid == cached_xid) {
           cached_error = xid_mappings[i].cuda_error;
           fprintf(
-              stderr, "[CUDA FAULT INJECTION] ENABLED - Simulating XID %d (%s)\n", cached_xid,
-              xid_mappings[i].description);
+              stderr, "[CUDA FAULT INJECTION] Library loaded - XID %d (%s)\n", cached_xid, xid_mappings[i].description);
           found = 1;
           break;
         }
@@ -97,16 +97,37 @@ get_fault_config(int* inject, int* xid_type, cudaError_t* error_code)
         cached_xid = 79;
         cached_error = cudaErrorNoDevice;
       }
-    } else {
-      fprintf(
-          stderr, "[CUDA FAULT INJECTION] %s (default: XID 79 - GPU fell off bus)\n",
-          cached_inject ? "ENABLED" : "DISABLED");
     }
 
     initialized = 1;
   }
 
-  *inject = cached_inject;
+  // Runtime toggle: Check node-persistent fault marker on EVERY call
+  // Use hostPath (/host-fault) so fault persists across pod restarts on same node
+  // Pod reschedules to different node → no file there → automatic recovery!
+  int runtime_inject = env_inject;  // Default to env var
+
+  // Check hostPath first (persistent across restarts on same node)
+  FILE* toggle_file = fopen("/host-fault/cuda_fault_enabled", "r");
+  if (toggle_file) {
+    char toggle_value[4] = {0};
+    if (fgets(toggle_value, sizeof(toggle_value), toggle_file)) {
+      runtime_inject = (toggle_value[0] == '1');
+    }
+    fclose(toggle_file);
+  } else {
+    // Fallback to ephemeral /tmp for backwards compatibility
+    toggle_file = fopen("/tmp/cuda_fault_enabled", "r");
+    if (toggle_file) {
+      char toggle_value[4] = {0};
+      if (fgets(toggle_value, sizeof(toggle_value), toggle_file)) {
+        runtime_inject = (toggle_value[0] == '1');
+      }
+      fclose(toggle_file);
+    }
+  }
+
+  *inject = runtime_inject;
   *xid_type = cached_xid;
   *error_code = cached_error;
 }

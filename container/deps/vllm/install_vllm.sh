@@ -126,7 +126,7 @@ git checkout $VLLM_REF
 echo "\n=== Installing vLLM & FlashInfer ==="
 echo "Installing vLLM $VLLM_REF from PyPI..."
 
-uv pip install vllm[flashinfer]==$VLLM_REF --torch-backend=${TORCH_BACKEND}
+uv pip install vllm[flashinfer,runai]==$VLLM_REF --torch-backend=${TORCH_BACKEND}
 uv pip install flashinfer-cubin==$FLASHINF_REF
 uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
 
