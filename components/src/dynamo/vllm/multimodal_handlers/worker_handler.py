@@ -4,6 +4,7 @@
 import copy
 import logging
 import os
+from collections import defaultdict
 
 import safetensors
 import torch
@@ -152,61 +153,60 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
 
-        if (
-            request.multimodal_input.image_url is None
-            and request.multimodal_input.video_url is None
-        ):
-            # Process embeddings using the connector
-            # Create a descriptor based on the embedding shape.
-
-            if TRANSFER_LOCAL:
-                logger.info("PD: Loading local safetensors file")
-                embeddings = safetensors.torch.load_file(
-                    "/tmp/encoder_cache.safetensors"
-                )["ec_cache"]
-            else:
-                embeddings = torch.empty(
-                    request.embeddings_shape,
-                    dtype=self.EMBEDDINGS_DTYPE,
-                    device=self.EMBEDDINGS_DEVICE,
-                )
-                descriptor = connect.Descriptor(embeddings)
-
-                if descriptor is None:
-                    raise RuntimeError(
-                        "Descriptor is None in PD worker - cannot process embeddings"
+        multi_modal_data = defaultdict(list)
+        for multimodal_input in request.multimodal_inputs:
+            if (
+                multimodal_input.image_url is None
+                and multimodal_input.video_url is None
+            ):
+                # Process embeddings using the connector
+                # Create a descriptor based on the embedding shape.
+                if TRANSFER_LOCAL:
+                    logger.info("PD: Loading local safetensors file")
+                    embeddings = safetensors.torch.load_file(
+                        request.serialized_request
+                    )["ec_cache"]
+                else:
+                    embeddings = torch.empty(
+                        request.embeddings_shape,
+                        dtype=self.EMBEDDINGS_DTYPE,
+                        device=self.EMBEDDINGS_DEVICE,
                     )
+                    descriptor = connect.Descriptor(embeddings)
 
-                read_op = await self._connector.begin_read(
-                    request.serialized_request, descriptor
-                )
-                await read_op.wait_for_completion()
-            if "video" in self.config.model.lower():
-                video_numpy = embeddings.numpy()
-                multi_modal_data = construct_mm_data(
-                    self.config.model,
-                    self.EMBEDDINGS_DTYPE,
-                    video_numpy=video_numpy,
-                )
+                    if descriptor is None:
+                        raise RuntimeError(
+                            "Descriptor is None in PD worker - cannot process embeddings"
+                        )
+
+                    read_op = await self._connector.begin_read(
+                        request.serialized_request, descriptor
+                    )
+                    await read_op.wait_for_completion()
+                if "video" in self.config.model.lower():
+                    video_numpy = embeddings.numpy()
+                    mm_data = construct_mm_data(
+                        self.config.model,
+                        self.EMBEDDINGS_DTYPE,
+                        video_numpy=video_numpy,
+                    )
+                    multi_modal_data["video"].append(mm_data["video"])
+                else:
+                    mm_data = construct_mm_data(
+                        self.config.model,
+                        self.EMBEDDINGS_DTYPE,
+                        image_embeds=embeddings,
+                        image_grid_thw=request.image_grid_thw,
+                    )
+                    multi_modal_data["image"].append(mm_data["image"])
             else:
-                multi_modal_data = construct_mm_data(
-                    self.config.model,
-                    self.EMBEDDINGS_DTYPE,
-                    image_embeds=embeddings,
-                    image_grid_thw=request.image_grid_thw,
+                # Use PIL image instead of image embeddings
+                multi_modal_data["image"].append(
+                    await self.image_loader.load_image(multimodal_input.image_url)
                 )
-        else:
-            # Use PIL image instead of image embeddings
-            multi_modal_data = {
-                "image": await self.image_loader.load_image(
-                    request.multimodal_input.image_url
-                )
-            }
 
         # Remove the image features from the request as they are not required
-        request.multimodal_input.image_url = None
-        request.multimodal_input.video_url = None
-        request.serialized_request = None
+        request.multimodal_inputs = None
 
         pd_request = copy.deepcopy(request)
         # Do prefill and remote decode if enable_disagg is true
