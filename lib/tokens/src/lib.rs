@@ -169,6 +169,157 @@ impl std::fmt::Debug for PositionalSequenceHash {
     }
 }
 
+/// A 128-bit positional lineage hash encoding parental lineage for tree traversal.
+///
+/// Layout (using full 128 bits):
+/// - Mode (2 bits): Determines position field size
+/// - Position (8/16/24 bits): Block position in sequence
+/// - Parent Fragment (variable bits): Fragment of parent's sequence hash
+/// - Current Fragment (variable bits): Fragment of current sequence hash
+///
+/// Modes (automatically selected based on position):
+/// - Mode 00: 8-bit position (max 255) + 59-bit parent + 59-bit current
+/// - Mode 01: 16-bit position (max 65,535) + 55-bit parent + 55-bit current
+/// - Mode 10: 24-bit position (max 16,777,215) + 51-bit parent + 51-bit current
+///
+/// This encoding enables backward traversal through the radix tree by matching
+/// parent fragments at position-1.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub struct PositionalLineageHash(u128);
+
+impl PositionalLineageHash {
+    /// Creates a new PositionalLineageHash from components.
+    ///
+    /// The mode is automatically selected based on the position value to use the minimal
+    /// representation that can fit the position.
+    ///
+    /// # Arguments
+    ///
+    /// * `current_seq_hash` - The sequence hash of the current block
+    /// * `parent_seq_hash` - The sequence hash of the parent block (None for root)
+    /// * `position` - The block position in the sequence
+    ///
+    /// # Panics
+    ///
+    /// Panics if position >= 2^24 (16,777,216).
+    pub fn new(
+        current_seq_hash: SequenceHash,
+        parent_seq_hash: Option<SequenceHash>,
+        position: u64,
+    ) -> Self {
+        if position >= (1u64 << 24) {
+            panic!(
+                "Position {} exceeds maximum supported value (2^24 - 1 = 16,777,215)",
+                position
+            );
+        }
+
+        let mode = Self::select_mode(position);
+        let (position_bits, parent_bits, current_bits) = Self::bit_layout(mode);
+
+        // CRITICAL: For cross-mode boundary matching, we need to align the current hash
+        // to the bits available at the next position. This ensures that when position+1
+        // stores our current hash as its parent, the fragments will match.
+        let next_mode = Self::select_mode(position + 1);
+        let (_, next_parent_bits, _) = Self::bit_layout(next_mode);
+
+        // Use the minimum of current_bits and next_parent_bits to ensure alignment
+        let aligned_current_bits = current_bits.min(next_parent_bits);
+
+        // Create masks
+        let position_mask = (1u128 << position_bits) - 1;
+        let parent_mask = (1u128 << parent_bits) - 1;
+        let current_mask = (1u128 << aligned_current_bits) - 1;
+
+        // Extract fragments (LSB-aligned for subset compatibility across modes)
+        let position_part = (position as u128) & position_mask;
+        let parent_part = (parent_seq_hash.unwrap_or(0) as u128) & parent_mask;
+        let current_part = (current_seq_hash as u128) & current_mask;
+
+        // Pack: [mode (2)][position (P)][parent (M)][current (N)]
+        // Note: We still allocate current_bits in the layout, but only use aligned_current_bits
+        let value = ((mode as u128) << 126)
+            | (position_part << (parent_bits + current_bits))
+            | (parent_part << current_bits)
+            | current_part;
+
+        PositionalLineageHash(value)
+    }
+
+    /// Returns the block position.
+    pub fn position(&self) -> u64 {
+        let mode = self.mode();
+        let (position_bits, parent_bits, current_bits) = Self::bit_layout(mode);
+        let position_mask = (1u128 << position_bits) - 1;
+        ((self.0 >> (parent_bits + current_bits)) & position_mask) as u64
+    }
+
+    /// Returns the current sequence hash fragment.
+    pub fn current_hash_fragment(&self) -> u64 {
+        let mode = self.mode();
+        let (_, _, current_bits) = Self::bit_layout(mode);
+        let current_mask = (1u128 << current_bits) - 1;
+        (self.0 & current_mask) as u64
+    }
+
+    /// Returns the parent sequence hash fragment.
+    pub fn parent_hash_fragment(&self) -> u64 {
+        let mode = self.mode();
+        let (_, parent_bits, current_bits) = Self::bit_layout(mode);
+        let parent_mask = (1u128 << parent_bits) - 1;
+        ((self.0 >> current_bits) & parent_mask) as u64
+    }
+
+    /// Returns the mode used for encoding (0, 1, or 2).
+    pub fn mode(&self) -> u8 {
+        (self.0 >> 126) as u8
+    }
+
+    /// Returns the inner 128-bit value.
+    #[inline(always)]
+    pub fn as_u128(&self) -> u128 {
+        self.0
+    }
+
+    /// Selects the minimal mode that can represent the given position.
+    fn select_mode(position: u64) -> u8 {
+        if position < (1u64 << 8) {
+            0 // Mode 00: 8-bit position
+        } else if position < (1u64 << 16) {
+            1 // Mode 01: 16-bit position
+        } else {
+            2 // Mode 10: 24-bit position
+        }
+    }
+
+    /// Returns the bit layout for a given mode: (position_bits, parent_bits, current_bits).
+    fn bit_layout(mode: u8) -> (u32, u32, u32) {
+        match mode {
+            0 => (8, 59, 59),  // 2 + 8 + 59 + 59 = 128
+            1 => (16, 55, 55), // 2 + 16 + 55 + 55 = 128
+            2 => (24, 51, 51), // 2 + 24 + 51 + 51 = 128
+            _ => panic!("Invalid mode: {}", mode),
+        }
+    }
+}
+
+impl std::fmt::Debug for PositionalLineageHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PositionalLineageHash")
+            .field("position", &self.position())
+            .field(
+                "current_hash_fragment",
+                &format!("{:#x}", self.current_hash_fragment()),
+            )
+            .field(
+                "parent_hash_fragment",
+                &format!("{:#x}", self.parent_hash_fragment()),
+            )
+            .field("mode", &self.mode())
+            .finish()
+    }
+}
+
 /// A collection of tokens, represented as a `Vec<Token>`.
 ///
 /// Provides convenience methods for conversion and manipulation.
@@ -491,7 +642,7 @@ impl TokenBlockChunk {
 /// Represents a completed, immutable block of tokens with associated hashes.
 ///
 /// Contains exactly `block_size` tokens and includes the [`SaltHash`], [`BlockHash`],
-/// [`SequenceHash`], [`PositionalSequenceHash`], and optionally the parent's [`SequenceHash`].
+/// [`SequenceHash`], [`PositionalSequenceHash`], [`PositionalLineageHash`], and optionally the parent's [`SequenceHash`].
 #[derive(Debug, Clone, Default, PartialEq)] // Add PartialEq for tests
 pub struct TokenBlock {
     tokens: Tokens,
@@ -500,6 +651,7 @@ pub struct TokenBlock {
     sequence_hash: SequenceHash,
     parent_sequence_hash: Option<SequenceHash>,
     positional_sequence_hash: PositionalSequenceHash,
+    positional_lineage_hash: PositionalLineageHash,
 }
 
 impl TokenBlock {
@@ -518,7 +670,7 @@ impl TokenBlock {
 
     /// Finalizes a [`TokenBlock`] from a [`TokenBlockChunk`], parent's sequence hash, and position.
     ///
-    /// This computes the final [`SequenceHash`] and [`PositionalSequenceHash`] for the block.
+    /// This computes the final [`SequenceHash`], [`PositionalSequenceHash`], and [`PositionalLineageHash`] for the block.
     fn from_chunk(
         chunk: TokenBlockChunk,
         parent_sequence_hash: Option<SequenceHash>,
@@ -541,6 +693,9 @@ impl TokenBlock {
             chunk.block_hash, // LocalBlockHash is the same as BlockHash
         );
 
+        let positional_lineage_hash =
+            PositionalLineageHash::new(sequence_hash, parent_sequence_hash, position as u64);
+
         Self {
             tokens: chunk.tokens,
             salt_hash: chunk.salt_hash,
@@ -548,6 +703,7 @@ impl TokenBlock {
             sequence_hash,
             parent_sequence_hash,
             positional_sequence_hash,
+            positional_lineage_hash,
         }
     }
 
@@ -584,6 +740,11 @@ impl TokenBlock {
     /// Returns the positional sequence hash for this block.
     pub fn positional_sequence_hash(&self) -> PositionalSequenceHash {
         self.positional_sequence_hash
+    }
+
+    /// Returns the positional lineage hash for this block.
+    pub fn positional_lineage_hash(&self) -> PositionalLineageHash {
+        self.positional_lineage_hash
     }
 
     /// Returns the position of this block in the sequence.
@@ -1216,6 +1377,189 @@ mod tests {
     }
 
     #[test]
+    fn test_positional_lineage_hash() {
+        // Test Mode 0: position fits in 8 bits (< 256)
+        let current_hash_0 = 0x1234567890ABCDEF;
+        let parent_hash_0 = 0xFEDCBA9876543210;
+        let position_0 = 100;
+        let plh_0 = PositionalLineageHash::new(current_hash_0, Some(parent_hash_0), position_0);
+
+        assert_eq!(plh_0.mode(), 0, "Position 100 should use mode 0");
+        assert_eq!(plh_0.position(), position_0);
+        // Current and parent are truncated to 59 bits in mode 0
+        assert_eq!(
+            plh_0.current_hash_fragment(),
+            current_hash_0 & ((1u64 << 59) - 1),
+            "Current hash should be truncated to 59 bits"
+        );
+        assert_eq!(
+            plh_0.parent_hash_fragment(),
+            parent_hash_0 & ((1u64 << 59) - 1),
+            "Parent hash should be truncated to 59 bits"
+        );
+
+        // Test Mode 1: position fits in 16 bits (256 <= pos < 65536)
+        let position_1 = 1000;
+        let plh_1 = PositionalLineageHash::new(current_hash_0, Some(parent_hash_0), position_1);
+
+        assert_eq!(plh_1.mode(), 1, "Position 1000 should use mode 1");
+        assert_eq!(plh_1.position(), position_1);
+        // Current and parent are truncated to 55 bits in mode 1
+        assert_eq!(
+            plh_1.current_hash_fragment(),
+            current_hash_0 & ((1u64 << 55) - 1),
+            "Current hash should be truncated to 55 bits"
+        );
+        assert_eq!(
+            plh_1.parent_hash_fragment(),
+            parent_hash_0 & ((1u64 << 55) - 1),
+            "Parent hash should be truncated to 55 bits"
+        );
+
+        // Test Mode 2: position fits in 24 bits (65536 <= pos < 16777216)
+        let position_2 = 100_000;
+        let plh_2 = PositionalLineageHash::new(current_hash_0, Some(parent_hash_0), position_2);
+
+        assert_eq!(plh_2.mode(), 2, "Position 100,000 should use mode 2");
+        assert_eq!(plh_2.position(), position_2);
+        // Current and parent are truncated to 51 bits in mode 2
+        assert_eq!(
+            plh_2.current_hash_fragment(),
+            current_hash_0 & ((1u64 << 51) - 1),
+            "Current hash should be truncated to 51 bits"
+        );
+        assert_eq!(
+            plh_2.parent_hash_fragment(),
+            parent_hash_0 & ((1u64 << 51) - 1),
+            "Parent hash should be truncated to 51 bits"
+        );
+
+        // Test edge cases: position at boundaries
+        let position_255 = 255;
+        let plh_255 = PositionalLineageHash::new(current_hash_0, Some(parent_hash_0), position_255);
+        assert_eq!(plh_255.mode(), 0, "Position 255 should use mode 0");
+        assert_eq!(plh_255.position(), position_255);
+
+        let position_256 = 256;
+        let plh_256 = PositionalLineageHash::new(current_hash_0, Some(parent_hash_0), position_256);
+        assert_eq!(plh_256.mode(), 1, "Position 256 should use mode 1");
+        assert_eq!(plh_256.position(), position_256);
+
+        let position_65535 = 65535;
+        let plh_65535 =
+            PositionalLineageHash::new(current_hash_0, Some(parent_hash_0), position_65535);
+        assert_eq!(plh_65535.mode(), 1, "Position 65535 should use mode 1");
+        assert_eq!(plh_65535.position(), position_65535);
+
+        let position_65536 = 65536;
+        let plh_65536 =
+            PositionalLineageHash::new(current_hash_0, Some(parent_hash_0), position_65536);
+        assert_eq!(plh_65536.mode(), 2, "Position 65536 should use mode 2");
+        assert_eq!(plh_65536.position(), position_65536);
+
+        // Test with None parent (root block)
+        let plh_root = PositionalLineageHash::new(current_hash_0, None, 0);
+        assert_eq!(plh_root.mode(), 0);
+        assert_eq!(plh_root.position(), 0);
+        assert_eq!(
+            plh_root.parent_hash_fragment(),
+            0,
+            "Root should have zero parent hash"
+        );
+        assert_eq!(
+            plh_root.current_hash_fragment(),
+            current_hash_0 & ((1u64 << 59) - 1)
+        );
+
+        // Test LSB alignment: verify that smaller mode fragments are subsets of larger mode fragments
+        let position_small = 100; // Mode 0: 59 bits
+        let position_large = 1000; // Mode 1: 55 bits
+        let plh_small =
+            PositionalLineageHash::new(current_hash_0, Some(parent_hash_0), position_small);
+        let plh_large =
+            PositionalLineageHash::new(current_hash_0, Some(parent_hash_0), position_large);
+
+        // The 55-bit fragment from mode 1 should match the lower 55 bits of the 59-bit fragment from mode 0
+        let mask_55 = (1u64 << 55) - 1;
+        assert_eq!(
+            plh_large.current_hash_fragment(),
+            plh_small.current_hash_fragment() & mask_55,
+            "LSB alignment: mode 1 fragment should be subset of mode 0 fragment"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Position 16777216 exceeds maximum supported value")]
+    fn test_positional_lineage_hash_panic_on_large_position() {
+        let current_hash = 0x1234567890ABCDEF;
+        let parent_hash = 0xFEDCBA9876543210;
+        let position = 1u64 << 24; // 2^24 = 16,777,216
+        let _ = PositionalLineageHash::new(current_hash, Some(parent_hash), position);
+    }
+
+    #[test]
+    fn test_positional_lineage_hash_mode_boundary_alignment() {
+        // Test that hash fragments align correctly across mode boundaries
+        // This is critical for backward traversal in the radix tree
+
+        let parent_hash = 0xFEDCBA9876543210;
+        let current_hash_255 = 0x1234567890ABCDEF;
+        let current_hash_256 = 0xABCDEF0123456789;
+
+        // Position 255: Mode 0 (last position before boundary)
+        let plh_255 = PositionalLineageHash::new(current_hash_255, Some(parent_hash), 255);
+        assert_eq!(plh_255.mode(), 0);
+
+        // Position 256: Mode 1 (first position after boundary)
+        // This should store position 255's current_hash as its parent
+        let plh_256 = PositionalLineageHash::new(current_hash_256, Some(current_hash_255), 256);
+        assert_eq!(plh_256.mode(), 1);
+
+        // CRITICAL TEST: The parent fragment at position 256 should match
+        // the current fragment at position 255, allowing backward traversal
+        // Both should be truncated to 55 bits (the minimum available at the boundary)
+        let mask_55 = (1u64 << 55) - 1;
+        assert_eq!(
+            plh_256.parent_hash_fragment(),
+            plh_255.current_hash_fragment() & mask_55,
+            "Mode boundary: position 256's parent fragment should match position 255's current fragment (55 bits)"
+        );
+
+        // Verify that position 255's current fragment is already truncated to 55 bits
+        // (not the full 59 bits that Mode 0 could theoretically support)
+        assert_eq!(
+            plh_255.current_hash_fragment(),
+            current_hash_255 & mask_55,
+            "Position 255 should pre-truncate current hash to 55 bits for next mode compatibility"
+        );
+
+        // Test the other boundary: 65535 -> 65536 (Mode 1 -> Mode 2)
+        let current_hash_65535 = 0x1111222233334444;
+        let current_hash_65536 = 0x5555666677778888;
+
+        let plh_65535 = PositionalLineageHash::new(current_hash_65535, Some(parent_hash), 65535);
+        assert_eq!(plh_65535.mode(), 1);
+
+        let plh_65536 =
+            PositionalLineageHash::new(current_hash_65536, Some(current_hash_65535), 65536);
+        assert_eq!(plh_65536.mode(), 2);
+
+        // Both should align to 51 bits (Mode 2's capacity)
+        let mask_51 = (1u64 << 51) - 1;
+        assert_eq!(
+            plh_65536.parent_hash_fragment(),
+            plh_65535.current_hash_fragment() & mask_51,
+            "Mode boundary: position 65536's parent fragment should match position 65535's current fragment (51 bits)"
+        );
+
+        assert_eq!(
+            plh_65535.current_hash_fragment(),
+            current_hash_65535 & mask_51,
+            "Position 65535 should pre-truncate current hash to 51 bits for next mode compatibility"
+        );
+    }
+
+    #[test]
     fn test_tokens_from() {
         let vec_u32: Vec<u32> = vec![1, 2, 3];
         let tokens_u32: Tokens = vec_u32.clone().into();
@@ -1349,6 +1693,15 @@ mod tests {
         assert_eq!(block1.sequence_hash(), SEQ_HASH_1_4); // First block seq_hash == block_hash
         assert_eq!(block1.position(), 0); // First block is at position 0
 
+        // Verify positional lineage hash for block 1
+        let plh1 = block1.positional_lineage_hash();
+        assert_eq!(plh1.position(), 0);
+        assert_eq!(plh1.parent_hash_fragment(), 0); // Root has no parent
+        assert_eq!(
+            plh1.current_hash_fragment(),
+            SEQ_HASH_1_4 & ((1u64 << 59) - 1)
+        ); // Mode 0: 59 bits
+
         let tokens2 = Tokens::from(vec![5, 6, 7, 8]);
         let chunk2 = TokenBlockChunk::new(tokens2.clone(), salt);
         let block2 = TokenBlock::from_chunk(chunk2, block1.parent_sequence_hash(), 1); // Incorrect parent
@@ -1368,6 +1721,18 @@ mod tests {
         assert_eq!(block2_correct.block_hash(), HASH_5_8);
         assert_eq!(block2_correct.sequence_hash(), SEQ_HASH_5_8);
         assert_eq!(block2_correct.position(), 1); // Second block is at position 1
+
+        // Verify positional lineage hash for block 2
+        let plh2 = block2_correct.positional_lineage_hash();
+        assert_eq!(plh2.position(), 1);
+        assert_eq!(
+            plh2.parent_hash_fragment(),
+            SEQ_HASH_1_4 & ((1u64 << 59) - 1)
+        ); // Parent fragment matches block1's sequence hash
+        assert_eq!(
+            plh2.current_hash_fragment(),
+            SEQ_HASH_5_8 & ((1u64 << 59) - 1)
+        ); // Mode 0: 59 bits
     }
 
     #[test]
