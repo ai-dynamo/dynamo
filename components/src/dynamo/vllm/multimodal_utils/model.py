@@ -27,7 +27,7 @@ class SupportedModels:
     """Supported multimodal model identifiers"""
 
     LLAVA_1_5_7B = "llava-hf/llava-1.5-7b-hf"
-    QWEN_2_5_VL_7B = "Qwen/Qwen3-VL-8B-Instruct"
+    QWEN_2_5_VL_7B = "Qwen/Qwen2.5-VL-7B-Instruct"
     LLAVA_NEXT_VIDEO_7B = "llava-hf/LLaVA-NeXT-Video-7B-hf"
 
 
