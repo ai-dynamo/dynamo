@@ -42,6 +42,7 @@ def get_client_function(client_type: str) -> Callable:
             output_token_length,
             max_retries,
             retry_delay_or_rate,  # Differs between implementations
+            continuous_load,
         )
 
     Raises:

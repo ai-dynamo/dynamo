@@ -40,6 +40,7 @@ class Config:
     custom_jinja_template: Optional[str] = None
     store_kv: str
     request_plane: str
+    enable_local_indexer: bool = False
 
     # mirror vLLM
     model: str
@@ -68,6 +69,9 @@ class Config:
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
     # dump config to file
     dump_config_to: Optional[str] = None
+
+    # Use vLLM's tokenizer for pre/post processing
+    use_vllm_tokenizer: bool = False
 
     def has_connector(self, connector_name: str) -> bool:
         """
@@ -201,11 +205,43 @@ def parse_args() -> Config:
         default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
+    parser.add_argument(
+        "--enable-local-indexer",
+        type=str,
+        choices=["true", "false"],
+        default=os.environ.get("DYN_LOCAL_INDEXER", "false"),
+        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
+    )
+    parser.add_argument(
+        "--use-vllm-tokenizer",
+        action="store_true",
+        default=False,
+        help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
+    )
     add_config_dump_args(parser)
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
+    args.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
     engine_args = AsyncEngineArgs.from_cli_args(args)
+
+    # Workaround for vLLM GIL contention bug with NIXL connector when using UniProcExecutor.
+    # With TP=1, vLLM defaults to UniProcExecutor which runs scheduler and worker in the same
+    # process. This causes a hot loop in _process_engine_step that doesn't release the GIL,
+    # blocking NIXL's add_remote_agent from completing. Using "mp" backend forces separate
+    # processes, avoiding the GIL contention.
+    # Note: Only apply for NIXL - other connectors (kvbm, lmcache) work fine with UniProcExecutor
+    # and forcing mp can expose race conditions in vLLM's scheduler.
+    # See: https://github.com/vllm-project/vllm/issues/29369
+    connector_list = [c.lower() for c in args.connector] if args.connector else []
+    uses_nixl = "nixl" in connector_list
+    tp_size = getattr(engine_args, "tensor_parallel_size", None) or 1
+    if uses_nixl and tp_size == 1 and engine_args.distributed_executor_backend is None:
+        logger.info(
+            "Setting --distributed-executor-backend=mp for TP=1 to avoid "
+            "UniProcExecutor GIL contention with NIXL connector"
+        )
+        engine_args.distributed_executor_backend = "mp"
 
     if engine_args.enable_prefix_caching is None:
         logger.debug(
@@ -285,6 +321,8 @@ def parse_args() -> Config:
     config.mm_prompt_template = args.mm_prompt_template
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
+    config.enable_local_indexer = args.enable_local_indexer
+    config.use_vllm_tokenizer = args.use_vllm_tokenizer
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
@@ -352,24 +390,6 @@ def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     if not config.engine_args.enable_prefix_caching:
         logger.info("No kv_events_config required: prefix caching is disabled")
         return None
-
-    # There is a bug with KV events publishing when LORA is enabled.
-    # This is fixed in https://github.com/vllm-project/vllm/pull/27728 but not released yet.
-    # remove below check once new vLLM version is released with the fix.
-    if config.engine_args.enable_lora:
-        if config.engine_args.kv_events_config is None:
-            # No explicit kv events config provided by user, we'll disable kv cache because LoRA is enabled and its not supported yet.
-            return None
-        else:
-            # User provided their own kv events config and it'll not work when LoRA is enabled.
-            message = (
-                "KV events doesn't work when LoRA is enabled due to upstream vLLM bug. "
-                "Please see https://github.com/vllm-project/vllm/pull/27728."
-                "For now, either disable lora or dont use explicit kv envents config."
-                "Dont set both --kv-events-config and --enable-lora in vllm command line args."
-            )
-            logger.error(message)
-            raise ValueError(message)
 
     # If user provided their own config, use that
     if c := getattr(config.engine_args, "kv_events_config"):
@@ -464,7 +484,7 @@ def overwrite_args(config):
         # skip tokenizer initialisation.  Setting this to **False** avoids
         # a NoneType error when the processor accesses the tokenizer.
         "skip_tokenizer_init": False,
-        "disable_log_requests": True,
+        "enable_log_requests": False,
         "disable_log_stats": False,
     }
 

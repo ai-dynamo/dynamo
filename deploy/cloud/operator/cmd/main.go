@@ -208,6 +208,7 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	if restrictedNamespace == "" && plannerClusterRoleName == "" {
 		setupLog.Error(nil, "planner-cluster-role-name is required in cluster-wide mode")
@@ -277,7 +278,6 @@ func main() {
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -575,6 +575,16 @@ func main() {
 		RBACManager:           rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeployment")
+		os.Exit(1)
+	}
+
+	if err = (&controller.DynamoGraphDeploymentScalingAdapterReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("dgdscalingadapter"),
+		Config:   ctrlConfig,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DGDScalingAdapter")
 		os.Exit(1)
 	}
 

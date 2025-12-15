@@ -5,6 +5,7 @@ from typing import (
     Any,
     AsyncGenerator,
     AsyncIterator,
+    Awaitable,
     Callable,
     Dict,
     List,
@@ -54,6 +55,32 @@ class DistributedRuntime:
     def child_token(self) -> CancellationToken:
         """
         Get a child cancellation token that can be passed to async tasks
+        """
+        ...
+
+    def register_engine_route(
+        self,
+        route_name: str,
+        callback: Callable[[dict], Awaitable[dict]],
+    ) -> None:
+        """
+        Register an async callback for /engine/{route_name} on the system status server.
+
+        Args:
+            route_name: The route path (e.g., "start_profile" creates /engine/start_profile)
+            callback: Async function with signature: async def(body: dict) -> dict
+
+        Example:
+            async def start_profile(body: dict) -> dict:
+                await engine.start_profile(**body)
+                return {"status": "ok", "message": "Profiling started"}
+
+            runtime.register_engine_route("start_profile", start_profile)
+
+        The callback receives the JSON request body as a dict and should return
+        a dict that will be serialized as the JSON response.
+
+        For GET requests or empty bodies, an empty dict {} is passed.
         """
         ...
 
@@ -433,6 +460,7 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    enable_local_indexer: bool
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
 
@@ -766,7 +794,7 @@ class KvEventPublisher:
     ...
 
     def __init__(
-        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0
+        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0, enable_local_indexer: bool = False
     ) -> None:
         """
         Create a `KvEventPublisher` object
@@ -776,6 +804,7 @@ class KvEventPublisher:
             worker_id: The worker ID
             kv_block_size: The KV block size (must be > 0)
             dp_rank: The data parallel rank (defaults to 0)
+            enable_local_indexer: Enable worker-local KV indexer (defaults to False)
         """
 
     def publish_stored(
@@ -816,7 +845,8 @@ class ZmqKvEventPublisherConfig:
         worker_id: int,
         kv_block_size: int,
         zmq_endpoint: str = "tcp://127.0.0.1:5557",
-        zmq_topic: str = ""
+        zmq_topic: str = "",
+        enable_local_indexer: bool = False
     ) -> None:
         """
         Configuration for the ZmqKvEventPublisher.
@@ -825,6 +855,7 @@ class ZmqKvEventPublisherConfig:
         :param kv_block_size: The block size for the key-value store.
         :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
         :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
+        :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to False.
         """
         ...
 
@@ -1077,6 +1108,10 @@ async def register_llm(
         Providing only one of these parameters will raise a ValueError.
         - `lora_name`: The served model name for the LoRA model
         - `base_model_path`: Path to the base model that the LoRA extends
+
+    For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
+    and a minimal model card is registered directly. Use model_path as the display name
+    for these models.
     """
     ...
 

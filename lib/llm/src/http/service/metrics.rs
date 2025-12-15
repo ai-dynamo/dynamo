@@ -165,6 +165,7 @@ pub struct Metrics {
     request_duration: HistogramVec,
     input_sequence_length: HistogramVec,
     output_sequence_length: HistogramVec,
+    cached_tokens: HistogramVec,
     output_tokens_counter: IntCounterVec,
     time_to_first_token: HistogramVec,
     inter_token_latency: HistogramVec,
@@ -252,6 +253,8 @@ pub struct ResponseMetricCollector {
     // be computed.
     last_response_time: Option<Duration>,
     osl: usize,
+    // we track if cached_tokens has been observed to ensure we only increment once per request
+    cached_tokens_observed: bool,
 }
 
 impl Default for Metrics {
@@ -378,7 +381,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::INPUT_SEQUENCE_TOKENS),
                 "Input sequence length in tokens",
             )
-            .buckets(input_sequence_buckets),
+            .buckets(input_sequence_buckets.clone()),
             &["model"],
         )
         .unwrap();
@@ -432,6 +435,16 @@ impl Metrics {
                 "Inter-token latency in seconds",
             )
             .buckets(inter_token_latency_buckets),
+            &["model"],
+        )
+        .unwrap();
+
+        let cached_tokens = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::CACHED_TOKENS),
+                "Number of cached tokens (prefix cache hits) per request",
+            )
+            .buckets(input_sequence_buckets.clone()),
             &["model"],
         )
         .unwrap();
@@ -502,6 +515,7 @@ impl Metrics {
             request_duration,
             input_sequence_length,
             output_sequence_length,
+            cached_tokens,
             output_tokens_counter,
             time_to_first_token,
             inter_token_latency,
@@ -597,6 +611,7 @@ impl Metrics {
         registry.register(Box::new(self.request_duration.clone()))?;
         registry.register(Box::new(self.input_sequence_length.clone()))?;
         registry.register(Box::new(self.output_sequence_length.clone()))?;
+        registry.register(Box::new(self.cached_tokens.clone()))?;
         registry.register(Box::new(self.output_tokens_counter.clone()))?;
         registry.register(Box::new(self.time_to_first_token.clone()))?;
         registry.register(Box::new(self.inter_token_latency.clone()))?;
@@ -830,6 +845,7 @@ impl ResponseMetricCollector {
             last_response_time: None,
             start_time: Instant::now(),
             osl: 0,
+            cached_tokens_observed: false,
         }
     }
 
@@ -841,6 +857,19 @@ impl ResponseMetricCollector {
     /// Check if this will be the first token (before calling observe_response)
     pub fn is_first_token(&self) -> bool {
         self.is_first_token
+    }
+
+    /// Observe cached tokens (prefix cache hits), observing only once per request when value is available
+    pub fn observe_cached_tokens(&mut self, cached_tokens: Option<usize>) {
+        if let Some(tokens) = cached_tokens
+            && !self.cached_tokens_observed
+        {
+            self.cached_tokens_observed = true;
+            self.metrics
+                .cached_tokens
+                .with_label_values(&[&self.model])
+                .observe(tokens as f64);
+        }
     }
 
     /// Observe a response with input sequence length and number of new tokens
@@ -943,11 +972,13 @@ impl<T> From<crate::types::Annotated<T>> for EventConverter<T> {
 ///
 /// This function handles metrics collection, http_queue_guard management, and converts
 /// annotated responses to SSE events for streaming responses.
+///
+/// Returns None for metrics annotation events (events without SSE data payload).
 pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     annotated: EventConverter<T>,
     response_collector: &mut ResponseMetricCollector,
     http_queue_guard: &mut Option<HttpQueueGuard>,
-) -> Result<Event, axum::Error> {
+) -> Result<Option<Event>, axum::Error> {
     use crate::preprocessor::LLMMetricAnnotation;
 
     let mut annotated = annotated.0;
@@ -955,6 +986,7 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     // update metrics
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
+        response_collector.observe_cached_tokens(metrics.cached_tokens);
 
         // Drop http_queue_guard on first token for streaming
         if response_collector.is_first_token()
@@ -976,11 +1008,11 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
 
     let mut event = Event::default();
 
-    if let Some(data) = annotated.data {
+    if let Some(ref data) = annotated.data {
         event = event.json_data(data)?;
     }
 
-    if let Some(msg) = annotated.event {
+    if let Some(ref msg) = annotated.event {
         if msg == "error" {
             let msgs = annotated
                 .comment
@@ -996,7 +1028,12 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
         }
     }
 
-    Ok(event)
+    // Filter out metrics annotation events (events without SSE data payload)
+    if annotated.data.is_none() && annotated.event.is_none() {
+        Ok(None)
+    } else {
+        Ok(Some(event))
+    }
 }
 
 /// Create a new router with optional custom backend metrics support
@@ -1355,6 +1392,122 @@ mod tests {
                 .with_label_values(&[model2])
                 .get(),
             20
+        );
+    }
+
+    #[test]
+    fn test_cached_tokens_once_per_request() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let expected_metric_name = "dynamo_frontend_cached_tokens";
+        let mut collector = metrics.clone().create_response_collector(model);
+
+        // Create histogram handle first
+        let _histogram = metrics.cached_tokens.with_label_values(&[model]);
+
+        // First call should observe and record 1 sample
+        collector.observe_cached_tokens(Some(100));
+        let metric_families = registry.gather();
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+
+        // Second call with same collector should not observe again (idempotent)
+        collector.observe_cached_tokens(Some(50));
+        let metric_families = registry.gather();
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+
+        // Third call with different value should still be idempotent
+        collector.observe_cached_tokens(Some(75));
+        let metric_families = registry.gather();
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_metrics_annotation_event_handling() {
+        use crate::preprocessor::LLMMetricAnnotation;
+        use crate::types::Annotated;
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let expected_metric_name = "dynamo_frontend_cached_tokens";
+        let mut collector = metrics.clone().create_response_collector(model);
+
+        // Create a metrics annotation event (event without SSE data payload)
+        let mut annotated = Annotated::<
+            crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+        > {
+            id: None,
+            data: None,
+            event: Some(crate::preprocessor::ANNOTATION_LLM_METRICS.to_string()),
+            comment: None,
+        };
+
+        // Add metrics annotation with cached_tokens
+        let llm_metrics = LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens: 20,
+            chunk_tokens: 5,
+            cached_tokens: Some(15),
+        };
+
+        let annotation = llm_metrics.to_annotation::<()>().unwrap();
+        annotated.event = annotation.event;
+        annotated.comment = annotation.comment;
+
+        // Process the event
+        let mut http_queue_guard = None;
+        let result = process_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(annotated),
+            &mut collector,
+            &mut http_queue_guard,
+        );
+
+        // Should return Ok(None) for metrics annotation events
+        assert!(matches!(result, Ok(None)));
+
+        // Should have observed the cached tokens from the metrics annotation event
+        let metric_families = registry.gather();
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
         );
     }
 }

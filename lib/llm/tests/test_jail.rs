@@ -34,6 +34,7 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
+                stop_reason: None,
                 logprobs: None,
             };
 
@@ -73,6 +74,7 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
                 logprobs: None,
             };
 
@@ -116,6 +118,7 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
+                stop_reason: None,
                 logprobs: None,
             };
 
@@ -158,6 +161,7 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: None,
+                        stop_reason: None,
                         logprobs: None,
                     }
                 })
@@ -202,6 +206,7 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: Some(FinishReason::Stop),
+                        stop_reason: None,
                         logprobs: None,
                     }
                 })
@@ -2323,6 +2328,7 @@ mod parallel_jail_tests {
                         reasoning_content: None,
                     },
                     finish_reason: None,
+                    stop_reason: None,
                     logprobs: None,
                 }
             })
@@ -2392,6 +2398,13 @@ mod parallel_jail_tests {
         for (i, (expected_name, expected_args)) in expected_tool_calls.iter().enumerate() {
             let tool_call = &all_tool_calls[i];
             assert!(tool_call.id.is_some(), "Tool call {} should have an ID", i);
+
+            assert_eq!(
+                tool_call.index, i as u32,
+                "Tool call {} should have index {}, got {}",
+                i, i, tool_call.index
+            );
+
             assert_eq!(
                 tool_call.r#type,
                 Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
