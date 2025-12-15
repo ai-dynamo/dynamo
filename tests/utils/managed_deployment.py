@@ -264,6 +264,20 @@ class DeploymentSpec:
         for service in services:
             service.image = image
 
+    def set_dynamo_namespace(self, dynamo_ns: str):
+        """Set the dynamoNamespace for all services.
+
+        This provides logical isolation within a Kubernetes namespace,
+        ensuring services only discover and communicate with each other.
+
+        Args:
+            dynamo_ns: The dynamo namespace to set for all services
+        """
+        for service_name, service_spec in self._deployment_spec["spec"][
+            "services"
+        ].items():
+            service_spec["dynamoNamespace"] = dynamo_ns
+
     def set_tensor_parallel(self, tp_size: int, service_names: Optional[list] = None):
         """Scale deployment for different tensor parallel configurations
 
