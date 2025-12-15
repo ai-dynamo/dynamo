@@ -31,7 +31,6 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --connector none \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' &
 
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
