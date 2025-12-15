@@ -333,21 +333,21 @@ impl ModelWatcher {
         tracing::debug!(model_name = card.name(), "adding model");
         self.manager.save_model_card(key, card.clone())?;
 
-        // Check if we should skip registration:
-        // - Skip if a model with this name already exists
-        // - UNLESS this is a prefill model and no prefill model exists yet for this name
-        let is_new_prefill = card.model_type.supports_prefill()
-            && !self
-                .manager
-                .list_prefill_models()
-                .contains(&card.name().to_string());
+        // Skip duplicate registrations based on model type.
+        // Prefill and decode models are tracked separately, so registering one
+        // doesn't block the other (they can arrive in any order).
+        let already_registered = if card.model_type.supports_prefill() {
+            self.manager.has_prefill_model(card.name())
+        } else {
+            self.manager.has_decode_model(card.name())
+        };
 
-        if self.manager.has_model_any(card.name()) && !is_new_prefill {
+        if already_registered {
             tracing::debug!(
                 model_name = card.name(),
                 namespace = endpoint_id.namespace,
                 model_type = %card.model_type,
-                "New endpoint for existing model, skipping"
+                "Model already registered, skipping"
             );
             return Ok(());
         }

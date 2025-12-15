@@ -116,6 +116,13 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": os.environ.get("DYN_REQUEST_PLANE", "nats"),
         "help": "Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     },
+    "enable-local-indexer": {
+        "flags": ["--enable-local-indexer"],
+        "type": str,
+        "choices": ["true", "false"],
+        "default": os.environ.get("DYN_LOCAL_INDEXER", "false"),
+        "help": "Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
+    },
 }
 
 
@@ -148,6 +155,8 @@ class DynamoArgs:
     embedding_worker: bool = False
     # config dump options
     dump_config_to: Optional[str] = None
+    # local indexer option
+    enable_local_indexer: bool = False
 
 
 class DisaggregationMode(Enum):
@@ -477,6 +486,7 @@ async def parse_args(args: list[str]) -> Config:
         multimodal_worker=parsed_args.multimodal_worker,
         embedding_worker=parsed_args.embedding_worker,
         dump_config_to=parsed_args.dump_config_to,
+        enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 
