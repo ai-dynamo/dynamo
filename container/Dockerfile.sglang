@@ -1,8 +1,8 @@
-# syntax=docker/dockerfile:1.10.0
+# # syntax=docker/dockerfile:1.10.0
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG SGLANG_IMAGE_TAG="v0.5.6.post2"
+ARG SGLANG_IMAGE_TAG="v0.5.6.post2-runtime"
 # Either 12 or 13
 ARG CUDA_VERSION="12"
 ARG BRANCH_TYPE
@@ -10,7 +10,7 @@ ARG BRANCH_TYPE
 ARG DYNAMO_VERSION=""
 ARG CARGO_BUILD_JOBS
 
-FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}-cu${CUDA_VERSION}-runtime
+FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}
 
 WORKDIR /sgl-workspace
 
