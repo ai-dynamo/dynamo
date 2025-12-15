@@ -43,9 +43,11 @@ class ProcessorHandler(ProcessMixIn):
         self,
         engine_args: AsyncEngineArgs,
         encode_worker_client: Client,
+        pd_worker_client: Client,
         prompt_template: str,
     ):
         self.encode_worker_client = encode_worker_client
+        self.pd_worker_client = pd_worker_client
         self.prompt_template = prompt_template
         self.engine_args = engine_args
         self.model_config = self.engine_args.create_model_config()
@@ -104,6 +106,15 @@ class ProcessorHandler(ProcessMixIn):
         # cause TypeError: unsupported type SamplingParams
         response_generator = await self.encode_worker_client.round_robin(
             worker_request.model_dump_json()
+        )
+        # Gather transformed requests
+        worker_request.multimodal_inputs = []
+        async for response in response_generator:
+            logger.debug(f"Received response from encode worker: {response}")
+            worker_request.multimodal_inputs.extend(response.multimodal_inputs)
+
+        response_generator = await self.pd_worker_client.round_robin(
+            request.model_dump_json(), context=context
         )
 
         output = self._generate_responses(response_generator, request_type)
