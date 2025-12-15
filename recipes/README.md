@@ -19,6 +19,7 @@ Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA D
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 8x H200 | ✅ | ❌ | Benchmark recipe pending | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | Benchmark recipe pending | ❌ |
 | **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 32+4 GB200 | ✅ | ✅ |Multi-node: 8 decode + 1 prefill nodes | ❌ |
+| **[Nemotron-253B](nemotron-253b/vllm/agg-multi-node/)** | vLLM | Agg (Multi-Node) | 16x H100 (2 nodes) | ✅ | ❌ | Large Model Multi-node Aggregated Serving (No Prefill) | ❌ |
 
 **Legend:**
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available | ❌ = Missing or incomplete

@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: nemotron-253b-dgx
+spec:
+  backendFramework: vllm
+  services:
+    Frontend:
+      componentType: frontend
+      dynamoNamespace: nemotron-253b-dgx
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace/components/backends/vllm
+      replicas: 1
+
+    VllmWorker:
+      componentType: worker
+      dynamoNamespace: nemotron-253b-dgx
+      sharedMemory:
+        size: 200Gi
+      # 2 nodes x 8 GPUs = 16 GPUs total (TP=8, PP=2)
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "8"
+        requests:
+          gpu: "8"
+      extraPodSpec:
+        runtimeClassName: nvidia
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: nemotron-253b-model-cache
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace/components/backends/vllm
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            failureThreshold: 720  # 120 minutes (2 hours) for 253B model
+            periodSeconds: 10
+          env:
+            - name: SERVED_MODEL_NAME
+              value: "nemotron-253b-ultra"
+            - name: HF_TOKEN
+              value: "hf_api_key"  # update if needed
+            - name: NCCL_DEBUG
+              value: "INFO"
+            - name: HF_HUB_DISABLE_PROGRESS_BARS
+              value: "1"
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "0"
+            - name: VLLM_HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - >-
+              export RAY_NODE_IP=$VLLM_HOST_IP &&
+              python3 -m dynamo.vllm
+              --model /models/nemotron-253b
+              --served-model-name nemotron-253b-ultra
+              --tensor-parallel-size 8
+              --pipeline-parallel-size 2
+              --data-parallel-size 1
+              --disable-log-requests
+              --gpu-memory-utilization 0.95
+              --trust-remote-code
+              --enforce-eager
+              --distributed-executor-backend ray
+              --connector none
+
+
+
