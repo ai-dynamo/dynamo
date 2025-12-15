@@ -11,6 +11,7 @@ use dynamo_async_openai::types::{
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 use validator::Validate;
 
@@ -18,18 +19,24 @@ use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatComplet
 use super::nvext::{NvExt, NvExtProvider};
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateResponse {
+    /// Flattened CreateResponse fields (model, input, temperature, etc.)
+    /// Using value_type = Object to prevent infinite schema recursion from deeply nested types.
     #[serde(flatten)]
+    #[schema(value_type = Object)]
     pub inner: dynamo_async_openai::types::responses::CreateResponse,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
 }
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvResponse {
+    /// Flattened Response fields.
+    /// Using value_type = Object to prevent infinite schema recursion.
     #[serde(flatten)]
+    #[schema(value_type = Object)]
     pub inner: dynamo_async_openai::types::responses::Response,
 
     /// NVIDIA extension field for response metadata (worker IDs, etc.)

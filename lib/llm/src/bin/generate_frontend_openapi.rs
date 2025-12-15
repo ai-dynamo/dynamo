@@ -16,12 +16,30 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::thread;
 
 use anyhow::Context as _;
 
 use dynamo_llm::http::service::{openapi_docs, service_v2::HttpService};
 
+/// Stack size for the generator thread (8 MB).
+/// The utoipa schema derivation for deeply nested OpenAI types requires
+/// additional stack space due to recursive type expansion.
+const GENERATOR_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 fn main() -> anyhow::Result<()> {
+    // Spawn a thread with a larger stack to handle deeply nested schema generation
+    let handle = thread::Builder::new()
+        .stack_size(GENERATOR_STACK_SIZE)
+        .spawn(generate_openapi)
+        .context("failed to spawn generator thread")?;
+
+    handle
+        .join()
+        .map_err(|e| anyhow::anyhow!("generator thread panicked: {:?}", e))?
+}
+
+fn generate_openapi() -> anyhow::Result<()> {
     // Build an HttpService instance with all standard OpenAI-compatible
     // frontend endpoints enabled so that the generated OpenAPI document
     // reflects the full surface area exposed to users.

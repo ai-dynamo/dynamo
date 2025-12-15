@@ -16,12 +16,13 @@ pub use crate::types::{
 use derive_builder::Builder;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
 
 /// Role of messages in the API.
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     User,
@@ -31,7 +32,7 @@ pub enum Role {
 }
 
 /// Status of input/output items.
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputStatus {
     InProgress,
@@ -40,7 +41,7 @@ pub enum OutputStatus {
 }
 
 /// Input payload: raw text or structured context items.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum Input {
     /// A text input to the model, equivalent to a text input with the user role.
@@ -50,7 +51,7 @@ pub enum Input {
 }
 
 /// A context item: currently only messages.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(untagged, rename_all = "snake_case")]
 pub enum InputItem {
     Message(InputMessage),
@@ -58,7 +59,7 @@ pub enum InputItem {
 }
 
 /// A message to prime the model.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
 #[builder(
     name = "InputMessageArgs",
     pattern = "mutable",
@@ -76,14 +77,14 @@ pub struct InputMessage {
     pub content: InputContent,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum InputMessageType {
     #[default]
     Message,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum InputContent {
     /// A text input to the model.
@@ -93,7 +94,7 @@ pub enum InputContent {
 }
 
 /// Parts of a message: text, image, video, file, or audio.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentType {
     /// A text input to the model.
@@ -108,12 +109,12 @@ pub enum ContentType {
     InputFile(InputFile),
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct InputText {
     text: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
 #[builder(
     name = "InputImageArgs",
     pattern = "mutable",
@@ -133,7 +134,7 @@ pub struct InputImage {
     image_url: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
 #[builder(
     name = "InputVideoArgs",
     pattern = "mutable",
@@ -153,7 +154,7 @@ pub struct InputVideo {
     video_url: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
 #[builder(
     name = "InputAudioArgs",
     pattern = "mutable",
@@ -171,7 +172,7 @@ pub struct InputAudio {
     audio_url: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
 #[builder(
     name = "InputFileArgs",
     pattern = "mutable",
@@ -192,7 +193,7 @@ pub struct InputFile {
 }
 
 /// Builder for a Responses API request.
-#[derive(Clone, Serialize, Deserialize, Debug, Default, Builder, PartialEq)]
+#[derive(ToSchema, Clone, Serialize, Deserialize, Debug, Default, Builder, PartialEq)]
 #[builder(
     name = "CreateResponseArgs",
     pattern = "mutable",
@@ -353,7 +354,7 @@ pub struct CreateResponse {
 }
 
 /// Service tier request options.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct PromptConfig {
     /// The unique identifier of the prompt template to use.
     pub id: String,
@@ -370,7 +371,7 @@ pub struct PromptConfig {
 }
 
 /// Service tier request options.
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ServiceTier {
     Auto,
@@ -379,7 +380,7 @@ pub enum ServiceTier {
 }
 
 /// Truncation strategies.
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Truncation {
     Auto,
@@ -387,7 +388,7 @@ pub enum Truncation {
 }
 
 /// o-series reasoning settings.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
 #[builder(
     name = "ReasoningConfigArgs",
     pattern = "mutable",
@@ -404,7 +405,7 @@ pub struct ReasoningConfig {
     pub summary: Option<ReasoningSummary>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningSummary {
     Auto,
@@ -413,13 +414,13 @@ pub enum ReasoningSummary {
 }
 
 /// Configuration for text response format.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct TextConfig {
     /// Defines the format: plain text, JSON object, or JSON schema.
     pub format: TextResponseFormat,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TextResponseFormat {
     /// The type of response format being defined: `text`
@@ -431,7 +432,7 @@ pub enum TextResponseFormat {
 }
 
 /// Definitions for model-callable tools.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolDefinition {
     /// File search tool.
@@ -452,7 +453,7 @@ pub enum ToolDefinition {
     LocalShell,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
 #[builder(
     name = "FileSearchArgs",
     pattern = "mutable",
@@ -474,7 +475,7 @@ pub struct FileSearch {
     pub ranking_options: Option<RankingOptions>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
 #[builder(
     name = "FunctionArgs",
     pattern = "mutable",
@@ -494,7 +495,7 @@ pub struct Function {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
 #[builder(
     name = "WebSearchPreviewArgs",
     pattern = "mutable",
@@ -510,7 +511,7 @@ pub struct WebSearchPreview {
     pub search_context_size: Option<WebSearchContextSize>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum WebSearchContextSize {
     Low,
@@ -518,7 +519,7 @@ pub enum WebSearchContextSize {
     High,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
 #[builder(
     name = "ComputerUsePreviewArgs",
     pattern = "mutable",
@@ -535,7 +536,7 @@ pub struct ComputerUsePreview {
 }
 
 /// Options for search result ranking.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct RankingOptions {
     /// The ranker to use for the file search.
     pub ranker: String,
@@ -546,7 +547,7 @@ pub struct RankingOptions {
 }
 
 /// Filters for file search.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum Filter {
     /// A filter used to compare a specified attribute key to a given value using a defined
@@ -557,7 +558,7 @@ pub enum Filter {
 }
 
 /// Single comparison filter.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ComparisonFilter {
     /// Specifies the comparison operator
     #[serde(rename = "type")]
@@ -568,7 +569,7 @@ pub struct ComparisonFilter {
     pub value: serde_json::Value,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 pub enum ComparisonType {
     #[serde(rename = "eq")]
     Equals,
@@ -585,7 +586,7 @@ pub enum ComparisonType {
 }
 
 /// Combine multiple filters.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct CompoundFilter {
     /// Type of operation
     #[serde(rename = "type")]
@@ -594,7 +595,7 @@ pub struct CompoundFilter {
     pub filters: Vec<Filter>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum CompoundType {
     And,
@@ -602,7 +603,7 @@ pub enum CompoundType {
 }
 
 /// Approximate user location for web search.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
 #[builder(
     name = "LocationArgs",
     pattern = "mutable",
@@ -629,7 +630,7 @@ pub struct Location {
 }
 
 /// MCP (Model Context Protocol) tool configuration.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
 #[builder(
     name = "McpArgs",
     pattern = "mutable",
@@ -654,7 +655,7 @@ pub struct Mcp {
 }
 
 /// Allowed tools configuration for MCP.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum AllowedTools {
     /// A flat list of allowed tool names.
@@ -664,7 +665,7 @@ pub enum AllowedTools {
 }
 
 /// Filter object for MCP allowed tools.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct McpAllowedToolsFilter {
     /// Names of tools in the filter
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -672,7 +673,7 @@ pub struct McpAllowedToolsFilter {
 }
 
 /// Approval policy or filter for MCP tools.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum RequireApproval {
     /// A blanket policy: "always" or "never".
@@ -681,7 +682,7 @@ pub enum RequireApproval {
     Filter(McpApprovalFilter),
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum RequireApprovalPolicy {
     Always,
@@ -689,7 +690,7 @@ pub enum RequireApprovalPolicy {
 }
 
 /// Filter object for MCP tool approval.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct McpApprovalFilter {
     /// A list of tools that always require approval.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -700,7 +701,7 @@ pub struct McpApprovalFilter {
 }
 
 /// Container configuration for a code interpreter.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum CodeInterpreterContainer {
     /// A simple container ID.
@@ -710,7 +711,7 @@ pub enum CodeInterpreterContainer {
 }
 
 /// Auto configuration for code interpreter container.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CodeInterpreterContainerKind {
     Auto {
@@ -721,7 +722,7 @@ pub enum CodeInterpreterContainerKind {
 }
 
 /// Code interpreter tool definition.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
 #[builder(
     name = "CodeInterpreterArgs",
     pattern = "mutable",
@@ -735,7 +736,7 @@ pub struct CodeInterpreter {
 }
 
 /// Mask image input for image generation.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct InputImageMask {
     /// Base64-encoded mask image.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -746,7 +747,7 @@ pub struct InputImageMask {
 }
 
 /// Image generation tool definition.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
 #[builder(
     name = "ImageGenerationArgs",
     pattern = "mutable",
@@ -784,7 +785,7 @@ pub struct ImageGeneration {
     pub size: Option<ImageGenerationSize>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageGenerationBackground {
     Transparent,
@@ -792,7 +793,7 @@ pub enum ImageGenerationBackground {
     Auto,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageGenerationOutputFormat {
     Png,
@@ -800,7 +801,7 @@ pub enum ImageGenerationOutputFormat {
     Jpeg,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageGenerationQuality {
     Low,
@@ -809,7 +810,7 @@ pub enum ImageGenerationQuality {
     Auto,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageGenerationSize {
     Auto,
@@ -822,7 +823,7 @@ pub enum ImageGenerationSize {
 }
 
 /// Control how the model picks or is forced to pick a tool.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum ToolChoice {
     /// Controls which (if any) tool is called by the model.
@@ -841,7 +842,7 @@ pub enum ToolChoice {
 }
 
 /// Simple tool-choice modes.
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolChoiceMode {
     /// The model will not call any tool and instead generates a message.
@@ -853,7 +854,7 @@ pub enum ToolChoiceMode {
 }
 
 /// Hosted tool type identifiers.
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum HostedToolType {
     FileSearch,
@@ -862,7 +863,7 @@ pub enum HostedToolType {
 }
 
 /// Error returned by the API when a request fails.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ErrorObject {
     /// The error code for the response.
     pub code: String,
@@ -871,14 +872,14 @@ pub struct ErrorObject {
 }
 
 /// Details about an incomplete response.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct IncompleteDetails {
     /// The reason why the response is incomplete.
     pub reason: String,
 }
 
 /// A simple text output from the model.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct OutputText {
     /// The annotations of the text output.
     pub annotations: Vec<Annotation>,
@@ -886,7 +887,7 @@ pub struct OutputText {
     pub text: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Annotation {
     /// A citation to a file.
@@ -897,7 +898,7 @@ pub enum Annotation {
     FilePath(FilePath),
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct FileCitation {
     /// The ID of the file.
     file_id: String,
@@ -905,7 +906,7 @@ pub struct FileCitation {
     index: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct UrlCitation {
     /// The index of the last character of the URL citation in the message.
     end_index: u32,
@@ -917,7 +918,7 @@ pub struct UrlCitation {
     url: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct FilePath {
     /// The ID of the file.
     file_id: String,
@@ -926,14 +927,14 @@ pub struct FilePath {
 }
 
 /// A refusal explanation from the model.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Refusal {
     /// The refusal explanationfrom the model.
     pub refusal: String,
 }
 
 /// A message generated by the model.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct OutputMessage {
     /// The content of the output message.
     pub content: Vec<Content>,
@@ -945,7 +946,7 @@ pub struct OutputMessage {
     pub status: OutputStatus,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Content {
     /// A text output from the model.
@@ -955,7 +956,7 @@ pub enum Content {
 }
 
 /// Nested content within an output message.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutputContent {
     /// An output message from the model.
@@ -987,7 +988,7 @@ pub enum OutputContent {
 }
 
 /// A reasoning item representing the model's chain of thought, including summary paragraphs.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ReasoningItem {
     /// Unique identifier of the reasoning content.
     pub id: String,
@@ -1003,14 +1004,14 @@ pub struct ReasoningItem {
 }
 
 /// A single summary text fragment from reasoning.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SummaryText {
     /// A short summary of the reasoning used by the model.
     pub text: String,
 }
 
 /// File search tool call output.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct FileSearchCallOutput {
     /// The unique ID of the file search tool call.
     pub id: String,
@@ -1023,7 +1024,7 @@ pub struct FileSearchCallOutput {
     pub results: Option<Vec<FileSearchResult>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum FileSearchCallOutputStatus {
     InProgress,
@@ -1034,7 +1035,7 @@ pub enum FileSearchCallOutputStatus {
 }
 
 /// A single result from a file search.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct FileSearchResult {
     /// The unique ID of the file.
     pub file_id: String,
@@ -1051,7 +1052,7 @@ pub struct FileSearchResult {
     pub attributes: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SafetyCheck {
     /// The ID of the safety check.
     pub id: String,
@@ -1062,7 +1063,7 @@ pub struct SafetyCheck {
 }
 
 /// Web search tool call output.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct WebSearchCallOutput {
     /// The unique ID of the web search tool call.
     pub id: String,
@@ -1071,7 +1072,7 @@ pub struct WebSearchCallOutput {
 }
 
 /// Output from a computer tool call.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ComputerCallOutput {
     pub action: ComputerCallAction,
     /// An identifier used when responding to the tool call with output.
@@ -1085,14 +1086,14 @@ pub struct ComputerCallOutput {
 }
 
 /// A point in 2D space.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Point {
     pub x: i32,
     pub y: i32,
 }
 
 /// Represents all user‐triggered actions.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ComputerCallAction {
     /// A click action.
@@ -1123,7 +1124,7 @@ pub enum ComputerCallAction {
     Wait,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ButtonPress {
     Left,
@@ -1134,7 +1135,7 @@ pub enum ButtonPress {
 }
 
 /// A click action.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Click {
     /// Which mouse button was pressed.
     pub button: ButtonPress,
@@ -1145,7 +1146,7 @@ pub struct Click {
 }
 
 /// A double click action.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DoubleClick {
     /// X‐coordinate of the double click.
     pub x: i32,
@@ -1154,7 +1155,7 @@ pub struct DoubleClick {
 }
 
 /// A drag action.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Drag {
     /// The path of points the cursor drags through.
     pub path: Vec<Point>,
@@ -1165,14 +1166,14 @@ pub struct Drag {
 }
 
 /// A keypress action.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KeyPress {
     /// The list of keys to press (e.g. `["Control", "C"]`).
     pub keys: Vec<String>,
 }
 
 /// A mouse move action.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MoveAction {
     /// X‐coordinate to move to.
     pub x: i32,
@@ -1181,7 +1182,7 @@ pub struct MoveAction {
 }
 
 /// A scroll action.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scroll {
     /// Horizontal scroll distance.
     pub scroll_x: i32,
@@ -1194,14 +1195,14 @@ pub struct Scroll {
 }
 
 /// A typing (text entry) action.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TypeAction {
     /// The text to type.
     pub text: String,
 }
 
 /// Metadata for a function call request.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct FunctionCall {
     /// The unique ID of the function tool call.
     pub id: String,
@@ -1216,7 +1217,7 @@ pub struct FunctionCall {
 }
 
 /// Output of an image generation request.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ImageGenerationCallOutput {
     /// Unique ID of the image generation call.
     pub id: String,
@@ -1227,7 +1228,7 @@ pub struct ImageGenerationCallOutput {
 }
 
 /// Output of a code interpreter request.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct CodeInterpreterCallOutput {
     /// The code that was executed.
     pub code: String,
@@ -1242,7 +1243,7 @@ pub struct CodeInterpreterCallOutput {
 }
 
 /// Individual result from a code interpreter: either logs or files.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CodeInterpreterResult {
     /// Text logs from the execution.
@@ -1252,20 +1253,20 @@ pub enum CodeInterpreterResult {
 }
 
 /// The output containing execution logs.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct CodeInterpreterTextOutput {
     /// The logs of the code interpreter tool call.
     pub logs: String,
 }
 
 /// The output containing file references.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct CodeInterpreterFileOutput {
     /// List of file IDs produced.
     pub files: Vec<CodeInterpreterFile>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct CodeInterpreterFile {
     /// The ID of the file.
     file_id: String,
@@ -1274,7 +1275,7 @@ pub struct CodeInterpreterFile {
 }
 
 /// Output of a local shell command request.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct LocalShellCallOutput {
     /// Details of the exec action.
     pub action: LocalShellAction,
@@ -1287,7 +1288,7 @@ pub struct LocalShellCallOutput {
 }
 
 /// Define the shape of a local shell action (exec).
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct LocalShellAction {
     /// The command to run.
     pub command: Vec<String>,
@@ -1302,7 +1303,7 @@ pub struct LocalShellAction {
 }
 
 /// Output of an MCP server tool invocation.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct McpCallOutput {
     /// JSON string of the arguments passed.
     pub arguments: String,
@@ -1319,7 +1320,7 @@ pub struct McpCallOutput {
 }
 
 /// Output listing tools available on an MCP server.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct McpListToolsOutput {
     /// Unique ID of the list request.
     pub id: String,
@@ -1333,7 +1334,7 @@ pub struct McpListToolsOutput {
 }
 
 /// Information about a single tool on an MCP server.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct McpToolInfo {
     /// The name of the tool.
     pub name: String,
@@ -1348,7 +1349,7 @@ pub struct McpToolInfo {
 }
 
 /// Output representing a human approval request for an MCP tool.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct McpApprovalRequestOutput {
     /// JSON string of arguments for the tool.
     pub arguments: String,
@@ -1361,7 +1362,7 @@ pub struct McpApprovalRequestOutput {
 }
 
 /// Usage statistics for a response.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Usage {
     /// The number of input tokens.
     pub input_tokens: u32,
@@ -1376,7 +1377,7 @@ pub struct Usage {
 }
 
 /// The complete response returned by the Responses API.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Response {
     /// Unix timestamp (in seconds) when this Response was created.
     pub created_at: u64,
@@ -1475,7 +1476,7 @@ pub struct Response {
     pub user: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Completed,
@@ -1485,7 +1486,7 @@ pub enum Status {
 }
 
 /// Event types for streaming responses from the Responses API
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type")]
 #[non_exhaustive] // Future-proof against breaking changes
 pub enum ResponseEvent {
@@ -1639,21 +1640,21 @@ pub enum ResponseEvent {
 /// Stream of response events
 pub type ResponseStream = Pin<Box<dyn Stream<Item = Result<ResponseEvent, OpenAIError>> + Send>>;
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseCreated {
     pub sequence_number: u64,
     pub response: ResponseMetadata,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseInProgress {
     pub sequence_number: u64,
     pub response: ResponseMetadata,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseOutputItemAdded {
     pub sequence_number: u64,
@@ -1661,7 +1662,7 @@ pub struct ResponseOutputItemAdded {
     pub item: OutputItem,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseContentPartAdded {
     pub sequence_number: u64,
@@ -1671,7 +1672,7 @@ pub struct ResponseContentPartAdded {
     pub part: ContentPart,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseOutputTextDelta {
     pub sequence_number: u64,
@@ -1683,7 +1684,7 @@ pub struct ResponseOutputTextDelta {
     pub logprobs: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseContentPartDone {
     pub sequence_number: u64,
@@ -1693,7 +1694,7 @@ pub struct ResponseContentPartDone {
     pub part: ContentPart,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseOutputItemDone {
     pub sequence_number: u64,
@@ -1702,7 +1703,7 @@ pub struct ResponseOutputItemDone {
 }
 
 /// Response completed event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseCompleted {
     pub sequence_number: u64,
@@ -1710,7 +1711,7 @@ pub struct ResponseCompleted {
 }
 
 /// Response failed event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseFailed {
     pub sequence_number: u64,
@@ -1718,7 +1719,7 @@ pub struct ResponseFailed {
 }
 
 /// Response incomplete event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseIncomplete {
     pub sequence_number: u64,
@@ -1726,7 +1727,7 @@ pub struct ResponseIncomplete {
 }
 
 /// Response queued event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseQueued {
     pub sequence_number: u64,
@@ -1734,7 +1735,7 @@ pub struct ResponseQueued {
 }
 
 /// Text output completed event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseOutputTextDone {
     pub sequence_number: u64,
@@ -1746,7 +1747,7 @@ pub struct ResponseOutputTextDone {
 }
 
 /// Refusal delta event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseRefusalDelta {
     pub sequence_number: u64,
@@ -1757,7 +1758,7 @@ pub struct ResponseRefusalDelta {
 }
 
 /// Refusal done event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseRefusalDone {
     pub sequence_number: u64,
@@ -1768,7 +1769,7 @@ pub struct ResponseRefusalDone {
 }
 
 /// Function call arguments delta event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseFunctionCallArgumentsDelta {
     pub sequence_number: u64,
@@ -1778,7 +1779,7 @@ pub struct ResponseFunctionCallArgumentsDelta {
 }
 
 /// Function call arguments done event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseFunctionCallArgumentsDone {
     pub sequence_number: u64,
@@ -1788,7 +1789,7 @@ pub struct ResponseFunctionCallArgumentsDone {
 }
 
 /// Error event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseError {
     pub sequence_number: u64,
@@ -1798,7 +1799,7 @@ pub struct ResponseError {
 }
 
 /// File search call in progress event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseFileSearchCallInProgress {
     pub sequence_number: u64,
@@ -1807,7 +1808,7 @@ pub struct ResponseFileSearchCallInProgress {
 }
 
 /// File search call searching event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseFileSearchCallSearching {
     pub sequence_number: u64,
@@ -1816,7 +1817,7 @@ pub struct ResponseFileSearchCallSearching {
 }
 
 /// File search call completed event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseFileSearchCallCompleted {
     pub sequence_number: u64,
@@ -1825,7 +1826,7 @@ pub struct ResponseFileSearchCallCompleted {
 }
 
 /// Web search call in progress event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseWebSearchCallInProgress {
     pub sequence_number: u64,
@@ -1834,7 +1835,7 @@ pub struct ResponseWebSearchCallInProgress {
 }
 
 /// Web search call searching event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseWebSearchCallSearching {
     pub sequence_number: u64,
@@ -1843,7 +1844,7 @@ pub struct ResponseWebSearchCallSearching {
 }
 
 /// Web search call completed event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseWebSearchCallCompleted {
     pub sequence_number: u64,
@@ -1852,7 +1853,7 @@ pub struct ResponseWebSearchCallCompleted {
 }
 
 /// Reasoning summary part added event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseReasoningSummaryPartAdded {
     pub sequence_number: u64,
@@ -1863,7 +1864,7 @@ pub struct ResponseReasoningSummaryPartAdded {
 }
 
 /// Reasoning summary part done event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseReasoningSummaryPartDone {
     pub sequence_number: u64,
@@ -1874,7 +1875,7 @@ pub struct ResponseReasoningSummaryPartDone {
 }
 
 /// Reasoning summary text delta event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseReasoningSummaryTextDelta {
     pub sequence_number: u64,
@@ -1885,7 +1886,7 @@ pub struct ResponseReasoningSummaryTextDelta {
 }
 
 /// Reasoning summary text done event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseReasoningSummaryTextDone {
     pub sequence_number: u64,
@@ -1896,7 +1897,7 @@ pub struct ResponseReasoningSummaryTextDone {
 }
 
 /// Reasoning summary delta event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseReasoningSummaryDelta {
     pub sequence_number: u64,
@@ -1907,7 +1908,7 @@ pub struct ResponseReasoningSummaryDelta {
 }
 
 /// Reasoning summary done event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseReasoningSummaryDone {
     pub sequence_number: u64,
@@ -1918,7 +1919,7 @@ pub struct ResponseReasoningSummaryDone {
 }
 
 /// Image generation call in progress event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseImageGenerationCallInProgress {
     pub sequence_number: u64,
@@ -1927,7 +1928,7 @@ pub struct ResponseImageGenerationCallInProgress {
 }
 
 /// Image generation call generating event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseImageGenerationCallGenerating {
     pub sequence_number: u64,
@@ -1936,7 +1937,7 @@ pub struct ResponseImageGenerationCallGenerating {
 }
 
 /// Image generation call partial image event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseImageGenerationCallPartialImage {
     pub sequence_number: u64,
@@ -1947,7 +1948,7 @@ pub struct ResponseImageGenerationCallPartialImage {
 }
 
 /// Image generation call completed event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseImageGenerationCallCompleted {
     pub sequence_number: u64,
@@ -1956,7 +1957,7 @@ pub struct ResponseImageGenerationCallCompleted {
 }
 
 /// MCP call arguments delta event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseMcpCallArgumentsDelta {
     pub sequence_number: u64,
@@ -1966,7 +1967,7 @@ pub struct ResponseMcpCallArgumentsDelta {
 }
 
 /// MCP call arguments done event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseMcpCallArgumentsDone {
     pub sequence_number: u64,
@@ -1976,7 +1977,7 @@ pub struct ResponseMcpCallArgumentsDone {
 }
 
 /// MCP call completed event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseMcpCallCompleted {
     pub sequence_number: u64,
@@ -1985,7 +1986,7 @@ pub struct ResponseMcpCallCompleted {
 }
 
 /// MCP call failed event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseMcpCallFailed {
     pub sequence_number: u64,
@@ -1994,7 +1995,7 @@ pub struct ResponseMcpCallFailed {
 }
 
 /// MCP call in progress event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseMcpCallInProgress {
     pub sequence_number: u64,
@@ -2003,7 +2004,7 @@ pub struct ResponseMcpCallInProgress {
 }
 
 /// MCP list tools completed event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseMcpListToolsCompleted {
     pub sequence_number: u64,
@@ -2012,7 +2013,7 @@ pub struct ResponseMcpListToolsCompleted {
 }
 
 /// MCP list tools failed event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseMcpListToolsFailed {
     pub sequence_number: u64,
@@ -2021,7 +2022,7 @@ pub struct ResponseMcpListToolsFailed {
 }
 
 /// MCP list tools in progress event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseMcpListToolsInProgress {
     pub sequence_number: u64,
@@ -2030,7 +2031,7 @@ pub struct ResponseMcpListToolsInProgress {
 }
 
 /// Code interpreter call in progress event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseCodeInterpreterCallInProgress {
     pub sequence_number: u64,
@@ -2039,7 +2040,7 @@ pub struct ResponseCodeInterpreterCallInProgress {
 }
 
 /// Code interpreter call interpreting event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseCodeInterpreterCallInterpreting {
     pub sequence_number: u64,
@@ -2048,7 +2049,7 @@ pub struct ResponseCodeInterpreterCallInterpreting {
 }
 
 /// Code interpreter call completed event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseCodeInterpreterCallCompleted {
     pub sequence_number: u64,
@@ -2057,7 +2058,7 @@ pub struct ResponseCodeInterpreterCallCompleted {
 }
 
 /// Code interpreter call code delta event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseCodeInterpreterCallCodeDelta {
     pub sequence_number: u64,
@@ -2067,7 +2068,7 @@ pub struct ResponseCodeInterpreterCallCodeDelta {
 }
 
 /// Code interpreter call code done event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseCodeInterpreterCallCodeDone {
     pub sequence_number: u64,
@@ -2077,7 +2078,7 @@ pub struct ResponseCodeInterpreterCallCodeDone {
 }
 
 /// Response metadata
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseMetadata {
     pub id: String,
@@ -2146,7 +2147,7 @@ pub struct ResponseMetadata {
 }
 
 /// Output item
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct OutputItem {
     pub id: String,
@@ -2164,7 +2165,7 @@ pub struct OutputItem {
 }
 
 /// Content part
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ContentPart {
     #[serde(rename = "type")]
@@ -2180,7 +2181,7 @@ pub struct ContentPart {
 
 /// Collects streaming response events into a complete response
 /// Output text annotation added event
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResponseOutputTextAnnotationAdded {
     pub sequence_number: u64,
@@ -2192,7 +2193,7 @@ pub struct ResponseOutputTextAnnotationAdded {
 }
 
 /// Text annotation object for output text
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(ToSchema, Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct TextAnnotation {
     #[serde(rename = "type")]
