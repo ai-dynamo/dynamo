@@ -1,35 +1,8 @@
 # syntax=docker/dockerfile:1.10.0
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# NOTE FOR dynamo_base AND wheel_builder STAGES:
-#
-# All changes to dynamo_base and wheel_builder stages should be replicated across
-# Dockerfile and Dockerfile.<framework> images.:
-#   - Dockerfile
-#   - Dockerfile.vllm
-#   - Dockerfile.sglang
-#   - Dockerfile.trtllm
-# This duplication was introduced purposely to quickly enable Docker layer caching and
-# deduplication. Please ensure these stages stay in sync until the duplication can be
-# addressed.
-#
-# Throughout this file, we make certain paths group-writable because this allows
-# both the dynamo user (UID 1000) and Dev Container users (UID != 1000) to work
-# properly without needing slow chown -R operations (which can add 2-10 extra
-# minutes).
-#
-# DEVELOPMENT PATHS THAT MUST BE GROUP-WRITABLE (for non-virtualenv containers):
-#   /workspace            - Users create/modify project files
-#   /home/dynamo          - Users create config/cache files
-#   /home/dynamo/.local   - SGLang uses $HOME/.local/lib/python3.10/site-packages for pip install
-#
-# HOW TO ACHIEVE GROUP-WRITABLE PERMISSIONS:
-# 1. SHELL + /etc/profile.d - Login shell sources umask 002 globally for all RUN commands (775/664)
-# 2. COPY --chmod=775       - Sets permissions on copied children (not destination)
-# 3. chmod g+w (no -R)      - Fixes destination dirs only (milliseconds vs minutes)
 
-ARG SGLANG_IMAGE_TAG="v0.5.6.post1"
+ARG SGLANG_IMAGE_TAG="v0.5.6.post2"
 # Either 12 or 13
 ARG CUDA_VERSION="12"
 ARG BRANCH_TYPE

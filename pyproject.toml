@@ -62,7 +62,7 @@ vllm = [
 sglang = [
     "uvloop",
     "nixl[cu12]<=0.7.1",
-    "sglang==0.5.6",
+    "sglang==0.5.6.post2",
 ]
 
 [project.entry-points.pytest11]
