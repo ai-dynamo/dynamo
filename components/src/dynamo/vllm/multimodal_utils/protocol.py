@@ -140,7 +140,7 @@ class MultiModalInput(BaseModel):
     video_url: Optional[str] = None
 
 
-class vLLMMultimodalRequest(vLLMGenerateRequest):
+class MultiModalGroup(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
@@ -148,6 +148,11 @@ class vLLMMultimodalRequest(vLLMGenerateRequest):
         Union[Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
     serialized_request: Optional[connect.RdmaMetadata | str] = None
+
+
+class vLLMMultimodalRequest(vLLMGenerateRequest):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    multimodal_inputs: List[MultiModalGroup] = Field(default_factory=list)
 
 
 class MyRequestOutput(BaseModel):

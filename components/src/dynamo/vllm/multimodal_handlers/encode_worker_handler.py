@@ -17,6 +17,7 @@ from ..multimodal_utils import (
     ImageLoader,
     MyRequestOutput,
     encode_image_embeddings,
+    get_embedding_hash,
     get_encoder_components,
     load_vision_model,
     vLLMMultimodalRequest,
@@ -103,98 +104,100 @@ class EncodeWorkerHandler:
 
         try:
             time_start = time.perf_counter()
-            if not request.multimodal_input.image_url:
-                raise ValueError("image_url is required for the encode worker.")
+            readables = []
+            for idx in range(len(request.multimodal_inputs)):
+                if not request.multimodal_inputs[idx].multimodal_input.image_url:
+                    raise ValueError("image_url is required for the encode worker.")
 
-            image = await self.image_loader.load_image(
-                request.multimodal_input.image_url
+                image = await self.image_loader.load_image(
+                    request.multimodal_inputs[idx].multimodal_input.image_url
+                )
+
+                logger.debug(
+                    f"Processing image {request.multimodal_inputs[idx].multimodal_input.image_url} for request: {{ id: {request_id} }}"
+                )
+                image_embeds = self.image_processor(images=image, return_tensors="pt")
+
+                # Encode the image embeddings using model-specific encoder
+                embeddings = encode_image_embeddings(
+                    model_name=self.model,
+                    image_embeds=image_embeds,
+                    vision_encoder=self.vision_encoder,
+                    projector=self.projector,
+                )
+
+                image_grid_thw = (
+                    image_embeds["image_grid_thw"].tolist()
+                    if "image_grid_thw" in image_embeds
+                    else None
+                )
+                logger.debug(
+                    f"Pixel values stats: mean={image_embeds['pixel_values'].mean().item()}, std={image_embeds['pixel_values'].std().item()}, min={image_embeds['pixel_values'].min().item()}, max={image_embeds['pixel_values'].max().item()}"
+                )
+
+                # Move embeddings to CPU for NIXL transfer to avoid UCX/InfiniBand issues
+                embeddings_cpu = embeddings.cpu()
+
+                request.multimodal_inputs[idx].image_grid_thw = image_grid_thw
+                request.multimodal_inputs[idx].embeddings_shape = tuple(
+                    embeddings.shape
+                )
+
+                if TRANSFER_LOCAL:
+                    embedding_key = get_embedding_hash(
+                        request.multimodal_inputs[idx].multimodal_input.image_url
+                    )
+                    logger.info(
+                        f"ENCODER: saving local safetensors file with key {embedding_key}"
+                    )
+                    tensors = {"ec_cache": embeddings_cpu}
+                    safetensors.torch.save_file(
+                        tensors, f"/tmp/encoder_cache.{embedding_key}.safetensors"
+                    )
+                    # [gluo FIXME] need mechanism to clean up local files
+                    request.multimodal_inputs[
+                        idx
+                    ].serialized_request = (
+                        f"/tmp/encoder_cache.{embedding_key}.safetensors"
+                    )
+                else:
+                    # [gluo FIXME] nixl_connector path needs to be update to handle multiple embeddings
+                    descriptor = connect.Descriptor(embeddings_cpu)
+                    readables.append(self._connector.create_readable(descriptor))
+                    request.multimodal_inputs[idx].serialized_request = readables[
+                        -1
+                    ].metadata()
+
+                # Clear the image URL as hint that the image is passed as embeddings.
+                request.multimodal_inputs[idx].multimodal_input.image_url = None
+
+            logger.debug(f"Request: {request.model_dump_json()}")
+
+            # Get the response generator
+            response_generator = await self.pd_worker_client.round_robin(
+                request.model_dump_json(), context=context
             )
+            for readable in readables:
+                await readable.wait_for_completion()
 
-            logger.debug(f"Processing image for request: {{ id: {request_id} }}")
-            image_embeds = self.image_processor(images=image, return_tensors="pt")
-
-            # Encode the image embeddings using model-specific encoder
-            embeddings = encode_image_embeddings(
-                model_name=self.model,
-                image_embeds=image_embeds,
-                vision_encoder=self.vision_encoder,
-                projector=self.projector,
-            )
-
-            image_grid_thw = (
-                image_embeds["image_grid_thw"].tolist()
-                if "image_grid_thw" in image_embeds
-                else None
-            )
-            logger.debug(
-                f"Pixel values stats: mean={image_embeds['pixel_values'].mean().item()}, std={image_embeds['pixel_values'].std().item()}, min={image_embeds['pixel_values'].min().item()}, max={image_embeds['pixel_values'].max().item()}"
-            )
-
-            # Move embeddings to CPU for NIXL transfer to avoid UCX/InfiniBand issues
-            embeddings_cpu = embeddings.cpu()
+            async for response in response_generator:
+                output = MyRequestOutput.model_validate_json(response.data())
+                yield MyRequestOutput(
+                    request_id=output.request_id,
+                    prompt=output.prompt,
+                    prompt_token_ids=output.prompt_token_ids,
+                    prompt_logprobs=output.prompt_logprobs,
+                    outputs=output.outputs,
+                    finished=output.finished,
+                ).model_dump_json()
+            # [gluo FIXME] move counter out
             time_end = time.perf_counter()
             self._accumulated_time += time_end - time_start
             self._processed_requests += 1
             logger.info(
-                f"Encoded image for request {{ id: {request_id} }} in {time_end - time_start:.4f} seconds. "
+                f"Encoded image(s) for request {{ id: {request_id} }} in {time_end - time_start:.4f} seconds. "
                 f"Average encoding time: {self._accumulated_time / self._processed_requests:.4f} seconds over {self._processed_requests} requests."
             )
-
-            request.image_grid_thw = image_grid_thw
-            request.embeddings_shape = tuple(embeddings.shape)
-
-            if TRANSFER_LOCAL:
-                logger.info("ENCODER: saving local safetensors file")
-                tensors = {"ec_cache": embeddings_cpu}
-                safetensors.torch.save_file(tensors, "/tmp/encoder_cache.safetensors")
-                # FIXME: only use one file to transfer for performance, need to extend if helps
-                request.serialized_request = "/tmp/encoder_cache.safetensors"
-                # Clear the image URL as hint that the image is passed as embeddings.
-                request.multimodal_input.image_url = None
-
-                logger.debug(f"Request: {request.model_dump_json()}")
-
-                # Get the response generator
-                response_generator = await self.pd_worker_client.round_robin(
-                    request.model_dump_json(), context=context
-                )
-
-                async for response in response_generator:
-                    output = MyRequestOutput.model_validate_json(response.data())
-                    yield MyRequestOutput(
-                        request_id=output.request_id,
-                        prompt=output.prompt,
-                        prompt_token_ids=output.prompt_token_ids,
-                        prompt_logprobs=output.prompt_logprobs,
-                        outputs=output.outputs,
-                        finished=output.finished,
-                    ).model_dump_json()
-            else:
-                descriptor = connect.Descriptor(embeddings_cpu)
-
-                with self._connector.create_readable(descriptor) as readable:
-                    request.serialized_request = readable.metadata()
-                    # Clear the image URL as hint that the image is passed as embeddings.
-                    request.multimodal_input.image_url = None
-
-                    logger.debug(f"Request: {request.model_dump_json()}")
-
-                    # Get the response generator
-                    response_generator = await self.pd_worker_client.round_robin(
-                        request.model_dump_json(), context=context
-                    )
-                    await readable.wait_for_completion()
-
-                    async for response in response_generator:
-                        output = MyRequestOutput.model_validate_json(response.data())
-                        yield MyRequestOutput(
-                            request_id=output.request_id,
-                            prompt=output.prompt,
-                            prompt_token_ids=output.prompt_token_ids,
-                            prompt_logprobs=output.prompt_logprobs,
-                            outputs=output.outputs,
-                            finished=output.finished,
-                        ).model_dump_json()
 
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")
