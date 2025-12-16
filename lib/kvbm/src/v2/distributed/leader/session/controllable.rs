@@ -160,9 +160,10 @@ impl ControllableSession {
                 }
                 _ => {
                     // Ignore unexpected messages (SessionState, BlocksStaged, SessionError are outbound)
-                    eprintln!(
-                        "ControllableSession: unexpected message for session {}: {:?}",
-                        self.session_id, msg
+                    tracing::warn!(
+                        session_id = %self.session_id,
+                        msg = ?msg,
+                        "ControllableSession: unexpected message"
                     );
                 }
             }

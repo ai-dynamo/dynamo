@@ -219,9 +219,10 @@ impl ResponderSession {
                 //       on the responder session - avoid using the wildcard match
                 _ => {
                     // Unexpected message - log and ignore
-                    eprintln!(
-                        "ResponderSession: unexpected message for session {}: {:?}",
-                        self.session_id, msg
+                    tracing::warn!(
+                        session_id = %self.session_id,
+                        msg = ?msg,
+                        "ResponderSession: unexpected message"
                     );
                 }
             }

@@ -176,12 +176,12 @@ impl InitiatorSession {
         remote_leaders: Vec<InstanceId>,
         sequence_hashes: Vec<SequenceHash>,
     ) -> Result<()> {
-        eprintln!(
-            "[INITIATOR {}] Starting in mode {:?} for {} hashes, {} remotes",
-            self.session_id,
-            self.mode,
-            sequence_hashes.len(),
-            remote_leaders.len()
+        tracing::debug!(
+            session_id = %self.session_id,
+            mode = ?self.mode,
+            num_hashes = sequence_hashes.len(),
+            num_remotes = remote_leaders.len(),
+            "Starting initiator session"
         );
 
         // Phase 1: Search (local G2 and G3, then remote if needed)
@@ -192,15 +192,15 @@ impl InitiatorSession {
         // Trims results to first contiguous sequence from start
         self.apply_find_policy(&sequence_hashes).await?;
 
-        eprintln!(
-            "[INITIATOR {}] search_phase complete, entering mode handler",
-            self.session_id
+        tracing::debug!(
+            session_id = %self.session_id,
+            "search_phase complete, entering mode handler"
         );
 
         // Phase 2: Staging based on mode
         match self.mode {
             StagingMode::Hold => {
-                eprintln!("[INITIATOR {}] Calling hold_mode()", self.session_id);
+                tracing::debug!(session_id = %self.session_id, "Calling hold_mode()");
                 self.hold_mode().await?;
                 // Wait for control commands or shutdown
                 self.await_commands(rx).await?;
@@ -347,9 +347,9 @@ impl InitiatorSession {
                 pending_g4_search,
                 pending_g4_load,
             ) {
-                eprintln!(
-                    "[INITIATOR {}] All responses received (including G4), exiting search_phase",
-                    self.session_id
+                tracing::debug!(
+                    session_id = %self.session_id,
+                    "All responses received (including G4), exiting search_phase"
                 );
                 break;
             }
@@ -370,10 +370,10 @@ impl InitiatorSession {
                         continue;
                     };
 
-                    eprintln!(
-                        "[INITIATOR {}] process_search_responses received G4: {}",
-                        self.session_id,
-                        msg.variant_name()
+                    tracing::debug!(
+                        session_id = %self.session_id,
+                        msg = msg.variant_name(),
+                        "process_search_responses received G4"
                     );
 
                     match msg {
@@ -391,8 +391,8 @@ impl InitiatorSession {
                                 }
                             }
                         }
-                        OnboardMessage::G4LoadComplete { success, failures, .. } => {
-                            self.handle_g4_load_complete(success, failures);
+                        OnboardMessage::G4LoadComplete { success, failures, blocks, .. } => {
+                            self.handle_g4_load_complete(success, failures, blocks);
                             pending_g4_load = false;
                         }
                         _ => {}
@@ -406,10 +406,10 @@ impl InitiatorSession {
                         break;
                     };
 
-                    eprintln!(
-                        "[INITIATOR {}] process_search_responses received: {}",
-                        self.session_id,
-                        msg.variant_name()
+                    tracing::debug!(
+                        session_id = %self.session_id,
+                        msg = msg.variant_name(),
+                        "process_search_responses received"
                     );
 
                     match msg {
@@ -420,11 +420,11 @@ impl InitiatorSession {
                             block_ids,
                             ..
                         } => {
-                            eprintln!(
-                                "[INITIATOR {}] Processing G2Results from {} with {} hashes",
-                                self.session_id,
-                                responder,
-                                sequence_hashes.len()
+                            tracing::debug!(
+                                session_id = %self.session_id,
+                                responder = %responder,
+                                num_hashes = sequence_hashes.len(),
+                                "Processing G2Results"
                             );
                             // Store layout for RDMA operations
                             self.remote_g2_layouts.insert(responder, layout_handle);
@@ -488,16 +488,16 @@ impl InitiatorSession {
                             // SearchComplete means responder is done with G2 AND G3 search
                             pending_g3_responses.remove(&responder);
 
-                            eprintln!(
-                                "[INITIATOR {}] SearchComplete from {}: g2_pending={}, g3_pending={}, ack_pending={}, search_pending={}, g4_search={}, g4_load={}",
-                                self.session_id,
-                                responder,
-                                pending_g2_responses,
-                                pending_g3_responses.len(),
-                                pending_acknowledgments.len(),
-                                pending_search_complete.len(),
-                                pending_g4_search,
-                                pending_g4_load
+                            tracing::debug!(
+                                session_id = %self.session_id,
+                                responder = %responder,
+                                g2_pending = pending_g2_responses,
+                                g3_pending = pending_g3_responses.len(),
+                                ack_pending = pending_acknowledgments.len(),
+                                search_pending = pending_search_complete.len(),
+                                g4_search = pending_g4_search,
+                                g4_load = pending_g4_load,
+                                "SearchComplete"
                             );
                         }
                         OnboardMessage::Acknowledged { responder, .. } => {
@@ -566,11 +566,11 @@ impl InitiatorSession {
 
         // If all hashes matched or first hole is at position 0, nothing to trim
         if keep_count == sequence_hashes.len() || keep_count == matched_hashes.len() {
-            eprintln!(
-                "[INITIATOR {}] apply_find_policy: no trimming needed ({} matched, {} total)",
-                self.session_id,
-                keep_count,
-                sequence_hashes.len()
+            tracing::debug!(
+                session_id = %self.session_id,
+                matched = keep_count,
+                total = sequence_hashes.len(),
+                "apply_find_policy: no trimming needed"
             );
             return Ok(());
         }
@@ -579,12 +579,12 @@ impl InitiatorSession {
         let keep_hashes: Vec<SequenceHash> = sequence_hashes[..keep_count].to_vec();
         let keep_set: HashSet<&SequenceHash> = keep_hashes.iter().collect();
 
-        eprintln!(
-            "[INITIATOR {}] apply_find_policy: trimming from {} to {} blocks (first hole at position {})",
-            self.session_id,
-            matched_hashes.len(),
-            keep_count,
-            keep_count
+        tracing::debug!(
+            session_id = %self.session_id,
+            from = matched_hashes.len(),
+            to = keep_count,
+            first_hole = keep_count,
+            "apply_find_policy: trimming blocks"
         );
 
         // Filter local blocks
@@ -615,11 +615,11 @@ impl InitiatorSession {
 
                 // Send ReleaseBlocks message if any blocks need releasing
                 if !release_hashes.is_empty() {
-                    eprintln!(
-                        "[INITIATOR {}] Releasing {} G2 blocks from instance {} (beyond first hole)",
-                        self.session_id,
-                        release_hashes.len(),
-                        remote_instance
+                    tracing::debug!(
+                        session_id = %self.session_id,
+                        count = release_hashes.len(),
+                        instance = %remote_instance,
+                        "Releasing G2 blocks beyond first hole"
                     );
                     self.transport
                         .send(
@@ -649,11 +649,11 @@ impl InitiatorSession {
 
             // Send ReleaseBlocks message if any blocks need releasing
             if !release_hashes.is_empty() {
-                eprintln!(
-                    "[INITIATOR {}] Releasing {} G3 blocks from instance {} (beyond first hole)",
-                    self.session_id,
-                    release_hashes.len(),
-                    remote_instance
+                tracing::debug!(
+                    session_id = %self.session_id,
+                    count = release_hashes.len(),
+                    instance = %remote_instance,
+                    "Releasing G3 blocks beyond first hole"
                 );
                 self.transport
                     .send(
@@ -678,10 +678,10 @@ impl InitiatorSession {
             .collect();
 
         if !g4_release_hashes.is_empty() {
-            eprintln!(
-                "[INITIATOR {}] Releasing {} G4 blocks (beyond first hole)",
-                self.session_id,
-                g4_release_hashes.len()
+            tracing::debug!(
+                session_id = %self.session_id,
+                count = g4_release_hashes.len(),
+                "Releasing G4 blocks beyond first hole"
             );
 
             for hash in &g4_release_hashes {
@@ -709,16 +709,16 @@ impl InitiatorSession {
         let loaded_g4 = self.g4_state.won_hashes.len();
         let failed_g4 = self.g4_state.failed_hashes.len();
 
-        eprintln!(
-            "[INITIATOR {}] hold_mode: local_g2={}, local_g3={}, remote_g2={}, remote_g3={}, pending_g4={}, loaded_g4={}, failed_g4={}",
-            self.session_id,
+        tracing::debug!(
+            session_id = %self.session_id,
             local_g2,
             local_g3,
             remote_g2,
             remote_g3,
             pending_g4,
             loaded_g4,
-            failed_g4
+            failed_g4,
+            "hold_mode"
         );
 
         self.status_tx
@@ -733,7 +733,7 @@ impl InitiatorSession {
             })
             .ok();
 
-        eprintln!("[INITIATOR {}] Sent Holding status", self.session_id);
+        tracing::debug!(session_id = %self.session_id, "Sent Holding status");
 
         Ok(())
     }
@@ -934,17 +934,19 @@ impl InitiatorSession {
 
             // Step 1: Import remote metadata if not already done
             if !parallel_worker.has_remote_metadata(remote_instance) {
-                eprintln!(
-                    "[INITIATOR {}] Requesting metadata from instance {}",
-                    self.session_id, remote_instance
+                tracing::debug!(
+                    session_id = %self.session_id,
+                    instance = %remote_instance,
+                    "Requesting metadata from instance"
                 );
                 let metadata = self.transport.request_metadata(remote_instance).await?;
                 parallel_worker
                     .connect_remote(remote_instance, metadata)?
                     .await?;
-                eprintln!(
-                    "[INITIATOR {}] Metadata imported for instance {}",
-                    self.session_id, remote_instance
+                tracing::debug!(
+                    session_id = %self.session_id,
+                    instance = %remote_instance,
+                    "Metadata imported for instance"
                 );
             }
 
@@ -957,11 +959,11 @@ impl InitiatorSession {
                 })?;
             let dst_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
 
-            eprintln!(
-                "[INITIATOR {}] Pulling {} blocks from instance {} via RDMA",
-                self.session_id,
-                block_ids.len(),
-                remote_instance
+            tracing::debug!(
+                session_id = %self.session_id,
+                count = block_ids.len(),
+                instance = %remote_instance,
+                "Pulling blocks via RDMA"
             );
 
             // Step 3: Execute RDMA transfer
@@ -976,9 +978,10 @@ impl InitiatorSession {
             )?;
             notification.await?;
 
-            eprintln!(
-                "[INITIATOR {}] RDMA transfer complete from instance {}",
-                self.session_id, remote_instance
+            tracing::debug!(
+                session_id = %self.session_id,
+                instance = %remote_instance,
+                "RDMA transfer complete"
             );
 
             // Step 4: Register pulled blocks with their sequence hashes
@@ -1117,10 +1120,10 @@ impl InitiatorSession {
                 .filter_map(|(hash, size_opt)| size_opt.map(|size| (hash, size)))
                 .collect();
 
-            eprintln!(
-                "[G4 SEARCH {}] Found {} blocks in object storage",
-                session_id,
-                found_hashes.len()
+            tracing::debug!(
+                session_id = %session_id,
+                count = found_hashes.len(),
+                "G4 search: found blocks in object storage"
             );
 
             // Send results back to initiator
@@ -1151,10 +1154,10 @@ impl InitiatorSession {
             }
         }
 
-        eprintln!(
-            "[INITIATOR {}] G4 won {} hashes (first-responder-wins)",
-            self.session_id,
-            won_hashes.len()
+        tracing::debug!(
+            session_id = %self.session_id,
+            won_count = won_hashes.len(),
+            "G4 won hashes (first-responder-wins)"
         );
 
         won_hashes
@@ -1163,7 +1166,8 @@ impl InitiatorSession {
     /// Load G4 blocks into local G2 via workers.
     ///
     /// Allocates G2 destination blocks and coordinates workers to download
-    /// from object storage via `get_blocks`.
+    /// from object storage via `get_blocks`. After successful download, blocks
+    /// are registered with the G2 manager and returned via G4LoadComplete message.
     async fn load_g4_blocks(
         &mut self,
         won_hashes: Vec<SequenceHash>,
@@ -1196,59 +1200,71 @@ impl InitiatorSession {
 
         let dst_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
 
-        // Track allocated blocks
+        // Track allocated blocks (for cleanup on failure)
         for (hash, block_id) in won_hashes.iter().zip(dst_ids.iter()) {
             self.g4_state.allocated_blocks.insert(*hash, *block_id);
         }
 
-        eprintln!(
-            "[INITIATOR {}] Loading {} G4 blocks via workers",
-            self.session_id,
-            won_hashes.len()
+        tracing::debug!(
+            session_id = %self.session_id,
+            count = won_hashes.len(),
+            "Loading G4 blocks via workers"
         );
 
         // Clone values for the spawned task
         let session_id = self.session_id;
         let hashes = won_hashes.clone();
         let parallel_worker = parallel_worker.clone();
+        let g2_manager = self.g2_manager.clone();
 
         // Spawn load task so we can continue processing other messages
+        // IMPORTANT: dst_blocks is moved into the task to keep them alive during download
         tokio::spawn(async move {
             // Execute get_blocks via parallel worker
             let results = parallel_worker
                 .get_blocks(hashes.clone(), LogicalLayoutHandle::G2, dst_ids.clone())
                 .await;
 
-            // Separate successes and failures
+            // Separate successes and failures, register successful blocks
             let mut success = Vec::new();
             let mut failures = Vec::new();
+            let mut blocks = Vec::new();
 
-            for (i, result) in results.into_iter().enumerate() {
+            // Iterate over results alongside the dst_blocks and hashes
+            for ((result, dst_block), seq_hash) in results
+                .into_iter()
+                .zip(dst_blocks.into_iter())
+                .zip(hashes.iter())
+            {
                 match result {
                     Ok(hash) => {
                         // Register the block with its sequence hash
-                        // Note: We need to register after successful download
+                        // This adds it to the BlockRegistry for presence filtering
+                        let immutable = g2_manager.register_mutable_block_with_hash(dst_block, *seq_hash);
+                        blocks.push(immutable);
                         success.push(hash);
                     }
                     Err(hash) => {
-                        failures.push((hash, format!("Failed to download block {}", i)));
+                        // Block will be returned to pool when dst_block is dropped
+                        failures.push((hash, "Failed to download block".to_string()));
                     }
                 }
             }
 
-            eprintln!(
-                "[G4 LOAD {}] Complete: {} success, {} failures",
-                session_id,
-                success.len(),
-                failures.len()
+            tracing::debug!(
+                session_id = %session_id,
+                success_count = success.len(),
+                failure_count = failures.len(),
+                "G4 load complete"
             );
 
-            // Send completion message
+            // Send completion message with registered blocks
             let _ = g4_tx
                 .send(OnboardMessage::G4LoadComplete {
                     session_id,
                     success,
                     failures,
+                    blocks: std::sync::Arc::new(blocks),
                 })
                 .await;
         });
@@ -1256,47 +1272,50 @@ impl InitiatorSession {
         Ok(())
     }
 
-    /// Handle G4 load completion, updating state and registering blocks.
+    /// Handle G4 load completion, updating state and adding blocks to local_g2_blocks.
+    ///
+    /// The blocks have already been registered with the G2 manager in the spawned task,
+    /// so they are now visible in the BlockRegistry for presence filtering.
     fn handle_g4_load_complete(
         &mut self,
         success: Vec<SequenceHash>,
         failures: Vec<(SequenceHash, String)>,
+        blocks: Arc<Vec<ImmutableBlock<G2>>>,
     ) {
-        // Process successful loads
+        // Process successful loads - update state tracking
         for hash in &success {
             self.g4_state.pending_load.remove(hash);
-
-            // Get the allocated block ID and register it
-            if let Some(block_id) = self.g4_state.allocated_blocks.remove(hash) {
-                // Note: The block was already written to by get_blocks.
-                // We need to get the MutableBlock and register it.
-                // For now, we track the block ID - the actual registration
-                // happens when we consolidate blocks.
-                // Re-insert for later registration during consolidation
-                self.g4_state.allocated_blocks.insert(*hash, block_id);
-            }
+            // Remove from allocated_blocks since we now have registered ImmutableBlocks
+            self.g4_state.allocated_blocks.remove(hash);
         }
+
+        // Unwrap the Arc to get the Vec (this is the only owner since the message was just received)
+        let blocks = Arc::try_unwrap(blocks).expect("G4LoadComplete should be the sole owner of blocks");
+
+        // Add the registered G4 blocks to local_g2_blocks
+        // These blocks are now registered in the BlockRegistry and will be
+        // detected by the PresenceFilter during G1→G2 offloading
+        self.local_g2_blocks.extend(blocks);
 
         // Process failures
         for (hash, error) in failures {
             self.g4_state.pending_load.remove(&hash);
             self.g4_state.failed_hashes.insert(hash, error);
 
-            // Release the allocated block on failure
-            if let Some(_block_id) = self.g4_state.allocated_blocks.remove(&hash) {
-                // Block will be deallocated when it goes out of scope
-            }
+            // Remove from allocated_blocks on failure (block was already dropped)
+            self.g4_state.allocated_blocks.remove(&hash);
 
             // Also remove from won_hashes since it failed to load
             self.g4_state.won_hashes.remove(&hash);
         }
 
-        eprintln!(
-            "[INITIATOR {}] G4 load complete: {} won, {} pending, {} failed",
-            self.session_id,
-            self.g4_state.won_hashes.len(),
-            self.g4_state.pending_load.len(),
-            self.g4_state.failed_hashes.len()
+        tracing::debug!(
+            session_id = %self.session_id,
+            won = self.g4_state.won_hashes.len(),
+            pending = self.g4_state.pending_load.len(),
+            failed = self.g4_state.failed_hashes.len(),
+            local_g2 = self.local_g2_blocks.count(),
+            "G4 load complete, blocks added to local_g2_blocks"
         );
     }
 }

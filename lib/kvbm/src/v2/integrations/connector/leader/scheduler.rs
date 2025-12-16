@@ -183,7 +183,7 @@ impl ConnectorLeader {
         );
 
         if scheduler_output.total_num_scheduled_tokens == 0 {
-            tracing::debug!("no scheduled tokens, early exiting");
+            tracing::trace!("no scheduled tokens, early exiting");
             return Ok(KvConnectorMetadata::new(scheduler_output.iteration));
         }
 

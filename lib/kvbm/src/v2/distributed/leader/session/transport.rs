@@ -114,10 +114,10 @@ impl NovaTransport {
     }
 
     pub async fn send(&self, target: InstanceId, message: OnboardMessage) -> Result<()> {
-        eprintln!(
-            "[TRANSPORT] Sending {} to instance {}",
-            message.variant_name(),
-            target
+        tracing::debug!(
+            msg = message.variant_name(),
+            target = %target,
+            "Sending message"
         );
 
         let bytes = Bytes::from(serde_json::to_vec(&message)?);
@@ -129,7 +129,7 @@ impl NovaTransport {
             .send()
             .await?;
 
-        eprintln!("[TRANSPORT] Successfully sent to {}", target);
+        tracing::debug!(target = %target, "Successfully sent");
 
         Ok(())
     }
@@ -140,10 +140,10 @@ impl NovaTransport {
         target: InstanceId,
         message: RemoteSessionMessage,
     ) -> Result<()> {
-        eprintln!(
-            "[TRANSPORT] Sending RemoteSession {} to instance {}",
-            message.variant_name(),
-            target
+        tracing::debug!(
+            msg = message.variant_name(),
+            target = %target,
+            "Sending RemoteSession"
         );
 
         let bytes = Bytes::from(serde_json::to_vec(&message)?);
@@ -155,10 +155,7 @@ impl NovaTransport {
             .send()
             .await?;
 
-        eprintln!(
-            "[TRANSPORT] Successfully sent remote session msg to {}",
-            target
-        );
+        tracing::debug!(target = %target, "Successfully sent remote session msg");
 
         Ok(())
     }
@@ -168,7 +165,7 @@ impl NovaTransport {
     /// Makes a unary RPC call to get Vec<SerializedLayout> from
     /// the remote leader's workers.
     pub async fn request_metadata(&self, target: InstanceId) -> Result<Vec<SerializedLayout>> {
-        eprintln!("[TRANSPORT] Requesting metadata from instance {}", target);
+        tracing::debug!(target = %target, "Requesting metadata from instance");
 
         let response: Bytes = self
             .nova
@@ -180,10 +177,10 @@ impl NovaTransport {
         // Deserialize the response
         let metadata: Vec<SerializedLayout> = serde_json::from_slice(&response)?;
 
-        eprintln!(
-            "[TRANSPORT] Received {} metadata entries from {}",
-            metadata.len(),
-            target
+        tracing::debug!(
+            count = metadata.len(),
+            target = %target,
+            "Received metadata entries"
         );
 
         Ok(metadata)
@@ -193,10 +190,10 @@ impl NovaTransport {
     ///
     /// Uses the new unified "kvbm.leader.session" handler.
     pub async fn send_session(&self, target: InstanceId, message: SessionMessage) -> Result<()> {
-        eprintln!(
-            "[TRANSPORT] Sending Session {} to instance {}",
-            message.variant_name(),
-            target
+        tracing::debug!(
+            msg = message.variant_name(),
+            target = %target,
+            "Sending Session"
         );
 
         let bytes = Bytes::from(serde_json::to_vec(&message)?);
@@ -208,7 +205,7 @@ impl NovaTransport {
             .send()
             .await?;
 
-        eprintln!("[TRANSPORT] Successfully sent session msg to {}", target);
+        tracing::debug!(target = %target, "Successfully sent session msg");
 
         Ok(())
     }

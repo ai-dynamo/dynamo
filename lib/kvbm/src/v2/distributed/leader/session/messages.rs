@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::v2::{BlockId, InstanceId, SequenceHash, physical::manager::LayoutHandle};
+use crate::v2::{BlockId, G2, InstanceId, SequenceHash, physical::manager::LayoutHandle};
+use crate::v2::logical::blocks::ImmutableBlock;
 
 use super::SessionId;
 
@@ -130,6 +132,11 @@ pub enum OnboardMessage {
         success: Vec<SequenceHash>,
         /// Failed hashes with error messages
         failures: Vec<(SequenceHash, String)>,
+        /// Successfully loaded and registered G2 blocks.
+        /// These are ready to be added to local_g2_blocks.
+        /// Wrapped in Arc for Clone derivation (internal message only).
+        #[serde(skip)]
+        blocks: Arc<Vec<ImmutableBlock<G2>>>,
     },
 
     // TODO: Add heartbeat/TTL mechanism for handling unresponsive initiators
