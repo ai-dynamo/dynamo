@@ -19,6 +19,8 @@ limitations under the License.
 
 ## External Contributors: Issue-First Workflow
 
+Thank you for your interest in contributing to Dynamo. To help us review your work efficiently, please follow the workflow below.
+
 ### When Is a GitHub Issue Required?
 
 **You can submit a PR directly without an issue if:**
@@ -32,17 +34,22 @@ limitations under the License.
 - New features, architecture changes, or multi-component changes
 - Any change that requires design discussion
 
-**Note**: All PRs are triaged. If your PR lacks sufficient context or understanding, reviewers may ask you to create an issue before proceeding.
+**Note**: All PRs are triaged. If your PR lacks sufficient context or understanding, reviewers will reject the PR and ask you to first submit an issue and get approval before proceeding.
 
 ### Issue-First Workflow Steps
 
 **If you are an external contributor and your change requires a GitHub Issue**, please follow this workflow:
 
-1. **Create a GitHub Issue First** – Before writing any code, [open a GitHub Issue](https://github.com/ai-dynamo/dynamo/issues/new) that describes the change you want to make.
+1. **Create a GitHub Issue First** – Before writing any code, [open a GitHub Issue](https://github.com/ai-dynamo/dynamo/issues/new/choose) using the appropriate template (Bug Report or Feature Request).
 
 2. **Identify the Problem** – Clearly explain the problem you are trying to solve, including any relevant context, error messages, or use cases.
 
-3. **Recommend a Solution** – Propose your intended solution or approach in the issue. This helps the Dynamo team understand your plan and provide early feedback.
+3. **Recommend a Solution** – Propose your intended solution or approach in the issue. Include:
+   - **Scope estimate**: T-shirt size (S/M/L/XL)
+   - **Files affected**: Approximate number and which components/interfaces
+   - **Type of change**: New code only, or refactoring existing code?
+
+   This helps the Dynamo team understand your plan, assess complexity, and provide early feedback. PRs that significantly exceed their stated scope may be rejected.
 
 4. **Get Approval** – Wait for the Dynamo team to review and approve both the problem statement and your proposed solution. This ensures alignment with the project's architecture and roadmap before you invest time in implementation.
 
@@ -57,6 +64,8 @@ limitations under the License.
 9. **Request a Review** – Add whomever approved your GitHub Issue as a reviewer on your PR. Please also add [@dagil-nvidia](https://github.com/dagil-nvidia) for visibility.
 
 This workflow ensures that external contributions are well-aligned with the project's goals and reduces the likelihood of significant rework.
+
+> **Note on AI-Generated Code**: While Dynamo encourages the use of AI-generated code, it is the full responsibility of the submitter to understand every change in the PR. Failure to demonstrate sufficient understanding of the submitted code will result in rejection.
 
 ---
 
