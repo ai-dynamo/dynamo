@@ -433,19 +433,25 @@ def populate_cost_data(
     table_idx = 0
 
     for p_idx, (_p_ttft, _p_thpt) in enumerate(zip(p_ttft, p_thpt)):
-        # Calculate prefill GPU hours per 1000 requests
-        # GPU hours = (tokens_per_request * num_requests) / (tokens_per_second_per_gpu * 3600)
-        prefill_gpu_hours = args.isl * 1000 / _p_thpt / 3600
-
         # Get prefill config details for this pareto point
         orig_prefill_idx = prefill_pareto_indices[p_idx]
         prefill_mapping = prefill_data.parallel_mappings[orig_prefill_idx]
+        prefill_num_gpus = prefill_mapping.get_num_gpus()
+
+        # Calculate prefill GPU hours per 1000 requests
+        # GPU hours = (tokens_per_request * num_requests) / (tokens_per_second_per_gpu * 3600) * num_gpus
+        prefill_gpu_hours = args.isl * 1000 / _p_thpt / 3600 * prefill_num_gpus
 
         # For each decode config, calculate total GPU hours
         line_data = []
         for d_idx, (_d_itl, _d_thpt) in enumerate(zip(d_itl, d_thpt)):
-            # Calculate decode GPU hours per 1000 requests
-            decode_gpu_hours = args.osl * 1000 / _d_thpt / 3600
+            # Get decode config details for this pareto point
+            orig_decode_idx = decode_pareto_indices[d_idx]
+            decode_mapping = decode_data.parallel_mappings[orig_decode_idx]
+            decode_num_gpus = decode_mapping.get_num_gpus()
+
+            # Calculate decode GPU hours per 1000 requests (scaled by num_gpus)
+            decode_gpu_hours = args.osl * 1000 / _d_thpt / 3600 * decode_num_gpus
             total_gpu_hours = prefill_gpu_hours + decode_gpu_hours
 
             # X-axis: tokens per user (based on ITL)
@@ -460,11 +466,7 @@ def populate_cost_data(
             )
 
             # Store mapping from cost table row to original indices
-            orig_decode_idx = decode_pareto_indices[d_idx]
             cost_index_mapping[table_idx] = (orig_prefill_idx, orig_decode_idx)
-
-            # Get decode config details for this pareto point
-            decode_mapping = decode_data.parallel_mappings[orig_decode_idx]
 
             # Generate DGD config YAML for display
             config_yaml = generate_dgd_config_yaml_for_display(
