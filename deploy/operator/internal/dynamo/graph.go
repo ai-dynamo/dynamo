@@ -35,6 +35,7 @@ import (
 
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
@@ -1056,6 +1057,19 @@ func GenerateBasePodSpec(
 	podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(podSpec.ImagePullSecrets, imagePullSecrets)
 
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName)
+
+	// Inject checkpoint configuration if enabled
+	// This is done after all other pod spec modifications to ensure checkpoint env vars
+	// and volumes are added to the final container
+	// Storage config comes from the operator's controller config (Helm values)
+	var storageConfig *v1alpha1.DynamoCheckpointStorageConfig
+	if controllerConfig.Checkpoint.Enabled {
+		storageConfig = checkpoint.StorageConfigFromControllerConfig(controllerConfig.Checkpoint.Storage)
+	}
+	if err := checkpoint.InjectCheckpointIntoPodSpec(&podSpec, component.Checkpoint, commonconsts.MainContainerName, storageConfig); err != nil {
+		return nil, fmt.Errorf("failed to inject checkpoint config: %w", err)
+	}
+
 	return &podSpec, nil
 }
 
@@ -1256,6 +1270,8 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dyn
 	}
 	// Add base model label if modelRef is specified
 	AddBaseModelLabel(labels, component.ModelRef)
+	// Add checkpoint labels if checkpointing is enabled
+	labels = checkpoint.InjectCheckpointLabelsFromConfig(labels, component.Checkpoint)
 	setMetricsLabels(labels, dynamoDeployment)
 	if component.Labels != nil {
 		err := mergo.Merge(&labels, component.Labels, mergo.WithOverride)

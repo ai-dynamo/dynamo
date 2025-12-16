@@ -122,6 +122,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// the service using the Scale subresource. When disabled, replicas can be modified directly.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
+
+	// Checkpoint configures container checkpointing for this service.
+	// When enabled, pods can be restored from a checkpoint tar file for faster cold start.
+	// +optional
+	Checkpoint *ServiceCheckpointConfig `json:"checkpoint,omitempty"`
 }
 
 type MultinodeSpec struct {

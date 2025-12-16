@@ -26,6 +26,7 @@ import (
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 
@@ -46,7 +47,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -205,7 +205,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 type Resource interface {
 	IsReady() (ready bool, reason string)
 	GetName() string
-	GetServiceStatuses() map[string]v1alpha1.ServiceReplicaStatus
+	GetServiceStatuses() map[string]nvidiacomv1alpha1.ServiceReplicaStatus
 }
 
 type ReconcileResult struct {
@@ -244,6 +244,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		logger.Error(err, "Failed to reconcile top-level PVCs")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile top-level PVCs: %w", err)
 	}
+
+	// Reconcile checkpoints for services with checkpointing enabled
+	checkpointStatuses, err := r.reconcileCheckpoints(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile checkpoints")
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile checkpoints: %w", err)
+	}
+	dynamoDeployment.Status.Checkpoints = checkpointStatuses
 
 	// Reconcile DynamoGraphDeploymentScalingAdapters for each service
 	err = r.reconcileScalingAdapters(ctx, dynamoDeployment)
@@ -427,7 +435,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context
 	}
 	syncedGrovePodCliqueSetAsResource, err := commoncontroller.NewResourceWithServiceStatuses(
 		syncedGrovePodCliqueSet,
-		func() (bool, string, map[string]v1alpha1.ServiceReplicaStatus) {
+		func() (bool, string, map[string]nvidiacomv1alpha1.ServiceReplicaStatus) {
 			// Grove readiness: all underlying PodCliques and PodCliqueScalingGroups have replicas == availableReplicas
 			allComponentsReady, reason, serviceStatuses := dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
 			if !allComponentsReady {
@@ -883,7 +891,7 @@ func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Re
 
 	var notReadyReasons []string
 	notReadyResources := []string{}
-	serviceStatuses := make(map[string]v1alpha1.ServiceReplicaStatus)
+	serviceStatuses := make(map[string]nvidiacomv1alpha1.ServiceReplicaStatus)
 	for _, resource := range resources {
 		ready, reason := resource.IsReady()
 
@@ -1076,6 +1084,173 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVCs(ctx context.Context, dyn
 	}
 
 	return nil
+}
+
+// reconcileCheckpoints reconciles Checkpoint CRs for services with checkpointing enabled
+// For Auto mode, it creates Checkpoint CRs if they don't exist
+// Returns a map of service names to checkpoint status
+func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (map[string]nvidiacomv1alpha1.ServiceCheckpointStatus, error) {
+	logger := log.FromContext(ctx)
+	statuses := make(map[string]nvidiacomv1alpha1.ServiceCheckpointStatus)
+
+	for serviceName, component := range dynamoDeployment.Spec.Services {
+		if component.Checkpoint == nil || !component.Checkpoint.Enabled {
+			continue
+		}
+
+		logger.Info("Reconciling checkpoint for service", "service", serviceName)
+
+		// Resolve checkpoint for this service
+		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, component.Checkpoint)
+		if err != nil {
+			logger.Error(err, "Failed to resolve checkpoint for service", "service", serviceName)
+			return nil, fmt.Errorf("failed to resolve checkpoint for service %s: %w", serviceName, err)
+		}
+
+		// If no checkpoint found and mode is Auto, create one
+		if info.CheckpointName == "" && component.Checkpoint.Mode == nvidiacomv1alpha1.CheckpointModeAuto {
+			logger.Info("Creating DynamoCheckpoint CR in Auto mode", "service", serviceName)
+
+			ckpt, err := r.createCheckpointCR(ctx, dynamoDeployment, serviceName, component)
+			if err != nil {
+				logger.Error(err, "Failed to create DynamoCheckpoint CR", "service", serviceName)
+				return nil, fmt.Errorf("failed to create checkpoint for service %s: %w", serviceName, err)
+			}
+
+			info.CheckpointName = ckpt.Name
+			// Compute hash and tarPath locally since status may not be populated yet
+			// (checkpoint controller reconciles asynchronously)
+			info.Hash = checkpoint.ComputeServiceIdentityHash(*component.Checkpoint.Identity)
+			info.TarPath = checkpoint.GetTarPath(consts.CheckpointBasePath, info.Hash)
+			info.PVCName = checkpoint.DefaultCheckpointPVCName
+			info.Ready = false // Newly created checkpoint is not ready yet
+		}
+
+		// Update status
+		statuses[serviceName] = nvidiacomv1alpha1.ServiceCheckpointStatus{
+			CheckpointName: info.CheckpointName,
+			IdentityHash:   info.Hash,
+			Ready:          info.Ready,
+			TarPath:        info.TarPath,
+		}
+	}
+
+	return statuses, nil
+}
+
+// createCheckpointCR creates a DynamoCheckpoint CR for a service in Auto mode
+func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
+	ctx context.Context,
+	dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment,
+	serviceName string,
+	component *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
+	if component.Checkpoint == nil || component.Checkpoint.Identity == nil {
+		return nil, fmt.Errorf("checkpoint identity is required for Auto mode")
+	}
+
+	identity := component.Checkpoint.Identity
+
+	// Compute hash for naming
+	hash := checkpoint.ComputeServiceIdentityHash(*identity)
+
+	// Generate checkpoint name: {dgd-name}-{service}-{hash-prefix}
+	ckptName := fmt.Sprintf("%s-%s-%s", dynamoDeployment.Name, strings.ToLower(serviceName), hash[:8])
+
+	// Use SyncResource to create/update the DynamoCheckpoint CR
+	_, ckpt, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoCheckpoint, bool, error) {
+		// Build the checkpoint identity from service identity
+		checkpointIdentity := nvidiacomv1alpha1.DynamoCheckpointIdentity{
+			Model:                identity.Model,
+			Framework:            identity.Framework,
+			FrameworkVersion:     identity.FrameworkVersion,
+			TensorParallelSize:   identity.TensorParallelSize,
+			PipelineParallelSize: identity.PipelineParallelSize,
+			Dtype:                identity.Dtype,
+			MaxModelLen:          identity.MaxModelLen,
+			ExtraParameters:      identity.ExtraParameters,
+		}
+
+		// Build pod template from service spec for checkpoint job
+		podTemplate := r.buildCheckpointJobPodTemplate(component, serviceName)
+
+		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      ckptName,
+				Namespace: dynamoDeployment.Namespace,
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: dynamoDeployment.Name,
+					consts.KubeLabelDynamoComponent:           serviceName,
+					consts.KubeLabelCheckpointHash:            hash,
+				},
+			},
+			Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
+				Identity: checkpointIdentity,
+				Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
+					PodTemplateSpec: podTemplate,
+				},
+			},
+		}
+		return ckpt, false, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to sync checkpoint CR: %w", err)
+	}
+
+	return ckpt, nil
+}
+
+// buildCheckpointJobPodTemplate builds a pod template for the checkpoint job from service spec
+func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
+	component *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+	serviceName string,
+) corev1.PodTemplateSpec {
+	// Build container from service spec
+	container := corev1.Container{
+		Name: consts.MainContainerName,
+	}
+
+	// Copy image from ExtraPodSpec if available
+	if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
+		container.Image = component.ExtraPodSpec.MainContainer.Image
+		container.Command = component.ExtraPodSpec.MainContainer.Command
+		container.Args = component.ExtraPodSpec.MainContainer.Args
+	}
+
+	// Copy env vars
+	container.Env = append(container.Env, component.Envs...)
+
+	// Copy resources using the common utility
+	if resourceReqs, err := commoncontroller.GetResourcesConfig(component.Resources); err == nil && resourceReqs != nil {
+		container.Resources = *resourceReqs
+	}
+
+	podSpec := corev1.PodSpec{
+		Containers:    []corev1.Container{container},
+		RestartPolicy: corev1.RestartPolicyNever,
+	}
+
+	// Copy node selector, tolerations from ExtraPodSpec
+	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
+		if component.ExtraPodSpec.PodSpec.NodeSelector != nil {
+			podSpec.NodeSelector = component.ExtraPodSpec.PodSpec.NodeSelector
+		}
+		if component.ExtraPodSpec.PodSpec.Tolerations != nil {
+			podSpec.Tolerations = component.ExtraPodSpec.PodSpec.Tolerations
+		}
+		if component.ExtraPodSpec.PodSpec.ServiceAccountName != "" {
+			podSpec.ServiceAccountName = component.ExtraPodSpec.PodSpec.ServiceAccountName
+		}
+	}
+
+	return corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				consts.KubeLabelDynamoComponent: serviceName,
+			},
+		},
+		Spec: podSpec,
+	}
 }
 
 // reconcileScalingAdapters ensures a DynamoGraphDeploymentScalingAdapter exists for each service in the DGD

@@ -97,6 +97,34 @@ const (
 	MainContainerName = "main"
 
 	RestartAnnotation = "nvidia.com/restartAt"
+	// Checkpoint related constants
+	KubeLabelCheckpointSource = "nvidia.com/checkpoint-source"
+	KubeLabelCheckpointHash   = "nvidia.com/checkpoint-hash"
+	KubeLabelCheckpointName   = "nvidia.com/checkpoint-name"
+
+	// EnvCheckpointStorageType indicates the storage backend type (pvc, s3, oci)
+	EnvCheckpointStorageType = "DYNAMO_CHECKPOINT_STORAGE_TYPE"
+	// EnvCheckpointLocation is the source location of the checkpoint
+	// For PVC: same as path (e.g., /checkpoints/{hash}.tar)
+	// For S3: s3://bucket/prefix/{hash}.tar
+	// For OCI: oci://registry/repo:{hash}
+	EnvCheckpointLocation = "DYNAMO_CHECKPOINT_LOCATION"
+	// EnvCheckpointPath is the local path to the checkpoint tar file
+	// For PVC: same as location
+	// For S3/OCI: download destination (e.g., /tmp/{hash}.tar)
+	EnvCheckpointPath = "DYNAMO_CHECKPOINT_PATH"
+	// EnvCheckpointHash is the identity hash (for debugging/observability)
+	EnvCheckpointHash = "DYNAMO_CHECKPOINT_HASH"
+	// EnvCheckpointSignalFile is the full path to the signal file
+	// The DaemonSet writes this file after checkpoint is complete
+	// The checkpoint job pod waits for this file, then exits successfully
+	EnvCheckpointSignalFile = "DYNAMO_CHECKPOINT_SIGNAL_FILE"
+
+	CheckpointVolumeName       = "checkpoint-storage"
+	CheckpointSignalVolumeName = "checkpoint-signal"
+	CheckpointBasePath         = "/checkpoints"
+	CheckpointSignalHostPath   = "/var/lib/dynamo-checkpoint/signals"
+	CheckpointSignalMountPath  = "/checkpoint-signal"
 )
 
 type MultinodeDeploymentType string

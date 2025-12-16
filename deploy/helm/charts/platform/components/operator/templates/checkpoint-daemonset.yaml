@@ -1,0 +1,206 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{- if .Values.checkpoint.enabled }}
+---
+# ServiceAccount for checkpoint agent
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-checkpoint-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: checkpoint-agent
+---
+# ClusterRole for checkpoint agent
+# Needs to watch pods and update Checkpoint CR status
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-checkpoint-agent
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: checkpoint-agent
+rules:
+  # Watch pods on node to detect checkpoint-source pods becoming ready
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Update DynamoCheckpoint CR status after checkpoint creation
+  - apiGroups: ["nvidia.com"]
+    resources: ["dynamocheckpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["nvidia.com"]
+    resources: ["dynamocheckpoints/status"]
+    verbs: ["patch", "update"]
+---
+# ClusterRoleBinding for checkpoint agent
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-checkpoint-agent
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: checkpoint-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "dynamo-operator.fullname" . }}-checkpoint-agent
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "dynamo-operator.fullname" . }}-checkpoint-agent
+    namespace: {{ .Release.Namespace }}
+---
+# DaemonSet for checkpoint agent
+# Runs on GPU nodes, watches for checkpoint-source pods, performs CRIU checkpointing
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-checkpoint-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: checkpoint-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: checkpoint-agent
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: checkpoint-agent
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- with .Values.checkpoint.agent.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.checkpoint.agent.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "dynamo-operator.fullname" . }}-checkpoint-agent
+      hostPID: true
+      hostNetwork: true
+      {{- with .Values.checkpoint.agent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      tolerations:
+        # Default tolerations to run on GPU nodes
+        - operator: Exists
+        {{- with .Values.checkpoint.agent.tolerations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.checkpoint.agent.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: agent
+          image: "{{ .Values.checkpoint.agent.image.repository }}:{{ .Values.checkpoint.agent.image.tag }}"
+          imagePullPolicy: {{ .Values.checkpoint.agent.image.pullPolicy }}
+          securityContext:
+            privileged: true
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # Unified checkpoint env vars (same as worker pods)
+            - name: DYNAMO_CHECKPOINT_STORAGE_TYPE
+              value: {{ .Values.checkpoint.storage.type | quote }}
+            # Base location URI (agent appends /{hash}.tar when writing)
+            - name: DYNAMO_CHECKPOINT_LOCATION
+              {{- if eq .Values.checkpoint.storage.type "pvc" }}
+              value: {{ .Values.checkpoint.storage.pvc.basePath | quote }}
+              {{- else if eq .Values.checkpoint.storage.type "s3" }}
+              value: {{ .Values.checkpoint.storage.s3.uri | quote }}
+              {{- else if eq .Values.checkpoint.storage.type "oci" }}
+              value: {{ .Values.checkpoint.storage.oci.uri | quote }}
+              {{- end }}
+            # Signal directory for checkpoint completion signaling
+            - name: DYNAMO_CHECKPOINT_SIGNAL_DIR
+              value: {{ .Values.checkpoint.storage.signalHostPath | quote }}
+            # Labels to watch for checkpoint source pods
+            - name: CHECKPOINT_SOURCE_LABEL
+              value: "nvidia.com/checkpoint-source=true"
+          volumeMounts:
+            {{- if eq .Values.checkpoint.storage.type "pvc" }}
+            # Mount the checkpoint PVC (only for PVC storage type)
+            - name: checkpoints
+              mountPath: {{ .Values.checkpoint.storage.pvc.basePath }}
+            {{- end }}
+            # Mount the signal directory for communication with checkpoint jobs
+            - name: signal-dir
+              mountPath: {{ .Values.checkpoint.storage.signalHostPath }}
+            # Mount containerd socket for container access
+            - name: containerd-socket
+              mountPath: /run/containerd/containerd.sock
+            # Mount host proc for CRIU
+            - name: host-proc
+              mountPath: /host-proc
+              readOnly: true
+            # Mount host cgroup for CRIU
+            - name: host-cgroup
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            {{- if and (eq .Values.checkpoint.storage.type "oci") .Values.checkpoint.storage.oci.credentialsSecretRef }}
+            # Mount docker config for OCI registry auth
+            - name: docker-config
+              mountPath: /root/.docker
+              readOnly: true
+            {{- end }}
+          {{- if and (eq .Values.checkpoint.storage.type "s3") .Values.checkpoint.storage.s3.credentialsSecretRef }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.checkpoint.storage.s3.credentialsSecretRef }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.checkpoint.agent.resources | nindent 12 }}
+      volumes:
+        {{- if eq .Values.checkpoint.storage.type "pvc" }}
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: {{ .Values.checkpoint.storage.pvc.pvcName }}
+        {{- end }}
+        - name: signal-dir
+          hostPath:
+            path: {{ .Values.checkpoint.storage.signalHostPath }}
+            type: DirectoryOrCreate
+        - name: containerd-socket
+          hostPath:
+            path: {{ .Values.checkpoint.agent.containerRuntimeSocket }}
+            type: Socket
+        - name: host-proc
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: host-cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        {{- if and (eq .Values.checkpoint.storage.type "oci") .Values.checkpoint.storage.oci.credentialsSecretRef }}
+        - name: docker-config
+          secret:
+            secretName: {{ .Values.checkpoint.storage.oci.credentialsSecretRef }}
+        {{- end }}
+      {{- with .Values.checkpoint.agent.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+
