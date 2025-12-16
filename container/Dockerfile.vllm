@@ -27,6 +27,7 @@ ARG DEEPGEMM_REF=""
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
+ARG SCCACHE_S3_ENDPOINT=""
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -122,6 +123,7 @@ ARG USE_SCCACHE
 ARG ARCH_ALT
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
+ARG SCCACHE_S3_ENDPOINT
 
 ENV ARCH_ALT=${ARCH_ALT}
 RUN if [ "$USE_SCCACHE" = "true" ]; then \
@@ -131,6 +133,7 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 # Set environment variables - they'll be empty strings if USE_SCCACHE=false
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
+    SCCACHE_ENDPOINT=${USE_SCCACHE:+${SCCACHE_S3_ENDPOINT}} \
     CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
     CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
     CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
