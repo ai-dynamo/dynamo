@@ -180,15 +180,15 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      # - name: Run tests
-      #   if: ${{ matrix.platform.arch != 'arm64' }}
-      #   uses: ./.github/actions/pytest
-      #   with:
-      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
-      #     pytest_marks: "pre_merge and vllm and (gpu_0 or gpu_1)"
-      #     framework: "vllm"
-      #     test_type: "pre_merge"
-      #     platform_arch: ${{ matrix.platform.arch }}
+      - name: Run tests
+        if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "pre_merge and vllm and (gpu_0 or gpu_1)"
+          framework: "vllm"
+          test_type: "pre_merge"
+          platform_arch: ${{ matrix.platform.arch }}
 
   sglang:
     needs: changed-files
@@ -241,15 +241,15 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      # - name: Run tests
-      #   if: ${{ matrix.platform.arch != 'arm64' }}
-      #   uses: ./.github/actions/pytest
-      #   with:
-      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
-      #     pytest_marks: "pre_merge and sglang and (gpu_0 or gpu_1)"
-      #     framework: "sglang"
-      #     test_type: "pre_merge"
-      #     platform_arch: ${{ matrix.platform.arch }}
+      - name: Run tests
+        if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "pre_merge and sglang and (gpu_0 or gpu_1)"
+          framework: "sglang"
+          test_type: "pre_merge"
+          platform_arch: ${{ matrix.platform.arch }}
 
   trtllm:
     needs: changed-files
@@ -302,15 +302,15 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      # - name: Run tests
-      #   if: ${{ matrix.platform.arch != 'arm64' }}
-      #   uses: ./.github/actions/pytest
-      #   with:
-      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
-      #     pytest_marks: "pre_merge and trtllm and (gpu_0 or gpu_1)"
-      #     framework: "trtllm"
-      #     test_type: "pre_merge"
-      #     platform_arch: ${{ matrix.platform.arch }}
+      - name: Run tests
+        if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          pytest_marks: "pre_merge and trtllm and (gpu_0 or gpu_1)"
+          framework: "trtllm"
+          test_type: "pre_merge"
+          platform_arch: ${{ matrix.platform.arch }}
 
   deploy-test-fault-tolerance:
     runs-on: cpu-amd-m5-2xlarge
