@@ -574,7 +574,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 # Install essential Python build tools
 RUN python3 -m pip install --no-cache-dir \
-    mooncake-transfer-engine==0.3.6.post1 \
+    mooncake-transfer-engine==0.3.7.post2 \
     scikit-build-core==0.11.6 \
     setuptools-rust==1.12.0
 
