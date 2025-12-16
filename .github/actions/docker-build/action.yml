@@ -140,7 +140,7 @@ runs:
         fi
 
         if [ -n "${{ inputs.use_ci_registry }}" ]; then
-          REGISTRY="${ECR_HOSTNAME}
+          REGISTRY="${ECR_HOSTNAME}"
         else
           REGISTRY="nvcr.io"
         fi
