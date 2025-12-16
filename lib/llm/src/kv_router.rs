@@ -101,29 +101,24 @@ pub fn router_endpoint_id(namespace: String) -> EndpointId {
 /// Specifies the type of worker being queried when using the `query_instance_id` annotation.
 /// This tells the router which worker pool to select from and what type of operation is intended.
 ///
-/// State transitions:
-/// - "disagg" → "prefill" → "decode" → response (disaggregated serving)
-/// - "agg" → response (aggregated serving, single worker handles both prefill and decode)
+/// Query instance types for worker selection
+/// - "prefill" → select a prefill worker (disaggregated serving)
+/// - "decode" → select a decode worker (disaggregated serving)
+/// Note: Empty value ("query_instance_id:") is handled by PrefillRouter for disagg orchestration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum QueryInstanceType {
-    /// Initial state for disaggregated serving - triggers prefill then decode worker selection
-    Disagg,
     /// Query for a prefill worker (disaggregated serving)
     Prefill,
     /// Query for a decode worker (disaggregated serving)
     Decode,
-    /// Query for an aggregated worker (non-disaggregated serving, single worker for both)
-    Agg,
 }
 
 impl std::fmt::Display for QueryInstanceType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            QueryInstanceType::Disagg => write!(f, "disagg"),
             QueryInstanceType::Prefill => write!(f, "prefill"),
             QueryInstanceType::Decode => write!(f, "decode"),
-            QueryInstanceType::Agg => write!(f, "agg"),
         }
     }
 }
@@ -133,12 +128,10 @@ impl std::str::FromStr for QueryInstanceType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "disagg" => Ok(QueryInstanceType::Disagg),
             "prefill" => Ok(QueryInstanceType::Prefill),
             "decode" => Ok(QueryInstanceType::Decode),
-            "agg" => Ok(QueryInstanceType::Agg),
             _ => Err(format!(
-                "Invalid QueryInstanceType: '{}'. Expected 'disagg', 'prefill', 'decode', or 'agg'",
+                "Invalid QueryInstanceType: '{}'. Expected 'prefill' or 'decode'",
                 s
             )),
         }
@@ -771,13 +764,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let context_id = request.context().id().to_string();
 
         // Check if this is a query_instance_id request and parse its type
-        // Supports both "query_instance_id" (legacy, treated as Agg) and "query_instance_id:type"
+        // Format: "query_instance_id:type" where type is "prefill" or "decode"
+        // Note: Empty value ("query_instance_id:") is handled by PrefillRouter for disagg orchestration
         let query_instance_type: Option<QueryInstanceType> =
-            if request.has_annotation("query_instance_id") {
-                // Legacy format: bare annotation without value, treat as Agg
-                Some(QueryInstanceType::Agg)
-            } else if let Some(type_str) = request.get_annotation_value("query_instance_id") {
-                // New format: "query_instance_id:type"
+            if let Some(type_str) = request.get_annotation_value("query_instance_id") {
                 match type_str.parse::<QueryInstanceType>() {
                     Ok(t) => Some(t),
                     Err(e) => {
@@ -835,30 +825,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let mut responses: Vec<Annotated<LLMEngineOutput>> = Vec::new();
 
             match query_type {
-                QueryInstanceType::Disagg => {
-                    // Disagg is not handled in KvPushRouter - it should be handled by the caller
-                    anyhow::bail!(
-                        "QueryInstanceType::Disagg is not supported in KvPushRouter. \
-                         Use 'prefill' or 'decode' for disaggregated serving, or 'agg' for aggregated."
-                    );
-                }
-                QueryInstanceType::Agg => {
-                    // Aggregated worker selection: single worker handles both prefill and decode
-                    let worker_id_info = WorkerIdInfo {
-                        prefill_worker_id: None,
-                        decode_worker_id: Some(instance_id),
-                    };
-                    responses.push(Annotated::from_annotation("worker_id", &worker_id_info)?);
-                    responses.push(Annotated::from_annotation(
-                        "token_data",
-                        &request.token_ids,
-                    )?);
-                    tracing::trace!(
-                        query_type = "agg",
-                        decode_worker_id = instance_id,
-                        "Returning aggregated worker selection"
-                    );
-                }
                 QueryInstanceType::Prefill => {
                     // Prefill worker selection: return worker_id with prefill_worker_id
                     let worker_id_info = WorkerIdInfo {

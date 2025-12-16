@@ -297,7 +297,7 @@ impl PrefillRouter {
     }
 
     /// Handle GAIE disaggregated worker selection flow.
-    /// When query_instance_id:disagg is set, this function:
+    /// When query_instance_id is present with empty value (query_instance_id:), this function:
     /// 1. Queries the prefill router to get prefill worker selection
     /// 2. Queries the decode router to get decode worker selection (with prefill_worker_id attached)
     /// 3. Returns the combined worker selection response
@@ -410,9 +410,10 @@ impl
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
 
-        // Check for GAIE disaggregated worker selection (query_instance_id:disagg)
+        // Check for GAIE disaggregated worker selection (query_instance_id:)
+        // Empty value signals the full disagg flow: get prefill worker, then decode worker
         if let Some(query_type_str) = req.get_annotation_value("query_instance_id") {
-            if let Ok(QueryInstanceType::Disagg) = query_type_str.parse::<QueryInstanceType>() {
+            if query_type_str.is_empty() {
                 return self
                     .get_prefill_and_decode_worker_ids(req, context, request_id, &next)
                     .await;
@@ -480,6 +481,14 @@ impl
                 // Restore original max_tokens for decode
                 decode_req.stop_conditions.max_tokens = original_max_tokens;
 
+                // Set router_config_override for decode: overlap_score_weight = 0
+                // This ensures load-based selection (no KV overlap consideration after prefill)
+                let existing_override = decode_req.router_config_override.take();
+                decode_req.router_config_override = Some(RouterConfigOverride {
+                    overlap_score_weight: Some(0.0),
+                    ..existing_override.unwrap_or_default()
+                });
+
                 // GAIE Stage 2: If target decode worker is specified, route directly to it
                 if let Some(decode_worker_id) = target_decode_worker {
                     decode_req.backend_instance_id = Some(decode_worker_id);
@@ -488,14 +497,6 @@ impl
                         decode_worker_id = decode_worker_id,
                         "GAIE Stage 2: Routing decode to pre-selected worker"
                     );
-                } else {
-                    // Set router_config_override for decode: overlap_score_weight = 0
-                    // (Only needed when not using pre-selected worker)
-                    let existing_override = decode_req.router_config_override.take();
-                    decode_req.router_config_override = Some(RouterConfigOverride {
-                        overlap_score_weight: Some(0.0),
-                        ..existing_override.unwrap_or_default()
-                    });
                 }
 
                 // Map the modified request through with preserved context
