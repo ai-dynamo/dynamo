@@ -9,6 +9,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::http::Response;
+
 use super::Metrics;
 use super::RouteDoc;
 use super::metrics;
@@ -25,8 +28,7 @@ use dynamo_runtime::storage::kv;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tower_http::trace::{DefaultOnResponse, TraceLayer};
-use tracing::Level;
+use tower_http::trace::TraceLayer;
 
 /// HTTP service shared state
 pub struct State {
@@ -388,11 +390,37 @@ impl HttpServiceConfigBuilder {
         router = router.merge(openapi_route);
         all_docs.extend(openapi_docs);
 
-        // Add span for tracing with INFO-level logging for on_response callback
+        // Add span for tracing
+        // Add on_response callback for logging response status code
         router = router.layer(
             TraceLayer::new_for_http()
                 .make_span_with(make_request_span)
-                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+                .on_response(
+                    |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
+                        let status = response.status();
+                        let latency_ms = latency.as_millis();
+
+                        if status.is_server_error() {
+                            tracing::error!(
+                                status = %status.as_u16(),
+                                latency_ms = %latency_ms,
+                                "request completed with server error"
+                            );
+                        } else if status.is_client_error() {
+                            tracing::warn!(
+                                status = %status.as_u16(),
+                                latency_ms = %latency_ms,
+                                "request completed with client request error"
+                            );
+                        } else {
+                            tracing::info!(
+                                status = %status.as_u16(),
+                                latency_ms = %latency_ms,
+                                "request completed"
+                            );
+                        }
+                    },
+                ),
         );
 
         Ok(HttpService {
