@@ -10,6 +10,26 @@ pub trait NvExtProvider {
     fn raw_prompt(&self) -> Option<String>;
 }
 
+/// Worker ID information for disaggregated serving
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct WorkerIdInfo {
+    /// The prefill worker ID that processed this request
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_id: Option<u64>,
+
+    /// The decode worker ID that processed this request
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_worker_id: Option<u64>,
+}
+
+/// NVIDIA LLM response extensions
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NvExtResponse {
+    /// Worker ID information (prefill and decode worker IDs)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<WorkerIdInfo>,
+}
+
 /// NVIDIA LLM extensions to the OpenAI API
 #[derive(Serialize, Deserialize, Builder, Validate, Debug, Clone)]
 #[validate(schema(function = "validate_nv_ext"))]
