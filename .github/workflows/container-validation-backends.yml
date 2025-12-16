@@ -579,8 +579,8 @@ jobs:
         profile:
           - agg
           - agg_router
-          # - disagg
-          - disagg_router
+          - disagg
+          # - disagg_router
     name: deploy-test-vllm (${{ matrix.profile }})
     env:
       FRAMEWORK: vllm
@@ -755,7 +755,7 @@ jobs:
   # Current conditions: 
   # - Run vllm disagg on all commits
   # - Run rest of jobs only on push to main or manual trigger
-  deploy-test-vllm-disagg:
+  deploy-test-vllm-disagg-router:
     runs-on: cpu-amd-m5-2xlarge
     if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, vllm]
@@ -766,7 +766,7 @@ jobs:
       max-parallel: 1
       matrix:
         profile:
-          - disagg
+          - disagg_router
     name: deploy-test-vllm (${{ matrix.profile }})
     env:
       FRAMEWORK: vllm
@@ -778,7 +778,7 @@ jobs:
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
     # Run if push to main, or manually triggered
-    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
+    if: ( github.ref_name == 'pull-request/4841' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, sglang]
     permissions:
       contents: read
