@@ -19,11 +19,11 @@ use dynamo_runtime::{
 
 use crate::{
     discovery::ModelManager,
-    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
+    kv_router::{KvPushRouter, KvRouterConfig, QueryInstanceType, RouterConfigOverride},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::PrefillResult,
+    protocols::openai::nvext::WorkerIdInfo,
 };
-
 /// Errors that can occur during prefill routing
 #[derive(Debug, thiserror::Error)]
 pub enum PrefillError {
@@ -244,6 +244,144 @@ impl PrefillRouter {
             prompt_tokens_details,
         })
     }
+
+    /// Query the prefill router for worker selection only (no actual prefill execution).
+    /// Used for GAIE disaggregated flow where we need prefill worker ID before decode selection.
+    async fn query_prefill_worker(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<u64, PrefillError> {
+        // Get the prefill router, error if not activated
+        let Some(prefill_router) = self.prefill_router.get() else {
+            return Err(PrefillError::NotActivated);
+        };
+
+        // Call the appropriate router based on the type
+        let mut response = match prefill_router {
+            InnerPrefillRouter::KvRouter(router) => router
+                .generate(request)
+                .await
+                .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
+            InnerPrefillRouter::SimpleRouter(router) => router
+                .generate(request)
+                .await
+                .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
+        };
+
+        // Extract worker_id from the response annotations
+        while let Some(item) = response.next().await {
+            if let Some(event) = item.event.as_ref() {
+                if event == "worker_id" {
+                    if let Some(comments) = item.comment.as_ref() {
+                        if let Some(first_comment) = comments.first() {
+                            if let Ok(worker_info) =
+                                serde_json::from_str::<WorkerIdInfo>(first_comment)
+                            {
+                                if let Some(prefill_worker_id) = worker_info.prefill_worker_id {
+                                    tracing::debug!(
+                                        prefill_worker_id = prefill_worker_id,
+                                        "Extracted prefill worker ID from query response"
+                                    );
+                                    return Ok(prefill_worker_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(PrefillError::PrefillError(
+            "No prefill_worker_id found in query response".to_string(),
+        ))
+    }
+
+    /// Handle GAIE disaggregated worker selection flow.
+    /// When query_instance_id:disagg is set, this function:
+    /// 1. Queries the prefill router to get prefill worker selection
+    /// 2. Queries the decode router to get decode worker selection (with prefill_worker_id attached)
+    /// 3. Returns the combined worker selection response
+    async fn get_prefill_and_decode_worker_ids(
+        &self,
+        req: PreprocessedRequest,
+        context: Context<()>,
+        request_id: String,
+        next: &ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        tracing::info!(
+            request_id = %request_id,
+            "GAIE disagg flow: Starting prefill and decode worker selection"
+        );
+
+        let engine_ctx = context.context();
+
+        // Step 1: Query prefill router with query_instance_id:prefill
+        let mut prefill_query_req = req.clone();
+        // Remove existing query_instance_id annotation and add prefill type
+        prefill_query_req
+            .annotations
+            .retain(|a| !a.starts_with("query_instance_id"));
+        prefill_query_req
+            .annotations
+            .push(format!("query_instance_id:{}", QueryInstanceType::Prefill));
+
+        tracing::debug!(
+            request_id = %request_id,
+            "GAIE disagg flow: Querying prefill router for worker selection"
+        );
+
+        let prefill_query_context = Context::with_id(prefill_query_req, request_id.clone());
+        engine_ctx.link_child(prefill_query_context.context());
+
+        // Query for prefill worker selection
+        let prefill_worker_id = self.query_prefill_worker(prefill_query_context).await?;
+
+        tracing::info!(
+            request_id = %request_id,
+            prefill_worker_id = prefill_worker_id,
+            "GAIE disagg flow: Selected prefill worker"
+        );
+
+        // Step 2: Prepare decode query with query_instance_id:decode and prefill_worker_id
+        let mut decode_query_req = req;
+        // Remove existing query_instance_id annotation and add decode type
+        decode_query_req
+            .annotations
+            .retain(|a| !a.starts_with("query_instance_id"));
+        decode_query_req
+            .annotations
+            .push(format!("query_instance_id:{}", QueryInstanceType::Decode));
+        // Add prefill_worker_id annotation for decode router
+        decode_query_req
+            .annotations
+            .push(format!("prefill_worker_id:{}", prefill_worker_id));
+
+        // Set overlap_score_weight = 0 for decode (load-based only)
+        let existing_override = decode_query_req.router_config_override.take();
+        decode_query_req.router_config_override = Some(RouterConfigOverride {
+            overlap_score_weight: Some(0.0),
+            ..existing_override.unwrap_or_default()
+        });
+
+        tracing::debug!(
+            request_id = %request_id,
+            prefill_worker_id = prefill_worker_id,
+            "GAIE disagg flow: Querying decode router for worker selection"
+        );
+
+        // Step 3: Forward to decode router (next) which will return decode worker selection
+        let decode_request = context.map(|_| decode_query_req);
+        let response = next.generate(decode_request).await;
+
+        tracing::info!(
+            request_id = %request_id,
+            prefill_worker_id = prefill_worker_id,
+            success = response.is_ok(),
+            "GAIE disagg flow: Completed worker selection (decode worker ID in response stream)"
+        );
+
+        response
+    }
 }
 
 impl Drop for PrefillRouter {
@@ -272,12 +410,46 @@ impl
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
 
+        // Check for GAIE disaggregated worker selection (query_instance_id:disagg)
+        if let Some(query_type_str) = req.get_annotation_value("query_instance_id") {
+            if let Ok(QueryInstanceType::Disagg) = query_type_str.parse::<QueryInstanceType>() {
+                return self
+                    .get_prefill_and_decode_worker_ids(req, context, request_id, &next)
+                    .await;
+            }
+        }
+
+        // Standard disaggregated serving flow (also used by GAIE Stage 2)
+        // Check for GAIE Stage 2: pre-selected worker IDs
+        let target_prefill_worker = req.target_prefill_worker_id;
+        let target_decode_worker = req.target_decode_worker_id;
+
+        if target_prefill_worker.is_some() || target_decode_worker.is_some() {
+            tracing::info!(
+                request_id = %request_id,
+                target_prefill_worker = ?target_prefill_worker,
+                target_decode_worker = ?target_decode_worker,
+                "GAIE Stage 2: Using pre-selected worker IDs"
+            );
+        }
+
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
         // Prepare prefill request with max_tokens = 1
         let mut prefill_req = req.clone();
         prefill_req.stop_conditions.max_tokens = Some(1);
+
+        // GAIE Stage 2: If target prefill worker is specified, route directly to it
+        if let Some(prefill_worker_id) = target_prefill_worker {
+            prefill_req.backend_instance_id = Some(prefill_worker_id);
+            tracing::debug!(
+                request_id = %request_id,
+                prefill_worker_id = prefill_worker_id,
+                "GAIE Stage 2: Routing prefill to pre-selected worker"
+            );
+        }
+
         let prefill_context = Context::with_id(prefill_req, request_id.clone());
 
         // Link the prefill context as a child so that kill signals propagate
@@ -308,12 +480,23 @@ impl
                 // Restore original max_tokens for decode
                 decode_req.stop_conditions.max_tokens = original_max_tokens;
 
-                // Set router_config_override for decode: overlap_score_weight = 0
-                let existing_override = decode_req.router_config_override.take();
-                decode_req.router_config_override = Some(RouterConfigOverride {
-                    overlap_score_weight: Some(0.0),
-                    ..existing_override.unwrap_or_default()
-                });
+                // GAIE Stage 2: If target decode worker is specified, route directly to it
+                if let Some(decode_worker_id) = target_decode_worker {
+                    decode_req.backend_instance_id = Some(decode_worker_id);
+                    tracing::debug!(
+                        request_id = %request_id,
+                        decode_worker_id = decode_worker_id,
+                        "GAIE Stage 2: Routing decode to pre-selected worker"
+                    );
+                } else {
+                    // Set router_config_override for decode: overlap_score_weight = 0
+                    // (Only needed when not using pre-selected worker)
+                    let existing_override = decode_req.router_config_override.take();
+                    decode_req.router_config_override = Some(RouterConfigOverride {
+                        overlap_score_weight: Some(0.0),
+                        ..existing_override.unwrap_or_default()
+                    });
+                }
 
                 // Map the modified request through with preserved context
                 let decode_request = context.map(|_| decode_req);

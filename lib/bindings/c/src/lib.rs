@@ -393,6 +393,10 @@ pub struct WorkerSelectionPipeline {
 ///
 /// # Errors
 /// Returns `DynamoLlmResult::ERR` on failure and does not write to `pipeline_out`.
+/// # Safety
+/// See detailed safety docs above. Additional parameter:
+/// - `enforce_disagg`: If true, requests fail when disaggregated serving is unavailable.
+///   If false, falls back to aggregated serving.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     namespace_c_str: *const c_char,
@@ -404,6 +408,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     router_temperature: f64,
     use_kv_events: bool,
     router_replica_sync: bool,
+    enforce_disagg: bool,
     pipeline_out: *mut *mut WorkerSelectionPipeline,
 ) -> DynamoLlmResult {
     if pipeline_out.is_null() {
@@ -472,6 +477,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
             router_mode,
             (busy_threshold >= 0.0).then_some(busy_threshold),
             kv_router_config,
+            enforce_disagg,
         )
         .await
     };
@@ -919,6 +925,98 @@ pub async fn query_worker_selection_and_annotate(
     Ok((worker_id, tokens, original_request))
 }
 
+/// Spawn a background task to watch for prefill models and activate prefill routers.
+/// This is a lightweight watcher that only handles prefill model discovery.
+fn spawn_prefill_watcher(
+    drt: DistributedRuntime,
+    model_manager: Arc<ModelManager>,
+    target_namespace: String,
+) {
+    use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_runtime::protocols::EndpointId;
+    use futures::StreamExt;
+
+    tokio::spawn(async move {
+        let discovery = drt.discovery();
+        let mut stream = match discovery.list_and_watch(DiscoveryQuery::AllModels, None).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to start prefill discovery stream");
+                return;
+            }
+        };
+
+        while let Some(result) = stream.next().await {
+            let event = match result {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::error!(error = %e, "Error in prefill discovery stream");
+                    continue;
+                }
+            };
+
+            if let DiscoveryEvent::Added(instance) = event {
+                let (endpoint_id, card) = match &instance {
+                    DiscoveryInstance::Model {
+                        namespace,
+                        component,
+                        endpoint,
+                        ..
+                    } => {
+                        // Filter by namespace
+                        if namespace != &target_namespace {
+                            continue;
+                        }
+
+                        let eid = EndpointId {
+                            namespace: namespace.clone(),
+                            component: component.clone(),
+                            name: endpoint.clone(),
+                        };
+
+                        match instance.deserialize_model::<ModelDeploymentCard>() {
+                            Ok(card) => (eid, card),
+                            Err(_) => continue,
+                        }
+                    }
+                    _ => continue,
+                };
+
+                // Only handle prefill models
+                if !card.model_type.supports_prefill() {
+                    continue;
+                }
+
+                tracing::info!(
+                    model_name = card.name(),
+                    "Prefill model discovered, activating prefill router"
+                );
+
+                // Get the endpoint and activate the prefill router
+                if let Ok(ns) = drt.namespace(&endpoint_id.namespace) {
+                    if let Ok(comp) = ns.component(&endpoint_id.component) {
+                        let endpoint = comp.endpoint(&endpoint_id.name);
+                        if let Err(e) = model_manager.activate_prefill_router(card.name(), endpoint)
+                        {
+                            tracing::warn!(
+                                model_name = card.name(),
+                                error = %e,
+                                "Failed to activate prefill router"
+                            );
+                        } else {
+                            tracing::info!(
+                                model_name = card.name(),
+                                "Prefill router activated successfully"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
 /// Create a worker selection pipeline for OpenAI Chat Completion requests
 ///
 /// This is a concrete implementation that works specifically with NvCreateChatCompletionRequest
@@ -931,6 +1029,7 @@ pub async fn query_worker_selection_and_annotate(
 /// - `router_mode`: How to route requests (KV, RoundRobin, etc.)
 /// - `busy_threshold`: Optional threshold for busy worker detection
 /// - `kv_router_config`: Optional KV router configuration (only used when router_mode is KV)
+/// - `enforce_disagg`: If true, fail requests when disaggregated serving is unavailable
 ///
 /// # Returns
 /// A configured worker selection pipeline ready to use
@@ -941,12 +1040,15 @@ pub async fn create_worker_selection_pipeline_chat(
     router_mode: RouterMode,
     busy_threshold: Option<f64>,
     kv_router_config: Option<KvRouterConfig>,
+    enforce_disagg: bool,
 ) -> anyhow::Result<
     ServiceEngine<
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >,
 > {
+    use dynamo_llm::kv_router::PrefillRouter;
+
     let runtime = Runtime::from_settings()?;
     let dst_config = DistributedConfig::from_settings();
     let drt_owned = DistributedRuntime::new(runtime, dst_config).await?;
@@ -966,10 +1068,9 @@ pub async fn create_worker_selection_pipeline_chat(
     let router_config = dynamo_llm::entrypoint::RouterConfig {
         router_mode,
         kv_router_config: kv_router_config.unwrap_or_default(),
-        // C bindings only support active_decode_blocks_threshold for now (via busy_threshold param)
         active_decode_blocks_threshold: busy_threshold,
         active_prefill_tokens_threshold: None,
-        enforce_disagg: false,
+        enforce_disagg,
     };
     let watcher = ModelWatcher::new(
         component.drt().clone(),
@@ -997,6 +1098,34 @@ pub async fn create_worker_selection_pipeline_chat(
     } else {
         None
     };
+
+    // Create prefill chooser for dynamic disaggregation support
+    // This registers the model and returns a receiver that will be activated
+    // when a prefill worker is discovered
+    let prefill_chooser = model_manager
+        .register_prefill_router(model_name.to_string())
+        .map(|rx| {
+            // Create prefill-specific config with track_active_blocks disabled
+            let mut prefill_config = kv_router_config.unwrap_or_default();
+            prefill_config.router_track_active_blocks = false;
+
+            PrefillRouter::new(
+                rx,
+                model_manager.clone(),
+                router_mode,
+                card.kv_cache_block_size,
+                Some(prefill_config),
+                enforce_disagg,
+            )
+        });
+
+    // Start background watcher for prefill model discovery
+    // This will activate the prefill router when prefill workers join
+    spawn_prefill_watcher(
+        component.drt().clone(),
+        model_manager.clone(),
+        namespace.to_string(),
+    );
 
     // Download model config files from HuggingFace for EPP
     // The backend's card has NATS URLs which aren't accessible from EPP
@@ -1033,7 +1162,6 @@ pub async fn create_worker_selection_pipeline_chat(
 
     // Create worker monitor if busy_threshold is set
     // Note: C bindings don't register with ModelManager, so HTTP endpoint won't see this
-    // C bindings only support active_decode_blocks_threshold for now (active_prefill_tokens_threshold defaults to 1000000 tokens = effectively disabled)
     let worker_monitor = busy_threshold.map(|t| KvWorkerMonitor::new(client.clone(), t, 1000000));
 
     let engine = build_routed_pipeline::<
@@ -1046,8 +1174,8 @@ pub async fn create_worker_selection_pipeline_chat(
         worker_monitor,
         chooser,
         hf_tokenizer,
-        None,  // prefill_chooser
-        false, // enforce_disagg
+        prefill_chooser,
+        enforce_disagg,
     )
     .await?;
 

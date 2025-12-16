@@ -98,6 +98,53 @@ pub fn router_endpoint_id(namespace: String) -> EndpointId {
     }
 }
 
+/// Specifies the type of worker being queried when using the `query_instance_id` annotation.
+/// This tells the router which worker pool to select from and what type of operation is intended.
+///
+/// State transitions:
+/// - "disagg" → "prefill" → "decode" → response (disaggregated serving)
+/// - "agg" → response (aggregated serving, single worker handles both prefill and decode)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QueryInstanceType {
+    /// Initial state for disaggregated serving - triggers prefill then decode worker selection
+    Disagg,
+    /// Query for a prefill worker (disaggregated serving)
+    Prefill,
+    /// Query for a decode worker (disaggregated serving)
+    Decode,
+    /// Query for an aggregated worker (non-disaggregated serving, single worker for both)
+    Agg,
+}
+
+impl std::fmt::Display for QueryInstanceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueryInstanceType::Disagg => write!(f, "disagg"),
+            QueryInstanceType::Prefill => write!(f, "prefill"),
+            QueryInstanceType::Decode => write!(f, "decode"),
+            QueryInstanceType::Agg => write!(f, "agg"),
+        }
+    }
+}
+
+impl std::str::FromStr for QueryInstanceType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "disagg" => Ok(QueryInstanceType::Disagg),
+            "prefill" => Ok(QueryInstanceType::Prefill),
+            "decode" => Ok(QueryInstanceType::Decode),
+            "agg" => Ok(QueryInstanceType::Agg),
+            _ => Err(format!(
+                "Invalid QueryInstanceType: '{}'. Expected 'disagg', 'prefill', 'decode', or 'agg'",
+                s
+            )),
+        }
+    }
+}
+
 /// Creates a DiscoveryQuery for the KV router in the given namespace.
 pub fn router_discovery_query(namespace: String) -> DiscoveryQuery {
     DiscoveryQuery::Endpoint {
@@ -723,13 +770,29 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Extract context ID for request tracking
         let context_id = request.context().id().to_string();
 
-        // Check if this is a query_instance_id request first
-        let query_instance_id = request.has_annotation("query_instance_id");
+        // Check if this is a query_instance_id request and parse its type
+        // Supports both "query_instance_id" (legacy, treated as Agg) and "query_instance_id:type"
+        let query_instance_type: Option<QueryInstanceType> =
+            if request.has_annotation("query_instance_id") {
+                // Legacy format: bare annotation without value, treat as Agg
+                Some(QueryInstanceType::Agg)
+            } else if let Some(type_str) = request.get_annotation_value("query_instance_id") {
+                // New format: "query_instance_id:type"
+                match type_str.parse::<QueryInstanceType>() {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        tracing::warn!("Invalid query_instance_id type '{}': {}", type_str, e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
 
         let (instance_id, dp_rank, overlap_amount) = if let Some(id) = request.backend_instance_id {
             // If instance_id is set, use it and compute actual overlap
             let dp_rank = request.dp_rank.unwrap_or(0);
-            if query_instance_id {
+            if query_instance_type.is_some() {
                 tracing::debug!(
                     "backend_instance_id is set, routing to instance {id} with dp_rank {dp_rank} and ignoring query_instance_id annotation"
                 );
@@ -759,27 +822,86 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     Some(&context_id),
                     &request.token_ids,
                     request.router_config_override.as_ref(),
-                    !query_instance_id, // Don't update states if query_instance_id
+                    query_instance_type.is_none(), // Don't update states if query_instance_id
                 )
                 .await?;
             (best_worker.worker_id, best_worker.dp_rank, overlap_amount)
         };
 
-        // if request has the annotation "query_instance_id",
-        // then the request will not be routed to the worker,
-        // and instead the worker_instance_id will be returned.
+        // If request has a query_instance_id annotation, return worker selection info
+        // without routing to the actual worker.
         let stream_context = request.context().clone();
-        if query_instance_id {
-            let instance_id_str = instance_id.to_string();
-            let response = Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
+        if let Some(query_type) = query_instance_type {
+            let mut responses: Vec<Annotated<LLMEngineOutput>> = Vec::new();
 
-            // Return the tokens in nvext.token_data format
-            let response_tokens = Annotated::from_annotation("token_data", &request.token_ids)?;
-            tracing::trace!(
-                "Tokens requested in the response through the query_instance_id annotation: {:?}",
-                response_tokens
-            );
-            let stream = stream::iter(vec![response, response_tokens]);
+            match query_type {
+                QueryInstanceType::Disagg => {
+                    // Disagg is not handled in KvPushRouter - it should be handled by the caller
+                    anyhow::bail!(
+                        "QueryInstanceType::Disagg is not supported in KvPushRouter. \
+                         Use 'prefill' or 'decode' for disaggregated serving, or 'agg' for aggregated."
+                    );
+                }
+                QueryInstanceType::Agg => {
+                    // Aggregated worker selection: single worker handles both prefill and decode
+                    let worker_id_info = WorkerIdInfo {
+                        prefill_worker_id: None,
+                        decode_worker_id: Some(instance_id),
+                    };
+                    responses.push(Annotated::from_annotation("worker_id", &worker_id_info)?);
+                    responses.push(Annotated::from_annotation(
+                        "token_data",
+                        &request.token_ids,
+                    )?);
+                    tracing::trace!(
+                        query_type = "agg",
+                        decode_worker_id = instance_id,
+                        "Returning aggregated worker selection"
+                    );
+                }
+                QueryInstanceType::Prefill => {
+                    // Prefill worker selection: return worker_id with prefill_worker_id
+                    let worker_id_info = WorkerIdInfo {
+                        prefill_worker_id: Some(instance_id),
+                        decode_worker_id: None,
+                    };
+                    responses.push(Annotated::from_annotation("worker_id", &worker_id_info)?);
+                    responses.push(Annotated::from_annotation(
+                        "token_data",
+                        &request.token_ids,
+                    )?);
+                    tracing::trace!(
+                        query_type = "prefill",
+                        prefill_worker_id = instance_id,
+                        "Returning prefill worker selection"
+                    );
+                }
+                QueryInstanceType::Decode => {
+                    // Decode worker selection: return worker_id with both prefill and decode worker IDs
+                    // Get prefill_worker_id from annotation (set by caller after prefill selection)
+                    let prefill_worker_id = request
+                        .get_annotation_value("prefill_worker_id")
+                        .and_then(|s| s.parse::<u64>().ok());
+
+                    let worker_id_info = WorkerIdInfo {
+                        prefill_worker_id,
+                        decode_worker_id: Some(instance_id),
+                    };
+                    responses.push(Annotated::from_annotation("worker_id", &worker_id_info)?);
+                    responses.push(Annotated::from_annotation(
+                        "token_data",
+                        &request.token_ids,
+                    )?);
+                    tracing::trace!(
+                        query_type = "decode",
+                        prefill_worker_id = ?prefill_worker_id,
+                        decode_worker_id = instance_id,
+                        "Returning decode worker selection"
+                    );
+                }
+            }
+
+            let stream = stream::iter(responses);
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
         let (mut backend_input, context) = request.into_parts();
