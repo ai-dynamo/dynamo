@@ -198,7 +198,9 @@ class ChatProcessor:
         if request.stream:
             # Handle streaming response
             num_output_text_so_far = 0
-            async for raw_response in self.openai_serving.chat_completion_stream_generator(
+            async for (
+                raw_response
+            ) in self.openai_serving.chat_completion_stream_generator(
                 request,
                 result_generator,
                 request_id,
@@ -231,7 +233,9 @@ class ChatProcessor:
             # Collect all chunks into a single response
             full_response = None
             num_output_text_so_far = 0
-            async for raw_response in self.openai_serving.chat_completion_stream_generator(
+            async for (
+                raw_response
+            ) in self.openai_serving.chat_completion_stream_generator(
                 request,
                 result_generator,
                 request_id,
