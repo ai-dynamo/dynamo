@@ -592,13 +592,6 @@ def create_selection_handler(
     return handle_selection
 
 
-def _load_webui_css() -> str:
-    """Load custom CSS for the WebUI from styles.css."""
-    css_path = Path(__file__).parent / "styles.css"
-    with open(css_path) as f:
-        return f.read()
-
-
 def create_gradio_interface(
     json_data_str,
     handle_selection,
@@ -612,9 +605,7 @@ def create_gradio_interface(
     Returns:
         gr.Blocks: Configured Gradio demo
     """
-    custom_css = _load_webui_css()
-
-    with gr.Blocks(title="Configuration Selection", css=custom_css) as demo:
+    with gr.Blocks(title="Configuration Selection") as demo:
         # Create hidden UI components (reused from AIC profiling module)
         ui_components = create_profiling_ui_components()
         selection_input = ui_components["selection_input"]
