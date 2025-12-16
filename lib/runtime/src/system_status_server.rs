@@ -734,7 +734,10 @@ async fn http_sd_config_handler(state: Arc<SystemStatusState>) -> impl IntoRespo
                 // Build labels
                 let mut labels = serde_json::Map::new();
                 labels.insert("namespace".to_string(), json!(namespace));
-                labels.insert("instance_id".to_string(), json!(format!("{:x}", instance_id)));
+                labels.insert(
+                    "instance_id".to_string(),
+                    json!(format!("{:x}", instance_id)),
+                );
                 // Construct URL for __meta_url label (assume http scheme)
                 let url = format!("http://{}:{}/metrics", host, port);
                 labels.insert("__meta_url".to_string(), json!(url));
@@ -756,7 +759,10 @@ async fn http_sd_config_handler(state: Arc<SystemStatusState>) -> impl IntoRespo
         })
         .collect();
 
-    tracing::trace!("Returning {} metrics endpoints in http_sd format", targets.len());
+    tracing::trace!(
+        "Returning {} metrics endpoints in http_sd format",
+        targets.len()
+    );
 
     // Set Content-Type header as required by Prometheus http_sd spec
     let mut headers = HeaderMap::new();
@@ -1276,7 +1282,9 @@ mod integration_tests {
                 // Verify Content-Type header
                 assert_eq!(
                     response.headers().get("content-type"),
-                    Some(&reqwest::header::HeaderValue::from_static("application/json")),
+                    Some(&reqwest::header::HeaderValue::from_static(
+                        "application/json"
+                    )),
                     "response should have Content-Type: application/json"
                 );
 

@@ -757,7 +757,12 @@ mod tests {
         let event = stream.next().await.unwrap().unwrap();
         match event {
             DiscoveryEvent::Added(instance) => match instance {
-                DiscoveryInstance::MetricsEndpoint { namespace, host, port, .. } => {
+                DiscoveryInstance::MetricsEndpoint {
+                    namespace,
+                    host,
+                    port,
+                    ..
+                } => {
                     assert_eq!(namespace, "test-ns");
                     assert_eq!(host, "localhost");
                     assert_eq!(port, 8080);
