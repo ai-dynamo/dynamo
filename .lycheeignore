@@ -2,4 +2,4 @@
 ^file://
 
 # Ignore URLs in test data files
-**/tests/data/**
+.*tests/data.*
