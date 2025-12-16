@@ -98,6 +98,7 @@ operator:
 deploy:
   - 'deploy/helm/**'
   - 'deploy/utils/**'
+  - 'deploy/chrek/**'
 
 planner:
   - 'components/src/dynamo/planner/**'
