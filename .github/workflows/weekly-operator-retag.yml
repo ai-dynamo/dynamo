@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Weekly Operator Image Retag
+
+on:
+  schedule:
+    - cron: '0 8 * * 0' # Every Sunday at 12:00 AM PST (08:00 UTC)
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail {0}
+
+env:
+  REGISTRY_IMAGE: ai-dynamo/dynamo
+  AZURE_ACR_HOSTNAME: dynamoci.azurecr.io
+
+jobs:
+  retag-operator:
+    name: Retag Operator Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Need full history to get commit date
+
+      - name: Get commit info
+        id: commit
+        run: |
+          GIT_REV_SHORT=$(git rev-parse --short HEAD)
+          GIT_REV_FULL=$(git rev-parse HEAD)
+          COMMIT_DATE=$(git show -s --format=%cd --date=format:'%m-%d-%y' ${GIT_REV_SHORT})
+          
+          echo "GIT_REV_SHORT=${GIT_REV_SHORT}" >> $GITHUB_OUTPUT
+          echo "GIT_REV_FULL=${GIT_REV_FULL}" >> $GITHUB_OUTPUT
+          echo "COMMIT_DATE=${COMMIT_DATE}" >> $GITHUB_OUTPUT
+          
+          echo "Short commit: ${GIT_REV_SHORT}"
+          echo "Full commit: ${GIT_REV_FULL}"
+          echo "Commit date: ${COMMIT_DATE}"
+
+      - name: Login to Azure ACR
+        uses: ./.github/actions/docker-login
+        with:
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+      - name: Pull, retag, and push operator image
+        env:
+          GIT_REV_FULL: ${{ steps.commit.outputs.GIT_REV_FULL }}
+          COMMIT_DATE: ${{ steps.commit.outputs.COMMIT_DATE }}
+        run: |
+          SOURCE_TAG="${GIT_REV_FULL}-operator-amd64"
+          TARGET_TAG="${COMMIT_DATE}-${GIT_REV_FULL}-operator-amd64"
+          
+          SOURCE_IMAGE="${AZURE_ACR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
+          TARGET_IMAGE="${AZURE_ACR_HOSTNAME}/${REGISTRY_IMAGE}:${TARGET_TAG}"
+          
+          echo "Source image: ${SOURCE_IMAGE}"
+          echo "Target image: ${TARGET_IMAGE}"
+          
+          echo "Pulling source image..."
+          docker pull "${SOURCE_IMAGE}"
+          
+          echo "Tagging image..."
+          docker tag "${SOURCE_IMAGE}" "${TARGET_IMAGE}"
+          
+          echo "Pushing new tag..."
+          docker push "${TARGET_IMAGE}"
+          
+          echo "Successfully retagged operator image with date prefix"
+
