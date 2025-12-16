@@ -413,7 +413,7 @@ impl HttpServiceConfigBuilder {
                                 "request completed with client request error"
                             );
                         } else {
-                            tracing::info!(
+                            tracing::debug!(
                                 status = %status.as_u16(),
                                 latency_ms = %latency_ms,
                                 "request completed"
