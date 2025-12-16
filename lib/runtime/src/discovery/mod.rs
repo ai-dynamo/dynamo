@@ -57,6 +57,12 @@ pub enum DiscoveryQuery {
         component: String,
         endpoint: String,
     },
+    /// Query all metrics endpoints in the system
+    AllMetricsEndpoints,
+    /// Query all metrics endpoints in a specific namespace
+    NamespacedMetricsEndpoints {
+        namespace: String,
+    },
 }
 
 /// Specification for registering objects in the discovery plane
@@ -82,6 +88,13 @@ pub enum DiscoverySpec {
         /// Optional suffix appended after instance_id in the key path (e.g., for LoRA adapters)
         /// Key format: {namespace}/{component}/{endpoint}/{instance_id}[/{model_suffix}]
         model_suffix: Option<String>,
+    },
+    /// Metrics endpoint specification for registration
+    MetricsEndpoint {
+        namespace: String,
+        host: String,
+        port: u16,
+        gpu_uuids: Vec<String>,
     },
 }
 
@@ -151,6 +164,18 @@ impl DiscoverySpec {
                 card_json,
                 model_suffix,
             },
+            Self::MetricsEndpoint {
+                namespace,
+                host,
+                port,
+                gpu_uuids,
+            } => DiscoveryInstance::MetricsEndpoint {
+                namespace,
+                instance_id,
+                host,
+                port,
+                gpu_uuids,
+            },
         }
     }
 }
@@ -174,6 +199,14 @@ pub enum DiscoveryInstance {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_suffix: Option<String>,
     },
+    /// Registered metrics endpoint instance
+    MetricsEndpoint {
+        namespace: String,
+        instance_id: u64,
+        host: String,
+        port: u16,
+        gpu_uuids: Vec<String>,
+    },
 }
 
 impl DiscoveryInstance {
@@ -182,6 +215,7 @@ impl DiscoveryInstance {
         match self {
             Self::Endpoint(inst) => inst.instance_id,
             Self::Model { instance_id, .. } => *instance_id,
+            Self::MetricsEndpoint { instance_id, .. } => *instance_id,
         }
     }
 
@@ -195,6 +229,9 @@ impl DiscoveryInstance {
             Self::Model { card_json, .. } => Ok(serde_json::from_value(card_json.clone())?),
             Self::Endpoint(_) => {
                 anyhow::bail!("Cannot deserialize model from Endpoint instance")
+            }
+            Self::MetricsEndpoint { .. } => {
+                anyhow::bail!("Cannot deserialize model from MetricsEndpoint instance")
             }
         }
     }
@@ -236,4 +273,92 @@ pub trait Discovery: Send + Sync {
         query: DiscoveryQuery,
         cancel_token: Option<CancellationToken>,
     ) -> Result<DiscoveryStream>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_metrics_endpoint_serialization() {
+        let instance = DiscoveryInstance::MetricsEndpoint {
+            namespace: "test-namespace".to_string(),
+            instance_id: 12345,
+            host: "localhost".to_string(),
+            port: 8080,
+            gpu_uuids: vec!["GPU-12345".to_string(), "GPU-67890".to_string()],
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&instance).unwrap();
+        println!("Serialized: {}", json);
+
+        // Deserialize back
+        let deserialized: DiscoveryInstance = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(instance, deserialized);
+
+        // Verify fields
+        match deserialized {
+            DiscoveryInstance::MetricsEndpoint {
+                namespace,
+                instance_id,
+                host,
+                port,
+                gpu_uuids,
+            } => {
+                assert_eq!(namespace, "test-namespace");
+                assert_eq!(instance_id, 12345);
+                assert_eq!(host, "localhost");
+                assert_eq!(port, 8080);
+                assert_eq!(
+                    gpu_uuids,
+                    vec!["GPU-12345".to_string(), "GPU-67890".to_string()]
+                );
+            }
+            _ => panic!("Expected MetricsEndpoint variant"),
+        }
+    }
+
+    #[test]
+    fn test_metrics_endpoint_spec_with_instance_id() {
+        let spec = DiscoverySpec::MetricsEndpoint {
+            namespace: "test-ns".to_string(),
+            host: "localhost".to_string(),
+            port: 8080,
+            gpu_uuids: vec!["GPU-abc123".to_string()],
+        };
+
+        let instance = spec.with_instance_id(999);
+
+        match instance {
+            DiscoveryInstance::MetricsEndpoint {
+                namespace,
+                instance_id,
+                host,
+                port,
+                gpu_uuids,
+            } => {
+                assert_eq!(namespace, "test-ns");
+                assert_eq!(instance_id, 999);
+                assert_eq!(host, "localhost");
+                assert_eq!(port, 8080);
+                assert_eq!(gpu_uuids, vec!["GPU-abc123".to_string()]);
+            }
+            _ => panic!("Expected MetricsEndpoint variant"),
+        }
+    }
+
+    #[test]
+    fn test_metrics_endpoint_instance_id() {
+        let instance = DiscoveryInstance::MetricsEndpoint {
+            namespace: "test-ns".to_string(),
+            instance_id: 777,
+            host: "localhost".to_string(),
+            port: 8080,
+            gpu_uuids: vec![],
+        };
+
+        assert_eq!(instance.instance_id(), 777);
+    }
 }
