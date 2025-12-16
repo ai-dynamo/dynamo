@@ -74,6 +74,7 @@ class VLLMProcess:
         num_workers: int = 2,
         single_gpu: bool = False,
         data_parallel_size: Optional[int] = None,
+        request_plane: str = "tcp",
     ):
         """Initialize vLLM workers with dynamo integration.
 
@@ -89,6 +90,7 @@ class VLLMProcess:
             num_workers: Number of vLLM worker processes
             single_gpu: If True, all workers share GPU 0
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
+            request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
         """
         # Generate unique namespace for isolation
         namespace_suffix = generate_random_suffix()
@@ -183,6 +185,7 @@ class VLLMProcess:
                 {
                     "CUDA_VISIBLE_DEVICES": gpu_device,
                     "DYN_NAMESPACE": self.namespace,
+                    "DYN_REQUEST_PLANE": request_plane,
                     "DYN_VLLM_KV_EVENT_PORT": str(20080 + worker_idx),
                     "VLLM_NIXL_SIDE_CHANNEL_PORT": str(20090 + worker_idx),
                     "PYTHONHASHSEED": "0",  # for deterministic event id's
@@ -306,16 +309,20 @@ class VLLMProcess:
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_vllm_kv_router_basic(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, predownload_models, set_ucx_tls_no_mm, request_plane
 ):
     """
     Quick e2e sanity test for KV router with vLLM engine instances.
+    Tests both NATS and TCP request planes.
     """
 
     # runtime_services starts etcd and nats
     N_VLLM_WORKERS = 2
-    logger.info(f"Starting vLLM KV router test with {N_VLLM_WORKERS} workers")
+    logger.info(
+        f"Starting vLLM KV router test with {N_VLLM_WORKERS} workers using request_plane={request_plane}"
+    )
 
     try:
         # Start vLLM workers
@@ -325,6 +332,7 @@ def test_vllm_kv_router_basic(
             vllm_args=VLLM_ARGS,
             num_workers=N_VLLM_WORKERS,
             single_gpu=True,  # fit workers into one GPU
+            request_plane=request_plane,
         )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
         vllm_workers.__enter__()
@@ -339,6 +347,7 @@ def test_vllm_kv_router_basic(
             num_requests=NUM_REQUESTS,
             frontend_timeout=180,  # 3 minutes should be plenty for TinyLlama
             store_backend="etcd",  # Explicit for clarity
+            request_plane=request_plane,
         )
 
     finally:

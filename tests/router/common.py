@@ -611,6 +611,7 @@ def _test_router_basic(
     num_requests: int,
     frontend_timeout: int = 120,
     store_backend: str = "etcd",
+    request_plane: str = "nats",
 ):
     """Basic router test: start router, wait for workers and send concurrent requests via HTTP frontend.
 
@@ -628,6 +629,7 @@ def _test_router_basic(
         num_requests: Number of concurrent requests to send
         frontend_timeout: Timeout for frontend readiness check (default: 120s)
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "nats".
 
     Raises:
         AssertionError: If requests fail or frontend doesn't become ready
@@ -637,7 +639,12 @@ def _test_router_basic(
         # Start KV router frontend
         logger.info(f"Starting KV router frontend on port {frontend_port}")
         kv_router = KVRouterProcess(
-            request, block_size, frontend_port, engine_workers.namespace, store_backend
+            request,
+            block_size,
+            frontend_port,
+            engine_workers.namespace,
+            store_backend,
+            request_plane=request_plane,
         )
         kv_router.__enter__()
 
