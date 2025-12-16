@@ -9,6 +9,7 @@ on:
       - main
       - "pull-request/[0-9]+"
       - release/*.*.*
+      - ops-1969/ci-base-image-change
   workflow_dispatch:
     inputs:
       run_deploy_operator:
