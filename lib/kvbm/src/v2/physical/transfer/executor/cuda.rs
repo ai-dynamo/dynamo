@@ -72,6 +72,12 @@ pub fn execute_cuda_transfer(
     match strategy {
         TransferStrategy::CudaAsyncH2D => {
             let backend = select_backend_for_layouts(src, dst);
+            tracing::debug!(
+                strategy = "CudaAsyncH2D",
+                ?backend,
+                num_blocks = src_block_ids.len(),
+                "Attempting kernel-based transfer"
+            );
             if let Err(e) = try_execute_operational_kernel(
                 src,
                 dst,
@@ -82,7 +88,11 @@ pub fn execute_cuda_transfer(
                 backend,
             ) {
                 // Fallback to memcpy-based path
-                tracing::debug!("Kernel-based H2D failed ({}), falling back to memcpy", e);
+                tracing::debug!(
+                    strategy = "CudaAsyncH2D",
+                    error = %e,
+                    "Kernel-based transfer failed, falling back to memcpy"
+                );
                 execute_h2d(
                     src,
                     dst,
@@ -91,10 +101,22 @@ pub fn execute_cuda_transfer(
                     layers,
                     stream.as_ref(),
                 )?;
+            } else {
+                tracing::debug!(
+                    strategy = "CudaAsyncH2D",
+                    ?backend,
+                    "Kernel-based transfer succeeded"
+                );
             }
         }
         TransferStrategy::CudaAsyncD2H => {
             let backend = select_backend_for_layouts(src, dst);
+            tracing::debug!(
+                strategy = "CudaAsyncD2H",
+                ?backend,
+                num_blocks = src_block_ids.len(),
+                "Attempting kernel-based transfer"
+            );
             if let Err(e) = try_execute_operational_kernel(
                 src,
                 dst,
@@ -105,7 +127,11 @@ pub fn execute_cuda_transfer(
                 backend,
             ) {
                 // Fallback to memcpy-based path
-                tracing::debug!("Kernel-based D2H failed ({}), falling back to memcpy", e);
+                tracing::debug!(
+                    strategy = "CudaAsyncD2H",
+                    error = %e,
+                    "Kernel-based transfer failed, falling back to memcpy"
+                );
                 execute_d2h(
                     src,
                     dst,
@@ -114,11 +140,22 @@ pub fn execute_cuda_transfer(
                     layers,
                     stream.as_ref(),
                 )?;
+            } else {
+                tracing::debug!(
+                    strategy = "CudaAsyncD2H",
+                    ?backend,
+                    "Kernel-based transfer succeeded"
+                );
             }
         }
         TransferStrategy::CudaAsyncD2D => {
-            // Try kernel-based path first, fall back to memcpy on error
             let backend = select_backend_for_layouts(src, dst);
+            tracing::debug!(
+                strategy = "CudaAsyncD2D",
+                ?backend,
+                num_blocks = src_block_ids.len(),
+                "Attempting kernel-based transfer"
+            );
             if let Err(e) = try_execute_operational_kernel(
                 src,
                 dst,
@@ -129,7 +166,11 @@ pub fn execute_cuda_transfer(
                 backend,
             ) {
                 // Fallback to memcpy-based path
-                tracing::debug!("Kernel-based D2D failed ({}), falling back to memcpy", e);
+                tracing::debug!(
+                    strategy = "CudaAsyncD2D",
+                    error = %e,
+                    "Kernel-based transfer failed, falling back to memcpy"
+                );
                 execute_d2d(
                     src,
                     dst,
@@ -138,9 +179,20 @@ pub fn execute_cuda_transfer(
                     layers,
                     stream.as_ref(),
                 )?;
+            } else {
+                tracing::debug!(
+                    strategy = "CudaAsyncD2D",
+                    ?backend,
+                    "Kernel-based transfer succeeded"
+                );
             }
         }
         TransferStrategy::CudaBlockingH2D => {
+            tracing::debug!(
+                strategy = "CudaBlockingH2D",
+                num_blocks = src_block_ids.len(),
+                "Executing blocking memcpy transfer"
+            );
             execute_h2d(
                 src,
                 dst,
@@ -153,6 +205,11 @@ pub fn execute_cuda_transfer(
             stream.synchronize()?;
         }
         TransferStrategy::CudaBlockingD2H => {
+            tracing::debug!(
+                strategy = "CudaBlockingD2H",
+                num_blocks = src_block_ids.len(),
+                "Executing blocking memcpy transfer"
+            );
             execute_d2h(
                 src,
                 dst,
@@ -368,6 +425,11 @@ pub(crate) fn try_execute_operational_kernel(
     stream: &cudarc::driver::CudaStream,
     backend: OperationalCopyBackend,
 ) -> Result<()> {
+    // Bind CUDA context to current thread before any CUDA operations.
+    // This is necessary because this function may be called from any tokio worker thread,
+    // but malloc_sync() requires the context to be current on the calling thread.
+    stream.context().bind_to_thread()?;
+
     // Check compatibility
     if !are_layouts_kernel_compatible(src, dst) {
         return Err(anyhow!("Layouts not compatible for kernel-based copy"));

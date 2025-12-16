@@ -90,7 +90,7 @@ impl ConnectorLeader {
                     OnboardingStatus::Searching
                     | OnboardingStatus::Preparing { .. }
                     | OnboardingStatus::Staging { .. } => {
-                        tracing::debug!(?status, "Find operation still in progress");
+                        tracing::trace!(?status, "Find operation still in progress");
                         MatchCheckOutcome::InProgress
                     }
                     OnboardingStatus::Complete { matched_blocks } => {
