@@ -18,10 +18,13 @@ import math
 import re
 import time
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+import requests
+
 from dynamo import prometheus_names  # type: ignore[attr-defined]
+from tests.utils.constants import DefaultPort
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +41,12 @@ class BasePayload:
 
     # Connection info
     host: str = "localhost"
-    port: int = 8000
+    port: int = DefaultPort.FRONTEND.value
     endpoint: str = ""
     method: str = "POST"
+    # Optional additional ports used by specialized payloads (e.g. LoRA system/control-plane APIs).
+    # This is intentionally empty by default to preserve prior semantics.
+    system_ports: list[int] = field(default_factory=list)
 
     def url(self) -> str:
         ep = self.endpoint.lstrip("/")
@@ -241,6 +247,93 @@ class ToolCallingChatPayload(ChatPayload):
 
 
 @dataclass
+class LoraTestChatPayload(ChatPayload):
+    """
+    Chat payload that loads a LoRA adapter before sending inference requests.
+
+    This payload first loads the specified LoRA adapter via the system API,
+    then sends chat completion requests using the LoRA model.
+    """
+
+    def __init__(
+        self,
+        body: dict,
+        lora_name: str,
+        s3_uri: str,
+        system_port: int = DefaultPort.SYSTEM1.value,
+        repeat_count: int = 1,
+        expected_response: Optional[list] = None,
+        expected_log: Optional[list] = None,
+        timeout: int = 60,
+    ):
+        super().__init__(
+            body=body,
+            repeat_count=repeat_count,
+            expected_response=expected_response or [],
+            expected_log=expected_log or [],
+            timeout=timeout,
+        )
+        self.system_ports = [system_port]
+        self.lora_name = lora_name
+        self.s3_uri = s3_uri
+        self._lora_loaded = False
+
+    def _ensure_lora_loaded(self) -> None:
+        """Ensure the LoRA adapter is loaded before making inference requests"""
+        if not self._lora_loaded:
+            # Import the load_lora_adapter function
+            # Note: This import is done here to avoid circular dependencies
+            from tests.serve.lora_utils import load_lora_adapter
+
+            load_lora_adapter(
+                system_port=self.system_ports[0],
+                lora_name=self.lora_name,
+                s3_uri=self.s3_uri,
+                timeout=self.timeout,
+            )
+
+            # Wait for the LoRA model to appear in /v1/models
+            models_url = f"http://{self.host}:{self.port}/v1/models"
+            start_time = time.time()
+
+            logger.info(
+                f"Waiting for LoRA model '{self.lora_name}' to appear in /v1/models..."
+            )
+
+            while time.time() - start_time < self.timeout:
+                try:
+                    response = requests.get(models_url, timeout=5)
+                    if response.status_code == 200:
+                        data = response.json()
+                        models = data.get("data", [])
+                        model_ids = [m.get("id", "") for m in models]
+
+                        if self.lora_name in model_ids:
+                            logger.info(
+                                f"LoRA model '{self.lora_name}' is now available"
+                            )
+                            self._lora_loaded = True
+                            return
+
+                        logger.debug(
+                            f"Available models: {model_ids}, waiting for '{self.lora_name}'..."
+                        )
+                except requests.RequestException as e:
+                    logger.debug(f"Error checking /v1/models: {e}")
+
+                time.sleep(1)
+
+            raise RuntimeError(
+                f"Timeout: LoRA model '{self.lora_name}' did not appear in /v1/models within {self.timeout}s"
+            )
+
+    def url(self) -> str:
+        """Load LoRA before first request, then return URL"""
+        self._ensure_lora_loaded()
+        return super().url()
+
+
+@dataclass
 class CompletionPayload(BasePayload):
     """Payload for completions endpoint."""
 
@@ -366,7 +459,7 @@ class MetricCheck:
 class MetricsPayload(BasePayload):
     endpoint: str = "/metrics"
     method: str = "GET"
-    port: int = 8081
+    port: int = DefaultPort.SYSTEM1.value
     min_num_requests: int = 1
     backend: Optional[
         str

@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func TestIsSpecChanged2(t *testing.T) {
+func TestGetSpecChangeResult(t *testing.T) {
 	tests := []struct {
 		name          string
 		current       client.Object
@@ -407,16 +407,182 @@ func TestIsSpecChanged2(t *testing.T) {
 			if err != nil {
 				t.Errorf("failed to get spec hash in test for resource %s: %s", tt.current.GetName(), err)
 			}
-			updateHashAnnotation(tt.current, hash)
-			gotHash, err := IsSpecChanged(tt.current, tt.desired)
+			// Set both hash and generation annotations (generation=1 simulates initial state)
+			updateAnnotations(tt.current, hash, 1)
+			result, err := GetSpecChangeResult(tt.current, tt.desired)
 			if err != nil {
 				t.Errorf("failed to check if spec has changed in test for resource %s: %s", tt.current.GetName(), err)
 			}
-			if tt.expectedHash && gotHash == nil {
-				t.Errorf("IsSpecChanged() = %v, want %v", gotHash, tt.expectedHash)
+			if tt.expectedHash && !result.NeedsUpdate {
+				t.Errorf("GetSpecChangeResult() NeedsUpdate = %v, want %v", result.NeedsUpdate, tt.expectedHash)
 			}
-			if !tt.expectedHash && gotHash != nil {
-				t.Errorf("IsSpecChanged() = %v, want %v", gotHash, tt.expectedHash)
+			if !tt.expectedHash && result.NeedsUpdate {
+				t.Errorf("GetSpecChangeResult() NeedsUpdate = %v, want %v", result.NeedsUpdate, tt.expectedHash)
+			}
+		})
+	}
+}
+
+func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
+	tests := []struct {
+		name                       string
+		currentGeneration          int64
+		lastAppliedGeneration      string // empty string means annotation not set
+		lastAppliedHash            string // empty string means annotation not set, "match" means compute from desired
+		desiredReplicas            int64  // different from current (2) means hash will differ
+		expectNeedsUpdate          bool
+		expectManualChangeDetected bool
+		expectNewGeneration        int64 // 0 means don't check
+	}{
+		{
+			name:                  "no change - generations and hash match",
+			currentGeneration:     5,
+			lastAppliedGeneration: "5",
+			lastAppliedHash:       "match",
+			desiredReplicas:       2, // same as current
+			expectNeedsUpdate:     false,
+		},
+		{
+			name:                       "manual change detected - generation increased",
+			currentGeneration:          7,
+			lastAppliedGeneration:      "5",
+			lastAppliedHash:            "match",
+			desiredReplicas:            2,
+			expectNeedsUpdate:          true,
+			expectManualChangeDetected: true,
+			expectNewGeneration:        8, // current(7) + 1
+		},
+		{
+			// Upgrade scenario: hash matches but no generation annotation yet.
+			// We do a full update to ensure spec is correct (could have been manual edits
+			// before we added generation tracking).
+			name:                  "missing generation annotation - full update for safety",
+			currentGeneration:     5,
+			lastAppliedGeneration: "", // missing
+			lastAppliedHash:       "match",
+			desiredReplicas:       2,
+			expectNeedsUpdate:     true,
+			expectNewGeneration:   6, // current + 1
+		},
+		{
+			name:                  "missing hash annotation - needs full update",
+			currentGeneration:     5,
+			lastAppliedGeneration: "5",
+			lastAppliedHash:       "", // missing
+			desiredReplicas:       2,
+			expectNeedsUpdate:     true,
+			expectNewGeneration:   6, // current(5) + 1
+		},
+		{
+			name:                  "hash changed - needs full update",
+			currentGeneration:     5,
+			lastAppliedGeneration: "5",
+			lastAppliedHash:       "match",
+			desiredReplicas:       3, // different from current (2)
+			expectNeedsUpdate:     true,
+			expectNewGeneration:   6, // current(5) + 1
+		},
+		{
+			name:                  "corrupted generation annotation - needs full update",
+			currentGeneration:     5,
+			lastAppliedGeneration: "invalid",
+			lastAppliedHash:       "match",
+			desiredReplicas:       2,
+			expectNeedsUpdate:     true,
+			expectNewGeneration:   6, // current(5) + 1
+		},
+		{
+			name:                  "both annotations missing - needs full update",
+			currentGeneration:     5,
+			lastAppliedGeneration: "",
+			lastAppliedHash:       "",
+			desiredReplicas:       2,
+			expectNeedsUpdate:     true,
+			expectNewGeneration:   6, // current(5) + 1
+		},
+		{
+			name:                       "manual change with hash also changed",
+			currentGeneration:          7,
+			lastAppliedGeneration:      "5",
+			lastAppliedHash:            "match",
+			desiredReplicas:            3, // different
+			expectNeedsUpdate:          true,
+			expectManualChangeDetected: false, // hash change takes precedence
+			expectNewGeneration:        8,
+		},
+		{
+			// Generation=0 can occur with CRDs that don't have generation tracking enabled,
+			// or as a safety net for edge cases. When gen=0, we skip generation-based
+			// manual change detection and rely solely on hash comparison.
+			name:                  "generation zero - skip generation check",
+			currentGeneration:     0,
+			lastAppliedGeneration: "0",
+			lastAppliedHash:       "match",
+			desiredReplicas:       2,
+			expectNeedsUpdate:     false, // gen check skipped when gen=0, hash matches
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			// Create current resource
+			current := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "apps/v1",
+					"kind":       "Deployment",
+					"metadata": map[string]interface{}{
+						"name":        "test-deployment",
+						"namespace":   "default",
+						"generation":  tt.currentGeneration,
+						"annotations": map[string]interface{}{},
+					},
+					"spec": map[string]interface{}{
+						"replicas": int64(2),
+					},
+				},
+			}
+
+			// Create desired resource
+			desired := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "apps/v1",
+					"kind":       "Deployment",
+					"metadata": map[string]interface{}{
+						"name":      "test-deployment",
+						"namespace": "default",
+					},
+					"spec": map[string]interface{}{
+						"replicas": tt.desiredReplicas,
+					},
+				},
+			}
+
+			// Set annotations based on test case
+			// "match" means the lastAppliedHash should match the CURRENT spec's hash
+			// (simulating that operator last applied what's currently in the cluster)
+			annotations := make(map[string]string)
+			if tt.lastAppliedHash == "match" {
+				hash, err := GetSpecHash(current)
+				g.Expect(err).To(gomega.BeNil())
+				annotations[NvidiaAnnotationHashKey] = hash
+			} else if tt.lastAppliedHash != "" {
+				annotations[NvidiaAnnotationHashKey] = tt.lastAppliedHash
+			}
+			if tt.lastAppliedGeneration != "" {
+				annotations[NvidiaAnnotationGenerationKey] = tt.lastAppliedGeneration
+			}
+			if len(annotations) > 0 {
+				current.SetAnnotations(annotations)
+			}
+
+			result, err := GetSpecChangeResult(current, desired)
+			g.Expect(err).To(gomega.BeNil())
+			g.Expect(result.NeedsUpdate).To(gomega.Equal(tt.expectNeedsUpdate), "NeedsUpdate mismatch")
+			g.Expect(result.ManualChangeDetected).To(gomega.Equal(tt.expectManualChangeDetected), "ManualChangeDetected mismatch")
+			if tt.expectNewGeneration != 0 {
+				g.Expect(result.NewGeneration).To(gomega.Equal(tt.expectNewGeneration), "NewGeneration mismatch")
 			}
 		})
 	}

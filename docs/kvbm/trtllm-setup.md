@@ -23,7 +23,6 @@ To learn what KVBM is, please check [here](kvbm_architecture.md)
 
 > [!Note]
 > - Ensure that `etcd` and `nats` are running before starting.
-> - KVBM does not currently support CUDA graphs in TensorRT-LLM.
 > - KVBM only supports TensorRT-LLM’s PyTorch backend.
 > - Disable partial reuse `enable_partial_reuse: false` in the LLM API config’s `kv_connector_config` to increase offloading cache hits.
 > - KVBM requires TensorRT-LLM v1.1.0rc5 or newer.

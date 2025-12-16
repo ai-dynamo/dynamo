@@ -234,6 +234,7 @@ impl LocalModelBuilder {
             self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
             self.runtime_config.max_num_batched_tokens =
                 mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
+            self.runtime_config.enable_local_indexer = mocker_engine_args.enable_local_indexer;
             self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
             self.media_decoder = Some(MediaDecoder::default());
             self.media_fetcher = Some(MediaFetcher::default());

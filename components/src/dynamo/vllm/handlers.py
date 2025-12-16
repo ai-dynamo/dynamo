@@ -758,7 +758,6 @@ class BaseWorkerHandler(ABC):
                 logger.debug(
                     f"Starting token generation for request {request_id} (no LoRA)"
                 )
-
             gen = self.engine_client.generate(
                 prompt,
                 sampling_params,
@@ -947,12 +946,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     async def _generate_text_mode(self, request, context, request_id):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""
         # Get text input using InputParamManager
-        input_text = self.input_param_manager.get_input_param(
+        input_data = self.input_param_manager.get_input_param(
             request, use_tokenizer=True
         )
 
         # Build prompt for vLLM
-        prompt = TextPrompt(prompt=input_text)
+        if isinstance(input_data, list):
+            prompt = TokensPrompt(prompt_token_ids=input_data)
+        else:
+            prompt = TextPrompt(prompt=input_data)
 
         # Build sampling params from OpenAI-style request
         sampling_params = build_sampling_params_openai(
@@ -1050,14 +1052,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Prefill Request ID: {request_id}")
 
-        if self.use_vllm_tokenizer:
-            # Text-in-text-out mode: use InputParamManager
-            async for chunk in self._generate_text_mode(request, context, request_id):
-                yield chunk
-        else:
-            # Token-in-token-out mode: internal protocol format
-            async for chunk in self._generate_token_mode(request, context, request_id):
-                yield chunk
+        # Token-in-token-out mode: internal protocol format
+        async for chunk in self._generate_token_mode(request, context, request_id):
+            yield chunk
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
@@ -1157,80 +1154,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                             f"generated {len(token_ids)} token(s), "
                             f"has_kv_params={res.kv_transfer_params is not None}"
                         )
-
-                    yield output
-            except asyncio.CancelledError:
-                # raise the error because we cannot migrate prefill requests
-                raise GeneratorExit(
-                    "Prefill engine was shut down during token generation"
-                ) from None
-
-    async def _generate_text_mode(self, request, context, request_id):
-        """Generate prefill using OpenAI-compatible format (text-in-text-out)."""
-        # Get text input using InputParamManager
-        input_text = self.input_param_manager.get_input_param(
-            request, use_tokenizer=True
-        )
-
-        # Build prompt for vLLM
-        prompt = TextPrompt(prompt=input_text)
-
-        # Build sampling params from OpenAI-style request
-        sampling_params = build_sampling_params_openai(
-            request, self.default_sampling_params
-        )
-        sampling_params.detokenize = False  # Prefill doesn't need detokenization
-
-        # Configure for prefill-only mode with remote decode
-        if sampling_params.extra_args is None:
-            sampling_params.extra_args = {}
-        sampling_params.extra_args["kv_transfer_params"] = {
-            "do_remote_decode": True,
-        }
-        sampling_params_defaults = {
-            "do_remote_prefill": False,
-            "remote_engine_id": None,
-            "remote_block_ids": None,
-            "remote_host": None,
-            "remote_port": None,
-        }
-        # Add only missing keys
-        for k, v in sampling_params_defaults.items():
-            sampling_params.extra_args["kv_transfer_params"].setdefault(k, v)
-        # Override for prefill: only generate 1 token
-        sampling_params.max_tokens = 1
-        sampling_params.min_tokens = 1
-
-        dp_rank = request.get("dp_rank", None)
-
-        async with self._abort_monitor(context, request_id, is_prefill=True):
-            try:
-                gen = self.engine_client.generate(
-                    prompt, sampling_params, request_id, data_parallel_rank=dp_rank
-                )
-            except EngineDeadError as e:
-                logger.error(f"vLLM EngineDeadError: {e}")
-                logger.warning("Initiating Dynamo Runtime shutdown.")
-                self.runtime.shutdown()
-                os._exit(1)
-
-            try:
-                async for res in gen:
-                    logger.debug(f"kv transfer params: {res.kv_transfer_params}")
-
-                    token_ids = res.outputs[0].token_ids if res.outputs else []
-
-                    output: Dict[str, Any] = {
-                        "token_ids": list(token_ids),
-                        "disaggregated_params": (
-                            {"kv_transfer_params": res.kv_transfer_params}
-                            if res.kv_transfer_params
-                            else None
-                        ),
-                        "completion_usage": BaseWorkerHandler._build_completion_usage(
-                            request_output=res
-                        ),
-                    }
 
                     yield output
             except asyncio.CancelledError:
