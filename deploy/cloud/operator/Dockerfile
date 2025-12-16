@@ -50,7 +50,9 @@ RUN apt-get update && apt-get install -y make && apt-get clean && rm -rf /var/li
 # Run tests using Makefile
 RUN make test
 
-# Build stage - depends on successful lint and test
+# Build stage
+# Note: This stage does not implicitly run 'linter' or 'tester'.
+# Use --target linter or --target tester to run those stages specifically.
 FROM base AS builder
 
 ARG TARGETOS=linux
@@ -59,39 +61,9 @@ ARG TARGETARCH
 # Build the binary for the target architecture
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cmd/main.go
 
-#########################################################################
-#  Branch & Merge Pattern to handle architecture naming
-#    This maps TARGETARCH (amd64/arm64) to architecture-specific settings
-#########################################################################
-
-##################################
-########## Runtime Base ##########
-##################################
-
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime_base
+# Depends on RUNTIME_IMAGE being a multi-arch manifest
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 WORKDIR /
-
-##################################
-# Branch 1: AMD64 specific settings
-##################################
-
-FROM runtime_base AS runtime_amd64
-# AMD64-specific configurations can be added here if needed
-
-##################################
-# Branch 2: ARM64 specific settings
-##################################
-
-FROM runtime_base AS runtime_arm64
-# ARM64-specific configurations can be added here if needed
-
-##################################
-# Merge: Select correct branch
-##################################
-
-ARG TARGETARCH
-FROM runtime_${TARGETARCH} AS runtime
-
 
 COPY --from=builder /workspace/manager .
 USER 65532:65532
