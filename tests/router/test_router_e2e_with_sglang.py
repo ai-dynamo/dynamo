@@ -333,6 +333,8 @@ def test_sglang_kv_router_basic(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.skip(reason="Broken by sglang changes")
+# TODO: Re-enable this test once https://github.com/sgl-project/sglang/pull/14934 is merged
 def test_router_decisions_sglang_multiple_workers(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):

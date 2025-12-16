@@ -183,8 +183,8 @@ impl CommonExtProvider for NvCreateCompletionRequest {
     }
 
     /// Guided Decoding Options
-    fn get_guided_json(&self) -> Option<&serde_json::Value> {
-        self.common.guided_json.as_ref()
+    fn get_guided_json(&self) -> Option<serde_json::Value> {
+        self.common.guided_json.clone()
     }
 
     fn get_guided_regex(&self) -> Option<String> {

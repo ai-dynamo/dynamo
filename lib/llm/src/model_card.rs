@@ -162,6 +162,11 @@ impl GenerationConfig {
     }
 }
 
+/// Check if our model only has config fields for a Mistral-format model.
+fn is_exclusively_mistral_model(directory: &Path) -> bool {
+    !directory.join("config.json").exists() && directory.join("params.json").exists()
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Builder, Default)]
 pub struct ModelDeploymentCard {
     /// Human readable model name, e.g. "Meta Llama 3.1 8B Instruct"
@@ -352,7 +357,9 @@ impl ModelDeploymentCard {
                     .with_context(|| p.display().to_string())
             }
             None => {
-                anyhow::bail!("Blank ModelDeploymentCard does not have a tokenizer");
+                anyhow::bail!(
+                    "Blank ModelDeploymentCard does not have a tokenizer. Is this a mistral model? If so, the `--use-<framework>-tokenizer` flag in the engine command is required."
+                );
             }
         }
     }
@@ -497,8 +504,23 @@ impl ModelDeploymentCard {
                 // If neither of those are present let the engine default it
                 .unwrap_or(0);
 
+        let is_mistral_model = is_exclusively_mistral_model(local_path);
+
+        let (model_info, tokenizer, gen_config, prompt_formatter) = if !is_mistral_model {
+            (
+                Some(ModelInfoType::from_disk(local_path)?),
+                Some(TokenizerKind::from_disk(local_path)?),
+                GenerationConfig::from_disk(local_path).ok(),
+                PromptFormatterArtifact::from_disk(local_path)?,
+            )
+        } else {
+            (None, None, None, None)
+        };
+
         // Load chat template - either custom or from repo
-        let chat_template_file = if let Some(template_path) = custom_template_path {
+        let chat_template_file = if is_mistral_model {
+            None
+        } else if let Some(template_path) = custom_template_path {
             if !template_path.exists() {
                 anyhow::bail!(
                     "Custom template file does not exist: {}",
@@ -525,10 +547,10 @@ impl ModelDeploymentCard {
         Ok(Self {
             slug: Slug::from_string(&display_name),
             display_name,
-            model_info: Some(ModelInfoType::from_disk(local_path)?),
-            tokenizer: Some(TokenizerKind::from_disk(local_path)?),
-            gen_config: GenerationConfig::from_disk(local_path).ok(), // optional
-            prompt_formatter: PromptFormatterArtifact::from_disk(local_path)?,
+            model_info,
+            tokenizer,
+            gen_config,
+            prompt_formatter,
             chat_template_file,
             prompt_context: None, // TODO - auto-detect prompt context
             context_length,

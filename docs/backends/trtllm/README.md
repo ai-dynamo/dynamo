@@ -240,7 +240,7 @@ To benchmark your deployment with AIPerf, see this utility script, configuring t
 
 ## Multimodal support
 
-Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [Multimodal Support Guide](./multimodal_support.md).
+Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [TensorRT-LLM Multimodal Guide](../../multimodal/trtllm.md).
 
 ## Logits Processing
 

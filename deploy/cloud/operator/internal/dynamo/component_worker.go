@@ -86,6 +86,10 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 			Name:  "DYN_SYSTEM_PORT",
 			Value: fmt.Sprintf("%d", commonconsts.DynamoSystemPort),
 		},
+		{
+			Name:  "DYN_HEALTH_CHECK_ENABLED",
+			Value: "true",
+		},
 	}...)
 
 	return container, nil
