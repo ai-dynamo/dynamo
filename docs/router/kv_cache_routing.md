@@ -88,26 +88,63 @@ When both workers are registered, requests are automatically routed.
 
 ```python
 # Decode worker registration (in your decode worker)
+decode_endpoint = runtime.namespace("dynamo").component("decode").endpoint("generate")
+
 await register_llm(
     model_input=ModelInput.Tokens,
     model_type=ModelType.Chat | ModelType.Completions,
-    endpoint=generate_endpoint,
+    endpoint=decode_endpoint,
     model_name="meta-llama/Llama-2-7b-hf",
     # ... other parameters
 )
 
+await decode_endpoint.serve_endpoint(decode_handler.generate)
+
 # Prefill worker registration (in your prefill worker)
+prefill_endpoint = runtime.namespace("dynamo").component("prefill").endpoint("generate")
+
 await register_llm(
     model_input=ModelInput.Tokens,
     model_type=ModelType.Prefill,  # <-- Mark as prefill worker
-    endpoint=generate_endpoint,
+    endpoint=prefill_endpoint,
     model_name="meta-llama/Llama-2-7b-hf",  # Must match decode model name
     # ... other parameters
 )
+
+await prefill_endpoint.serve_endpoint(prefill_handler.generate)
 ```
 
 > [!Note]
 > The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh).
+
+### Request Flow
+
+The following diagram shows an overview of the major components in disaggregated serving:
+
+```mermaid
+graph TD
+    HTTP[HTTP]
+    ROUTER[Router]
+    PREFILL[Prefill Worker]
+    DECODE[Decode Worker]
+
+    classDef worker_style fill:#f3e5f5,stroke:#333,stroke-width:2px,color:#333;
+    classDef router_style fill:#2e8b57,stroke:#333,stroke-width:2px,color:#fff;
+
+    class PREFILL,DECODE worker_style
+    class ROUTER router_style
+
+    HTTP <--> |"request/response"| ROUTER
+    ROUTER --> |"1. send to prefill"| PREFILL
+    PREFILL --> |"2. return NIXL metadata"| ROUTER
+    ROUTER --> |"3. send with metadata"| DECODE
+    DECODE --> |"4. stream response"| ROUTER
+
+    PREFILL -.-> |"publish kv events"| ROUTER
+
+    linkStyle 0,1,2,3,4 stroke:#8b4513,stroke-width:2px
+    linkStyle 5 stroke:#2196f3,stroke-width:2px
+```
 
 ## Overview
 
@@ -153,13 +190,15 @@ graph TD
     JS -->|Consume as Durable Consumer| R2
     JS -->|Periodic Snapshot| OS
 
-    style JS fill:#e1f5fe,color:#5a850f
-    style OS fill:#e8f5e9,color:#5a850f
-    style E1 fill:#fff3e0,color:#5a850f
-    style E2 fill:#fff3e0,color:#5a850f
-    style E3 fill:#fff3e0,color:#5a850f
-    style R1 fill:#f3e5f5,color:#5a850f
-    style R2 fill:#f3e5f5,color:#5a850f
+    style JS fill:#e1f5fe,stroke:#333,color:#333
+    style OS fill:#e1f5fe,stroke:#333,color:#333
+    style E1 fill:#f3e5f5,stroke:#333,color:#333
+    style E2 fill:#f3e5f5,stroke:#333,color:#333
+    style E3 fill:#f3e5f5,stroke:#333,color:#333
+    style R1 fill:#2e8b57,stroke:#333,color:#fff
+    style R2 fill:#2e8b57,stroke:#333,color:#fff
+
+    linkStyle 0,1,2,3,4,5 stroke:#2196f3,stroke-width:2px
 ```
 
 #### Mode 2: NATS Core with Local Indexer
@@ -194,12 +233,14 @@ graph TD
     NC -->|Subscribe| R1
     NC -->|Subscribe| R2
 
-    style NC fill:#e1f5fe,color:#5a850f
-    style E1 fill:#fff3e0,color:#5a850f
-    style E2 fill:#fff3e0,color:#5a850f
-    style E3 fill:#fff3e0,color:#5a850f
-    style R1 fill:#f3e5f5,color:#5a850f
-    style R2 fill:#f3e5f5,color:#5a850f
+    style NC fill:#e1f5fe,stroke:#333,color:#333
+    style E1 fill:#f3e5f5,stroke:#333,color:#333
+    style E2 fill:#f3e5f5,stroke:#333,color:#333
+    style E3 fill:#f3e5f5,stroke:#333,color:#333
+    style R1 fill:#2e8b57,stroke:#333,color:#fff
+    style R2 fill:#2e8b57,stroke:#333,color:#fff
+
+    linkStyle 0,1,2,3,4 stroke:#2196f3,stroke-width:2px
 ```
 
 **How gap detection works:**
@@ -372,20 +413,21 @@ To get a feel for how KV Cache management works on a single worker with KV Cache
 Further details can be found for: [TRT-LLM](https://developer.nvidia.com/blog/introducing-new-kv-cache-reuse-optimizations-in-nvidia-tensorrt-llm/), [vLLM](https://docs.vllm.ai/en/latest/design/automatic_prefix_caching.html#design-automatic-prefix-caching) and [SGLang](https://lmsys.org/blog/2024-01-17-sglang/).
 
 ## KV Cache Routing and Load Balancing
-```text
-+---------+          +------------------+           +---------+
-|  Tokens |--------->| KV Aware Router  |---------> | Worker 2|
-+---------+          +------------------+           +---------+
-                             |
-          +------------------+------------------+
-          |                  |                  |
-          | Cached: 2 blocks | Cached: 5 blocks | Cached: 8 blocks
-          | Prefill: 8 blks  | Prefill: 5 blks  | Prefill: 2 blks
-          | Decode: 10 blks  | Decode: 5 blks   | Decode: 9 blks
-          v                  v                  v
-   +----------------+  +----------------+  +----------------+
-   |   Worker 1     |  |   Worker 2     |  |   Worker 3     |
-   +----------------+  +----------------+  +----------------+
+```mermaid
+graph TD
+    T[Tokens] --> R[KV Aware Router]
+
+    R -.-> W1["Worker 1<br/>Cached: 2 blocks<br/>Prefill: 8 blks<br/>Decode: 10 blks"]
+    R ==>|Selected| W2["Worker 2<br/>Cached: 5 blocks<br/>Prefill: 5 blks<br/>Decode: 5 blks"]
+    R -.-> W3["Worker 3<br/>Cached: 8 blocks<br/>Prefill: 2 blks<br/>Decode: 9 blks"]
+
+    style T fill:#fff3e0,stroke:#333,color:#333
+    style R fill:#2e8b57,stroke:#333,color:#fff
+    style W1 fill:#f3e5f5,stroke:#333,color:#333
+    style W2 fill:#c8e6c9,stroke:#333,color:#333
+    style W3 fill:#f3e5f5,stroke:#333,color:#333
+
+    linkStyle 0,1,2,3 stroke:#8b4513,stroke-width:2px
 ```
 
 KV Cache reuse introduces complexity to LLM serving load balancing. While it can significantly reduce computation costs, routing strategies that ignore worker-specific KV states can lead to:
