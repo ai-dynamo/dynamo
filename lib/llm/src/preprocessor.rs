@@ -71,6 +71,7 @@ pub struct LLMMetricAnnotation {
     pub input_tokens: usize,
     pub output_tokens: usize,
     pub chunk_tokens: usize,
+    pub cached_tokens: Option<usize>,
 }
 
 impl LLMMetricAnnotation {
@@ -647,6 +648,7 @@ impl OpenAIPreprocessor {
                         input_tokens: isl,
                         output_tokens: current_osl,
                         chunk_tokens,
+                        cached_tokens: None,
                     };
 
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
@@ -674,20 +676,39 @@ impl OpenAIPreprocessor {
                     // again. The stream is exhausted and will panic if polled after None.
                     inner.finished = true;
 
-                    // Check if we need to send a usage chunk
-                    if inner.response_generator.is_usage_enabled()
-                        && inner.finish_reason_sent
-                        && !inner.usage_chunk_sent
-                    {
+                    if inner.finish_reason_sent && !inner.usage_chunk_sent {
                         inner.usage_chunk_sent = true;
 
-                        // Create the final usage chunk
                         let usage_chunk = inner.response_generator.create_usage_chunk();
+                        let usage = inner.response_generator.get_usage();
+                        let llm_metrics = LLMMetricAnnotation {
+                            input_tokens: usage.prompt_tokens as usize,
+                            output_tokens: usage.completion_tokens as usize,
+                            chunk_tokens: 0,
+                            cached_tokens: usage
+                                .prompt_tokens_details
+                                .as_ref()
+                                .and_then(|d| d.cached_tokens.map(|c| c as usize)),
+                        };
+
+                        // Create annotation string
+                        let annotation = llm_metrics.to_annotation::<()>().unwrap_or_else(|e| {
+                            tracing::warn!("Failed to serialize metrics: {}", e);
+                            Annotated::<()>::from_data(())
+                        });
+
+                        // Send the usage chunk if needed
+                        let data = if inner.response_generator.is_usage_enabled() {
+                            Some(usage_chunk)
+                        } else {
+                            None
+                        };
+
                         let annotated_usage = Annotated::<Resp> {
                             id: None,
-                            data: Some(usage_chunk),
-                            event: None,
-                            comment: None,
+                            data,
+                            event: Some(ANNOTATION_LLM_METRICS.to_string()),
+                            comment: annotation.comment,
                         };
 
                         tracing::trace!(
@@ -753,22 +774,14 @@ impl OpenAIPreprocessor {
         has_tools: bool,
     ) -> std::result::Result<bool, Error> {
         match (tool_call_parser, tool_choice, has_tools) {
-            // No parser but tools requested - error cases
-            (None, Some(ChatCompletionToolChoiceOption::Required), true) => {
-                tracing::warn!(
-                    "Tool choice 'required' specified but no tool parser configured; proceeding without jailing"
-                );
-                Ok(false)
-            }
+            // tool_choice=required/named work without parser (use Immediate jail mode)
+            (None, Some(ChatCompletionToolChoiceOption::Required), true) => Ok(true),
+            (None, Some(ChatCompletionToolChoiceOption::Named(_)), true) => Ok(true),
+
+            // tool_choice=auto requires a parser
             (None, Some(ChatCompletionToolChoiceOption::Auto), true) => {
                 tracing::warn!(
                     "Tool choice 'auto' specified but no tool parser configured; proceeding without jailing"
-                );
-                Ok(false)
-            }
-            (None, Some(ChatCompletionToolChoiceOption::Named(_)), _) => {
-                tracing::warn!(
-                    "Named tool choice specified but no tool parser configured; proceeding without jailing"
                 );
                 Ok(false)
             }
@@ -787,15 +800,38 @@ impl OpenAIPreprocessor {
 
     /// Apply tool calling jail to the stream if needed
     pub fn apply_tool_calling_jail<S>(
-        tool_call_parser: String,
+        tool_call_parser: Option<String>,
+        tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        let jail = JailedStream::builder()
-            .tool_call_parser(tool_call_parser)
-            .build();
+        use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
+
+        let mut builder = JailedStream::builder();
+
+        // Configure jail based on tool_choice
+        match tool_choice {
+            Some(ChatCompletionToolChoiceOption::Named(named)) => {
+                // Immediate jail mode for named tool choice
+                builder = builder.tool_choice_named(named.function.name.clone());
+            }
+            Some(ChatCompletionToolChoiceOption::Required) => {
+                // Immediate jail mode for required tool choice
+                builder = builder.tool_choice_required();
+            }
+            Some(ChatCompletionToolChoiceOption::Auto)
+            | Some(ChatCompletionToolChoiceOption::None)
+            | None => {
+                // Traditional marker-based jail for auto/none/unspecified
+                if let Some(parser) = tool_call_parser {
+                    builder = builder.tool_call_parser(parser);
+                }
+            }
+        }
+
+        let jail = builder.build();
         jail.apply_with_finish_reason(stream)
     }
 
@@ -958,11 +994,11 @@ impl
 
         // Apply jail conditionally
         let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
-            if let Some(parser) = self.tool_call_parser.clone() {
-                Box::pin(Self::apply_tool_calling_jail(parser, stream))
-            } else {
-                Box::pin(stream) // Should not happen due to should_jail check
-            }
+            Box::pin(Self::apply_tool_calling_jail(
+                self.tool_call_parser.clone(),
+                request.inner.tool_choice.clone(),
+                stream,
+            ))
         } else {
             Box::pin(stream)
         };

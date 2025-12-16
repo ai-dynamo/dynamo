@@ -2,7 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
-use crate::{protocols::common, types::TokenIdType};
+use crate::{
+    protocols::{
+        common::{self, timing::RequestTimingTracker},
+        openai::nvext::{NvExtProvider, NvExtResponse, TimingInfo, WorkerIdInfo},
+    },
+    types::TokenIdType,
+};
 
 impl NvCreateCompletionRequest {
     /// Enables usage tracking for non-streaming requests to comply with OpenAI API specification.
@@ -33,6 +39,12 @@ impl NvCreateCompletionRequest {
     // put this method on the request
     // inspect the request to extract options
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
+        // Check if client requested timing in extra_fields
+        let enable_timing = self
+            .nvext()
+            .and_then(|nv| nv.extra_fields.as_ref())
+            .is_some_and(|fields| fields.iter().any(|f| f == "timing"));
+
         let options = DeltaGeneratorOptions {
             enable_usage: self
                 .inner
@@ -42,6 +54,7 @@ impl NvCreateCompletionRequest {
                 .unwrap_or(false),
             enable_logprobs: self.inner.logprobs.unwrap_or(0) > 0,
             observability_fields: self.nvext.as_ref().and_then(|nv| nv.observability_fields.clone()),
+            enable_timing,
         };
 
         DeltaGenerator::new(self.inner.model.clone(), options, request_id)
@@ -54,9 +67,9 @@ pub struct DeltaGeneratorOptions {
     pub enable_logprobs: bool,
     /// Extra fields to include in response nvext (e.g., "worker_id", "timing_metrics")
     pub observability_fields: Option<Vec<String>>,
+    pub enable_timing: bool,
 }
 
-#[derive(Debug, Clone)]
 pub struct DeltaGenerator {
     id: String,
     object: String,
@@ -65,6 +78,7 @@ pub struct DeltaGenerator {
     system_fingerprint: Option<String>,
     usage: dynamo_async_openai::types::CompletionUsage,
     options: DeltaGeneratorOptions,
+    timing_tracker: Option<RequestTimingTracker>,
 }
 
 impl DeltaGenerator {
@@ -90,6 +104,13 @@ impl DeltaGenerator {
 
         let completion_id = format!("cmpl-{request_id}");
 
+        // Create timing tracker if timing is enabled
+        let timing_tracker = if options.enable_timing {
+            Some(RequestTimingTracker::new())
+        } else {
+            None
+        };
+
         Self {
             id: completion_id,
             object: "text_completion".to_string(),
@@ -98,6 +119,7 @@ impl DeltaGenerator {
             system_fingerprint: None,
             usage,
             options,
+            timing_tracker,
         }
     }
 
@@ -204,8 +226,7 @@ impl DeltaGenerator {
     /// # Returns
     /// * A [`NvCreateCompletionResponse`] with empty choices and usage stats.
     pub fn create_usage_chunk(&self) -> NvCreateCompletionResponse {
-        let mut usage = self.usage.clone();
-        usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
+        let usage = self.get_usage();
 
         let inner = dynamo_async_openai::types::CreateCompletionResponse {
             id: self.id.clone(),
@@ -233,6 +254,10 @@ impl DeltaGenerator {
             .as_ref()
             .map(|fields| fields.iter().any(|f| f == field))
             .unwrap_or(false)
+    pub fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage {
+        let mut usage = self.usage.clone();
+        usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
+        usage
     }
 }
 
@@ -241,27 +266,25 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         &mut self,
         delta: common::llm_backend::BackendOutput,
     ) -> anyhow::Result<NvCreateCompletionResponse> {
-        // aggregate usage
-        if self.options.enable_usage {
-            // SAFETY: Casting from `usize` to `u32` could lead to precision loss after `u32::MAX`,
-            // but this will not be an issue until context lengths exceed 4_294_967_295.
-            let token_length: u32 = delta
-                .token_ids
-                .len()
-                .try_into()
-                .expect("token_ids length exceeds u32::MAX");
+        // Aggregate token usage even if usage tracking is disabled for metrics tracking
+        // SAFETY: Casting from `usize` to `u32` could lead to precision loss after `u32::MAX`,
+        // but this will not be an issue until context lengths exceed 4_294_967_295.
+        let token_length: u32 = delta
+            .token_ids
+            .len()
+            .try_into()
+            .expect("token_ids length exceeds u32::MAX");
 
-            self.usage.completion_tokens += token_length;
+        self.usage.completion_tokens += token_length;
 
-            // If backend provides completion_usage with prompt token details,
-            // propagate the entire details struct to usage tracking
-            if let Some(prompt_details) = delta
-                .completion_usage
-                .as_ref()
-                .and_then(|usage| usage.prompt_tokens_details.as_ref())
-            {
-                self.usage.prompt_tokens_details = Some(prompt_details.clone());
-            }
+        // If backend provides completion_usage with prompt token details,
+        // propagate the entire details struct to usage tracking
+        if let Some(prompt_details) = delta
+            .completion_usage
+            .as_ref()
+            .and_then(|usage| usage.prompt_tokens_details.as_ref())
+        {
+            self.usage.prompt_tokens_details = Some(prompt_details.clone());
         }
 
         let logprobs = self.create_logprobs(
@@ -299,6 +322,44 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             // Only set nvext if we have at least one field
             if !nvext_obj.is_empty() {
                 response.inner.nvext = Some(serde_json::Value::Object(nvext_obj));
+        // Record first token time (only succeeds on first call due to OnceLock)
+        if let Some(ref tracker) = self.timing_tracker {
+            tracker.record_first_token();
+        }
+
+        // Extract worker_id from disaggregated_params
+        let worker_id_info = delta
+            .disaggregated_params
+            .as_ref()
+            .and_then(|params| params.get("worker_id"))
+            .and_then(|v| serde_json::from_value::<WorkerIdInfo>(v.clone()).ok());
+
+        // Get timing info if this is the final response (has finish_reason)
+        let timing_info: Option<TimingInfo> = if finish_reason.is_some() {
+            self.timing_tracker.as_ref().map(|tracker| {
+                tracker.record_finish();
+                tracker.get_timing_info()
+            })
+        } else {
+            None
+        };
+
+        // Inject nvext if we have worker_id or timing
+        if worker_id_info.is_some() || timing_info.is_some() {
+            let nvext_response = NvExtResponse {
+                worker_id: worker_id_info.clone(),
+                timing: timing_info,
+            };
+
+            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
+                response.inner.nvext = Some(nvext_json);
+                if let Some(ref info) = worker_id_info {
+                    tracing::debug!(
+                        "Injected worker_id into completions nvext: prefill={:?}, decode={:?}",
+                        info.prefill_worker_id,
+                        info.decode_worker_id
+                    );
+                }
             }
         }
 
@@ -315,6 +376,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
     fn is_usage_enabled(&self) -> bool {
         DeltaGenerator::is_usage_enabled(self)
+    }
+
+    fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage {
+        DeltaGenerator::get_usage(self)
     }
 }
 

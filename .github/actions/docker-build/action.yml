@@ -16,9 +16,6 @@ inputs:
   image_tag:
     description: 'Custom image tag (optional, defaults to framework:latest)'
     required: false
-  ngc_ci_access_token:
-    description: 'NGC CI Access Token'
-    required: false
   ci_token:
     description: 'CI Token'
     required: false
@@ -67,20 +64,14 @@ runs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
       with:
-        driver: docker
+        driver: docker-container
         # Enable BuildKit for enhanced metadata
         buildkitd-flags: --debug
-    - name: Login to ECR
+    - name: Cleanup
+      if: always()
       shell: bash
-      env:
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
-        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-    - name: Login to NGC
-      if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
-      uses: ./.github/actions/docker-login
-      with:
-        ngc_ci_access_token: ${{ inputs.ngc_ci_access_token }}
+        docker system prune -af
     - name: Build image
       id: build
       shell: bash
@@ -91,9 +82,12 @@ runs:
         AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         PLATFORM: ${{ inputs.platform }}
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
         GITHUB_RUN_ID: ${{ github.run_id }}
         GITHUB_JOB: ${{ github.job }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
       run: |
+        set -x
         # Determine image tag
         if [ -n "${{ inputs.image_tag }}" ]; then
           IMAGE_TAG="${{ inputs.image_tag }}"
@@ -113,18 +107,28 @@ runs:
         echo "📝 Build log will be saved to: ${BUILD_LOG_FILE}"
 
         # Collect optional overrides provided by the workflow
+        # Set base cache args and set --cache-to if this is a main commit
         EXTRA_ARGS=""
+        EXTRA_ARGS="--cache-to type=inline "
+        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache "
+        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-${PLATFORM##*/} "
+        if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+          EXTRA_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache,mode=max "
+        fi
+
+        echo "$EXTRA_ARGS"
+        # Collect optional overrides provided by the workflow
         if [ -n "${{ inputs.base_image_tag }}" ]; then
-          EXTRA_ARGS+=" --base-image-tag ${{ inputs.base_image_tag }}"
+          EXTRA_ARGS+="--base-image-tag ${{ inputs.base_image_tag }} "
         fi
         if [ -n "${{ inputs.runtime_image_tag }}" ]; then
-          EXTRA_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${{ inputs.runtime_image_tag }}"
+          EXTRA_ARGS+="--build-arg RUNTIME_IMAGE_TAG=${{ inputs.runtime_image_tag }} "
         fi
         if [ -n "${{ inputs.cuda_version }}" ]; then
-          EXTRA_ARGS+=" --build-arg CUDA_VERSION=${{ inputs.cuda_version }}"
+          EXTRA_ARGS+="--build-arg CUDA_VERSION=${{ inputs.cuda_version }} "
         fi
         if [ -n "${{ inputs.torch_backend }}" ]; then
-          EXTRA_ARGS+=" --build-arg TORCH_BACKEND=${{ inputs.torch_backend }}"
+          EXTRA_ARGS+="--build-arg TORCH_BACKEND=${{ inputs.torch_backend }} "
         fi
         if [ -n "${{ inputs.dynamo_base_image }}" ]; then
           EXTRA_ARGS+=" --dynamo-base-image ${{ inputs.dynamo_base_image }}"
@@ -250,8 +254,7 @@ runs:
         chmod +x .github/scripts/parse_buildkit_output.py
 
         # Check for build logs and build stage arguments dynamically
-        BASE_BUILD_LOG="build-logs/base-image-build.log"
-        FRAMEWORK_BUILD_LOG="build-logs/framework-${FRAMEWORK_LOWER}-build.log"
+        BUILD_LOG="build-logs/single-stage-build.log"
 
         # Path to container metadata created in previous step
         CONTAINER_METADATA="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
@@ -264,18 +267,11 @@ runs:
         # Build stage arguments dynamically based on which logs exist
         STAGE_ARGS=()
 
-        if [ -f "$BASE_BUILD_LOG" ]; then
-          echo "  ✓ Found base image log: ${BASE_BUILD_LOG}"
-          STAGE_ARGS+=("base:${BASE_BUILD_LOG}")
+        if [ -f "$BUILD_LOG" ]; then
+          echo "  ✓ Found base image log: ${BUILD_LOG}"
+          STAGE_ARGS+=("runtime:${BUILD_LOG}")
         else
-          echo "  ℹ️  No base image log found"
-        fi
-
-        if [ -f "$FRAMEWORK_BUILD_LOG" ]; then
-          echo "  ✓ Found framework log: ${FRAMEWORK_BUILD_LOG}"
-          STAGE_ARGS+=("runtime:${FRAMEWORK_BUILD_LOG}")
-        else
-          echo "  ℹ️  No framework log found"
+          echo "  ℹ️  No image log found"
         fi
 
         # Check for any additional stage logs (e.g., build-logs/stage3-*.log)
