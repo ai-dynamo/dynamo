@@ -57,9 +57,9 @@ SOURCE_DIR=$(dirname "$(readlink -f "$0")")
 DOCKERFILE=${SOURCE_DIR}/Dockerfile
 BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
-# Registry - can be overridden with --registry
-REGISTRY="nvcr.io"
-
+# Base Images
+TRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
+TRTLLM_BASE_IMAGE_TAG=25.10-py3
 
 # Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
 # we need to build the TensorRT-LLM wheel from source.
@@ -101,6 +101,23 @@ DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc5"
 TENSORRTLLM_PIP_WHEEL=""
 
+VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+# FIXME: OPS-612 NCCL will hang with 25.03, so use 25.01 for now
+# Please check https://github.com/ai-dynamo/dynamo/pull/1065
+# for details and reproducer to manually test if the image
+# can be updated to later versions.
+VLLM_BASE_IMAGE_TAG="25.04-cuda12.9-devel-ubuntu24.04"
+
+NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+
+SGLANG_CUDA_VERSION="12.9.1"
+# This is for Dockerfile
+SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+# This is for Dockerfile.sglang. Unlike the other frameworks, it is using a different base image
+SGLANG_FRAMEWORK_IMAGE="nvcr.io/nvidia/cuda"
+SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
 
 NIXL_REF=0.7.1
 NIXL_UCX_REF=v1.19.0
@@ -117,30 +134,6 @@ ENABLE_KVBM=false
 USE_SCCACHE=""
 SCCACHE_BUCKET=""
 SCCACHE_REGION=""
-
-
-define_base_images() {
-    # Base Images
-    TRTLLM_BASE_IMAGE="${REGISTRY}/nvidia/pytorch"
-    TRTLLM_BASE_IMAGE_TAG=25.10-py3
-    VLLM_BASE_IMAGE="${REGISTRY}/nvidia/cuda-dl-base"
-    # FIXME: OPS-612 NCCL will hang with 25.03, so use 25.01 for now
-    # Please check https://github.com/ai-dynamo/dynamo/pull/1065
-    # for details and reproducer to manually test if the image
-    # can be updated to later versions.
-    VLLM_BASE_IMAGE_TAG="25.04-cuda12.9-devel-ubuntu24.04"
-
-    NONE_BASE_IMAGE="${REGISTRY}/nvidia/cuda-dl-base"
-    NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
-
-    SGLANG_CUDA_VERSION="12.9.1"
-    # This is for Dockerfile
-    SGLANG_BASE_IMAGE="${REGISTRY}/nvidia/cuda-dl-base"
-    SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
-    # This is for Dockerfile.sglang. Unlike the other frameworks, it is using a different base image
-    SGLANG_FRAMEWORK_IMAGE="${REGISTRY}/nvidia/cuda"
-    SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
-}
 
 get_options() {
     while :; do
@@ -338,14 +331,6 @@ get_options() {
         --no-tag-latest)
             NO_TAG_LATEST=true
             ;;
-        --registry)
-            if [ "$2" ]; then
-                REGISTRY=$2
-                shift
-            else
-                missing_requirement "$1"
-            fi
-            ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
             ;;
@@ -358,8 +343,6 @@ get_options() {
         esac
         shift
     done
-
-    define_base_images
 
     # Validate that --uid and --gid are only used with local-dev target
     if [[ -n "${CUSTOM_UID:-}" || -n "${CUSTOM_GID:-}" ]]; then
@@ -480,7 +463,6 @@ show_help() {
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
     echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
     echo "  [--no-tag-latest do not add latest-{framework} tag to built image]"
-    echo "  [--registry override the default registry (nvcr.io) with a custom registry]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -498,8 +480,6 @@ error() {
 }
 
 get_options "$@"
-
-define_base_images
 
 # Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64
 ARCH="amd64"
