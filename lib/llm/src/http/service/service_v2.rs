@@ -466,7 +466,7 @@ impl HttpServiceConfigBuilder {
                             Ok(next.run(req).await)
                         } else {
                             tracing::debug!("{} endpoints are disabled", endpoint_type.as_str());
-                            Err(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                            Err(axum::http::StatusCode::NOT_FOUND)
                         }
                     }
                 },
