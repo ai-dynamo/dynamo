@@ -750,10 +750,10 @@ jobs:
         kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE || true
 
   # For now, this job is separated from the job matrix above for easier flow control handling
-  # Uncomment the disagg matrix entry from the above job and delete the below job
+  # Uncomment the disagg_router matrix entry from the above job and delete the below job
   # when we want to run them under the same conditions.
-  # Current conditions: 
-  # - Run vllm disagg on all commits
+  # Current conditions:
+  # - Run vllm disagg_router on all commits
   # - Run rest of jobs only on push to main or manual trigger
   deploy-test-vllm-disagg-router:
     runs-on: cpu-amd-m5-2xlarge
@@ -778,7 +778,7 @@ jobs:
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
     # Run if push to main, or manually triggered
-    if: ( github.ref_name == 'pull-request/4841' || github.event.inputs.run_deploy_operator )
+    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, sglang]
     permissions:
       contents: read
