@@ -1743,7 +1743,9 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "The 'messages' field cannot be empty. At least one message is required."
+                format!(
+                    "{VALIDATION_PREFIX}The 'messages' field cannot be empty. At least one message is required."
+                )
             );
         }
     }
@@ -1810,7 +1812,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Frequency penalty must be between -2 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Frequency penalty must be between -2 and 2, got -3")
             );
         }
 
@@ -1833,7 +1835,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Presence penalty must be between -2 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Presence penalty must be between -2 and 2, got -3")
             );
         }
 
@@ -1856,7 +1858,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Temperature must be between 0 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Temperature must be between 0 and 2, got -3")
             );
         }
 
@@ -1879,7 +1881,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Top_p must be between 0 and 1, got -3"
+                format!("{VALIDATION_PREFIX}Top_p must be between 0 and 1, got -3")
             );
         }
 
@@ -1904,7 +1906,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Repetition penalty must be between 0 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Repetition penalty must be between 0 and 2, got -3")
             );
         }
 
@@ -1927,7 +1929,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Logprobs must be between 0 and 5, got 6"
+                format!("{VALIDATION_PREFIX}Logprobs must be between 0 and 5, got 6")
             );
         }
     }
@@ -1988,7 +1990,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Frequency penalty must be between -2 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Frequency penalty must be between -2 and 2, got -3")
             );
         }
 
@@ -2016,7 +2018,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Presence penalty must be between -2 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Presence penalty must be between -2 and 2, got -3")
             );
         }
 
@@ -2044,7 +2046,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Temperature must be between 0 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Temperature must be between 0 and 2, got -3")
             );
         }
 
@@ -2072,7 +2074,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Top_p must be between 0 and 1, got -3"
+                format!("{VALIDATION_PREFIX}Top_p must be between 0 and 1, got -3")
             );
         }
 
@@ -2102,7 +2104,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Repetition penalty must be between 0 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Repetition penalty must be between 0 and 2, got -3")
             );
         }
 
@@ -2130,7 +2132,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Top_logprobs must be between 0 and 20, got 25"
+                format!("{VALIDATION_PREFIX}Top_logprobs must be between 0 and 20, got 25")
             );
         }
     }
