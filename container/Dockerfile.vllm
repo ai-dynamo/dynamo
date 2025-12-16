@@ -129,9 +129,26 @@ RUN yum groupinstall -y 'Development Tools' &&  \
     dnf install -y almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y \
-        cmake ninja-build clang-devel gcc-c++ flex wget dkms \
-        protobuf-compiler libibverbs libibverbs-devel rdma-core \
-        rdma-core-devel libibumad libibumad-devel librdmacm-devel numactl-devel
+        # Build tools
+        cmake \
+        ninja-build \
+        clang-devel \
+        gcc-c++ \
+        flex \
+        wget \
+        # Kernel module build dependencies
+        dkms \
+        # Protobuf support
+        protobuf-compiler \
+        # RDMA/InfiniBand support (required for UCX build with --with-verbs)
+        libibverbs \
+        libibverbs-devel \
+        rdma-core \
+        rdma-core-devel \
+        libibumad \
+        libibumad-devel \
+        librdmacm-devel \
+        numactl-devel
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
@@ -484,8 +501,13 @@ RUN apt-get update && \
         git-lfs \
         curl \
         # Libraries required by UCX to find RDMA devices
-        libibverbs1 rdma-core ibverbs-utils libibumad3 \
-        libnuma1 librdmacm1 ibverbs-providers \
+        libibverbs1 \
+        rdma-core \
+        ibverbs-utils \
+        libibumad3 \
+        libnuma1 \
+        librdmacm1 \
+        ibverbs-providers \
         # JIT Kernel Compilation, flashinfer
         ninja-build \
         g++ \

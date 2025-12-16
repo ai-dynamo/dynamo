@@ -135,9 +135,26 @@ RUN yum groupinstall -y 'Development Tools' &&  \
     dnf install -y almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y \
-        cmake ninja-build clang-devel gcc-c++ flex wget dkms \
-        protobuf-compiler libibverbs libibverbs-devel rdma-core \
-        rdma-core-devel libibumad libibumad-devel librdmacm-devel numactl-devel
+        # Build tools
+        cmake \
+        ninja-build \
+        clang-devel \
+        gcc-c++ \
+        flex \
+        wget \
+        # Kernel module build dependencies
+        dkms \
+        # Protobuf support
+        protobuf-compiler \
+        # RDMA/InfiniBand support (required for UCX build with --with-verbs)
+        libibverbs \
+        libibverbs-devel \
+        rdma-core \
+        rdma-core-devel \
+        libibumad \
+        libibumad-devel \
+        librdmacm-devel \
+        numactl-devel
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
@@ -714,13 +731,43 @@ USER root
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends  \
     # System monitoring and debugging tools
-    nvtop htop gdb wget iproute2 net-tools openssh-client \
-    rsync lsof zip tree vim tmux git git-lfs \
-    autoconf automake cmake libtool meson bear ccache less \
+    nvtop \
+    htop \
+    gdb \
+    # Network and system utilities
+    wget \
+    iproute2 \
+    net-tools \
+    openssh-client \
+    rsync \
+    lsof \
+    # File and archive utilities
+    zip \
+    tree \
+    # Development and build tools
+    vim \
+    tmux \
+    git \
+    git-lfs \
+    autoconf \
+    automake \
+    cmake \
+    libtool \
+    meson \
+    bear \
+    ccache \
+    less \
     # Language and development support
-    clang libclang-dev zsh silversearcher-ag cloc locales \
+    clang \
+    libclang-dev \
+    # Shell and productivity tools
+    zsh \
+    silversearcher-ag \
+    cloc \
+    locales \
     # sudo for dev stage
-    sudo gnupg && \
+    sudo \
+    gnupg && \
     # Map Docker's "arm64" to NVIDIA's "sbsa" (Server Base System Arch) for the Key URL
     if [ "$TARGETARCH" = "amd64" ]; then NVARCH="x86_64"; else NVARCH="sbsa"; fi && \
     # 1. Add the repo (Devtools uses 'arm64' or 'amd64' matching TARGETARCH)
