@@ -51,9 +51,9 @@ Thank you for your interest in contributing to Dynamo. To help us review your wo
 
    This helps the Dynamo team understand your plan, assess complexity, and provide early feedback. PRs that significantly exceed their stated scope may be rejected.
 
-4. **Get Approval** – Wait for the Dynamo team to review and approve both the problem statement and your proposed solution. This ensures alignment with the project's architecture and roadmap before you invest time in implementation.
+4. **Get Approval** – Wait for the Dynamo team to review and approve both the problem statement and your proposed solution. This ensures alignment with the project's architecture and roadmap before you invest time in implementation. Once approved, a maintainer will apply the `approved-for-pr` label to your issue.
 
-5. **Submit a Pull Request** – Once your issue is approved, [submit a PR](https://github.com/ai-dynamo/dynamo/compare) that references the issue. Link your PR to the issue using [GitHub keywords](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue) (e.g., "Fixes #123" or "Closes #123").
+5. **Submit a Pull Request** – Once your issue has the `approved-for-pr` label, [submit a PR](https://github.com/ai-dynamo/dynamo/compare) that references the issue. Link your PR to the issue using [GitHub keywords](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue) (e.g., "Fixes #123" or "Closes #123").
 
 6. **Address Code Rabbit Review** – Wait for the automated Code Rabbit review to complete. Address its suggestions, including the nitpicks—they are often quite insightful and help improve code quality.
 
