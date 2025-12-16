@@ -79,6 +79,7 @@ async fn test_two_leaders_hold_mode_and_session_cleanup() -> Result<()> {
                     local_g3,
                     remote_g2,
                     remote_g3,
+                    ..
                 } => {
                     println!(
                         "Holding status: local_g2={}, local_g3={}, remote_g2={}, remote_g3={}",

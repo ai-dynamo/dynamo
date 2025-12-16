@@ -105,6 +105,33 @@ pub enum OnboardMessage {
         requester: InstanceId,
         session_id: SessionId,
     },
+
+    // =========================================================================
+    // G4/Object Storage Messages (Internal - not sent over network)
+    // =========================================================================
+    /// G4 search results from object storage `has_blocks`.
+    ///
+    /// Internal message sent via mpsc channel from the G4 search task
+    /// to the initiator session. Contains hashes found in object storage
+    /// with their sizes.
+    G4Results {
+        session_id: SessionId,
+        /// Hashes found in G4 with their sizes in bytes
+        found_hashes: Vec<(SequenceHash, usize)>,
+    },
+
+    /// G4 load completion results from object storage `get_blocks`.
+    ///
+    /// Internal message sent via mpsc channel from the G4 load task
+    /// to the initiator session. Contains per-block success/failure.
+    G4LoadComplete {
+        session_id: SessionId,
+        /// Successfully loaded hashes
+        success: Vec<SequenceHash>,
+        /// Failed hashes with error messages
+        failures: Vec<(SequenceHash, String)>,
+    },
+
     // TODO: Add heartbeat/TTL mechanism for handling unresponsive initiators
     // Heartbeat {
     //     requester: InstanceId,
@@ -137,11 +164,16 @@ impl OnboardMessage {
             | OnboardMessage::BlocksReady { session_id, .. }
             | OnboardMessage::Acknowledged { session_id, .. }
             | OnboardMessage::ReleaseBlocks { session_id, .. }
-            | OnboardMessage::CloseSession { session_id, .. } => *session_id,
+            | OnboardMessage::CloseSession { session_id, .. }
+            | OnboardMessage::G4Results { session_id, .. }
+            | OnboardMessage::G4LoadComplete { session_id, .. } => *session_id,
         }
     }
 
     /// Extract the requester/responder instance ID from the message.
+    ///
+    /// # Panics
+    /// Panics if called on G4 messages (internal only, no instance ID).
     pub fn instance_id(&self) -> InstanceId {
         match self {
             OnboardMessage::CreateSession { requester, .. }
@@ -154,6 +186,9 @@ impl OnboardMessage {
             | OnboardMessage::G3Results { responder, .. }
             | OnboardMessage::BlocksReady { responder, .. }
             | OnboardMessage::Acknowledged { responder, .. } => *responder,
+            OnboardMessage::G4Results { .. } | OnboardMessage::G4LoadComplete { .. } => {
+                panic!("G4 messages are internal and do not have an instance ID")
+            }
         }
     }
 
@@ -170,6 +205,8 @@ impl OnboardMessage {
             OnboardMessage::Acknowledged { .. } => "Acknowledged",
             OnboardMessage::ReleaseBlocks { .. } => "ReleaseBlocks",
             OnboardMessage::CloseSession { .. } => "CloseSession",
+            OnboardMessage::G4Results { .. } => "G4Results",
+            OnboardMessage::G4LoadComplete { .. } => "G4LoadComplete",
         }
     }
 }

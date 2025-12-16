@@ -732,3 +732,179 @@ async fn test_partial_get_success() -> Result<()> {
     );
     Ok(())
 }
+
+// =============================================================================
+// G4 Search Integration Tests
+// =============================================================================
+
+/// Test G4 search: blocks pre-uploaded to S3 can be discovered via has_blocks.
+///
+/// This simulates the G4 search flow:
+/// 1. Upload blocks to S3 (simulating offloaded G4 data)
+/// 2. has_blocks discovers them
+/// 3. Verify size metadata is correct
+#[tokio::test]
+async fn test_g4_search_finds_offloaded_blocks() -> Result<()> {
+    skip_if_no_minio!();
+
+    let test_client = TestS3Client::new().await?;
+
+    // Step 1: Upload blocks to S3 (simulating G4 offload)
+    let agent = create_test_agent("g4_search_src");
+    let layout = create_fc_system_layout(agent, 8);
+    let block_ids: Vec<BlockId> = (0..4).collect();
+    let hashes = generate_test_hashes(4, 700);
+
+    fill_blocks(&layout, &block_ids, FillPattern::Sequential)?;
+    let put_results = test_client.put_blocks(&hashes, &layout, &block_ids).await;
+    assert!(put_results.iter().all(|r| r.is_ok()), "Offload should succeed");
+    println!("✓ Pre-uploaded {} blocks to S3 (simulating G4)", block_ids.len());
+
+    // Step 2: G4 search via has_blocks
+    let search_results = test_client.has_blocks(&hashes).await;
+
+    // Step 3: Verify all blocks found
+    let expected_size = layout.layout().config().block_size_bytes();
+    let found_count = search_results.iter().filter(|(_, s)| s.is_some()).count();
+    assert_eq!(found_count, 4, "G4 search should find all 4 blocks");
+
+    for (hash, size_opt) in &search_results {
+        assert!(size_opt.is_some(), "Block {:?} should exist in G4", hash);
+        assert_eq!(size_opt.unwrap(), expected_size, "Block size should match");
+    }
+
+    println!("✓ G4 search found all {} blocks with correct size ({} bytes)", found_count, expected_size);
+    Ok(())
+}
+
+/// Test G4 search with mixed results: some blocks in S3, some not.
+///
+/// This tests the race scenario where G4 might only have some blocks.
+#[tokio::test]
+async fn test_g4_search_partial_results() -> Result<()> {
+    skip_if_no_minio!();
+
+    let test_client = TestS3Client::new().await?;
+
+    // Upload only blocks 0-2 to S3
+    let agent = create_test_agent("g4_partial_src");
+    let layout = create_fc_system_layout(agent, 8);
+    let uploaded_block_ids: Vec<BlockId> = (0..3).collect();
+    let uploaded_hashes = generate_test_hashes(3, 710);
+
+    fill_blocks(&layout, &uploaded_block_ids, FillPattern::Sequential)?;
+    let _ = test_client.put_blocks(&uploaded_hashes, &layout, &uploaded_block_ids).await;
+    println!("✓ Uploaded {} blocks (simulating partial G4)", uploaded_block_ids.len());
+
+    // Search for blocks 0-5 (0-2 exist, 3-5 don't)
+    let mut search_hashes = uploaded_hashes.clone();
+    search_hashes.extend(generate_test_hashes(3, 711)); // Non-existent blocks
+
+    let search_results = test_client.has_blocks(&search_hashes).await;
+
+    let found_count = search_results.iter().filter(|(_, s)| s.is_some()).count();
+    let missing_count = search_results.iter().filter(|(_, s)| s.is_none()).count();
+
+    assert_eq!(found_count, 3, "Should find 3 blocks that exist");
+    assert_eq!(missing_count, 3, "Should not find 3 blocks that don't exist");
+
+    println!("✓ G4 search correctly identified {} found, {} missing", found_count, missing_count);
+    Ok(())
+}
+
+/// Test G4 load: get_blocks retrieves data correctly.
+///
+/// This simulates the G4 load flow after search:
+/// 1. Upload blocks to S3
+/// 2. Allocate destination blocks (different layout)
+/// 3. get_blocks downloads into destination
+/// 4. Verify data integrity via checksums
+#[tokio::test]
+async fn test_g4_load_downloads_blocks() -> Result<()> {
+    skip_if_no_minio!();
+
+    let test_client = TestS3Client::new().await?;
+
+    // Step 1: Upload blocks to S3
+    let agent_src = create_test_agent("g4_load_src");
+    let src_layout = create_fc_system_layout(agent_src, 8);
+    let src_block_ids: Vec<BlockId> = (0..4).collect();
+    let hashes = generate_test_hashes(4, 720);
+
+    let src_checksums = fill_and_checksum(&src_layout, &src_block_ids, FillPattern::Sequential)?;
+    let _ = test_client.put_blocks(&hashes, &src_layout, &src_block_ids).await;
+    println!("✓ Uploaded {} blocks to G4", src_block_ids.len());
+
+    // Step 2: Allocate destination blocks (simulating G2 allocation)
+    let agent_dst = create_test_agent("g4_load_dst");
+    let dst_layout = create_fc_system_layout(agent_dst, 8);
+    let dst_block_ids: Vec<BlockId> = (4..8).collect(); // Different block IDs
+
+    // Step 3: Download via get_blocks
+    let get_results = test_client.get_blocks(&hashes, &dst_layout, &dst_block_ids).await;
+
+    let success_count = get_results.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(success_count, 4, "All G4 loads should succeed");
+    println!("✓ Downloaded {} blocks from G4", success_count);
+
+    // Step 4: Verify checksums
+    let dst_checksums = compute_block_checksums(&dst_layout, &dst_block_ids)?;
+
+    for ((&src_id, &dst_id), _hash) in src_block_ids.iter().zip(dst_block_ids.iter()).zip(hashes.iter()) {
+        let src_checksum = src_checksums.get(&src_id).expect("src checksum");
+        let dst_checksum = dst_checksums.get(&dst_id).expect("dst checksum");
+        assert_eq!(src_checksum, dst_checksum, "Checksum mismatch: src[{}] != dst[{}]", src_id, dst_id);
+    }
+
+    println!("✓ G4 load verified: all {} blocks have matching checksums", success_count);
+    Ok(())
+}
+
+/// Test G4 load with per-block failures.
+///
+/// This tests error handling when some blocks fail to load from G4.
+#[tokio::test]
+async fn test_g4_load_partial_failure() -> Result<()> {
+    skip_if_no_minio!();
+
+    let test_client = TestS3Client::new().await?;
+
+    // Upload only blocks 0, 2 (skip 1, 3)
+    let agent_src = create_test_agent("g4_fail_src");
+    let src_layout = create_fc_system_layout(agent_src, 8);
+
+    // Upload block 0 and 2 only
+    let uploaded_ids: Vec<BlockId> = vec![0, 2];
+    let uploaded_hashes: Vec<SequenceHash> = generate_test_hashes(2, 730);
+
+    fill_blocks(&src_layout, &uploaded_ids, FillPattern::Sequential)?;
+    let _ = test_client.put_blocks(&uploaded_hashes, &src_layout, &uploaded_ids).await;
+    println!("✓ Uploaded 2 blocks (0, 2) - blocks 1, 3 don't exist");
+
+    // Try to load all 4 blocks (0, 1, 2, 3 - but 1 and 3 don't exist)
+    let mut all_hashes = vec![uploaded_hashes[0]]; // Block 0 exists
+    all_hashes.push(generate_test_hashes(1, 731)[0]); // Block 1 doesn't exist
+    all_hashes.push(uploaded_hashes[1]); // Block 2 exists
+    all_hashes.push(generate_test_hashes(1, 732)[0]); // Block 3 doesn't exist
+
+    let agent_dst = create_test_agent("g4_fail_dst");
+    let dst_layout = create_fc_system_layout(agent_dst, 8);
+    let dst_block_ids: Vec<BlockId> = vec![4, 5, 6, 7];
+
+    let get_results = test_client.get_blocks(&all_hashes, &dst_layout, &dst_block_ids).await;
+
+    let success_count = get_results.iter().filter(|r| r.is_ok()).count();
+    let failure_count = get_results.iter().filter(|r| r.is_err()).count();
+
+    assert_eq!(success_count, 2, "2 blocks should succeed");
+    assert_eq!(failure_count, 2, "2 blocks should fail");
+
+    // Verify the failures are for the correct blocks (indices 1 and 3)
+    assert!(get_results[0].is_ok(), "Block 0 should succeed");
+    assert!(get_results[1].is_err(), "Block 1 should fail");
+    assert!(get_results[2].is_ok(), "Block 2 should succeed");
+    assert!(get_results[3].is_err(), "Block 3 should fail");
+
+    println!("✓ G4 load partial failure: {} succeeded, {} failed as expected", success_count, failure_count);
+    Ok(())
+}

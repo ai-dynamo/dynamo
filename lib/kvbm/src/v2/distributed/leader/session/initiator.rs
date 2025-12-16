@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use tokio::sync::{Mutex, mpsc, watch};
+use tokio::task::JoinHandle;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -11,8 +12,9 @@ use crate::{
     logical::{blocks::ImmutableBlock, manager::BlockManager},
     physical::transfer::TransferOptions,
     v2::{
-        BlockId, G2, G3, InstanceId, SequenceHash, distributed::parallelism::ParallelWorker,
-        logical::LogicalLayoutHandle, physical::manager::LayoutHandle,
+        BlockId, G2, G3, InstanceId, SequenceHash, distributed::object::ObjectBlockOps,
+        distributed::parallelism::ParallelWorker, logical::LogicalLayoutHandle,
+        physical::manager::LayoutHandle,
     },
 };
 
@@ -52,6 +54,37 @@ fn validate_contiguous_positions(seq_hashes: &[SequenceHash]) -> Result<()> {
     Ok(())
 }
 
+/// Tracks G4/object storage search state for parallel search.
+///
+/// This state is used when G4 search runs in parallel with G2/G3 search.
+/// The first responder (local, remote, or G4) wins for each hash.
+#[derive(Default)]
+struct G4SearchState {
+    /// Hashes won by G4 in the first-responder-wins race
+    won_hashes: HashSet<SequenceHash>,
+    /// Hashes currently pending load (get_blocks in progress)
+    pending_load: HashSet<SequenceHash>,
+    /// Hashes that failed to load with error messages
+    failed_hashes: HashMap<SequenceHash, String>,
+    /// Block IDs allocated for G4→G2 loading (sequence_hash → block_id)
+    allocated_blocks: HashMap<SequenceHash, BlockId>,
+}
+
+impl G4SearchState {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Clear all state.
+    #[expect(dead_code)]
+    fn clear(&mut self) {
+        self.won_hashes.clear();
+        self.pending_load.clear();
+        self.failed_hashes.clear();
+        self.allocated_blocks.clear();
+    }
+}
+
 /// Initiator-side session for coordinating distributed block search.
 ///
 /// Supports three staging modes:
@@ -83,6 +116,17 @@ pub struct InitiatorSession {
 
     // Control channel for deferred operations
     control_rx: mpsc::Receiver<SessionControl>,
+
+    // G4/Object storage fields
+    /// Object storage client for G4 search and load (leader-initiated)
+    object_client: Option<Arc<dyn ObjectBlockOps>>,
+    /// G4 search state tracking won hashes, pending loads, and failures
+    g4_state: G4SearchState,
+    /// Channel for receiving G4 search/load results
+    g4_rx: Option<mpsc::Receiver<OnboardMessage>>,
+    /// Handle for G4 search task (for cancellation on drop)
+    #[allow(dead_code)]
+    g4_task_handle: Option<JoinHandle<()>>,
 }
 
 impl InitiatorSession {
@@ -99,6 +143,7 @@ impl InitiatorSession {
         status_tx: watch::Sender<OnboardingStatus>,
         all_g2_blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
         control_rx: mpsc::Receiver<SessionControl>,
+        object_client: Option<Arc<dyn ObjectBlockOps>>,
     ) -> Self {
         Self {
             session_id,
@@ -117,6 +162,10 @@ impl InitiatorSession {
             remote_g2_layouts: HashMap::new(),
             all_g2_blocks,
             control_rx,
+            object_client,
+            g4_state: G4SearchState::new(),
+            g4_rx: None,
+            g4_task_handle: None,
         }
     }
 
@@ -199,8 +248,12 @@ impl InitiatorSession {
             }
         }
 
-        // Check if remote search needed
-        if matched_hashes.len() == sequence_hashes.len() || remote_leaders.is_empty() {
+        // Check if remote/G4 search needed
+        // Continue if: not all matched locally AND (remote leaders exist OR object_client configured)
+        let has_object_client = self.object_client.is_some();
+        if matched_hashes.len() == sequence_hashes.len()
+            || (remote_leaders.is_empty() && !has_object_client)
+        {
             return Ok(());
         }
 
@@ -217,7 +270,7 @@ impl InitiatorSession {
 
         self.status_tx.send(OnboardingStatus::Searching).ok();
 
-        // Send CreateSession to all remotes
+        // Send CreateSession to all remotes FIRST
         for remote in remote_leaders {
             let msg = OnboardMessage::CreateSession {
                 requester: self.instance_id,
@@ -227,19 +280,36 @@ impl InitiatorSession {
             self.transport.send(*remote, msg).await?;
         }
 
-        // Process search responses
-        self.process_search_responses(rx, remote_leaders, &mut matched_hashes)
+        // Then spawn G4 search task if object storage is configured and parallel_worker is available
+        // We use parallel_worker.has_blocks() which fans out to workers with rank-prefixed keys
+        let g4_tx = if self.object_client.is_some() && self.parallel_worker.is_some() {
+            let (tx, rx) = mpsc::channel(16);
+            self.g4_rx = Some(rx);
+            // Spawn G4 search - searches the same remaining hashes as remote search
+            let handle = self.spawn_g4_search(remaining_hashes.clone(), tx.clone());
+            self.g4_task_handle = Some(handle);
+            Some(tx)
+        } else {
+            None
+        };
+
+        // Process search responses (including G4 if configured)
+        self.process_search_responses(rx, remote_leaders, &mut matched_hashes, g4_tx)
             .await?;
 
         Ok(())
     }
 
-    /// Process G2Results and G3Results from responders.
+    /// Process G2Results, G3Results, and G4 results from responders.
+    ///
+    /// Uses `tokio::select!` to handle both remote messages and G4 results
+    /// in parallel, applying first-responder-wins logic across all tiers.
     async fn process_search_responses(
         &mut self,
         rx: &mut mpsc::Receiver<OnboardMessage>,
         remote_leaders: &[InstanceId],
         matched_hashes: &mut HashSet<SequenceHash>,
+        g4_tx: Option<mpsc::Sender<OnboardMessage>>,
     ) -> Result<()> {
         let mut pending_g2_responses = remote_leaders.len();
         let mut pending_g3_responses: HashSet<InstanceId> =
@@ -248,129 +318,194 @@ impl InitiatorSession {
             remote_leaders.iter().copied().collect();
         let mut pending_acknowledgments: HashSet<InstanceId> = HashSet::new();
 
-        while let Some(msg) = rx.recv().await {
-            eprintln!(
-                "[INITIATOR {}] process_search_responses received: {}",
-                self.session_id,
-                msg.variant_name()
-            );
+        // G4 state tracking
+        let mut pending_g4_search = self.g4_rx.is_some();
+        let mut pending_g4_load = false;
 
-            match msg {
-                OnboardMessage::G2Results {
-                    responder,
-                    layout_handle,
-                    sequence_hashes,
-                    block_ids,
-                    ..
-                } => {
-                    eprintln!(
-                        "[INITIATOR {}] Processing G2Results from {} with {} hashes",
-                        self.session_id,
-                        responder,
-                        sequence_hashes.len()
-                    );
-                    // Store layout for RDMA operations
-                    self.remote_g2_layouts.insert(responder, layout_handle);
+        // Helper to check if all responses are complete
+        let is_complete = |pending_g2: usize,
+                           pending_g3: &HashSet<InstanceId>,
+                           pending_ack: &HashSet<InstanceId>,
+                           pending_search: &HashSet<InstanceId>,
+                           pending_g4_s: bool,
+                           pending_g4_l: bool| {
+            pending_g2 == 0
+                && pending_g3.is_empty()
+                && pending_ack.is_empty()
+                && pending_search.is_empty()
+                && !pending_g4_s
+                && !pending_g4_l
+        };
 
-                    // First-responder-wins logic using sequence hashes
-                    let mut hold_hashes = Vec::new();
-                    let mut drop_hashes = Vec::new();
+        loop {
+            // Check completion before waiting for more messages
+            if is_complete(
+                pending_g2_responses,
+                &pending_g3_responses,
+                &pending_acknowledgments,
+                &pending_search_complete,
+                pending_g4_search,
+                pending_g4_load,
+            ) {
+                eprintln!(
+                    "[INITIATOR {}] All responses received (including G4), exiting search_phase",
+                    self.session_id
+                );
+                break;
+            }
 
-                    for (seq_hash, block_id) in sequence_hashes.iter().zip(block_ids.iter()) {
-                        if matched_hashes.insert(*seq_hash) {
-                            hold_hashes.push(*seq_hash);
-                            self.remote_g2_blocks
-                                .entry(responder)
-                                .or_default()
-                                .push(*block_id);
-                            // Track sequence hash in parallel for block registration after RDMA pull
-                            self.remote_g2_hashes
-                                .entry(responder)
-                                .or_default()
-                                .push(*seq_hash);
-                        } else {
-                            drop_hashes.push(*seq_hash);
-                        }
+            tokio::select! {
+                // Handle G4 messages from internal channel
+                g4_msg = async {
+                    if let Some(ref mut g4_rx) = self.g4_rx {
+                        g4_rx.recv().await
+                    } else {
+                        std::future::pending::<Option<OnboardMessage>>().await
                     }
+                } => {
+                    let Some(msg) = g4_msg else {
+                        // Channel closed unexpectedly
+                        pending_g4_search = false;
+                        pending_g4_load = false;
+                        continue;
+                    };
 
-                    // Send HoldBlocks decision
-                    self.transport
-                        .send(
+                    eprintln!(
+                        "[INITIATOR {}] process_search_responses received G4: {}",
+                        self.session_id,
+                        msg.variant_name()
+                    );
+
+                    match msg {
+                        OnboardMessage::G4Results { found_hashes, .. } => {
+                            pending_g4_search = false;
+
+                            // Process G4 results with first-responder-wins
+                            let won_hashes = self.process_g4_results(found_hashes, matched_hashes);
+
+                            // If G4 won any hashes, start loading them
+                            if !won_hashes.is_empty() {
+                                if let Some(ref tx) = g4_tx {
+                                    self.load_g4_blocks(won_hashes, tx.clone()).await?;
+                                    pending_g4_load = true;
+                                }
+                            }
+                        }
+                        OnboardMessage::G4LoadComplete { success, failures, .. } => {
+                            self.handle_g4_load_complete(success, failures);
+                            pending_g4_load = false;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Handle remote messages
+                remote_msg = rx.recv() => {
+                    let Some(msg) = remote_msg else {
+                        // Channel closed - exit loop
+                        break;
+                    };
+
+                    eprintln!(
+                        "[INITIATOR {}] process_search_responses received: {}",
+                        self.session_id,
+                        msg.variant_name()
+                    );
+
+                    match msg {
+                        OnboardMessage::G2Results {
                             responder,
-                            OnboardMessage::HoldBlocks {
-                                requester: self.instance_id,
-                                session_id: self.session_id,
-                                hold_hashes,
-                                drop_hashes,
-                            },
-                        )
-                        .await?;
+                            layout_handle,
+                            sequence_hashes,
+                            block_ids,
+                            ..
+                        } => {
+                            eprintln!(
+                                "[INITIATOR {}] Processing G2Results from {} with {} hashes",
+                                self.session_id,
+                                responder,
+                                sequence_hashes.len()
+                            );
+                            // Store layout for RDMA operations
+                            self.remote_g2_layouts.insert(responder, layout_handle);
 
-                    pending_acknowledgments.insert(responder);
-                    pending_g2_responses -= 1;
-                }
-                OnboardMessage::G3Results {
-                    responder,
-                    sequence_hashes,
-                    ..
-                } => {
-                    // Store G3 sequence hashes for later staging
-                    for seq_hash in sequence_hashes {
-                        if matched_hashes.insert(seq_hash) {
-                            self.remote_g3_blocks
-                                .entry(responder)
-                                .or_default()
-                                .push(seq_hash);
+                            // First-responder-wins logic using sequence hashes
+                            let mut hold_hashes = Vec::new();
+                            let mut drop_hashes = Vec::new();
+
+                            for (seq_hash, block_id) in sequence_hashes.iter().zip(block_ids.iter()) {
+                                if matched_hashes.insert(*seq_hash) {
+                                    hold_hashes.push(*seq_hash);
+                                    self.remote_g2_blocks
+                                        .entry(responder)
+                                        .or_default()
+                                        .push(*block_id);
+                                    // Track sequence hash in parallel for block registration after RDMA pull
+                                    self.remote_g2_hashes
+                                        .entry(responder)
+                                        .or_default()
+                                        .push(*seq_hash);
+                                } else {
+                                    drop_hashes.push(*seq_hash);
+                                }
+                            }
+
+                            // Send HoldBlocks decision
+                            self.transport
+                                .send(
+                                    responder,
+                                    OnboardMessage::HoldBlocks {
+                                        requester: self.instance_id,
+                                        session_id: self.session_id,
+                                        hold_hashes,
+                                        drop_hashes,
+                                    },
+                                )
+                                .await?;
+
+                            pending_acknowledgments.insert(responder);
+                            pending_g2_responses -= 1;
                         }
-                    }
+                        OnboardMessage::G3Results {
+                            responder,
+                            sequence_hashes,
+                            ..
+                        } => {
+                            // Store G3 sequence hashes for later staging
+                            for seq_hash in sequence_hashes {
+                                if matched_hashes.insert(seq_hash) {
+                                    self.remote_g3_blocks
+                                        .entry(responder)
+                                        .or_default()
+                                        .push(seq_hash);
+                                }
+                            }
 
-                    pending_g3_responses.remove(&responder);
-                }
-                OnboardMessage::SearchComplete { responder, .. } => {
-                    pending_search_complete.remove(&responder);
-                    // SearchComplete means responder is done with G2 AND G3 search
-                    pending_g3_responses.remove(&responder);
+                            pending_g3_responses.remove(&responder);
+                        }
+                        OnboardMessage::SearchComplete { responder, .. } => {
+                            pending_search_complete.remove(&responder);
+                            // SearchComplete means responder is done with G2 AND G3 search
+                            pending_g3_responses.remove(&responder);
 
-                    eprintln!(
-                        "[INITIATOR {}] SearchComplete from {}: g2_pending={}, g3_pending={}, ack_pending={}, search_pending={}",
-                        self.session_id,
-                        responder,
-                        pending_g2_responses,
-                        pending_g3_responses.len(),
-                        pending_acknowledgments.len(),
-                        pending_search_complete.len()
-                    );
-
-                    // Check if search is complete
-                    if pending_g2_responses == 0
-                        && pending_g3_responses.is_empty()
-                        && pending_acknowledgments.is_empty()
-                        && pending_search_complete.is_empty()
-                    {
-                        eprintln!(
-                            "[INITIATOR {}] All responses received, exiting search_phase",
-                            self.session_id
-                        );
-                        break;
-                    }
-                }
-                OnboardMessage::Acknowledged { responder, .. } => {
-                    pending_acknowledgments.remove(&responder);
-
-                    // Check if search is complete
-                    if pending_g2_responses == 0
-                        && pending_g3_responses.is_empty()
-                        && pending_acknowledgments.is_empty()
-                        && pending_search_complete.is_empty()
-                    {
-                        eprintln!(
-                            "[INITIATOR {}] All responses received, exiting search_phase",
-                            self.session_id
-                        );
-                        break;
+                            eprintln!(
+                                "[INITIATOR {}] SearchComplete from {}: g2_pending={}, g3_pending={}, ack_pending={}, search_pending={}, g4_search={}, g4_load={}",
+                                self.session_id,
+                                responder,
+                                pending_g2_responses,
+                                pending_g3_responses.len(),
+                                pending_acknowledgments.len(),
+                                pending_search_complete.len(),
+                                pending_g4_search,
+                                pending_g4_load
+                            );
+                        }
+                        OnboardMessage::Acknowledged { responder, .. } => {
+                            pending_acknowledgments.remove(&responder);
+                        }
+                        _ => {}
                     }
                 }
-                _ => {}
             }
         }
 
@@ -411,6 +546,11 @@ impl InitiatorSession {
             for hash in hashes {
                 matched_hashes.insert(*hash);
             }
+        }
+
+        // G4 won hashes (blocks successfully loaded from object storage)
+        for hash in &self.g4_state.won_hashes {
+            matched_hashes.insert(*hash);
         }
 
         // Find the first hole: count contiguous matches from start
@@ -528,6 +668,32 @@ impl InitiatorSession {
             }
         }
 
+        // Filter G4 state - release allocated blocks and remove from tracking for hashes beyond first hole
+        let g4_release_hashes: Vec<SequenceHash> = self
+            .g4_state
+            .won_hashes
+            .iter()
+            .filter(|h| !keep_set.contains(h))
+            .copied()
+            .collect();
+
+        if !g4_release_hashes.is_empty() {
+            eprintln!(
+                "[INITIATOR {}] Releasing {} G4 blocks (beyond first hole)",
+                self.session_id,
+                g4_release_hashes.len()
+            );
+
+            for hash in &g4_release_hashes {
+                // Remove from won_hashes
+                self.g4_state.won_hashes.remove(hash);
+                // Remove from pending_load (if still loading)
+                self.g4_state.pending_load.remove(hash);
+                // Remove allocated block (will be deallocated when dropped)
+                self.g4_state.allocated_blocks.remove(hash);
+            }
+        }
+
         Ok(())
     }
 
@@ -538,9 +704,21 @@ impl InitiatorSession {
         let remote_g2: usize = self.remote_g2_blocks.values().map(|v| v.len()).sum();
         let remote_g3: usize = self.remote_g3_blocks.values().map(|v| v.len()).sum();
 
+        // G4 state
+        let pending_g4 = self.g4_state.pending_load.len();
+        let loaded_g4 = self.g4_state.won_hashes.len();
+        let failed_g4 = self.g4_state.failed_hashes.len();
+
         eprintln!(
-            "[INITIATOR {}] hold_mode: local_g2={}, local_g3={}, remote_g2={}, remote_g3={}",
-            self.session_id, local_g2, local_g3, remote_g2, remote_g3
+            "[INITIATOR {}] hold_mode: local_g2={}, local_g3={}, remote_g2={}, remote_g3={}, pending_g4={}, loaded_g4={}, failed_g4={}",
+            self.session_id,
+            local_g2,
+            local_g3,
+            remote_g2,
+            remote_g3,
+            pending_g4,
+            loaded_g4,
+            failed_g4
         );
 
         self.status_tx
@@ -549,6 +727,9 @@ impl InitiatorSession {
                 local_g3,
                 remote_g2,
                 remote_g3,
+                pending_g4,
+                loaded_g4,
+                failed_g4,
             })
             .ok();
 
@@ -896,5 +1077,226 @@ impl InitiatorSession {
         }
 
         Ok(())
+    }
+
+    // =========================================================================
+    // G4/Object Storage Methods
+    // =========================================================================
+
+    /// Spawn a G4 search task that runs in parallel with remote G2/G3 search.
+    ///
+    /// This task calls `has_blocks` via parallel_worker which fans out to workers.
+    /// Workers use rank-prefixed keys, so we must query through them (not directly to S3).
+    fn spawn_g4_search(
+        &self,
+        sequence_hashes: Vec<SequenceHash>,
+        tx: mpsc::Sender<OnboardMessage>,
+    ) -> JoinHandle<()> {
+        let session_id = self.session_id;
+        // Use parallel_worker for has_blocks - it fans out to workers who use rank-prefixed keys
+        let parallel_worker = self.parallel_worker.clone();
+
+        tokio::spawn(async move {
+            let Some(worker) = parallel_worker else {
+                // No parallel worker configured, send empty results
+                let _ = tx
+                    .send(OnboardMessage::G4Results {
+                        session_id,
+                        found_hashes: vec![],
+                    })
+                    .await;
+                return;
+            };
+
+            // Call has_blocks via parallel_worker (fans out to workers with rank-prefixed keys)
+            let results = worker.has_blocks(sequence_hashes).await;
+
+            // Filter to only blocks that exist (Some(size))
+            let found_hashes: Vec<(SequenceHash, usize)> = results
+                .into_iter()
+                .filter_map(|(hash, size_opt)| size_opt.map(|size| (hash, size)))
+                .collect();
+
+            eprintln!(
+                "[G4 SEARCH {}] Found {} blocks in object storage",
+                session_id,
+                found_hashes.len()
+            );
+
+            // Send results back to initiator
+            let _ = tx
+                .send(OnboardMessage::G4Results {
+                    session_id,
+                    found_hashes,
+                })
+                .await;
+        })
+    }
+
+    /// Process G4 search results with first-responder-wins logic.
+    ///
+    /// Returns the hashes that G4 won (not already claimed by G2/G3/remote).
+    fn process_g4_results(
+        &mut self,
+        found_hashes: Vec<(SequenceHash, usize)>,
+        matched_hashes: &mut HashSet<SequenceHash>,
+    ) -> Vec<SequenceHash> {
+        let mut won_hashes = Vec::new();
+
+        for (hash, _size) in found_hashes {
+            // First-responder-wins: only claim if not already matched
+            if matched_hashes.insert(hash) {
+                won_hashes.push(hash);
+                self.g4_state.won_hashes.insert(hash);
+            }
+        }
+
+        eprintln!(
+            "[INITIATOR {}] G4 won {} hashes (first-responder-wins)",
+            self.session_id,
+            won_hashes.len()
+        );
+
+        won_hashes
+    }
+
+    /// Load G4 blocks into local G2 via workers.
+    ///
+    /// Allocates G2 destination blocks and coordinates workers to download
+    /// from object storage via `get_blocks`.
+    async fn load_g4_blocks(
+        &mut self,
+        won_hashes: Vec<SequenceHash>,
+        g4_tx: mpsc::Sender<OnboardMessage>,
+    ) -> Result<()> {
+        if won_hashes.is_empty() {
+            return Ok(());
+        }
+
+        let parallel_worker = self
+            .parallel_worker
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("ParallelWorker required for G4 load"))?;
+
+        // Mark hashes as pending load
+        for hash in &won_hashes {
+            self.g4_state.pending_load.insert(*hash);
+        }
+
+        // Allocate G2 destination blocks
+        let dst_blocks = self
+            .g2_manager
+            .allocate_blocks(won_hashes.len())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Failed to allocate {} G2 blocks for G4 load",
+                    won_hashes.len()
+                )
+            })?;
+
+        let dst_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
+
+        // Track allocated blocks
+        for (hash, block_id) in won_hashes.iter().zip(dst_ids.iter()) {
+            self.g4_state.allocated_blocks.insert(*hash, *block_id);
+        }
+
+        eprintln!(
+            "[INITIATOR {}] Loading {} G4 blocks via workers",
+            self.session_id,
+            won_hashes.len()
+        );
+
+        // Clone values for the spawned task
+        let session_id = self.session_id;
+        let hashes = won_hashes.clone();
+        let parallel_worker = parallel_worker.clone();
+
+        // Spawn load task so we can continue processing other messages
+        tokio::spawn(async move {
+            // Execute get_blocks via parallel worker
+            let results = parallel_worker
+                .get_blocks(hashes.clone(), LogicalLayoutHandle::G2, dst_ids.clone())
+                .await;
+
+            // Separate successes and failures
+            let mut success = Vec::new();
+            let mut failures = Vec::new();
+
+            for (i, result) in results.into_iter().enumerate() {
+                match result {
+                    Ok(hash) => {
+                        // Register the block with its sequence hash
+                        // Note: We need to register after successful download
+                        success.push(hash);
+                    }
+                    Err(hash) => {
+                        failures.push((hash, format!("Failed to download block {}", i)));
+                    }
+                }
+            }
+
+            eprintln!(
+                "[G4 LOAD {}] Complete: {} success, {} failures",
+                session_id,
+                success.len(),
+                failures.len()
+            );
+
+            // Send completion message
+            let _ = g4_tx
+                .send(OnboardMessage::G4LoadComplete {
+                    session_id,
+                    success,
+                    failures,
+                })
+                .await;
+        });
+
+        Ok(())
+    }
+
+    /// Handle G4 load completion, updating state and registering blocks.
+    fn handle_g4_load_complete(
+        &mut self,
+        success: Vec<SequenceHash>,
+        failures: Vec<(SequenceHash, String)>,
+    ) {
+        // Process successful loads
+        for hash in &success {
+            self.g4_state.pending_load.remove(hash);
+
+            // Get the allocated block ID and register it
+            if let Some(block_id) = self.g4_state.allocated_blocks.remove(hash) {
+                // Note: The block was already written to by get_blocks.
+                // We need to get the MutableBlock and register it.
+                // For now, we track the block ID - the actual registration
+                // happens when we consolidate blocks.
+                // Re-insert for later registration during consolidation
+                self.g4_state.allocated_blocks.insert(*hash, block_id);
+            }
+        }
+
+        // Process failures
+        for (hash, error) in failures {
+            self.g4_state.pending_load.remove(&hash);
+            self.g4_state.failed_hashes.insert(hash, error);
+
+            // Release the allocated block on failure
+            if let Some(_block_id) = self.g4_state.allocated_blocks.remove(&hash) {
+                // Block will be deallocated when it goes out of scope
+            }
+
+            // Also remove from won_hashes since it failed to load
+            self.g4_state.won_hashes.remove(&hash);
+        }
+
+        eprintln!(
+            "[INITIATOR {}] G4 load complete: {} won, {} pending, {} failed",
+            self.session_id,
+            self.g4_state.won_hashes.len(),
+            self.g4_state.pending_load.len(),
+            self.g4_state.failed_hashes.len()
+        );
     }
 }

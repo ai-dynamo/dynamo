@@ -11,7 +11,7 @@ use crate::distributed::worker::{LeaderLayoutConfig, NovaWorkerClient, Worker};
 use crate::integrations::connector::worker::ConnectorWorkerClient;
 use crate::logical::blocks::{BlockDuplicationPolicy, BlockRegistry};
 use crate::logical::manager::{BlockManager, FrequencyTrackingCapacity};
-use crate::v2::distributed::object::{ObjectLockManager, create_lock_manager};
+use crate::v2::distributed::object::{ObjectLockManager, create_lock_manager, create_object_client};
 use crate::v2::distributed::offload::{
     ObjectPipelineBuilder, ObjectPresenceFilter, OffloadEngine, PendingTracker, PipelineBuilder,
     S3PresenceChecker, create_policy_from_config,
@@ -393,6 +393,14 @@ impl ConnectorLeader {
         // Conditionally add G3 manager
         if let Some(g3_mgr) = g3_manager {
             leader_builder = leader_builder.g3_manager(g3_mgr);
+        }
+
+        // Add object_client for G4 search (leader calls has_blocks on S3 directly)
+        // Uses rank=None so keys are not prefixed - allows querying all worker-written blocks
+        if let Some(object_config) = &self.runtime.config().object {
+            tracing::debug!("Creating object client for G4 search (no rank prefix)");
+            let object_client = create_object_client(object_config, None).await?;
+            leader_builder = leader_builder.object_client(object_client);
         }
 
         let leader = leader_builder.build()?;

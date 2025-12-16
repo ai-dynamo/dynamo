@@ -19,6 +19,7 @@ use crate::{
     physical::transfer::{TransferCompleteNotification, TransferOptions},
     v2::{
         BlockId, G2, G3, InstanceId, SequenceHash, distributed::worker::RemoteDescriptor,
+        distributed::object::ObjectBlockOps,
         logical::LogicalLayoutHandle,
     },
 };
@@ -126,6 +127,13 @@ pub struct InstanceLeader {
     /// Map of unified session message receivers.
     /// Used by the new SessionHandle/SessionEndpoint protocol.
     session_sessions: Arc<DashMap<SessionId, SessionMessageTx>>,
+
+    // ========================================================================
+    // G4/Object Storage
+    // ========================================================================
+    /// Object storage client for G4 search and load operations.
+    /// Leader calls has_blocks on S3 directly, coordinates workers for get_blocks.
+    object_client: Option<Arc<dyn ObjectBlockOps>>,
 }
 
 /// Builder for InstanceLeader.
@@ -139,6 +147,7 @@ pub struct InstanceLeaderBuilder {
     sessions: Option<Arc<DashMap<SessionId, OnboardSessionTx>>>,
     remote_leaders: Option<Vec<InstanceId>>,
     cached_worker_metadata: Option<Vec<SerializedLayout>>,
+    object_client: Option<Arc<dyn ObjectBlockOps>>,
 }
 
 impl InstanceLeaderBuilder {
@@ -216,6 +225,16 @@ impl InstanceLeaderBuilder {
         self
     }
 
+    /// Set the object storage client for G4 search and load operations.
+    ///
+    /// The leader uses this client to:
+    /// - Query S3 for block presence via `has_blocks`
+    /// - Coordinate workers to load blocks from S3 via `get_blocks`
+    pub fn object_client(mut self, client: Arc<dyn ObjectBlockOps>) -> Self {
+        self.object_client = Some(client);
+        self
+    }
+
     pub fn build(self) -> Result<InstanceLeader> {
         let nova = self
             .nova
@@ -269,6 +288,7 @@ impl InstanceLeaderBuilder {
             controllable_sessions: Arc::new(DashMap::new()),
             remote_sessions: Arc::new(DashMap::new()),
             session_sessions: Arc::new(DashMap::new()),
+            object_client: self.object_client,
         })
     }
 }
@@ -344,6 +364,14 @@ impl InstanceLeader {
     /// It implements `ObjectBlockOps` for coordinated object storage uploads.
     pub fn parallel_worker(&self) -> Option<Arc<dyn ParallelWorker>> {
         self.parallel_worker.clone()
+    }
+
+    /// Get the object storage client for G4 operations.
+    ///
+    /// Returns `Some` if object storage is configured, `None` otherwise.
+    /// The client is used by InitiatorSession for G4 parallel search.
+    pub fn object_client(&self) -> Option<Arc<dyn ObjectBlockOps>> {
+        self.object_client.clone()
     }
 
     /// Add a remote leader to the search list.
@@ -1243,15 +1271,17 @@ impl Leader for InstanceLeader {
         // Determine if we can return immediately (Ready) or need async session
         // Ready if:
         //   - g3 blocks is empty
-        //   - there are no remote leaders
-        //   - OR there are remote leaders, but search_remote is false
+        //   - AND NOT (search_remote AND has_remote_leaders)
+        //   - AND NOT (search_remote AND has_object_client)
         //
-        // is_ready is false if:
+        // AsyncSession (is_ready=false) if:
         //   - g3 is not empty, or
-        //   - remote_search is true and there are remote leaders
+        //   - search_remote is true AND (has_remote_leaders OR has_object_client)
         let has_remote_leaders = !self.remote_leaders.read().unwrap().is_empty();
-        let is_ready =
-            matched_g3_blocks.is_empty() && !(has_remote_leaders && options.search_remote);
+        let has_object_client = self.object_client.is_some();
+        let needs_remote_search =
+            options.search_remote && (has_remote_leaders || has_object_client);
+        let is_ready = matched_g3_blocks.is_empty() && !needs_remote_search;
 
         if is_ready {
             // No session needed - blocks owned directly by ReadyResult (RAII)
@@ -1327,6 +1357,7 @@ impl Leader for InstanceLeader {
                 let (_, rx) = mpsc::channel(1);
                 rx
             }),
+            self.object_client.clone(),
         );
 
         let remote_leaders = self.remote_leaders.read().unwrap().clone();

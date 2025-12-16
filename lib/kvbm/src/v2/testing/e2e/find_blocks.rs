@@ -149,6 +149,7 @@ mod tests {
                         local_g3,
                         remote_g2,
                         remote_g3,
+                        ..
                     } => {
                         eprintln!(
                             "Holding breakdown:\n  \
@@ -442,6 +443,7 @@ mod tests {
                         local_g3,
                         remote_g2,
                         remote_g3,
+                        ..
                     } => {
                         eprintln!(
                             "Holding breakdown:\n  \
@@ -650,6 +652,7 @@ mod tests {
                         local_g3,
                         remote_g2,
                         remote_g3,
+                        ..
                     } => {
                         eprintln!(
                             "Holding breakdown:\n  \
@@ -846,6 +849,7 @@ mod tests {
                         local_g3,
                         remote_g2,
                         remote_g3,
+                        ..
                     } => {
                         eprintln!(
                             "Holding breakdown:\n  \

@@ -305,11 +305,17 @@ pub enum OnboardingStatus {
     /// - `local_g3`: number of blocks in local G3 (needs local staging)
     /// - `remote_g2`: number of blocks in remote G2 (needs RDMA pull)
     /// - `remote_g3`: number of blocks in remote G3 (needs remote staging + RDMA)
+    /// - `pending_g4`: number of blocks with G4 load in progress
+    /// - `loaded_g4`: number of blocks successfully loaded from G4 (included in local_g2)
+    /// - `failed_g4`: number of blocks that failed to load from G4
     Holding {
         local_g2: usize,
         local_g3: usize,
         remote_g2: usize,
         remote_g3: usize,
+        pending_g4: usize,
+        loaded_g4: usize,
+        failed_g4: usize,
     },
 
     /// Preparing: staging G3→G2 (StagingMode::Prepare or Full).
