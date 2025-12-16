@@ -225,6 +225,9 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
 
     /// Check if usage tracking is enabled.
     fn is_usage_enabled(&self) -> bool;
+
+    /// Get the current usage statistics with properly calculated total_tokens.
+    fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
