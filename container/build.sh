@@ -328,6 +328,15 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
+        --registry)
+            # Override the default registry
+            if [ "$2" ]; then
+                REGISTRY=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
         --no-tag-latest)
             NO_TAG_LATEST=true
             ;;
