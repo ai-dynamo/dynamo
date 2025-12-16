@@ -169,6 +169,7 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          use_ci_registry: 'true'
       - name: Login to Container Registries
         uses: ./.github/actions/docker-login
         with:
@@ -237,6 +238,7 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          use_ci_registry: 'true'
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
@@ -298,6 +300,7 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          use_ci_registry: 'true'
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:

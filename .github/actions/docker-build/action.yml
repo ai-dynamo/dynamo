@@ -52,7 +52,9 @@ inputs:
   dynamo_base_image:
     description: 'Pre-built Dynamo base image to use instead of building from scratch'
     required: false
-
+  use_ci_registry:
+    description: 'Use CI registry instead of default registry'
+    required: false
 outputs:
   image_tag:
     description: 'Image Tag'
@@ -137,8 +139,15 @@ runs:
           EXTRA_ARGS+=" --build-arg ENABLE_KVBM=${{ inputs.enable_kvbm }}"
         fi
 
+        if [ -n "${{ inputs.use_ci_registry }}" ]; then
+          REGISTRY="${ECR_HOSTNAME}
+        else
+          REGISTRY="nvcr.io"
+        fi
+
         # Execute build and capture output (show on console AND save to file)
         ./container/build.sh --tag "$IMAGE_TAG" \
+          --registry $REGISTRY \
           --target ${{ inputs.target }} \
           --vllm-max-jobs 10 \
           --framework ${{ inputs.framework }} \
