@@ -1,11 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod crd;
 mod daemon;
 mod utils;
 
-pub use utils::hash_pod_name;
+// #[cfg(all(test, feature = "integration"))]
+mod crd_tests;
 
+pub use crd::{DynamoWorkerMetadata, DynamoWorkerMetadataSpec};
+pub use utils::hash_pod_name;
+pub use utils::LOCALHOST_TEST_ANNOTATION;
+
+use crd::{apply_cr, build_cr};
 use daemon::DiscoveryDaemon;
 use utils::PodInfo;
 
@@ -27,6 +34,10 @@ pub struct KubeDiscoveryClient {
     instance_id: u64,
     metadata: Arc<RwLock<DiscoveryMetadata>>,
     metadata_watch: tokio::sync::watch::Receiver<Arc<MetadataSnapshot>>,
+    /// Kubernetes client for CR operations
+    kube_client: KubeClient,
+    /// Pod information (name, namespace, uid)
+    pod_info: PodInfo,
 }
 
 impl KubeDiscoveryClient {
@@ -43,10 +54,11 @@ impl KubeDiscoveryClient {
         let instance_id = hash_pod_name(&pod_info.pod_name);
 
         tracing::info!(
-            "Initializing KubeDiscoveryClient: pod_name={}, instance_id={:x}, namespace={}",
+            "Initializing KubeDiscoveryClient: pod_name={}, instance_id={:x}, namespace={}, pod_uid={}",
             pod_info.pod_name,
             instance_id,
-            pod_info.pod_namespace
+            pod_info.pod_namespace,
+            pod_info.pod_uid
         );
 
         let kube_client = KubeClient::try_default()
@@ -56,8 +68,8 @@ impl KubeDiscoveryClient {
         // Create watch channel with initial empty snapshot
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(Arc::new(MetadataSnapshot::empty()));
 
-        // Create and spawn daemon
-        let daemon = DiscoveryDaemon::new(kube_client, pod_info, cancel_token)?;
+        // Create and spawn daemon (clone kube_client and pod_info since daemon takes ownership)
+        let daemon = DiscoveryDaemon::new(kube_client.clone(), pod_info.clone(), cancel_token)?;
 
         tokio::spawn(async move {
             if let Err(e) = daemon.run(watch_tx).await {
@@ -71,6 +83,8 @@ impl KubeDiscoveryClient {
             instance_id,
             metadata,
             metadata_watch: watch_rx,
+            kube_client,
+            pod_info,
         })
     }
 }
@@ -91,12 +105,13 @@ impl Discovery for KubeDiscoveryClient {
             instance_id
         );
 
-        // Write to local metadata
+        // Write to local metadata and persist to CR
+        // IMPORTANT: Hold the write lock across the CR write to prevent race conditions
         let mut metadata = self.metadata.write().await;
         match &instance {
             DiscoveryInstance::Endpoint(inst) => {
                 tracing::info!(
-                    "Registered endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
+                    "Registering endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
                     inst.namespace,
                     inst.component,
                     inst.endpoint,
@@ -111,7 +126,7 @@ impl Discovery for KubeDiscoveryClient {
                 ..
             } => {
                 tracing::info!(
-                    "Registered model card: namespace={}, component={}, endpoint={}, instance_id={:x}",
+                    "Registering model card: namespace={}, component={}, endpoint={}, instance_id={:x}",
                     namespace,
                     component,
                     endpoint,
@@ -121,22 +136,74 @@ impl Discovery for KubeDiscoveryClient {
             }
         }
 
+        // Build and apply the CR with the updated metadata
+        // This persists the metadata to Kubernetes for other pods to discover
+        let cr = build_cr(
+            &self.pod_info.pod_name,
+            &self.pod_info.pod_uid,
+            instance_id,
+            &*metadata,
+        )?;
+
+        apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await?;
+
+        tracing::debug!(
+            "Persisted metadata to DynamoWorkerMetadata CR for instance_id={:x}",
+            instance_id
+        );
+
         Ok(instance)
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
-        // TODO: need to handle meta data change propagation to other pods
-        // Current implementation delete the entry from local metadata but
-        // it doesn't invalidate the cached service metadata on other pods
+        let instance_id = self.instance_id();
+
+        // Write to local metadata and persist to CR
+        // IMPORTANT: Hold the write lock across the CR write to prevent race conditions
         let mut metadata = self.metadata.write().await;
         match &instance {
-            DiscoveryInstance::Endpoint(_inst) => {
+            DiscoveryInstance::Endpoint(inst) => {
+                tracing::info!(
+                    "Unregistering endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
+                    inst.namespace,
+                    inst.component,
+                    inst.endpoint,
+                    instance_id
+                );
                 metadata.unregister_endpoint(&instance)?;
             }
-            DiscoveryInstance::Model { .. } => {
+            DiscoveryInstance::Model {
+                namespace,
+                component,
+                endpoint,
+                ..
+            } => {
+                tracing::info!(
+                    "Unregistering model card: namespace={}, component={}, endpoint={}, instance_id={:x}",
+                    namespace,
+                    component,
+                    endpoint,
+                    instance_id
+                );
                 metadata.unregister_model_card(&instance)?;
             }
         }
+
+        // Build and apply the CR with the updated metadata
+        // This persists the removal to Kubernetes for other pods to see
+        let cr = build_cr(
+            &self.pod_info.pod_name,
+            &self.pod_info.pod_uid,
+            instance_id,
+            &*metadata,
+        )?;
+
+        apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await?;
+
+        tracing::debug!(
+            "Persisted metadata removal to DynamoWorkerMetadata CR for instance_id={:x}",
+            instance_id
+        );
 
         Ok(())
     }

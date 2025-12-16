@@ -12,25 +12,22 @@ use kube::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::Notify;
+use tokio::time::{timeout, Duration};
 
-use super::utils::{PodInfo, extract_endpoint_info, hash_pod_name};
+use super::crd::DynamoWorkerMetadata;
+use super::utils::{PodInfo, extract_endpoint_info};
 
-const SNAPSHOT_POLL_INTERVAL_MS: u64 = 5000;
-const MAX_CONCURRENT_FETCHES: usize = 20;
-const METADATA_FETCH_TIMEOUT_SECS: u64 = 5;
+const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
 
-/// Discovers and aggregates metadata from pods in the cluster
+/// Discovers and aggregates metadata from DynamoWorkerMetadata CRs in the cluster
 #[derive(Clone)]
 pub(super) struct DiscoveryDaemon {
     /// Kubernetes client
     kube_client: KubeClient,
-    /// HTTP client for fetching remote metadata
-    http_client: reqwest::Client,
-    /// Cache of remote pod metadata (instance_id -> metadata)
-    cache: Arc<RwLock<HashMap<u64, Arc<DiscoveryMetadata>>>>,
-    // This pod's info
+    /// This pod's info
     pod_info: PodInfo,
+    /// Cancellation token for shutdown
     cancel_token: CancellationToken,
 }
 
@@ -40,35 +37,36 @@ impl DiscoveryDaemon {
         pod_info: PodInfo,
         cancel_token: CancellationToken,
     ) -> Result<Self> {
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(METADATA_FETCH_TIMEOUT_SECS))
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
-
         Ok(Self {
             kube_client,
-            http_client,
-            cache: Arc::new(RwLock::new(HashMap::new())),
             pod_info,
             cancel_token,
         })
     }
 
     /// Run the discovery daemon
+    ///
+    /// Watches both EndpointSlices (to know which pods are ready) and
+    /// DynamoWorkerMetadata CRs (to get the metadata for each pod).
+    /// A pod is included in the snapshot only if:
+    /// 1. It appears as ready in an EndpointSlice
+    /// 2. It has a corresponding DynamoWorkerMetadata CR
     pub async fn run(
         self,
         watch_tx: tokio::sync::watch::Sender<Arc<MetadataSnapshot>>,
     ) -> Result<()> {
         tracing::info!("Discovery daemon starting");
 
-        // Create reflector for ALL EndpointSlices in our namespace
+        // Create notify for watch-driven updates (shared by both reflectors)
+        let notify = Arc::new(Notify::new());
+
+        // --- EndpointSlice Reflector ---
         let endpoint_slices: Api<EndpointSlice> =
             Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
 
-        let (reader, writer) = reflector::store();
+        let (ep_reader, ep_writer) = reflector::store();
 
-        // Apply label selector to only watch discovery-enabled EndpointSlices
-        let watch_config = Config::default()
+        let ep_watch_config = Config::default()
             .labels("nvidia.com/dynamo-discovery-backend=kubernetes")
             .labels("nvidia.com/dynamo-discovery-enabled=true");
 
@@ -76,38 +74,83 @@ impl DiscoveryDaemon {
             "Daemon watching EndpointSlices with labels: nvidia.com/dynamo-discovery-backend=kubernetes, nvidia.com/dynamo-discovery-enabled=true"
         );
 
-        // Spawn reflector task (runs independently)
-        let reflector_stream = reflector(writer, watcher(endpoint_slices, watch_config))
+        let notify_ep = notify.clone();
+        let ep_reflector_stream = reflector(ep_writer, watcher(endpoint_slices, ep_watch_config))
             .default_backoff()
             .touched_objects()
-            .for_each(|res| {
+            .for_each(move |res| {
                 match res {
                     Ok(obj) => {
                         tracing::debug!(
                             slice_name = obj.metadata.name.as_deref().unwrap_or("unknown"),
-                            "Daemon reflector updated EndpointSlice"
+                            "EndpointSlice reflector updated"
                         );
+                        notify_ep.notify_one();
                     }
                     Err(e) => {
-                        tracing::warn!("Daemon reflector error: {}", e);
+                        tracing::warn!("EndpointSlice reflector error: {}", e);
+                        notify_ep.notify_one();
                     }
                 }
                 futures::future::ready(())
             });
 
-        tokio::spawn(reflector_stream);
+        tokio::spawn(ep_reflector_stream);
 
-        // Polling loop
+        // --- DynamoWorkerMetadata CR Reflector ---
+        let metadata_crs: Api<DynamoWorkerMetadata> =
+            Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
+
+        let (cr_reader, cr_writer) = reflector::store();
+
+        // Watch all DynamoWorkerMetadata CRs in the namespace
+        let cr_watch_config = Config::default();
+
+        tracing::info!(
+            "Daemon watching DynamoWorkerMetadata CRs in namespace: {}",
+            self.pod_info.pod_namespace
+        );
+
+        let notify_cr = notify.clone();
+        let cr_reflector_stream = reflector(cr_writer, watcher(metadata_crs, cr_watch_config))
+            .default_backoff()
+            .touched_objects()
+            .for_each(move |res| {
+                match res {
+                    Ok(obj) => {
+                        tracing::debug!(
+                            cr_name = obj.metadata.name.as_deref().unwrap_or("unknown"),
+                            "DynamoWorkerMetadata CR reflector updated"
+                        );
+                        notify_cr.notify_one();
+                    }
+                    Err(e) => {
+                        tracing::warn!("DynamoWorkerMetadata CR reflector error: {}", e);
+                        notify_cr.notify_one();
+                    }
+                }
+                futures::future::ready(())
+            });
+
+        tokio::spawn(cr_reflector_stream);
+
+        // Event-driven loop with debouncing
         let mut sequence = 0u64;
         let mut prev_instance_ids: HashSet<u64> = HashSet::new();
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_millis(SNAPSHOT_POLL_INTERVAL_MS));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
-                _ = interval.tick() => {
-                    match self.aggregate_snapshot(&reader, sequence).await {
+                // Wait for notification from either reflector
+                _ = notify.notified() => {
+                    // Debounce: wait fixed duration to batch rapid events
+                    tokio::time::sleep(DEBOUNCE_DURATION).await;
+
+                    // Drain any permit that accumulated during the sleep
+                    let _ = timeout(Duration::ZERO, notify.notified()).await;
+
+                    tracing::trace!("Debounce window elapsed, processing snapshot");
+
+                    match self.aggregate_snapshot(&ep_reader, &cr_reader, sequence).await {
                         Ok(snapshot) => {
                             // Compare instance IDs to detect changes
                             let current_instance_ids: HashSet<u64> =
@@ -134,11 +177,6 @@ impl DiscoveryDaemon {
                                     added.iter().map(|id| format!("{:x}", id)).collect::<Vec<_>>().join(", "),
                                     removed.iter().map(|id| format!("{:x}", id)).collect::<Vec<_>>().join(", ")
                                 );
-
-                                // Prune cache for removed instances
-                                if !removed.is_empty() {
-                                    self.prune_cache(&removed).await;
-                                }
 
                                 // Broadcast the snapshot (only when changed)
                                 if watch_tx.send(Arc::new(snapshot)).is_err() {
@@ -174,57 +212,85 @@ impl DiscoveryDaemon {
         Ok(())
     }
 
-    /// Aggregate metadata from all pods into a snapshot
+    /// Aggregate metadata from EndpointSlices and DynamoWorkerMetadata CRs into a snapshot
+    ///
+    /// A pod is included in the snapshot only if:
+    /// 1. It appears as ready in an EndpointSlice
+    /// 2. It has a corresponding DynamoWorkerMetadata CR (CR name = pod name)
     async fn aggregate_snapshot(
         &self,
-        reader: &reflector::Store<EndpointSlice>,
+        ep_reader: &reflector::Store<EndpointSlice>,
+        cr_reader: &reflector::Store<DynamoWorkerMetadata>,
         sequence: u64,
     ) -> Result<MetadataSnapshot> {
         let start = std::time::Instant::now();
 
-        // Extract ALL ready endpoints (instance_id, pod_name, pod_ip, system_port) directly from reflector
-        let all_endpoints: Vec<(u64, String, String, u16)> = reader
+        // Extract ready pods from EndpointSlices: (instance_id, pod_name, pod_ip, system_port)
+        let ready_pods: Vec<(u64, String, String, u16)> = ep_reader
             .state()
             .iter()
             .flat_map(|arc_slice| extract_endpoint_info(arc_slice.as_ref()))
             .collect();
 
         tracing::trace!(
-            "Daemon found {} ready endpoints to fetch",
-            all_endpoints.len()
+            "Daemon found {} ready pods from EndpointSlices",
+            ready_pods.len()
         );
 
-        // Concurrent fetch: Fetch metadata for all endpoints in parallel
-        let fetch_futures =
-            all_endpoints
-                .into_iter()
-                .map(|(instance_id, pod_name, pod_ip, system_port)| {
-                    let daemon = self.clone();
-                    async move {
-                        match daemon.fetch_metadata(&pod_name, &pod_ip, system_port).await {
-                            Ok(metadata) => Some((instance_id, metadata)),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to fetch metadata for pod {} (instance_id={:x}): {}",
-                                    pod_name,
-                                    instance_id,
-                                    e
-                                );
-                                None
-                            }
-                        }
+        // Build a map of CR name -> metadata for quick lookup
+        let cr_map: HashMap<String, Arc<DiscoveryMetadata>> = cr_reader
+            .state()
+            .iter()
+            .filter_map(|arc_cr| {
+                let cr_name = arc_cr.metadata.name.as_ref()?;
+                
+                // Deserialize the data field to DiscoveryMetadata
+                match serde_json::from_value::<DiscoveryMetadata>(arc_cr.spec.data.clone()) {
+                    Ok(metadata) => {
+                        tracing::trace!(
+                            "Loaded metadata from CR '{}' with instance_id={:x}",
+                            cr_name,
+                            arc_cr.spec.instance_id
+                        );
+                        Some((cr_name.clone(), Arc::new(metadata)))
                     }
-                });
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to deserialize metadata from CR '{}': {}",
+                            cr_name,
+                            e
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
 
-        // Execute fetches concurrently with bounded parallelism
-        let results: Vec<_> = futures::stream::iter(fetch_futures)
-            .buffer_unordered(MAX_CONCURRENT_FETCHES)
-            .collect()
-            .await;
+        tracing::trace!(
+            "Daemon loaded {} DynamoWorkerMetadata CRs",
+            cr_map.len()
+        );
 
-        // Build the snapshot
-        let instances: HashMap<u64, Arc<DiscoveryMetadata>> =
-            results.into_iter().flatten().collect();
+        // Correlate: ready pod + CR exists = include in snapshot
+        let mut instances: HashMap<u64, Arc<DiscoveryMetadata>> = HashMap::new();
+
+        for (instance_id, pod_name, _pod_ip, _system_port) in ready_pods {
+            // CR name is the pod name
+            if let Some(metadata) = cr_map.get(&pod_name) {
+                instances.insert(instance_id, metadata.clone());
+                tracing::trace!(
+                    "Included pod '{}' (instance_id={:x}) in snapshot",
+                    pod_name,
+                    instance_id
+                );
+            } else {
+                tracing::trace!(
+                    "Skipping pod '{}' (instance_id={:x}): no DynamoWorkerMetadata CR found",
+                    pod_name,
+                    instance_id
+                );
+            }
+        }
 
         let elapsed = start.elapsed();
 
@@ -240,80 +306,5 @@ impl DiscoveryDaemon {
             sequence,
             timestamp: std::time::Instant::now(),
         })
-    }
-
-    /// Fetch metadata for a single pod (with caching)
-    async fn fetch_metadata(
-        &self,
-        pod_name: &str,
-        pod_ip: &str,
-        system_port: u16,
-    ) -> Result<Arc<DiscoveryMetadata>> {
-        let instance_id = hash_pod_name(pod_name);
-
-        // Check cache
-        {
-            let cache = self.cache.read().await;
-            if let Some(cached) = cache.get(&instance_id) {
-                tracing::trace!(
-                    "Cache hit for pod_name={}, instance_id={:x}",
-                    pod_name,
-                    instance_id
-                );
-                return Ok(cached.clone());
-            }
-        }
-
-        // Cache miss: fetch from HTTP
-        let url = format!("http://{}:{}/metadata", pod_ip, system_port);
-
-        tracing::debug!("Fetching metadata from {url}");
-
-        let response = self
-            .http_client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch metadata from {}: {}", url, e))?;
-
-        let metadata: DiscoveryMetadata = response
-            .json()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to parse metadata from {}: {}", url, e))?;
-
-        let metadata = Arc::new(metadata);
-
-        // Cache it
-        {
-            let mut cache = self.cache.write().await;
-            // Check again in case another task inserted while we were fetching
-            if let Some(existing) = cache.get(&instance_id) {
-                tracing::debug!(
-                    "Another task cached metadata for instance_id={:x} while we were fetching",
-                    instance_id
-                );
-                return Ok(existing.clone());
-            }
-
-            cache.insert(instance_id, metadata.clone());
-
-            tracing::debug!(
-                "Cached metadata for pod_name={}, instance_id={:x}",
-                pod_name,
-                instance_id
-            );
-        }
-
-        Ok(metadata)
-    }
-
-    /// Prune cache entries for removed instances
-    async fn prune_cache(&self, removed_ids: &[u64]) {
-        let mut cache = self.cache.write().await;
-        for id in removed_ids {
-            if cache.remove(id).is_some() {
-                tracing::debug!("Pruned cache for removed instance_id={:x}", id);
-            }
-        }
     }
 }
