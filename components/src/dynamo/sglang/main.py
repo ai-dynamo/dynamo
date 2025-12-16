@@ -103,11 +103,8 @@ async def init(runtime: DistributedRuntime, config: Config):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     # Prevent SGLang from blocking on non-leader nodes
-    # We can switch this to 0 and leverage our own metrics
-    # after https://github.com/sgl-project/sglang/pull/13686
-    # is merged in
     if server_args.node_rank >= 1:
-        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
+        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
     engine = sgl.Engine(server_args=server_args)
 
@@ -171,8 +168,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     handler = DecodeWorkerHandler(
         component, engine, config, publisher, prefill_client, prefill_router_client
     )
-
-    health_check_payload = SglangHealthCheckPayload(engine).to_dict()
+    print(f"Config: {config}")
+    health_check_payload = SglangHealthCheckPayload(
+        engine, use_text_input=dynamo_args.use_sglang_tokenizer
+    ).to_dict()
 
     logging.info(
         f"Registering model with endpoint types: {dynamo_args.dyn_endpoint_types}"
@@ -222,11 +221,8 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     # Prevent SGLang from blocking on non-leader nodes
-    # We can switch this to 0 and leverage our own metrics
-    # after https://github.com/sgl-project/sglang/pull/13686
-    # is merged in
     if server_args.node_rank >= 1:
-        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
+        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
     engine = sgl.Engine(server_args=server_args)
 
@@ -337,7 +333,9 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     ready_event = asyncio.Event()
 
     handler = EmbeddingWorkerHandler(component, engine, config, publisher)
-    health_check_payload = SglangHealthCheckPayload(engine).to_dict()
+    health_check_payload = SglangHealthCheckPayload(
+        engine, use_text_input=dynamo_args.use_sglang_tokenizer
+    ).to_dict()
 
     try:
         # Start endpoint immediately and register model concurrently

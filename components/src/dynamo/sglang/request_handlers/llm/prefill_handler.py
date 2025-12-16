@@ -64,6 +64,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             Bootstrap info dict with host, port, and room for decode worker connection.
         """
         logging.debug(f"New Request ID: {context.id()}")
+        trace_id = context.trace_id
 
         if "request" in request:
             # DisaggPreprocessedRequest format
@@ -111,6 +112,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         input_param = self._get_input_param(inner_request)
 
+        # Propagate trace context to SGLang
+        if self.enable_trace:
+            self._propagate_trace_context_to_sglang(context, bootstrap_room)
+
         results = await self.engine.async_generate(
             **input_param,
             sampling_params=sampling_params,
@@ -118,6 +123,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_host=self.bootstrap_host,
             bootstrap_port=self.bootstrap_port,
             bootstrap_room=bootstrap_room,
+            rid=trace_id,
         )
 
         task = asyncio.create_task(self._consume_results(results, context))

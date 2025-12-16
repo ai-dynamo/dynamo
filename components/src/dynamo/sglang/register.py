@@ -117,6 +117,7 @@ async def _get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.tool_call_parser
+    runtime_config.enable_local_indexer = dynamo_args.enable_local_indexer
 
     # Set bootstrap endpoint for disaggregated serving (prefill workers)
     bootstrap_host, bootstrap_port = _get_bootstrap_info_for_config(engine)

@@ -274,17 +274,22 @@ async fn handle_writer(
     alive_rx: tokio::sync::oneshot::Receiver<()>,
     context: Arc<dyn AsyncEngineContext>,
 ) -> Result<FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>> {
+    // Only send sentinel for normal channel closure
+    let mut send_sentinel = true;
+
     loop {
         let msg = tokio::select! {
             biased;
 
             _ = context.killed() => {
                 tracing::trace!("context kill signal received; shutting down");
+                send_sentinel = false;
                 break;
             }
 
             _ = context.stopped() => {
                 tracing::trace!("context stop signal received; shutting down");
+                send_sentinel = false;
                 break;
             }
 
@@ -304,14 +309,17 @@ async fn handle_writer(
                 "failed to send message to network; possible disconnect: {:?}",
                 e
             );
+            send_sentinel = false;
             break;
         }
     }
 
-    // send sentinel message
-    let message = serde_json::to_vec(&ControlMessage::Sentinel)?;
-    let msg = TwoPartMessage::from_header(message.into());
-    framed_writer.send(msg).await?;
+    // Send sentinel only on normal closure
+    if send_sentinel {
+        let message = serde_json::to_vec(&ControlMessage::Sentinel)?;
+        let msg = TwoPartMessage::from_header(message.into());
+        framed_writer.send(msg).await?;
+    }
 
     drop(alive_rx);
     Ok(framed_writer)

@@ -341,6 +341,30 @@ impl PrefillRouter {
     ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
         Self::execute_prefill(self.prefill_router.get().cloned(), request).await
     }
+
+    /// Spawn prefill as a background task
+    fn spawn_prefill_task(&self, prefill_request: SingleIn<PreprocessedRequest>) {
+        let router = self.prefill_router.get().cloned();
+
+        tokio::spawn(async move {
+            match Self::execute_prefill(router, prefill_request).await {
+                Ok(_) => {
+                    tracing::debug!("Prefill background task completed");
+                }
+                Err(e) => {
+                    tracing::warn!("Prefill background task error: {e:?}");
+                }
+            }
+        });
+    }
+
+    /// Call the prefill router and extract structured prefill result and worker ID
+    async fn call_prefill(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
+        Self::execute_prefill(self.prefill_router.get().cloned(), request).await
+    }
 }
 
 impl Drop for PrefillRouter {
@@ -449,14 +473,8 @@ impl
                     ..existing_override.unwrap_or_default()
                 });
 
-                // Store prefill worker ID in context if available
-                let mut decode_context = context;
-                if let Some(worker_id) = prefill_worker_id {
-                    decode_context.insert("prefill_worker_id", worker_id);
-                }
-
                 // Map the modified request through with preserved context
-                let decode_request = decode_context.map(|_| decode_req);
+                let decode_request = context.map(|_| decode_req);
                 next.generate(decode_request).await
             }
             Err(PrefillError::NotActivated) => {

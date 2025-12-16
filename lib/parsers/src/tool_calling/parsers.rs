@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::config::{ParserConfig, ToolCallConfig};
+use super::dsml::{
+    detect_tool_call_start_dsml, find_tool_call_end_position_dsml, try_tool_call_parse_dsml,
+};
 use super::harmony::{
     detect_tool_call_start_harmony, find_tool_call_end_position_harmony,
     parse_tool_calls_harmony_complete,
@@ -35,6 +38,7 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("harmony", ToolCallConfig::harmony());
         map.insert("deepseek_v3", ToolCallConfig::deepseek_v3());
         map.insert("deepseek_v3_1", ToolCallConfig::deepseek_v3_1());
+        map.insert("deepseek_v3_2", ToolCallConfig::deepseek_v3_2());
         map.insert("qwen3_coder", ToolCallConfig::qwen3_coder());
         map.insert("jamba", ToolCallConfig::jamba());
         map.insert("default", ToolCallConfig::default());
@@ -70,6 +74,10 @@ pub async fn try_tool_call_parse(
         }
         ParserConfig::Xml(xml_config) => {
             let (results, normal_content) = try_tool_call_parse_xml(message, xml_config)?;
+            Ok((results, normal_content))
+        }
+        ParserConfig::Dsml(dsml_config) => {
+            let (results, normal_content) = try_tool_call_parse_dsml(message, dsml_config)?;
             Ok((results, normal_content))
         }
     }
@@ -120,6 +128,7 @@ pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::
                 anyhow::bail!("Typescript parser not implemented");
             }
             ParserConfig::Xml(xml_config) => Ok(detect_tool_call_start_xml(chunk, xml_config)),
+            ParserConfig::Dsml(dsml_config) => Ok(detect_tool_call_start_dsml(chunk, dsml_config)),
         },
         None => anyhow::bail!(
             "Parser '{}' is not implemented. Available parsers: {:?}",
@@ -156,6 +165,7 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> usi
                 chunk.len()
             }
             ParserConfig::Xml(xml_config) => find_tool_call_end_position_xml(chunk, xml_config),
+            ParserConfig::Dsml(dsml_config) => find_tool_call_end_position_dsml(chunk, dsml_config),
         },
         None => {
             // Unknown parser, return full content length
@@ -191,6 +201,7 @@ mod tests {
             "pythonic",
             "deepseek_v3",
             "deepseek_v3_1",
+            "deepseek_v3_2",
             "qwen3_coder",
             "jamba",
         ];
@@ -1567,6 +1578,82 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         let (name, args) = extract_name_and_args(result[1].clone());
         assert_eq!(name, "get_current_weather");
         assert_eq!(args["location"], "Paris");
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_2_single_tool_call() {
+        let input = r#"<｜DSML｜function_calls>
+<｜DSML｜invoke name="get_datetime">
+<｜DSML｜parameter name="timezone" string="true">Asia/Shanghai</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜function_calls>"#;
+
+        let (tool_calls, normal_text) = detect_and_parse_tool_call(input, Some("deepseek_v3_2"))
+            .await
+            .expect("Failed to parse");
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_datetime");
+        assert_eq!(normal_text, Some("".to_string()));
+
+        let args: serde_json::Value =
+            serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+        assert_eq!(args["timezone"], "Asia/Shanghai");
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_2_multiple_tool_calls() {
+        let input = r#"<｜DSML｜function_calls>
+<｜DSML｜invoke name="get_weather">
+<｜DSML｜parameter name="location" string="true">Hangzhou</｜DSML｜parameter>
+<｜DSML｜parameter name="date" string="true">2024-01-16</｜DSML｜parameter>
+</｜DSML｜invoke>
+<｜DSML｜invoke name="get_weather">
+<｜DSML｜parameter name="location" string="true">Beijing</｜DSML｜parameter>
+<｜DSML｜parameter name="date" string="true">2024-01-16</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜function_calls>"#;
+
+        let (tool_calls, _) = detect_and_parse_tool_call(input, Some("deepseek_v3_2"))
+            .await
+            .expect("Failed to parse");
+
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+        assert_eq!(tool_calls[1].function.name, "get_weather");
+
+        let args0: serde_json::Value =
+            serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+        assert_eq!(args0["location"], "Hangzhou");
+        assert_eq!(args0["date"], "2024-01-16");
+
+        let args1: serde_json::Value =
+            serde_json::from_str(&tool_calls[1].function.arguments).unwrap();
+        assert_eq!(args1["location"], "Beijing");
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_2_mixed_parameter_types() {
+        let input = r#"<｜DSML｜function_calls>
+<｜DSML｜invoke name="search">
+<｜DSML｜parameter name="query" string="true">search agent benchmark 2024</｜DSML｜parameter>
+<｜DSML｜parameter name="topn" string="false">10</｜DSML｜parameter>
+<｜DSML｜parameter name="source" string="true">web</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜function_calls>"#;
+
+        let (tool_calls, _) = detect_and_parse_tool_call(input, Some("deepseek_v3_2"))
+            .await
+            .expect("Failed to parse");
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "search");
+
+        let args: serde_json::Value =
+            serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+        assert_eq!(args["query"], "search agent benchmark 2024");
+        assert_eq!(args["topn"], 10); // Should be number, not string
+        assert_eq!(args["source"], "web");
     }
 
     #[tokio::test]
