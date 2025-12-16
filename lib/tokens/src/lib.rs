@@ -12,6 +12,12 @@ use std::ops::Range;
 mod radix;
 pub use radix::PositionalRadixTree;
 
+/// Trait for hashes that include position information.
+pub trait PositionalHash {
+    /// Returns the position associated with the hash.
+    fn position(&self) -> u64;
+}
+
 /// A token is represented as a 32-bit unsigned integer.
 pub type Token = u32;
 
@@ -750,6 +756,18 @@ impl TokenBlock {
     /// Returns the position of this block in the sequence.
     pub fn position(&self) -> u64 {
         self.positional_sequence_hash.position()
+    }
+}
+
+impl PositionalHash for PositionalSequenceHash {
+    fn position(&self) -> u64 {
+        self.position()
+    }
+}
+
+impl PositionalHash for PositionalLineageHash {
+    fn position(&self) -> u64 {
+        self.position()
     }
 }
 

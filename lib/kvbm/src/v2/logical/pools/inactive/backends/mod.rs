@@ -10,6 +10,7 @@ mod hashmap_backend;
 mod lru_backend;
 mod multi_lru_backend;
 mod reuse_policy;
+pub mod lineage;
 
 #[cfg(test)]
 mod tests;
@@ -18,6 +19,7 @@ pub(crate) use fifo::FifoReusePolicy;
 pub(crate) use hashmap_backend::HashMapBackend;
 pub(crate) use lru_backend::LruBackend;
 pub(crate) use multi_lru_backend::MultiLruBackend;
+// pub(crate) use lineage::LineageBackend; // Not used widely yet
 
 pub use reuse_policy::{ReusePolicy, ReusePolicyError};
 
