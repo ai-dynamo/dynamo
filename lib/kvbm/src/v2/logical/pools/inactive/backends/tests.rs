@@ -20,6 +20,7 @@ mod backend_tests {
         HashMap,
         Lru,
         MultiLru,
+        Lineage,
     }
 
     fn create_backend(backend_type: BackendType) -> Box<dyn InactivePoolBackend<TestData>> {
@@ -30,12 +31,14 @@ mod backend_tests {
                 NonZeroUsize::new(10).unwrap(),
                 Arc::new(TinyLFUTracker::new(100)),
             )),
+            BackendType::Lineage => Box::new(LineageBackend::new()),
         }
     }
 
     #[rstest]
     #[case::hashmap(BackendType::HashMap)]
     #[case::lru(BackendType::Lru)]
+    #[case::lineage(BackendType::Lineage)]
     fn test_insert_and_len(#[case] backend_type: BackendType) {
         let mut backend = create_backend(backend_type);
 
@@ -52,6 +55,7 @@ mod backend_tests {
     #[rstest]
     #[case::hashmap(BackendType::HashMap)]
     #[case::lru(BackendType::Lru)]
+    #[case::lineage(BackendType::Lineage)]
     fn test_has_block(#[case] backend_type: BackendType) {
         let mut backend = create_backend(backend_type);
 
@@ -65,6 +69,7 @@ mod backend_tests {
     #[rstest]
     #[case::hashmap(BackendType::HashMap)]
     #[case::lru(BackendType::Lru)]
+    #[case::lineage(BackendType::Lineage)]
     fn test_find_matches(#[case] backend_type: BackendType) {
         let mut backend = create_backend(backend_type);
 
@@ -86,6 +91,7 @@ mod backend_tests {
     #[rstest]
     #[case::hashmap(BackendType::HashMap)]
     #[case::lru(BackendType::Lru)]
+    #[case::lineage(BackendType::Lineage)]
     fn test_find_matches_stops_on_miss(#[case] backend_type: BackendType) {
         let mut backend = create_backend(backend_type);
 
@@ -104,6 +110,7 @@ mod backend_tests {
     #[rstest]
     #[case::hashmap(BackendType::HashMap)]
     #[case::lru(BackendType::Lru)]
+    #[case::lineage(BackendType::Lineage)]
     fn test_allocate(#[case] backend_type: BackendType) {
         let mut backend = create_backend(backend_type);
 
@@ -127,6 +134,7 @@ mod backend_tests {
     #[case::hashmap(BackendType::HashMap)]
     #[case::lru(BackendType::Lru)]
     #[case::multi_lru(BackendType::MultiLru)]
+    #[case::lineage(BackendType::Lineage)]
     fn test_allocate_more_than_available(#[case] backend_type: BackendType) {
         let mut backend = create_backend(backend_type);
 
@@ -150,6 +158,7 @@ mod backend_tests {
     #[case::hashmap(BackendType::HashMap)]
     #[case::lru(BackendType::Lru)]
     #[case::multi_lru(BackendType::MultiLru)]
+    #[case::lineage(BackendType::Lineage)]
     fn test_allocate_all(#[case] backend_type: BackendType) {
         let mut backend = create_backend(backend_type);
 
@@ -177,6 +186,7 @@ mod backend_tests {
     #[case::hashmap(BackendType::HashMap)]
     #[case::lru(BackendType::Lru)]
     #[case::multi_lru(BackendType::MultiLru)]
+    #[case::lineage(BackendType::Lineage)]
     fn test_allocate_all_empty_pool(#[case] backend_type: BackendType) {
         let mut backend = create_backend(backend_type);
 

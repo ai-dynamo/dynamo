@@ -3,6 +3,7 @@
 
 use dynamo_tokens::TokenBlockSequence;
 
+use crate::KvbmSequenceHashProvider;
 use crate::logical::pools::backends::{FifoReusePolicy, HashMapBackend};
 
 use super::{
@@ -198,7 +199,7 @@ fn test_concurrent_try_get_block_and_drop() {
         partial.commit().expect("Should be able to commit")
     };
 
-    let seq_hash = token_block.positional_sequence_hash();
+    let seq_hash = token_block.kvbm_sequence_hash();
     let handle = registry.register_sequence_hash(seq_hash);
 
     let reset_blocks: Vec<_> = (0..10).map(|i| Block::new(i, 4)).collect();

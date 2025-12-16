@@ -32,7 +32,7 @@ mod tests {
 
     /// Create a test sequence hash from a simple integer.
     fn test_hash(n: u64) -> SequenceHash {
-        SequenceHash::new(n, 0, 0)
+        SequenceHash::new(n, None, 0)
     }
 
     /// Get current time as seconds since epoch

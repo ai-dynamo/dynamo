@@ -9,7 +9,7 @@ use dynamo_tokens::TokenBlockSequence;
 use super::Request;
 use crate::distributed::leader::FindMatchesResult;
 use crate::distributed::offload::TransferHandle;
-use crate::v2::{BlockId, SequenceHash};
+use crate::v2::{BlockId, KvbmSequenceHashProvider, SequenceHash};
 
 // ============================================================================
 // Error Types
@@ -535,7 +535,7 @@ impl RequestSlot {
             .iter()
             .skip(start_idx)
             .zip(&mut drain)
-            .map(|(b, id)| (b.positional_sequence_hash(), id))
+            .map(|(b, id)| (b.kvbm_sequence_hash(), id))
             .collect::<Vec<_>>();
 
         self.block_matches
@@ -692,7 +692,7 @@ impl RequestSlot {
         self.sequence
             .blocks()
             .iter()
-            .map(|b| b.positional_sequence_hash())
+            .map(|b| b.kvbm_sequence_hash())
             .collect()
     }
 
@@ -1059,7 +1059,7 @@ mod tests {
             slot.sequence
                 .blocks()
                 .iter()
-                .map(|b| b.positional_sequence_hash())
+                .map(|b| b.kvbm_sequence_hash())
                 .collect()
         }
 

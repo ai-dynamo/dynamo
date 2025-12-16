@@ -6,6 +6,8 @@
 //! Allocates blocks in first-in-first-out order based on insertion time.
 //! Uses BTreeMap for O(log n) insertion/removal with priority key ordering.
 
+#![allow(dead_code)]
+
 use super::reuse_policy::*;
 
 use std::collections::{BTreeMap, HashMap};

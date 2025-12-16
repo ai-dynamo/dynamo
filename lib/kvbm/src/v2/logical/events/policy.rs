@@ -6,12 +6,12 @@
 //! Policies determine whether a block registration should emit a KvCacheEvent
 //! based on characteristics like position, frequency, or other criteria.
 
-use crate::v2::PositionalSequenceHash;
+use crate::SequenceHash;
 
 /// Trait for policies that determine whether to emit events for a block.
 pub trait EventEmissionPolicy: Send + Sync {
     /// Returns true if an event should be emitted for the given sequence hash.
-    fn should_emit(&self, seq_hash: PositionalSequenceHash) -> bool;
+    fn should_emit(&self, seq_hash: SequenceHash) -> bool;
 }
 
 /// Policy that emits events only for blocks at power-of-2 positions within a range.
@@ -56,7 +56,7 @@ impl Default for PowerOfTwoPolicy {
 }
 
 impl EventEmissionPolicy for PowerOfTwoPolicy {
-    fn should_emit(&self, seq_hash: PositionalSequenceHash) -> bool {
+    fn should_emit(&self, seq_hash: SequenceHash) -> bool {
         let position = seq_hash.position();
 
         // Check if position is within range
@@ -72,16 +72,17 @@ impl EventEmissionPolicy for PowerOfTwoPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{KvbmSequenceHashProvider, SequenceHash};
     use dynamo_tokens::TokenBlockSequence;
 
-    fn create_seq_hash_at_position(position: usize) -> PositionalSequenceHash {
+    fn create_seq_hash_at_position(position: usize) -> SequenceHash {
         // Create a sequence with enough blocks to reach the desired position
         let tokens_per_block = 4;
         let total_tokens = (position + 1) * tokens_per_block;
         let tokens: Vec<u32> = (0..total_tokens as u32).collect();
 
         let seq = TokenBlockSequence::from_slice(&tokens, tokens_per_block as u32, Some(1337));
-        seq.blocks()[position].positional_sequence_hash()
+        seq.blocks()[position].kvbm_sequence_hash()
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::{BlockId, utils::tinylfu::TinyLFUTracker};
+use crate::{BlockId, logical::pools::backends::LineageBackend, utils::tinylfu::TinyLFUTracker};
 
 use super::{
     blocks::{
@@ -19,7 +19,7 @@ use super::{
     pools::{
         ActivePool, BlockDuplicationPolicy, InactivePool, InactivePoolBackend, ResetPool,
         ReusePolicy, SequenceHash,
-        backends::{FifoReusePolicy, HashMapBackend, LruBackend, MultiLruBackend},
+        backends::{HashMapBackend, LruBackend, MultiLruBackend},
     },
 };
 
@@ -71,6 +71,8 @@ pub enum InactiveBackendConfig {
         /// Default: [3, 8, 15]
         frequency_thresholds: [u8; 3],
     },
+    /// Lineage backend
+    Lineage,
 }
 
 /// Builder for BlockManager configuration
@@ -558,9 +560,10 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
                     .map_err(|e| BlockManagerBuilderError::InvalidBackend(e.to_string()))?,
                 )
             }
+            Some(InactiveBackendConfig::Lineage) => Box::new(LineageBackend::default()),
             None => {
                 // Default to HashMap with FIFO
-                Box::new(HashMapBackend::new(Box::new(FifoReusePolicy::new())))
+                Box::new(LineageBackend::default())
             }
         };
 
@@ -612,6 +615,7 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
 mod tests {
     use super::super::blocks::BlockError;
     use super::*;
+    use crate::KvbmSequenceHashProvider;
     use dynamo_tokens::TokenBlockSequence;
     use rstest::rstest;
 
@@ -1032,7 +1036,7 @@ mod tests {
 
             // Step 1: Allocate and complete blocks
             let token_block = create_test_token_block_from_iota(500);
-            let seq_hash = token_block.positional_sequence_hash();
+            let seq_hash = token_block.kvbm_sequence_hash();
 
             let mutable_blocks = manager.allocate_blocks(1).expect("Should allocate blocks");
             assert_eq!(manager.available_blocks(), initial_available - 1);
@@ -1163,7 +1167,7 @@ mod tests {
             assert_eq!(manager.available_blocks(), total_blocks - 3);
 
             // Step 4: Match and use one of the blocks
-            let seq_hash = create_test_token_block_from_iota(700).positional_sequence_hash();
+            let seq_hash = create_test_token_block_from_iota(700).kvbm_sequence_hash();
             let matched_blocks = manager.match_blocks(&[seq_hash]);
             assert_eq!(matched_blocks.len(), 1);
 
@@ -1368,7 +1372,7 @@ mod tests {
             let manager = create_test_manager(10);
 
             let token_block = create_test_token_block_from_iota(150);
-            let expected_hash = token_block.positional_sequence_hash();
+            let expected_hash = token_block.kvbm_sequence_hash();
             let mutable_blocks = manager.allocate_blocks(1).expect("Should allocate blocks");
             let complete_block = mutable_blocks
                 .into_iter()
@@ -1394,7 +1398,7 @@ mod tests {
             for i in 0..3 {
                 let tokens = vec![100 + i, 101 + i, 102 + i, 103 + i];
                 let token_block = create_token_block(&tokens);
-                expected_hashes.push(token_block.positional_sequence_hash());
+                expected_hashes.push(token_block.kvbm_sequence_hash());
 
                 let mutable_blocks = manager.allocate_blocks(1).expect("Should allocate blocks");
                 let complete_block = mutable_blocks
@@ -1434,7 +1438,7 @@ mod tests {
                 .expect("Should build manager");
 
             let token_block = create_test_token_block_from_iota(iota_base);
-            let seq_hash = token_block.positional_sequence_hash();
+            let seq_hash = token_block.kvbm_sequence_hash();
 
             // Register the same sequence hash twice
             let complete_block1 = {
@@ -1557,8 +1561,7 @@ mod tests {
         fn test_match_no_blocks() {
             let manager = create_test_manager(10);
 
-            let seq_hashes =
-                vec![create_test_token_block_from_iota(400).positional_sequence_hash()];
+            let seq_hashes = vec![create_test_token_block_from_iota(400).kvbm_sequence_hash()];
             let matched_blocks = manager.match_blocks(&seq_hashes);
             assert_eq!(matched_blocks.len(), 0);
         }
@@ -1568,7 +1571,7 @@ mod tests {
             let manager = create_test_manager(10);
 
             let token_block = create_test_token_block_from_iota(500);
-            let seq_hash = token_block.positional_sequence_hash();
+            let seq_hash = token_block.kvbm_sequence_hash();
 
             // Register a block
             let mutable_blocks = manager.allocate_blocks(1).expect("Should allocate blocks");
@@ -1596,7 +1599,7 @@ mod tests {
             for i in 0..4 {
                 let tokens = vec![600 + i, 601 + i, 602 + i, 603 + i];
                 let token_block = create_token_block(&tokens);
-                seq_hashes.push(token_block.positional_sequence_hash());
+                seq_hashes.push(token_block.kvbm_sequence_hash());
 
                 let mutable_blocks = manager.allocate_blocks(1).expect("Should allocate blocks");
                 let complete_block = mutable_blocks
@@ -1627,7 +1630,7 @@ mod tests {
             for i in 0..3 {
                 let tokens = vec![700 + i, 701 + i, 702 + i, 703 + i];
                 let token_block = create_token_block(&tokens);
-                seq_hashes.push(token_block.positional_sequence_hash());
+                seq_hashes.push(token_block.kvbm_sequence_hash());
 
                 if i < 2 {
                     // Only register first 2 blocks
@@ -1657,7 +1660,7 @@ mod tests {
             let manager = create_test_manager(10);
 
             let token_block = create_test_token_block_from_iota(800);
-            let seq_hash = token_block.positional_sequence_hash();
+            let seq_hash = token_block.kvbm_sequence_hash();
 
             // Register a block
             let mutable_blocks = manager.allocate_blocks(1).expect("Should allocate blocks");
@@ -1723,7 +1726,7 @@ mod tests {
             let manager = create_test_manager(10);
 
             let token_block = create_test_token_block_from_iota(200);
-            let seq_hash = token_block.positional_sequence_hash();
+            let seq_hash = token_block.kvbm_sequence_hash();
 
             // Create a weak block
             let weak_block = {
@@ -1801,7 +1804,7 @@ mod tests {
             let manager = create_test_manager(10);
 
             let token_block = create_test_token_block_from_iota(150);
-            let seq_hash = token_block.positional_sequence_hash();
+            let seq_hash = token_block.kvbm_sequence_hash();
 
             // Create multiple weak blocks from the same immutable block
             let (weak1, weak2, weak3) = {
@@ -1849,7 +1852,7 @@ mod tests {
             let manager = create_test_manager(10);
 
             let token_block = create_test_token_block_from_iota(250);
-            let seq_hash = token_block.positional_sequence_hash();
+            let seq_hash = token_block.kvbm_sequence_hash();
 
             // Register a block (this puts it in active pool initially)
             let mutable_blocks = manager.allocate_blocks(1).expect("Should allocate blocks");
@@ -1875,7 +1878,7 @@ mod tests {
             let manager = create_test_manager(20);
 
             let token_block = create_test_token_block_from_iota(350);
-            let seq_hash = token_block.positional_sequence_hash();
+            let seq_hash = token_block.kvbm_sequence_hash();
 
             // Register a block
             let weak_block = {
@@ -1984,7 +1987,7 @@ mod tests {
 
             // 2. Complete the block
             let token_block = create_test_token_block_from_iota(1);
-            let seq_hash = token_block.positional_sequence_hash();
+            let seq_hash = token_block.kvbm_sequence_hash();
             let complete_block = mutable_block
                 .complete(token_block)
                 .expect("Should complete block");
@@ -2045,7 +2048,7 @@ mod tests {
             };
 
             for token_block in token_blocks.iter() {
-                let seq_hash = token_block.positional_sequence_hash();
+                let seq_hash = token_block.kvbm_sequence_hash();
                 seq_hashes.push(seq_hash);
 
                 // Allocate mutable block and complete it
@@ -2084,7 +2087,7 @@ mod tests {
             for i in 0..10 {
                 let tokens = vec![2000 + i, 2001 + i, 2002 + i, 2003 + i];
                 let token_block = create_token_block(&tokens);
-                all_hashes.push(token_block.positional_sequence_hash());
+                all_hashes.push(token_block.kvbm_sequence_hash());
 
                 let mutable_blocks = manager.allocate_blocks(1).expect("Should allocate");
                 let complete_block = mutable_blocks
@@ -2104,7 +2107,7 @@ mod tests {
             for i in 10..15 {
                 let tokens = vec![2000 + i, 2001 + i, 2002 + i, 2003 + i];
                 let token_block = create_token_block(&tokens);
-                all_hashes.push(token_block.positional_sequence_hash());
+                all_hashes.push(token_block.kvbm_sequence_hash());
 
                 let mutable_blocks = manager.allocate_blocks(1).expect("Should allocate");
                 let complete_block = mutable_blocks
@@ -2165,7 +2168,7 @@ mod tests {
 
             // Verify they share the same registry (frequency tracking works across both)
             let token_block = create_test_token_block_from_iota(3000);
-            let seq_hash = token_block.positional_sequence_hash();
+            let seq_hash = token_block.kvbm_sequence_hash();
 
             // Register in manager1
             let mutable_blocks1 = manager1.allocate_blocks(1).expect("Should allocate");

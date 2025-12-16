@@ -22,11 +22,12 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Weak};
 
-use dynamo_tokens::PositionalRadixTree;
 use parking_lot::Mutex;
 
 /// Type alias for registered block return function
 type RegisteredReturnFn<T> = Arc<dyn Fn(Arc<Block<T, Registered>>) + Send + Sync>;
+
+pub type PositionalRadixTree<V> = dynamo_tokens::PositionalRadixTree<V, SequenceHash>;
 
 /// Global registry for managing block registrations.
 /// Tracks canonical blocks and provides registration handles.
@@ -859,7 +860,7 @@ struct RegistryState {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::{BlockId, utils::tinylfu::TinyLFUTracker};
+    use crate::{BlockId, KvbmSequenceHashProvider, utils::tinylfu::TinyLFUTracker};
 
     use super::*;
 
@@ -915,7 +916,7 @@ pub(crate) mod tests {
     #[test]
     fn test_type_tracking_enforcement() {
         let registry = BlockRegistry::new();
-        let seq_hash = create_test_token_block(&[1, 2, 3, 4]).positional_sequence_hash();
+        let seq_hash = create_test_token_block(&[1, 2, 3, 4]).kvbm_sequence_hash();
         let handle = registry.register_sequence_hash(seq_hash);
 
         // Test: attach unique first, then try multiple (should fail)
@@ -947,7 +948,7 @@ pub(crate) mod tests {
     #[test]
     fn test_different_types_usage() {
         let registry = BlockRegistry::new();
-        let seq_hash = create_test_token_block(&[1, 2, 3, 4]).positional_sequence_hash();
+        let seq_hash = create_test_token_block(&[1, 2, 3, 4]).kvbm_sequence_hash();
         let handle = registry.register_sequence_hash(seq_hash);
 
         // Define some test types for better demonstration
@@ -1015,7 +1016,7 @@ pub(crate) mod tests {
         let registry = BlockRegistry::with_frequency_tracker(tracker.clone());
 
         let block_1 = create_test_token_block(&[1, 2, 3, 4]);
-        let seq_hash_1 = block_1.positional_sequence_hash();
+        let seq_hash_1 = block_1.kvbm_sequence_hash();
 
         assert!(registry.has_frequency_tracking());
         assert_eq!(registry.count(seq_hash_1), 0);
@@ -1028,7 +1029,7 @@ pub(crate) mod tests {
         assert_eq!(registry.count(seq_hash_1), 3);
 
         let block_2 = create_test_token_block(&[5, 6, 7, 8]);
-        let seq_hash_2 = block_2.positional_sequence_hash();
+        let seq_hash_2 = block_2.kvbm_sequence_hash();
 
         let _handle1 = registry.register_sequence_hash(seq_hash_2);
         assert_eq!(registry.count(seq_hash_2), 1);
@@ -1045,8 +1046,8 @@ pub(crate) mod tests {
         let tracker = Arc::new(TinyLFUTracker::new(100));
         let registry = BlockRegistry::with_frequency_tracker(tracker.clone());
 
-        let seq_hash_1 = create_test_token_block(&[1, 2, 3, 4]).positional_sequence_hash();
-        let seq_hash_2 = create_test_token_block(&[5, 6, 7, 8]).positional_sequence_hash();
+        let seq_hash_1 = create_test_token_block(&[1, 2, 3, 4]).kvbm_sequence_hash();
+        let seq_hash_2 = create_test_token_block(&[5, 6, 7, 8]).kvbm_sequence_hash();
 
         let _handle1 = registry.transfer_registration(seq_hash_1);
         assert_eq!(registry.count(seq_hash_1), 0);
@@ -1185,7 +1186,7 @@ pub(crate) mod tests {
     #[test]
     fn test_handle_drop_removes_registration() {
         let registry = BlockRegistry::new();
-        let seq_hash = create_test_token_block(&[1, 2, 3, 4]).positional_sequence_hash();
+        let seq_hash = create_test_token_block(&[1, 2, 3, 4]).kvbm_sequence_hash();
 
         {
             let _handle = registry.register_sequence_hash(seq_hash);
@@ -1201,7 +1202,7 @@ pub(crate) mod tests {
     #[test]
     fn test_multiple_handles_same_sequence() {
         let registry = BlockRegistry::new();
-        let seq_hash = create_test_token_block(&[1, 2, 3, 4]).positional_sequence_hash();
+        let seq_hash = create_test_token_block(&[1, 2, 3, 4]).kvbm_sequence_hash();
         let handle1 = registry.register_sequence_hash(seq_hash);
         let handle2 = handle1.clone();
 
@@ -1221,7 +1222,7 @@ pub(crate) mod tests {
     #[test]
     fn test_mutable_access() {
         let registry = BlockRegistry::new();
-        let seq_hash = create_test_token_block(&[1, 2, 3, 4]).positional_sequence_hash();
+        let seq_hash = create_test_token_block(&[1, 2, 3, 4]).kvbm_sequence_hash();
         let handle = registry.register_sequence_hash(seq_hash);
 
         #[derive(Debug, Clone, PartialEq)]
@@ -1278,7 +1279,7 @@ pub(crate) mod tests {
     #[test]
     fn test_with_all_mut_unique() {
         let registry = BlockRegistry::new();
-        let seq_hash = create_test_token_block(&[1, 2, 3, 4]).positional_sequence_hash();
+        let seq_hash = create_test_token_block(&[1, 2, 3, 4]).kvbm_sequence_hash();
         let handle = registry.register_sequence_hash(seq_hash);
 
         #[derive(Debug, Clone, PartialEq)]
@@ -1312,7 +1313,7 @@ pub(crate) mod tests {
     #[test]
     fn test_with_all_mut_multiple() {
         let registry = BlockRegistry::new();
-        let seq_hash = create_test_token_block(&[1, 2, 3, 4]).positional_sequence_hash();
+        let seq_hash = create_test_token_block(&[1, 2, 3, 4]).kvbm_sequence_hash();
         let handle = registry.register_sequence_hash(seq_hash);
 
         #[derive(Debug, Clone, PartialEq)]
@@ -1399,7 +1400,7 @@ pub(crate) mod tests {
 
         let tokens = vec![1u32, 2, 3, 4];
         let token_block = create_test_token_block(&tokens);
-        let seq_hash = token_block.positional_sequence_hash();
+        let seq_hash = token_block.kvbm_sequence_hash();
         let handle = registry.register_sequence_hash(seq_hash);
 
         let reset_blocks: Vec<_> = (0..10)

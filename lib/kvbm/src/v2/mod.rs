@@ -44,10 +44,10 @@ pub mod testing;
 pub use dynamo_identity::InstanceId;
 pub use dynamo_kvbm_config::KvbmConfig;
 pub use dynamo_nova::{PeerInfo, WorkerAddress};
-pub use dynamo_tokens::{PositionalSequenceHash, SequenceHash as SequenceHashV1};
+pub use dynamo_tokens::{PositionalLineageHash, SequenceHash as SequenceHashV1};
 
 pub type BlockId = usize;
-pub type SequenceHash = PositionalSequenceHash;
+pub type SequenceHash = PositionalLineageHash;
 
 /// G1 marker: GPU/device tier
 #[derive(Clone, Copy, Debug)]
@@ -64,3 +64,13 @@ pub struct G3;
 /// G4 marker: Object store tier
 #[derive(Clone, Copy, Debug)]
 pub struct G4;
+
+pub trait KvbmSequenceHashProvider {
+    fn kvbm_sequence_hash(&self) -> SequenceHash;
+}
+
+impl KvbmSequenceHashProvider for dynamo_tokens::TokenBlock {
+    fn kvbm_sequence_hash(&self) -> SequenceHash {
+        self.positional_lineage_hash()
+    }
+}

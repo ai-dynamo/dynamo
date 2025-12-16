@@ -6,6 +6,8 @@
 //! Blocks transition through states: Reset → Complete → Registered → Reset.
 //! The type system prevents invalid state transitions at compile time.
 
+use crate::KvbmSequenceHashProvider;
+
 use super::registry::BlockRegistrationHandle;
 use super::{Block, BlockError, BlockId, BlockMetadata};
 
@@ -96,7 +98,7 @@ impl<T: BlockMetadata> Block<T, Complete> {
             block_id: self.block_id,
             block_size: self.block_size,
             state: Registered {
-                sequence_hash: self.state.token_block.positional_sequence_hash(),
+                sequence_hash: self.state.token_block.kvbm_sequence_hash(),
                 registration_handle,
             },
             marker: PhantomData,
@@ -108,7 +110,7 @@ impl<T: BlockMetadata> Block<T, Complete> {
     }
 
     pub fn sequence_hash(&self) -> SequenceHash {
-        self.state.token_block.positional_sequence_hash()
+        self.state.token_block.kvbm_sequence_hash()
     }
 
     pub fn reset(self) -> Block<T, Reset> {

@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::v2::PositionalSequenceHash;
+use crate::SequenceHash;
 
 /// Instance identifier for a worker node (u128).
 pub type InstanceId = u128;
@@ -24,7 +24,7 @@ pub enum KvCacheEvent {
     /// A block has been registered in a worker's cache.
     Create {
         /// The positional sequence hash identifying the block.
-        seq_hash: PositionalSequenceHash,
+        seq_hash: SequenceHash,
         /// The worker instance that registered the block.
         instance_id: InstanceId,
         /// The cluster/deployment identifier for event routing.
@@ -33,7 +33,7 @@ pub enum KvCacheEvent {
     /// A block has been removed from a worker's cache.
     Remove {
         /// The positional sequence hash identifying the block.
-        seq_hash: PositionalSequenceHash,
+        seq_hash: SequenceHash,
         /// The worker instance that removed the block.
         instance_id: InstanceId,
     },
@@ -45,7 +45,7 @@ pub enum KvCacheEvent {
 /// When all references to the block are dropped, this handle's Drop implementation
 /// sends a Remove event to clean up the hub's tracking state.
 pub struct EventReleaseHandle {
-    seq_hash: PositionalSequenceHash,
+    seq_hash: SequenceHash,
     instance_id: InstanceId,
     event_tx: mpsc::UnboundedSender<KvCacheEvent>,
 }
@@ -58,7 +58,7 @@ impl EventReleaseHandle {
     /// * `instance_id` - The worker instance identifier
     /// * `event_tx` - Channel sender for emitting the Remove event
     pub fn new(
-        seq_hash: PositionalSequenceHash,
+        seq_hash: SequenceHash,
         instance_id: InstanceId,
         event_tx: mpsc::UnboundedSender<KvCacheEvent>,
     ) -> Self {
@@ -88,13 +88,14 @@ impl Drop for EventReleaseHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::KvbmSequenceHashProvider;
     use dynamo_tokens::TokenBlockSequence;
 
     #[test]
     fn test_event_serialization() {
         let tokens = vec![1u32, 2, 3, 4];
         let seq = TokenBlockSequence::from_slice(&tokens, tokens.len() as u32, Some(1337));
-        let seq_hash = seq.blocks()[0].positional_sequence_hash();
+        let seq_hash = seq.blocks()[0].kvbm_sequence_hash();
 
         let create_event = KvCacheEvent::Create {
             seq_hash,
@@ -120,7 +121,7 @@ mod tests {
     async fn test_release_handle_drop() {
         let tokens = vec![1u32, 2, 3, 4];
         let seq = TokenBlockSequence::from_slice(&tokens, tokens.len() as u32, Some(1337));
-        let seq_hash = seq.blocks()[0].positional_sequence_hash();
+        let seq_hash = seq.blocks()[0].kvbm_sequence_hash();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
 

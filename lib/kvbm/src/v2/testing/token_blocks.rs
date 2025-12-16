@@ -5,7 +5,7 @@
 
 use dynamo_tokens::{TokenBlock, TokenBlockSequence};
 
-use crate::v2::logical::pools::SequenceHash;
+use crate::{KvbmSequenceHashProvider, SequenceHash};
 
 /// Create a token block from a slice of tokens.
 ///
@@ -77,7 +77,7 @@ pub fn generate_sequence_hashes(token_sequence: &TokenBlockSequence) -> Vec<Sequ
     token_sequence
         .blocks()
         .iter()
-        .map(|block| block.positional_sequence_hash())
+        .map(|block| block.kvbm_sequence_hash())
         .collect()
 }
 

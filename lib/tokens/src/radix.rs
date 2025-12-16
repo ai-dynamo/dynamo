@@ -27,10 +27,7 @@ where
     }
 
     /// Provides the entry for the key at the given position.
-    pub fn prefix(
-        &self,
-        key: &K,
-    ) -> dashmap::mapref::one::RefMut<'_, u64, DashMap<K, V>> {
+    pub fn prefix(&self, key: &K) -> dashmap::mapref::one::RefMut<'_, u64, DashMap<K, V>> {
         let position = key.position();
         self.map.entry(position).or_default()
     }
