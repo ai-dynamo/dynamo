@@ -209,6 +209,83 @@ dynamo-operator:
           # -- Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued.
           renewBefore: "720h"
 
+  # Checkpoint configuration for fast pod restore using CRIU/cuda-checkpoint
+  checkpoint:
+    # -- Whether to enable checkpoint/restore functionality. When enabled, deploys the checkpoint-agent DaemonSet for creating container checkpoints.
+    enabled: false
+
+    # Storage configuration for checkpoint tar files
+    # Supports multiple backends: pvc (default), s3, oci
+    storage:
+      # -- Storage backend type. Options: "pvc" (PersistentVolumeClaim), "s3" (S3-compatible object storage), "oci" (OCI registry)
+      type: pvc
+
+      # -- Host path for signal files used for communication between checkpoint job pods and the DaemonSet. Both components mount this path to coordinate checkpoint completion.
+      signalHostPath: "/var/lib/dynamo-checkpoint/signals"
+
+      # PVC storage configuration (used when type=pvc)
+      pvc:
+        # -- Name of an existing PVC for storing checkpoint tar files. This PVC must be created separately with RWX (ReadWriteMany) access mode to allow multiple nodes to read checkpoints.
+        pvcName: "checkpoint-storage"
+        # -- Base path within the PVC for storing checkpoint tar files. Each checkpoint is stored as {basePath}/{identityHash}.tar
+        basePath: "/checkpoints"
+
+      # S3 storage configuration (used when type=s3)
+      s3:
+        # -- S3 URI in format: s3://[endpoint/]bucket/prefix. Examples: "s3://my-bucket/checkpoints" (AWS S3), "s3://minio.example.com/my-bucket/checkpoints" (MinIO)
+        uri: ""
+        # -- Reference to a secret containing AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and optionally AWS_REGION. If not provided, uses IRSA/Workload Identity for authentication.
+        credentialsSecretRef: ""
+
+      # OCI registry storage configuration (used when type=oci)
+      oci:
+        # -- OCI URI in format: oci://registry/repository. Examples: "oci://myregistry.io/checkpoints", "oci://ghcr.io/myorg/checkpoints"
+        uri: ""
+        # -- Reference to a docker config secret for registry authentication
+        credentialsSecretRef: ""
+
+    # Checkpoint agent DaemonSet configuration
+    agent:
+      # Container image for the checkpoint agent
+      image:
+        # -- Container image repository for the checkpoint agent
+        repository: nvcr.io/nvidia/ai-dynamo/checkpoint-agent
+        # -- Container image tag for the checkpoint agent
+        tag: "latest"
+        # -- Image pull policy for the checkpoint agent
+        pullPolicy: IfNotPresent
+
+      # -- Resource limits and requests for checkpoint agent containers
+      resources:
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+
+      # -- Node selector for checkpoint agent pods. Use this to restrict checkpoint agents to specific nodes (e.g., GPU nodes).
+      nodeSelector: {}
+      #  nvidia.com/gpu.present: "true"
+
+      # -- Node tolerations for checkpoint agent pods
+      tolerations: []
+
+      # -- Affinity rules for checkpoint agent pods
+      affinity: {}
+
+      # -- Additional labels to add to checkpoint agent pods
+      podLabels: {}
+
+      # -- Additional annotations to add to checkpoint agent pods
+      podAnnotations: {}
+
+      # -- Image pull secrets for the checkpoint agent container image
+      imagePullSecrets: []
+
+      # -- Path to the container runtime socket. The checkpoint agent needs access to the container runtime to perform checkpoint operations. Change to /var/run/docker.sock for Docker runtime.
+      containerRuntimeSocket: /run/containerd/containerd.sock
+
 
 # Grove component - distributed inference orchestration
 grove:

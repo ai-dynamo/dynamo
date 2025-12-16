@@ -73,6 +73,26 @@ type DynamoGraphDeploymentStatus struct {
 	// The map key is the service name from spec.services.
 	// +optional
 	Services map[string]ServiceReplicaStatus `json:"services,omitempty"`
+	// Checkpoints contains per-service checkpoint status information.
+	// The map key is the service name from spec.services.
+	// +optional
+	Checkpoints map[string]ServiceCheckpointStatus `json:"checkpoints,omitempty"`
+}
+
+// ServiceCheckpointStatus contains checkpoint information for a single service.
+type ServiceCheckpointStatus struct {
+	// CheckpointName is the name of the associated Checkpoint CR
+	// +optional
+	CheckpointName string `json:"checkpointName,omitempty"`
+	// IdentityHash is the computed hash of the checkpoint identity
+	// +optional
+	IdentityHash string `json:"identityHash,omitempty"`
+	// Ready indicates if the checkpoint is ready for use
+	// +optional
+	Ready bool `json:"ready,omitempty"`
+	// TarPath is the path to the checkpoint tar file
+	// +optional
+	TarPath string `json:"tarPath,omitempty"`
 }
 
 // ServiceReplicaStatus contains replica information for a single service.

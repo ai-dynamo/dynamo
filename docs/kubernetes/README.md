@@ -219,6 +219,7 @@ Key customization points include:
 - **[Create Custom Deployments](./deployment/create_deployment.md)** - Build your own CRDs
 - **[Managing Models with DynamoModel](./deployment/dynamomodel-guide.md)** - Deploy LoRA adapters and manage models
 - **[Operator Documentation](./dynamo_operator.md)** - How the platform works
+- **[Checkpointing](./checkpointing.md)** - Fast pod startup with checkpoint/restore
 - **[Helm Charts](../../deploy/helm/README.md)** - For advanced users
 - **[GitOps Deployment with FluxCD](./fluxcd.md)** - For advanced users
 - **[Logging](./observability/logging.md)** - For logging setup
