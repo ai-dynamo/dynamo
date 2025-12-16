@@ -3,7 +3,7 @@
 
 //! System memory storage backed by malloc.
 
-use super::{MemoryDescription, Result, StorageError, StorageKind, actions, nixl::NixlDescriptor};
+use super::{MemoryDescriptor, Result, StorageError, StorageKind, actions, nixl::NixlDescriptor};
 use std::any::Any;
 use std::ptr::NonNull;
 
@@ -82,7 +82,7 @@ impl Drop for SystemStorage {
     }
 }
 
-impl MemoryDescription for SystemStorage {
+impl MemoryDescriptor for SystemStorage {
     fn addr(&self) -> usize {
         self.ptr.as_ptr() as usize
     }

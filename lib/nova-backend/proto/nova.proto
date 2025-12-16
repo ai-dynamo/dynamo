@@ -1,0 +1,29 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package nova.streaming.v1;
+
+// Nova streaming service for active messages
+//
+// This service uses bidirectional streaming to send pre-framed messages.
+// Messages are wrapped in FramedData which contains our custom TCP frame format.
+service NovaStreaming
+{
+  // Bidirectional streaming RPC
+  // Client sends framed messages, server receives them
+  // The response stream is unused (empty) in our implementation
+  rpc Stream(stream FramedData) returns (stream FramedData);
+}
+
+// Wrapper for pre-framed message data
+//
+// The data field contains our complete TCP frame:
+// [u16: version][u8: msg_type][u32: header_len][u32: payload_len][header][payload]
+message FramedData
+{
+  bytes preamble = 1;
+  bytes header = 2;
+  bytes payload = 3;
+}

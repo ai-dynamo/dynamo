@@ -3,7 +3,7 @@
 
 //! Disk-backed memory storage using memory-mapped files.
 
-use super::{MemoryDescription, Result, StorageError, StorageKind, nixl::NixlDescriptor};
+use super::{MemoryDescriptor, Result, StorageError, StorageKind, nixl::NixlDescriptor};
 use std::any::Any;
 use std::path::{Path, PathBuf};
 
@@ -177,7 +177,7 @@ impl Drop for DiskStorage {
     }
 }
 
-impl MemoryDescription for DiskStorage {
+impl MemoryDescriptor for DiskStorage {
     fn addr(&self) -> usize {
         0
     }
@@ -345,7 +345,7 @@ impl super::nixl::NixlCompatible for DiskStorage {
 //         }
 //     }
 
-//     impl MemoryDescription for MemMappedFileStorage {
+//     impl MemoryDescriptor for MemMappedFileStorage {
 //         fn addr(&self) -> usize {
 //             self.mmap.as_ptr() as usize
 //         }

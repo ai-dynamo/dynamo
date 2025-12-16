@@ -171,7 +171,7 @@ async fn perform_allocation_and_build_handler(
                 PhysicalLayoutBuilder::new(agent.clone())
                     .with_config(layout_config.clone())
                     .fully_contiguous()
-                    .allocate_pinned(true)
+                    .allocate_pinned(Some(device_id as u32))
                     .build()?,
             )
         } else {

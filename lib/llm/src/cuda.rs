@@ -84,7 +84,8 @@ impl DynamoCudaContextGuard {
     /// The caller must ensure the context is valid.
     pub unsafe fn new(context: CUcontext) -> Pin<Box<Self>> {
         // Push the context onto the CUDA context stack
-        let result = cuCtxPushCurrent_v2(context);
+        // SAFETY: The caller guarantees the context is valid per the function's safety contract
+        let result = unsafe { cuCtxPushCurrent_v2(context) };
         if result != cudaError_enum::CUDA_SUCCESS {
             panic!("Failed to push CUDA context: {:?}", result);
         }
@@ -192,7 +193,8 @@ impl DynamoCudaContextProvider for CudaContext {
 
 impl DynamoCudaContextProvider for CudaStream {
     unsafe fn cu_context(&self) -> cudarc::driver::sys::CUcontext {
-        self.context().cu_context()
+        // SAFETY: The caller guarantees safety per the trait's contract
+        unsafe { self.context().cu_context() }
     }
 }
 

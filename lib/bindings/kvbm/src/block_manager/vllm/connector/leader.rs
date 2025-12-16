@@ -13,7 +13,7 @@ use crate::block_manager::{
     VllmBlockManager, distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest,
     vllm::connector::leader::slot::VllmConnectorSlot,
 };
-use crate::get_current_tokio_handle;
+use crate::dynamo::get_current_tokio_handle;
 
 use dynamo_llm::block_manager::{
     BasicMetadata, DiskStorage, ImmutableBlock, PinnedStorage,
