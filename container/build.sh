@@ -353,6 +353,15 @@ get_options() {
         shift
     done
 
+    # Handle registry override if specified
+    if [ -n "$REGISTRY" ]; then
+        TRTLLM_BASE_IMAGE="${TRTLLM_BASE_IMAGE/nvcr.io/$REGISTRY}"
+        VLLM_BASE_IMAGE="${VLLM_BASE_IMAGE/nvcr.io/$REGISTRY}"
+        NONE_BASE_IMAGE="${NONE_BASE_IMAGE/nvcr.io/$REGISTRY}"
+        SGLANG_BASE_IMAGE="${SGLANG_BASE_IMAGE/nvcr.io/$REGISTRY}"
+        SGLANG_FRAMEWORK_IMAGE="${SGLANG_FRAMEWORK_IMAGE/nvcr.io/$REGISTRY}"
+    fi
+
     # Validate that --uid and --gid are only used with local-dev target
     if [[ -n "${CUSTOM_UID:-}" || -n "${CUSTOM_GID:-}" ]]; then
         if [[ "${TARGET:-}" != "local-dev" ]]; then
@@ -472,6 +481,7 @@ show_help() {
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
     echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
     echo "  [--no-tag-latest do not add latest-{framework} tag to built image]"
+    echo "  [--registry registry URL to replace nvcr.io in base images]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
