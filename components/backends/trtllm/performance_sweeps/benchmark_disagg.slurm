@@ -10,103 +10,34 @@ CONTAINER_NAME=disaggr-test-$(date +%s)-$$
 STREAMING=true
 CTX_GPU_FRAC=0.85
 
-num_ctx_servers=$1
-ctx_tp_size=$2
-ctx_ep_size=$3
-ctx_enable_attention_dp=$4
-ctx_batch_size=$5
-ctx_max_num_tokens=$6
-num_gen_servers=$7
-gen_tp_size=$8
-gen_ep_size=$9
-gen_batch_size=${10}
-gen_max_num_tokens=${11}
-gen_enable_attention_dp=${12}
-gen_gpu_memory_fraction=${13}
-eplb_num_slots=${14}
-mtp_size=${15}
-concurrency_list=${16}
-gen_nodes=${17}
-kind=${18}
-model_path=${19}
-served_model_name=${20}
-image=${21}
-isl=${22}
-osl=${23}
-benchmark_kind=${24}
-ntasks_per_node=${25}
+config=$1
+model_path=$2
+isl=$3
+osl=$4
+concurrency_list=$5
 
-CACHE_TRANSCEIVER_MAX_NUM_TOKENS=${CACHE_TRANSCEIVER_MAX_NUM_TOKENS:-$((${isl} + ${osl} + 512))}
-
-ctx_max_seq_len=$((${isl} + 203))
-gen_max_seq_len=$((${isl} + ${osl} + 203))
+SERVED_MODEL_NAME=model
+NTASKS_PER_NODE=${NTASKS_PER_NODE:-4}
 
 WORK_DIR=${MOUNT_DIR}
 LOG_DIR=$WORK_DIR/${kind}-bm-${isl}-${osl}
 SCRIPTS_DIR=${WORK_DIR}/
-set_clock_cmd="bash ${SCRIPTS_DIR}/set_clock.sh"
 mkdir -p ${LOG_DIR}
 echo "trying to submit job"
 
-sub_dir=${LOG_DIR}/ctx${num_ctx_servers}_gen${num_gen_servers}_dp${gen_tp_size}_ep${gen_ep_size}_batch${gen_batch_size}_eplb${eplb_num_slots}_mtp${mtp_size}
+sub_dir=$LOG_DIR/$(python3 -c "import yaml, uuid; print(yaml.safe_load(open('${config}')).get('name', 'benchmark-' + uuid.uuid4().hex))")
 
 echo "concurrency_list: ${concurrency_list}"
-
-ctx_gpus=$((num_ctx_servers * ctx_tp_size))
-gen_gpus=$((num_gen_servers * gen_tp_size))
-
-echo "enable_attention_dp: ${ctx_enable_attention_dp}, ${gen_enable_attention_dp}, gpu_memory_fraction: ${gen_gpu_memory_fraction}"
-
-if [ "${gen_enable_attention_dp}" = "false" ]; then
-    sub_dir=${LOG_DIR}/ctx${num_ctx_servers}_gen${num_gen_servers}_tp${gen_tp_size}_ep${gen_ep_size}_batch${gen_batch_size}_eplb${eplb_num_slots}_mtp${mtp_size}
-fi
 
 full_logdir=${sub_dir}
 mkdir -p ${full_logdir}
 
-# Set clock
-#srun ${set_clock_cmd}
+container_mounts=${MOUNT_DIR}:${MOUNT_DIR},${model_path}:${model_path},${config}:${config}
 
-container_mounts=${MOUNT_DIR}:${MOUNT_DIR},${model_path}:${model_path}
-
-# start the container
-srun -l --container-image=${image} \
-        --container-name=${CONTAINER_NAME} \
-        --container-mounts=${container_mounts} \
-        --mpi=pmix \
-        echo "Container up."
-
-# generate the yaml file
-srun -l --container-name=${CONTAINER_NAME} \
-        --container-mounts=${container_mounts} \
-        --mpi=pmix --overlap \
-	    -n 1 -N 1 \
-        python3 ${SCRIPTS_DIR}/scripts/gen_yaml.py --config ${full_logdir}/config.yaml \
-            --model ${model_path} \
-            --num_ctx_servers ${num_ctx_servers} \
-            --ctx_tp_size ${ctx_tp_size} \
-            --ctx_ep_size ${ctx_ep_size} \
-            --ctx_batch_size ${ctx_batch_size} \
-            --ctx_max_num_tokens ${ctx_max_num_tokens} \
-            --ctx_max_seq_len ${ctx_max_seq_len} \
-            --ctx_free_gpu_memory_fraction ${CTX_GPU_FRAC} \
-            --cache_transceiver_max_num_tokens ${CACHE_TRANSCEIVER_MAX_NUM_TOKENS} \
-            --num_gen_servers ${num_gen_servers} \
-            --gen_tp_size ${gen_tp_size} \
-            --gen_ep_size ${gen_ep_size} \
-            --gen_batch_size ${gen_batch_size} \
-            --gen_max_num_tokens ${gen_max_num_tokens} \
-            --gen_max_seq_len ${gen_max_seq_len} \
-            --gen_gpu_memory_fraction ${gen_gpu_memory_fraction} \
-            --eplb_num_slots ${eplb_num_slots} \
-            $(if [ "${gen_enable_attention_dp}" = "true" ]; then echo "--gen_enable_attention_dp"; fi) \
-            $(if [ "${ctx_enable_attention_dp}" = "true" ]; then echo "--ctx_enable_attention_dp"; fi) \
-            $(if [ "${mtp_size}" -gt 0 ]; then echo "--mtp_size ${mtp_size}"; fi)
-
-echo "YAML file generated."
-
-nsys_on=""
-# nsys_on=${full_logdir}
+srun --container-name ${CONTAINER_NAME} \
+    --container-mounts ${container_mounts} \
+    -N 1 -n 1 \
+    python3 ${SCRIPTS_DIR}/scripts/gen_instance_config.py ${config} ${full_logdir}
 
 nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
 
@@ -155,6 +86,12 @@ echo "$SERVER_PID" >> "$PID_FILE"
 # wait for the server to start
 sleep 10
 
+if [[ -n $(scontrol show config | grep "GresTypes" | grep "gpu") ]]; then
+    gpus_per_node="--gpus-per-node ${ntasks_per_node}"
+else
+    gpus_per_node=""
+fi
+
 DECODE_COUNT=$(grep 'decode_count:' "${full_logdir}/instance_config.yaml" | awk '{print $2}')
 if [ -z "$DECODE_COUNT" ]; then
     echo "Error: Failed to extract decode_count from instance_config.yaml"
@@ -162,13 +99,14 @@ if [ -z "$DECODE_COUNT" ]; then
 fi
 echo "Decode Count: $DECODE_COUNT"
 
-if [[ -n $(scontrol show config | grep "GresTypes" | grep "gpu") ]]; then
-    gpus_per_node="--gpus-per-node ${ntasks_per_node}"
-else
-    gpus_per_node=""
+gen_tp_size=$(grep 'decode_tp_size:' "${full_logdir}/instance_config.yaml" | awk '{print $2}')
+if [ -z "$gen_tp_size" ]; then
+    echo "Error: Failed to extract decode_tp_size from instance_config.yaml"
+    exit 1
 fi
+echo "Decode TP Size: $gen_tp_size"
 
-num_gen_nodes=$((gen_nodes/num_gen_servers))
+num_gen_nodes=$((gen_tp_size/NTASKS_PER_NODE))
 for ((i=1; i<=DECODE_COUNT; i++)); do
   echo "Running Decode Worker: ${i}"
   decode_node_list=()
@@ -187,7 +125,7 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
       --oversubscribe \
       --overlap \
       -e UCX_NET_DEVICES,TRTLLM_UCX_INTERFACE \
-      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/decode_config.yaml ${ctx_gpus} ${served_model_name} ${model_path} 'decode' $gen_enable_attention_dp &> ${full_logdir}/output_decode_worker_${i}.log &
+      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${config} "decode" &> ${full_logdir}/output_decode_worker_${i}.log &
   echo "$!" >> "$PID_FILE"
 done
 
