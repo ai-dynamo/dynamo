@@ -118,6 +118,30 @@ USE_SCCACHE=""
 SCCACHE_BUCKET=""
 SCCACHE_REGION=""
 
+
+define_base_images() {
+    # Base Images
+    TRTLLM_BASE_IMAGE="${REGISTRY}/nvidia/pytorch"
+    TRTLLM_BASE_IMAGE_TAG=25.10-py3
+    VLLM_BASE_IMAGE="${REGISTRY}/nvidia/cuda-dl-base"
+    # FIXME: OPS-612 NCCL will hang with 25.03, so use 25.01 for now
+    # Please check https://github.com/ai-dynamo/dynamo/pull/1065
+    # for details and reproducer to manually test if the image
+    # can be updated to later versions.
+    VLLM_BASE_IMAGE_TAG="25.04-cuda12.9-devel-ubuntu24.04"
+
+    NONE_BASE_IMAGE="${REGISTRY}/nvidia/cuda-dl-base"
+    NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+
+    SGLANG_CUDA_VERSION="12.9.1"
+    # This is for Dockerfile
+    SGLANG_BASE_IMAGE="${REGISTRY}/nvidia/cuda-dl-base"
+    SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+    # This is for Dockerfile.sglang. Unlike the other frameworks, it is using a different base image
+    SGLANG_FRAMEWORK_IMAGE="${REGISTRY}/nvidia/cuda"
+    SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
+}
+
 get_options() {
     while :; do
         case $1 in
@@ -335,26 +359,7 @@ get_options() {
         shift
     done
 
-    # Base Images
-    TRTLLM_BASE_IMAGE="${REGISTRY}/nvidia/pytorch"
-    TRTLLM_BASE_IMAGE_TAG=25.10-py3
-    VLLM_BASE_IMAGE="${REGISTRY}/nvidia/cuda-dl-base"
-    # FIXME: OPS-612 NCCL will hang with 25.03, so use 25.01 for now
-    # Please check https://github.com/ai-dynamo/dynamo/pull/1065
-    # for details and reproducer to manually test if the image
-    # can be updated to later versions.
-    VLLM_BASE_IMAGE_TAG="25.04-cuda12.9-devel-ubuntu24.04"
-
-    NONE_BASE_IMAGE="${REGISTRY}/nvidia/cuda-dl-base"
-    NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
-
-    SGLANG_CUDA_VERSION="12.9.1"
-    # This is for Dockerfile
-    SGLANG_BASE_IMAGE="${REGISTRY}/nvidia/cuda-dl-base"
-    SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
-    # This is for Dockerfile.sglang. Unlike the other frameworks, it is using a different base image
-    SGLANG_FRAMEWORK_IMAGE="${REGISTRY}/nvidia/cuda"
-    SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
+    define_base_images
 
     # Validate that --uid and --gid are only used with local-dev target
     if [[ -n "${CUSTOM_UID:-}" || -n "${CUSTOM_GID:-}" ]]; then
@@ -494,6 +499,7 @@ error() {
 
 get_options "$@"
 
+define_base_images
 
 # Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64
 ARCH="amd64"
