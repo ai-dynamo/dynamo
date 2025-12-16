@@ -67,12 +67,12 @@ impl S3LockManager {
 
     /// Format the lock key for a given hash.
     fn lock_key(&self, hash: &SequenceHash) -> String {
-        format!("{:?}.lock", hash)
+        format!("{}.lock", hash)
     }
 
     /// Format the meta key for a given hash.
     fn meta_key(&self, hash: &SequenceHash) -> String {
-        format!("{:?}.meta", hash)
+        format!("{}.meta", hash)
     }
 
     /// Create lock file content with current timestamp.

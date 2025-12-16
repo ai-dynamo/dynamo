@@ -25,8 +25,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 use rstest::rstest;
 
+use crate::v2::distributed::object::LayoutConfigExt;
 use crate::v2::distributed::object::s3::{S3Config, S3ObjectBlockClient};
-use crate::v2::distributed::object::{LayoutConfigExt, ObjectBlockClient};
 use crate::v2::physical::layout::{BlockDimension, PhysicalLayout};
 use crate::v2::physical::transfer::{
     BlockChecksum, FillPattern, NixlAgent, compute_block_checksums, fill_blocks,
@@ -86,7 +86,7 @@ fn generate_test_hashes(count: usize, seed: usize) -> Vec<SequenceHash> {
     seq.blocks()
         .iter()
         .take(count)
-        .map(|b| b.positional_sequence_hash())
+        .map(|b| b.positional_lineage_hash())
         .collect()
 }
 
@@ -179,6 +179,36 @@ impl TestS3Client {
     /// Get the bucket name.
     pub fn bucket(&self) -> &str {
         &self.bucket
+    }
+
+    /// Check if blocks exist in S3.
+    pub async fn has_blocks(&self, keys: &[SequenceHash]) -> Vec<(SequenceHash, Option<usize>)> {
+        use crate::v2::distributed::object::ObjectBlockOps;
+        self.inner.has_blocks(keys.to_vec()).await
+    }
+
+    /// Put blocks to S3 using physical layout.
+    pub async fn put_blocks(
+        &self,
+        keys: &[SequenceHash],
+        layout: &PhysicalLayout,
+        block_ids: &[BlockId],
+    ) -> Vec<Result<SequenceHash, SequenceHash>> {
+        self.inner
+            .put_blocks_with_layout(keys.to_vec(), layout.clone(), block_ids.to_vec())
+            .await
+    }
+
+    /// Get blocks from S3 into physical layout.
+    pub async fn get_blocks(
+        &self,
+        keys: &[SequenceHash],
+        layout: &PhysicalLayout,
+        block_ids: &[BlockId],
+    ) -> Vec<Result<SequenceHash, SequenceHash>> {
+        self.inner
+            .get_blocks_with_layout(keys.to_vec(), layout.clone(), block_ids.to_vec())
+            .await
     }
 
     /// Delete all objects in the bucket.

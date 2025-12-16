@@ -8,6 +8,7 @@
 
 use anyhow::{Result, anyhow};
 use aws_sdk_s3::Client;
+use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::primitives::ByteStream;
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -16,6 +17,7 @@ use futures::stream::StreamExt;
 use crate::v2::distributed::object::{
     DefaultKeyFormatter, KeyFormatter, LayoutConfigExt, ObjectBlockOps,
 };
+use crate::v2::logical::LogicalLayoutHandle;
 use crate::v2::physical::transfer::PhysicalLayout;
 use crate::{BlockId, SequenceHash};
 use std::sync::Arc;
@@ -243,9 +245,9 @@ impl S3ObjectBlockClient {
         {
             Ok(_) => Ok(true),
             Err(e) => {
-                // Check if this is a precondition failed error
+                // Check if this is a precondition failed error (HTTP 412)
                 let service_error = e.into_service_error();
-                if service_error.is_precondition_failed() {
+                if service_error.code() == Some("PreconditionFailed") {
                     Ok(false)
                 } else {
                     Err(anyhow!(
@@ -287,7 +289,7 @@ impl S3ObjectBlockClient {
             }
             Err(e) => {
                 let service_error = e.into_service_error();
-                if service_error.is_no_such_key() {
+                if service_error.code() == Some("NoSuchKey") {
                     Ok(None)
                 } else {
                     Err(anyhow!(
@@ -321,7 +323,7 @@ impl S3ObjectBlockClient {
             Ok(_) => Ok(true),
             Err(e) => {
                 let service_error = e.into_service_error();
-                if service_error.is_no_such_key() {
+                if service_error.code() == Some("NoSuchKey") {
                     Ok(false)
                 } else {
                     Err(anyhow!(
@@ -355,7 +357,8 @@ impl S3ObjectBlockClient {
             Ok(_) => Ok(true),
             Err(e) => {
                 let service_error = e.into_service_error();
-                if service_error.is_not_found() {
+                // HeadObject returns "NotFound" when object doesn't exist
+                if service_error.code() == Some("NotFound") {
                     Ok(false)
                 } else {
                     Err(anyhow!(
@@ -383,6 +386,171 @@ impl S3ObjectBlockClient {
             .await
             .map_err(|e| anyhow!("S3 put_object failed for key '{}': {}", key, e))?;
         Ok(())
+    }
+
+    /// Put blocks to object storage using a physical layout.
+    ///
+    /// This is the internal implementation that workers call after resolving
+    /// the logical layout handle to a physical layout.
+    ///
+    /// # Arguments
+    /// * `keys` - Sequence hashes identifying each block
+    /// * `layout` - Physical layout containing the block data
+    /// * `block_ids` - Block IDs within the layout to upload
+    ///
+    /// Returns a vector of results for each block:
+    /// - Ok(hash) indicates the block was successfully stored
+    /// - Err(hash) indicates the block failed to store
+    pub fn put_blocks_with_layout(
+        &self,
+        keys: Vec<SequenceHash>,
+        layout: PhysicalLayout,
+        block_ids: Vec<BlockId>,
+    ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        let config = layout.layout().config();
+        let block_size = config.block_size_bytes();
+        let region_size = config.region_size();
+        let is_contiguous = layout.layout().is_fully_contiguous();
+        let max_concurrent = self.config.max_concurrent_requests;
+        let client = self.client.clone();
+        let bucket = self.config.bucket.clone();
+        let formatter = self.key_formatter.clone();
+
+        Box::pin(async move {
+            let work_items: Vec<_> = keys.into_iter().zip(block_ids.into_iter()).collect();
+
+            let tasks = work_items.into_iter().map(|(key, block_id)| {
+                let client = client.clone();
+                let bucket = bucket.clone();
+                let key_str = formatter.format_key(&key);
+                let layout = layout.clone();
+
+                async move {
+                    let result: Result<(), anyhow::Error> = async {
+                        // Copy block data to bytes on rayon thread pool
+                        let data = tokio_rayon::spawn(move || {
+                            copy_block_to_bytes(
+                                &layout,
+                                block_id,
+                                block_size,
+                                region_size,
+                                is_contiguous,
+                            )
+                        })
+                        .await?;
+
+                        // Upload to S3
+                        client
+                            .put_object()
+                            .bucket(&bucket)
+                            .key(&key_str)
+                            .body(ByteStream::from(data))
+                            .send()
+                            .await
+                            .map_err(|e| anyhow!("S3 put_object failed: {}", e))?;
+
+                        Ok(())
+                    }
+                    .await;
+
+                    match result {
+                        Ok(()) => Ok(key),
+                        Err(_) => Err(key),
+                    }
+                }
+            });
+
+            futures::stream::iter(tasks)
+                .buffer_unordered(max_concurrent)
+                .collect()
+                .await
+        })
+    }
+
+    /// Get blocks from object storage into a physical layout.
+    ///
+    /// This is the internal implementation that workers call after resolving
+    /// the logical layout handle to a physical layout.
+    ///
+    /// # Arguments
+    /// * `keys` - Sequence hashes identifying each block
+    /// * `layout` - Physical layout to write the block data into
+    /// * `block_ids` - Block IDs within the layout to download into
+    ///
+    /// Returns a vector of results for each block:
+    /// - Ok(hash) indicates the block was successfully retrieved
+    /// - Err(hash) indicates the block failed to retrieve
+    pub fn get_blocks_with_layout(
+        &self,
+        keys: Vec<SequenceHash>,
+        layout: PhysicalLayout,
+        block_ids: Vec<BlockId>,
+    ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        let config = layout.layout().config();
+        let block_size = config.block_size_bytes();
+        let region_size = config.region_size();
+        let is_contiguous = layout.layout().is_fully_contiguous();
+        let max_concurrent = self.config.max_concurrent_requests;
+        let client = self.client.clone();
+        let bucket = self.config.bucket.clone();
+        let formatter = self.key_formatter.clone();
+
+        Box::pin(async move {
+            let work_items: Vec<_> = keys.into_iter().zip(block_ids.into_iter()).collect();
+
+            let tasks = work_items.into_iter().map(|(key, block_id)| {
+                let client = client.clone();
+                let bucket = bucket.clone();
+                let key_str = formatter.format_key(&key);
+                let layout = layout.clone();
+
+                async move {
+                    let result: Result<(), anyhow::Error> = async {
+                        // Download from S3
+                        let resp = client
+                            .get_object()
+                            .bucket(&bucket)
+                            .key(&key_str)
+                            .send()
+                            .await
+                            .map_err(|e| anyhow!("S3 get_object failed: {}", e))?;
+
+                        let data = resp
+                            .body
+                            .collect()
+                            .await
+                            .map_err(|e| anyhow!("failed to collect S3 response body: {}", e))?
+                            .into_bytes();
+
+                        // Copy bytes to block on rayon thread pool
+                        tokio_rayon::spawn(move || {
+                            copy_bytes_to_block(
+                                &data,
+                                &layout,
+                                block_id,
+                                block_size,
+                                region_size,
+                                is_contiguous,
+                            )
+                        })
+                        .await?;
+
+                        Ok(())
+                    }
+                    .await;
+
+                    match result {
+                        Ok(()) => Ok(key),
+                        Err(_) => Err(key),
+                    }
+                }
+            });
+
+            futures::stream::iter(tasks)
+                .buffer_unordered(max_concurrent)
+                .collect()
+                .await
+        })
     }
 }
 
@@ -518,140 +686,51 @@ impl ObjectBlockOps for S3ObjectBlockClient {
     fn put_blocks(
         &self,
         keys: Vec<SequenceHash>,
-        layout: PhysicalLayout,
-        block_ids: Vec<BlockId>,
+        _src_layout: LogicalLayoutHandle,
+        _block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
-        let config = layout.layout().config();
-        let block_size = config.block_size_bytes();
-        let region_size = config.region_size();
-        let is_contiguous = layout.layout().is_fully_contiguous();
-        let max_concurrent = self.config.max_concurrent_requests;
-        let client = self.client.clone();
-        let bucket = self.config.bucket.clone();
-        let formatter = self.key_formatter.clone();
-
-        Box::pin(async move {
-            let work_items: Vec<_> = keys.into_iter().zip(block_ids.into_iter()).collect();
-
-            let tasks = work_items.into_iter().map(|(key, block_id)| {
-                let client = client.clone();
-                let bucket = bucket.clone();
-                let key_str = formatter.format_key(&key);
-                let layout = layout.clone();
-
-                async move {
-                    let result: Result<(), anyhow::Error> = async {
-                        // Copy block data to bytes on rayon thread pool
-                        let data = tokio_rayon::spawn(move || {
-                            copy_block_to_bytes(
-                                &layout,
-                                block_id,
-                                block_size,
-                                region_size,
-                                is_contiguous,
-                            )
-                        })
-                        .await?;
-
-                        // Upload to S3
-                        client
-                            .put_object()
-                            .bucket(&bucket)
-                            .key(&key_str)
-                            .body(ByteStream::from(data))
-                            .send()
-                            .await
-                            .map_err(|e| anyhow!("S3 put_object failed: {}", e))?;
-
-                        Ok(())
-                    }
-                    .await;
-
-                    match result {
-                        Ok(()) => Ok(key),
-                        Err(_) => Err(key),
-                    }
-                }
-            });
-
-            futures::stream::iter(tasks)
-                .buffer_unordered(max_concurrent)
-                .collect()
-                .await
-        })
+        // S3ObjectBlockClient cannot resolve LogicalLayoutHandle to PhysicalLayout.
+        // Workers should use put_blocks_with_layout() instead after resolving the handle.
+        tracing::error!(
+            "S3ObjectBlockClient::put_blocks called with LogicalLayoutHandle - \
+             use put_blocks_with_layout() via DirectWorker instead"
+        );
+        Box::pin(async move { keys.into_iter().map(Err).collect() })
     }
 
     fn get_blocks(
         &self,
         keys: Vec<SequenceHash>,
+        _dst_layout: LogicalLayoutHandle,
+        _block_ids: Vec<BlockId>,
+    ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        // S3ObjectBlockClient cannot resolve LogicalLayoutHandle to PhysicalLayout.
+        // Workers should use get_blocks_with_layout() instead after resolving the handle.
+        tracing::error!(
+            "S3ObjectBlockClient::get_blocks called with LogicalLayoutHandle - \
+             use get_blocks_with_layout() via DirectWorker instead"
+        );
+        Box::pin(async move { keys.into_iter().map(Err).collect() })
+    }
+
+    fn put_blocks_with_layout(
+        &self,
+        keys: Vec<SequenceHash>,
         layout: PhysicalLayout,
         block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
-        let config = layout.layout().config();
-        let block_size = config.block_size_bytes();
-        let region_size = config.region_size();
-        let is_contiguous = layout.layout().is_fully_contiguous();
-        let max_concurrent = self.config.max_concurrent_requests;
-        let client = self.client.clone();
-        let bucket = self.config.bucket.clone();
-        let formatter = self.key_formatter.clone();
+        // Delegate to the inherent method
+        S3ObjectBlockClient::put_blocks_with_layout(self, keys, layout, block_ids)
+    }
 
-        Box::pin(async move {
-            let work_items: Vec<_> = keys.into_iter().zip(block_ids.into_iter()).collect();
-
-            let tasks = work_items.into_iter().map(|(key, block_id)| {
-                let client = client.clone();
-                let bucket = bucket.clone();
-                let key_str = formatter.format_key(&key);
-                let layout = layout.clone();
-
-                async move {
-                    let result: Result<(), anyhow::Error> = async {
-                        // Download from S3
-                        let resp = client
-                            .get_object()
-                            .bucket(&bucket)
-                            .key(&key_str)
-                            .send()
-                            .await
-                            .map_err(|e| anyhow!("S3 get_object failed: {}", e))?;
-
-                        let data = resp
-                            .body
-                            .collect()
-                            .await
-                            .map_err(|e| anyhow!("failed to collect S3 response body: {}", e))?
-                            .into_bytes();
-
-                        // Copy bytes to block on rayon thread pool
-                        tokio_rayon::spawn(move || {
-                            copy_bytes_to_block(
-                                &data,
-                                &layout,
-                                block_id,
-                                block_size,
-                                region_size,
-                                is_contiguous,
-                            )
-                        })
-                        .await?;
-
-                        Ok(())
-                    }
-                    .await;
-
-                    match result {
-                        Ok(()) => Ok(key),
-                        Err(_) => Err(key),
-                    }
-                }
-            });
-
-            futures::stream::iter(tasks)
-                .buffer_unordered(max_concurrent)
-                .collect()
-                .await
-        })
+    fn get_blocks_with_layout(
+        &self,
+        keys: Vec<SequenceHash>,
+        layout: PhysicalLayout,
+        block_ids: Vec<BlockId>,
+    ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        // Delegate to the inherent method
+        S3ObjectBlockClient::get_blocks_with_layout(self, keys, layout, block_ids)
     }
 }
 
@@ -686,5 +765,3 @@ mod tests {
         assert!(config.force_path_style);
     }
 }
-
-

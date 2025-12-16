@@ -27,7 +27,7 @@ mod tests {
         BoxFuture as PolicyBoxFuture, EvalContext, ObjectLockPresenceFilter, OffloadPolicy,
         PendingTracker,
     };
-    use crate::v2::physical::transfer::PhysicalLayout;
+    use crate::v2::logical::LogicalLayoutHandle;
     use crate::v2::{BlockId, G2, SequenceHash};
 
     /// Create a test sequence hash from a simple integer.
@@ -144,7 +144,7 @@ mod tests {
         fn put_blocks(
             &self,
             keys: Vec<SequenceHash>,
-            _layout: PhysicalLayout,
+            _layout: LogicalLayoutHandle,
             _block_ids: Vec<BlockId>,
         ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
             let storage = self.storage.clone();
@@ -162,7 +162,7 @@ mod tests {
         fn get_blocks(
             &self,
             keys: Vec<SequenceHash>,
-            _layout: PhysicalLayout,
+            _layout: LogicalLayoutHandle,
             _block_ids: Vec<BlockId>,
         ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
             let storage = self.storage.clone();

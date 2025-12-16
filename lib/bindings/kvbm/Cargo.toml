@@ -29,7 +29,7 @@ static-kernels = ["dynamo-kvbm-kernels/static-kernels"]
 
 [dependencies]
 dynamo-llm = { path = "../../llm", optional = true }
-dynamo-kvbm = { path = "../../kvbm", optional = true }
+dynamo-kvbm = { path = "../../kvbm", optional = true, features = ["s3"] }
 dynamo-kvbm-kernels = { path = "../../kvbm-kernels", optional = true, features = ["static-kernels"] }
 dynamo-memory = { path = "../../memory", optional = true }
 dynamo-runtime = { path = "../../runtime", optional = true }

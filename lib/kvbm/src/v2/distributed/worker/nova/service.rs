@@ -304,12 +304,10 @@ impl NovaWorkerService {
                 async move {
                     let message: ObjectPutBlocksMessage = serde_json::from_slice(&ctx.payload)?;
 
-                    // Resolve logical handle to physical layout
-                    let layout = worker.resolve_layout(message.layout)?;
-
                     // Call DirectWorker's ObjectBlockOps implementation
+                    // DirectWorker resolves logical handle to physical layout internally
                     let results = worker
-                        .put_blocks(message.keys, layout, message.block_ids)
+                        .put_blocks(message.keys, message.layout, message.block_ids)
                         .await;
 
                     let response = ObjectPutGetBlocksResponse::from_results(results);
@@ -333,12 +331,10 @@ impl NovaWorkerService {
                 async move {
                     let message: ObjectGetBlocksMessage = serde_json::from_slice(&ctx.payload)?;
 
-                    // Resolve logical handle to physical layout
-                    let layout = worker.resolve_layout(message.layout)?;
-
                     // Call DirectWorker's ObjectBlockOps implementation
+                    // DirectWorker resolves logical handle to physical layout internally
                     let results = worker
-                        .get_blocks(message.keys, layout, message.block_ids)
+                        .get_blocks(message.keys, message.layout, message.block_ids)
                         .await;
 
                     let response = ObjectPutGetBlocksResponse::from_results(results);

@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::v2::distributed::object::ObjectBlockOps;
-use crate::v2::physical::transfer::PhysicalLayout;
 use futures::future::BoxFuture;
 use parking_lot::RwLock;
 use std::collections::HashSet;
@@ -462,15 +461,13 @@ impl ObjectBlockOps for NovaWorkerClient {
     fn put_blocks(
         &self,
         keys: Vec<SequenceHash>,
-        _layout: PhysicalLayout,
+        src_layout: LogicalLayoutHandle,
         block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
         // For remote workers, we send the logical layout handle - they resolve it locally
-        // The layout parameter here is for DirectWorker; NovaWorkerClient ignores it
-        // and expects the caller to have already resolved the handle on the service side
         let message = ObjectPutBlocksMessage {
             keys: keys.clone(),
-            layout: LogicalLayoutHandle::G2, // Default to G2 for object storage
+            layout: src_layout,
             block_ids,
         };
         let bytes = match serde_json::to_vec(&message) {
@@ -506,12 +503,13 @@ impl ObjectBlockOps for NovaWorkerClient {
     fn get_blocks(
         &self,
         keys: Vec<SequenceHash>,
-        _layout: PhysicalLayout,
+        dst_layout: LogicalLayoutHandle,
         block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        // For remote workers, we send the logical layout handle - they resolve it locally
         let message = ObjectGetBlocksMessage {
             keys: keys.clone(),
-            layout: LogicalLayoutHandle::G2, // Default to G2 for object storage
+            layout: dst_layout,
             block_ids,
         };
         let bytes = match serde_json::to_vec(&message) {

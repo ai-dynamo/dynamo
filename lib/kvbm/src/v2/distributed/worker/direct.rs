@@ -307,7 +307,7 @@ impl WorkerTransfers for DirectWorker {
                 // Spawn task to execute object storage read
                 ctx.tokio().spawn(async move {
                     let results = object_client
-                        .get_blocks(keys.clone(), dst_physical, block_ids_vec)
+                        .get_blocks_with_layout(keys.clone(), dst_physical, block_ids_vec)
                         .await;
 
                     // Check if any failed
@@ -367,7 +367,7 @@ impl WorkerTransfers for DirectWorker {
                     .clone();
 
                 // Resolve source physical layout
-                let src_layout = self.resolve_layout(src)?;
+                let src_physical = self.resolve_layout(src)?;
                 let block_ids_vec: Vec<BlockId> = src_block_ids.to_vec();
 
                 // Create event for completion notification
@@ -379,7 +379,7 @@ impl WorkerTransfers for DirectWorker {
                 // Spawn task to execute object storage write
                 ctx.tokio().spawn(async move {
                     let results = object_client
-                        .put_blocks(keys.clone(), src_layout, block_ids_vec)
+                        .put_blocks_with_layout(keys.clone(), src_physical, block_ids_vec)
                         .await;
 
                     // Check if any failed
@@ -514,14 +514,24 @@ impl ObjectBlockOps for DirectWorker {
     fn put_blocks(
         &self,
         keys: Vec<SequenceHash>,
-        layout: crate::v2::physical::transfer::PhysicalLayout,
+        src_layout: LogicalLayoutHandle,
         block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        // Resolve logical handle to physical layout
+        let physical_layout = match self.resolve_layout(src_layout) {
+            Ok(layout) => layout,
+            Err(e) => {
+                tracing::error!(?src_layout, error = %e, "Failed to resolve layout for put_blocks");
+                return Box::pin(async move { keys.into_iter().map(Err).collect() });
+            }
+        };
+
         // Object client handles rank-based key prefixing internally
         if let Some(client) = self.object_client.as_ref() {
-            client.put_blocks(keys, layout, block_ids)
+            client.put_blocks_with_layout(keys, physical_layout, block_ids)
         } else {
             // No object client configured - return all keys as failed
+            tracing::warn!("put_blocks called but no object client configured");
             Box::pin(async move { keys.into_iter().map(Err).collect() })
         }
     }
@@ -529,14 +539,24 @@ impl ObjectBlockOps for DirectWorker {
     fn get_blocks(
         &self,
         keys: Vec<SequenceHash>,
-        layout: crate::v2::physical::transfer::PhysicalLayout,
+        dst_layout: LogicalLayoutHandle,
         block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        // Resolve logical handle to physical layout
+        let physical_layout = match self.resolve_layout(dst_layout) {
+            Ok(layout) => layout,
+            Err(e) => {
+                tracing::error!(?dst_layout, error = %e, "Failed to resolve layout for get_blocks");
+                return Box::pin(async move { keys.into_iter().map(Err).collect() });
+            }
+        };
+
         // Object client handles rank-based key prefixing internally
         if let Some(client) = self.object_client.as_ref() {
-            client.get_blocks(keys, layout, block_ids)
+            client.get_blocks_with_layout(keys, physical_layout, block_ids)
         } else {
             // No object client configured - return all keys as failed
+            tracing::warn!("get_blocks called but no object client configured");
             Box::pin(async move { keys.into_iter().map(Err).collect() })
         }
     }

@@ -21,6 +21,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use futures::future::BoxFuture;
 
+use crate::v2::logical::LogicalLayoutHandle;
 use crate::v2::physical::layout::LayoutConfig;
 use crate::v2::physical::transfer::PhysicalLayout;
 use crate::{BlockId, SequenceHash};
@@ -41,22 +42,25 @@ pub trait KeyFormatter: Send + Sync {
     fn format_key(&self, hash: &SequenceHash) -> String;
 }
 
-/// Default key formatter - uses debug representation without any prefix.
+/// Default key formatter - uses Display representation of PositionalLineageHash.
 ///
+/// Produces keys like: `0:abc123` or `5:abc123:def456` (position:current[:parent])
+/// using base58 encoding for hash fragments.
 /// Suitable for single-worker scenarios or testing.
 #[derive(Debug, Clone, Default)]
 pub struct DefaultKeyFormatter;
 
 impl KeyFormatter for DefaultKeyFormatter {
     fn format_key(&self, hash: &SequenceHash) -> String {
-        format!("{:?}", hash)
+        hash.to_string()
     }
 }
 
 /// Rank-prefixed key formatter for SPMD workers.
 ///
-/// Formats keys as `{rank}/{hash}` to ensure uniqueness across workers
-/// writing the same logical blocks.
+/// Formats keys as `{rank}/{display_hash}` to ensure uniqueness across workers
+/// writing the same logical blocks. The hash uses the Display representation
+/// (e.g., `0/5:abc123:def456`).
 #[derive(Debug, Clone)]
 pub struct RankPrefixedKeyFormatter {
     rank: usize,
@@ -76,7 +80,7 @@ impl RankPrefixedKeyFormatter {
 
 impl KeyFormatter for RankPrefixedKeyFormatter {
     fn format_key(&self, hash: &SequenceHash) -> String {
-        format!("{}/{:?}", self.rank, hash)
+        format!("{}/{}", self.rank, hash)
     }
 }
 
@@ -133,14 +137,19 @@ pub trait ObjectClient: Send + Sync {
 /// This trait provides high-level operations for storing and retrieving
 /// KV cache blocks in object storage (e.g., S3, MinIO).
 ///
+/// Uses `LogicalLayoutHandle` to identify source/destination layouts. In distributed
+/// mode, workers resolve the logical handle to their own physical layouts. This allows
+/// the leader (which doesn't have physical layouts) to use the same trait.
+///
 /// Uses `'static` BoxFuture for runtime flexibility - implementations clone/Arc
 /// what they need from self. Takes owned Vecs for simplicity; keys are returned
 /// in results so callers can correlate success/failure.
 ///
 /// Implemented by:
-/// - `S3ObjectBlockClient` - direct S3 operations
-/// - `DirectWorker` - augments keys with rank, delegates to underlying client
-/// - `CoordinatedWorker` - augments keys with rank, delegates to inner worker
+/// - `S3ObjectBlockClient` - direct S3 operations (has_blocks only; put/get require physical layout)
+/// - `DirectWorker` - resolves logical handle to physical layout, then delegates
+/// - `CoordinatedWorker` - delegates to inner worker
+/// - `LeaderObjectClient` - coordinates workers for distributed uploads
 pub trait ObjectBlockOps: Send + Sync {
     /// Check if blocks exist in object storage.
     ///
@@ -156,16 +165,20 @@ pub trait ObjectBlockOps: Send + Sync {
     ///
     /// # Arguments
     /// * `keys` - Sequence hashes identifying each block
-    /// * `layout` - Physical layout containing the block data
+    /// * `src_layout` - Logical layout handle identifying the source (workers resolve to physical)
     /// * `block_ids` - Block IDs within the layout to upload
     ///
     /// Returns a vector of results for each block:
     /// - Ok(hash) indicates the block was successfully stored
     /// - Err(hash) indicates the block failed to store
+    ///
+    /// # Note
+    /// For `S3ObjectBlockClient`, this will error - use `put_blocks_with_layout` instead.
+    /// Workers should resolve the logical handle to their physical layout first.
     fn put_blocks(
         &self,
         keys: Vec<SequenceHash>,
-        layout: PhysicalLayout,
+        src_layout: LogicalLayoutHandle,
         block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>>;
 
@@ -173,18 +186,64 @@ pub trait ObjectBlockOps: Send + Sync {
     ///
     /// # Arguments
     /// * `keys` - Sequence hashes identifying each block
-    /// * `layout` - Physical layout to write the block data into
+    /// * `dst_layout` - Logical layout handle identifying the destination (workers resolve to physical)
     /// * `block_ids` - Block IDs within the layout to download into
     ///
     /// Returns a vector of results for each block:
     /// - Ok(hash) indicates the block was successfully retrieved
     /// - Err(hash) indicates the block failed to retrieve
+    ///
+    /// # Note
+    /// For `S3ObjectBlockClient`, this will error - use `get_blocks_with_layout` instead.
+    /// Workers should resolve the logical handle to their physical layout first.
     fn get_blocks(
         &self,
         keys: Vec<SequenceHash>,
-        layout: PhysicalLayout,
+        dst_layout: LogicalLayoutHandle,
         block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>>;
+
+    // =========================================================================
+    // Physical Layout Methods (for workers that can resolve handles)
+    // =========================================================================
+
+    /// Put blocks to object storage using a resolved physical layout.
+    ///
+    /// This method is called by workers after resolving a logical handle to
+    /// their physical layout. The default implementation errors; storage backends
+    /// like `S3ObjectBlockClient` override this with actual upload logic.
+    ///
+    /// # Arguments
+    /// * `keys` - Sequence hashes identifying each block
+    /// * `layout` - Physical layout containing the block data
+    /// * `block_ids` - Block IDs within the layout to upload
+    fn put_blocks_with_layout(
+        &self,
+        keys: Vec<SequenceHash>,
+        _layout: PhysicalLayout,
+        _block_ids: Vec<BlockId>,
+    ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        Box::pin(async move { keys.into_iter().map(Err).collect() })
+    }
+
+    /// Get blocks from object storage into a resolved physical layout.
+    ///
+    /// This method is called by workers after resolving a logical handle to
+    /// their physical layout. The default implementation errors; storage backends
+    /// like `S3ObjectBlockClient` override this with actual download logic.
+    ///
+    /// # Arguments
+    /// * `keys` - Sequence hashes identifying each block
+    /// * `layout` - Physical layout to write the block data into
+    /// * `block_ids` - Block IDs within the layout to download into
+    fn get_blocks_with_layout(
+        &self,
+        keys: Vec<SequenceHash>,
+        _layout: PhysicalLayout,
+        _block_ids: Vec<BlockId>,
+    ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        Box::pin(async move { keys.into_iter().map(Err).collect() })
+    }
 }
 
 // ============================================================================

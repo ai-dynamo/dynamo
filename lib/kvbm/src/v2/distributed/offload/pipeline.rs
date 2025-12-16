@@ -43,7 +43,7 @@ use crate::v2::distributed::object::ObjectBlockOps;
 use crate::v2::logical::LogicalLayoutHandle;
 use crate::v2::logical::blocks::{BlockMetadata, BlockRegistry, ImmutableBlock};
 use crate::v2::logical::manager::BlockManager;
-use crate::v2::physical::transfer::{PhysicalLayout, TransferOptions};
+use crate::v2::physical::transfer::TransferOptions;
 use crate::v2::{BlockId, SequenceHash};
 
 use super::batch::{
@@ -648,7 +648,7 @@ impl<Src: BlockMetadata> ObjectPipeline<Src> {
     pub fn new(
         config: ObjectPipelineConfig<Src>,
         object_ops: Arc<dyn ObjectBlockOps>,
-        src_layout: PhysicalLayout,
+        src_layout: LogicalLayoutHandle,
         leader: Arc<InstanceLeader>,
         runtime: tokio::runtime::Handle,
     ) -> Self {
@@ -1743,8 +1743,9 @@ pub struct ObjectTransferExecutor<Src: BlockMetadata> {
     input_rx: BatchOutputRx<Src>,
     /// Object storage operations
     object_ops: Arc<dyn ObjectBlockOps>,
-    /// Source physical layout for reading block data
-    src_layout: PhysicalLayout,
+    /// Source logical layout handle for reading block data
+    /// The ObjectBlockOps implementation resolves this to a physical layout
+    src_layout: LogicalLayoutHandle,
     /// Skip actual transfers (for testing)
     skip_transfers: bool,
     /// Maximum concurrent transfer batches
@@ -1756,7 +1757,7 @@ pub struct ObjectTransferExecutor<Src: BlockMetadata> {
 /// Shared state for ObjectTransferExecutor that can be cloned across concurrent tasks.
 struct SharedObjectExecutorState {
     object_ops: Arc<dyn ObjectBlockOps>,
-    src_layout: PhysicalLayout,
+    src_layout: LogicalLayoutHandle,
     skip_transfers: bool,
     lock_manager: Option<Arc<dyn ObjectLockManager>>,
 }
@@ -1767,7 +1768,7 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
     pub fn new(
         input_rx: BatchOutputRx<Src>,
         object_ops: Arc<dyn ObjectBlockOps>,
-        src_layout: PhysicalLayout,
+        src_layout: LogicalLayoutHandle,
         skip_transfers: bool,
         max_concurrent_transfers: usize,
         lock_manager: Option<Arc<dyn ObjectLockManager>>,

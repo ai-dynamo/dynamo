@@ -338,6 +338,14 @@ impl InstanceLeader {
         self.parallel_worker.is_some()
     }
 
+    /// Get the parallel worker for distributed operations.
+    ///
+    /// The parallel worker fans out operations to all workers and aggregates results.
+    /// It implements `ObjectBlockOps` for coordinated object storage uploads.
+    pub fn parallel_worker(&self) -> Option<Arc<dyn ParallelWorker>> {
+        self.parallel_worker.clone()
+    }
+
     /// Add a remote leader to the search list.
     ///
     /// Remote leaders are queried during `find_matches_with_options` when

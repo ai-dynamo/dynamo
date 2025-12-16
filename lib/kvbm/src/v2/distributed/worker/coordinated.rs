@@ -14,7 +14,7 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 
 use crate::physical::manager::LayoutHandle;
-use crate::physical::transfer::{PhysicalLayout, TransferOptions};
+use crate::physical::transfer::TransferOptions;
 use crate::v2::distributed::object::ObjectBlockOps;
 use crate::v2::{BlockId, InstanceId, SequenceHash};
 
@@ -369,21 +369,21 @@ impl ObjectBlockOps for CoordinatedWorker {
     fn put_blocks(
         &self,
         keys: Vec<SequenceHash>,
-        layout: PhysicalLayout,
+        src_layout: LogicalLayoutHandle,
         block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
-        // Delegate to inner worker - Worker trait now extends ObjectBlockOps
-        self.inner.put_blocks(keys, layout, block_ids)
+        // Delegate to inner worker - inner worker resolves logical handle
+        self.inner.put_blocks(keys, src_layout, block_ids)
     }
 
     fn get_blocks(
         &self,
         keys: Vec<SequenceHash>,
-        layout: PhysicalLayout,
+        dst_layout: LogicalLayoutHandle,
         block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
-        // Delegate to inner worker - Worker trait now extends ObjectBlockOps
-        self.inner.get_blocks(keys, layout, block_ids)
+        // Delegate to inner worker - inner worker resolves logical handle
+        self.inner.get_blocks(keys, dst_layout, block_ids)
     }
 }
 

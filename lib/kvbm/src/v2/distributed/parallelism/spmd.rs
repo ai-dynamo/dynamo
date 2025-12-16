@@ -4,7 +4,6 @@
 use super::*;
 
 use crate::v2::distributed::object::ObjectBlockOps;
-use crate::v2::physical::transfer::PhysicalLayout;
 use anyhow::Result;
 use dynamo_nova::events::{LocalEvent, LocalEventSystem};
 use futures::future::BoxFuture;
@@ -332,10 +331,11 @@ impl ObjectBlockOps for ReplicatedWorker {
     fn put_blocks(
         &self,
         keys: Vec<SequenceHash>,
-        layout: PhysicalLayout,
+        src_layout: LogicalLayoutHandle,
         block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
         // For put_blocks, each worker writes with its own rank-prefixed key.
+        // Each worker resolves the logical handle to its own physical layout.
         // All workers must succeed for the operation to be considered successful.
         let workers = self.workers.clone();
 
@@ -345,9 +345,10 @@ impl ObjectBlockOps for ReplicatedWorker {
             }
 
             // Execute put on all workers in parallel
+            // Each worker resolves src_layout to its own physical layout
             let futures: Vec<_> = workers
                 .iter()
-                .map(|worker| worker.put_blocks(keys.clone(), layout.clone(), block_ids.clone()))
+                .map(|worker| worker.put_blocks(keys.clone(), src_layout, block_ids.clone()))
                 .collect();
 
             let results: Vec<Vec<Result<SequenceHash, SequenceHash>>> =
@@ -380,10 +381,11 @@ impl ObjectBlockOps for ReplicatedWorker {
     fn get_blocks(
         &self,
         keys: Vec<SequenceHash>,
-        layout: PhysicalLayout,
+        dst_layout: LogicalLayoutHandle,
         block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
         // For get_blocks, each worker reads from its own rank-prefixed key.
+        // Each worker resolves the logical handle to its own physical layout.
         // All workers must succeed for the operation to be considered successful.
         let workers = self.workers.clone();
 
@@ -393,9 +395,10 @@ impl ObjectBlockOps for ReplicatedWorker {
             }
 
             // Execute get on all workers in parallel
+            // Each worker resolves dst_layout to its own physical layout
             let futures: Vec<_> = workers
                 .iter()
-                .map(|worker| worker.get_blocks(keys.clone(), layout.clone(), block_ids.clone()))
+                .map(|worker| worker.get_blocks(keys.clone(), dst_layout, block_ids.clone()))
                 .collect();
 
             let results: Vec<Vec<Result<SequenceHash, SequenceHash>>> =

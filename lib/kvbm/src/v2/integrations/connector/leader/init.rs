@@ -11,12 +11,10 @@ use crate::distributed::worker::{LeaderLayoutConfig, NovaWorkerClient, Worker};
 use crate::integrations::connector::worker::ConnectorWorkerClient;
 use crate::logical::blocks::{BlockDuplicationPolicy, BlockRegistry};
 use crate::logical::manager::{BlockManager, FrequencyTrackingCapacity};
-use crate::v2::distributed::object::{
-    ObjectLockManager, create_lock_manager, create_object_client,
-};
+use crate::v2::distributed::object::{ObjectLockManager, create_lock_manager};
 use crate::v2::distributed::offload::{
-    ObjectLockPresenceFilter, ObjectPipelineBuilder, OffloadEngine, PendingTracker,
-    PipelineBuilder, create_policy_from_config,
+    ObjectPipelineBuilder, ObjectPresenceFilter, OffloadEngine, PendingTracker, PipelineBuilder,
+    S3PresenceChecker, create_policy_from_config,
 };
 use crate::{G1, G2, G3, InstanceId};
 
@@ -405,8 +403,12 @@ impl ConnectorLeader {
         tracing::debug!("Handlers registered");
 
         tracing::debug!("Setting instance leader");
+        // Clone for the OnceLock storage, we'll wrap in Arc below for the engine
         self.set_instance_leader(leader.clone())?;
         tracing::debug!("Instance leader set");
+
+        // Wrap in Arc for the engine builder and parallel_worker access
+        let leader = Arc::new(leader);
 
         // Build OffloadEngine with config-driven policies
         tracing::debug!("Building OffloadEngine");
@@ -431,11 +433,13 @@ impl ConnectorLeader {
             registry_for_offload.clone(),
             Some(g1_to_g2_pending.clone()),
         );
-        // Auto-chain G1→G2 completions to G2→G3 if G3 exists
+        // Auto-chain G1→G2 completions to downstream tiers (G3 and/or G4)
+        let has_downstream_tier =
+            g3_manager_for_offload.is_some() || self.runtime.config().object.is_some();
         let g1_to_g2_pipeline = PipelineBuilder::<G1, G2>::new()
             .policy(g1_to_g2_policy)
             .pending_tracker(g1_to_g2_pending)
-            .auto_chain(g3_manager_for_offload.is_some())
+            .auto_chain(has_downstream_tier)
             .build();
 
         // Build G2→G3 policy from config (or defaults if not configured)
@@ -460,43 +464,7 @@ impl ConnectorLeader {
             .pending_tracker(g2_to_g3_pending)
             .build();
 
-        // Build G2→G4 object storage infrastructure if configured
-        // The leader handles lock management and policy; workers handle actual data transfer
-        let (_object_lock_manager, g2_to_g4_pipeline) =
-            if let Some(object_config) = &self.runtime.config().object {
-                tracing::debug!("Object storage configured, creating lock manager");
-
-                // Create lock manager for distributed locking
-                let instance_id = self.runtime.nova.instance_id().to_string();
-                let lock_manager: Arc<dyn ObjectLockManager> =
-                    create_lock_manager(object_config, instance_id).await?;
-
-                // Create object client for leader (no rank prefix for lock/meta files)
-                let object_ops = create_object_client(object_config, None).await?;
-
-                // Create G2→G4 policy using lock manager
-                let g2_to_g4_pending = Arc::new(PendingTracker::new());
-                let g2_to_g4_policy = Arc::new(
-                    ObjectLockPresenceFilter::<G2>::new(lock_manager.clone())
-                        .with_pending_tracker(g2_to_g4_pending.clone()),
-                );
-
-                // Build G2→G4 object pipeline
-                // Note: The leader creates this pipeline for policy evaluation and coordination.
-                // Actual data transfers are executed by workers writing to their rank-prefixed keys.
-                let g2_to_g4_pipeline = ObjectPipelineBuilder::<G2>::new()
-                    .policy(g2_to_g4_policy)
-                    .pending_tracker(g2_to_g4_pending)
-                    .lock_manager(lock_manager.clone())
-                    .build();
-
-                tracing::info!("Object storage infrastructure created");
-                (Some((lock_manager, object_ops)), Some(g2_to_g4_pipeline))
-            } else {
-                (None, None)
-            };
-
-        let mut engine_builder = OffloadEngine::builder(Arc::new(leader))
+        let mut engine_builder = OffloadEngine::builder(leader.clone())
             .with_registry(registry_for_offload)
             .with_g2_manager(g2_manager_for_offload)
             .with_runtime(runtime_handle)
@@ -509,9 +477,51 @@ impl ConnectorLeader {
                 .with_g2_to_g3_pipeline(g2_to_g3_pipeline);
         }
 
-        // Conditionally add G4 pipeline if object lock manager exists
-        if let Some(g2_to_g4_pipeline) = g2_to_g4_pipeline {
-            engine_builder = engine_builder.with_g2_to_g4_pipeline(g2_to_g4_pipeline);
+        // Build G2→G4 object storage pipeline if configured
+        // Uses the parallel_worker from leader as ObjectBlockOps to fan out to all workers
+        if let Some(object_config) = &self.runtime.config().object {
+            tracing::debug!("Object storage configured, creating G2→G4 pipeline");
+
+            // Create lock manager for distributed locking
+            let instance_id = self.runtime.nova.instance_id().to_string();
+            let lock_manager: Arc<dyn ObjectLockManager> =
+                create_lock_manager(object_config, instance_id).await?;
+
+            // Get parallel_worker from leader - it implements ObjectBlockOps and fans out to all workers
+            if let Some(parallel_worker) = leader.parallel_worker() {
+                // parallel_worker implements ObjectBlockOps, we can cast it to the trait object
+                let object_ops: Arc<dyn crate::v2::distributed::object::ObjectBlockOps> =
+                    parallel_worker;
+
+                // Create S3 presence checker using the parallel worker
+                // When has_blocks is called, it queries all workers who check S3 with their rank-prefixed keys
+                let presence_checker = Arc::new(S3PresenceChecker::new(object_ops.clone()));
+
+                // Create presence filter with pending tracker
+                let g2_to_g4_pending = Arc::new(PendingTracker::new());
+                let presence_filter = Arc::new(
+                    ObjectPresenceFilter::<G2>::new(presence_checker)
+                        .with_pending_tracker(g2_to_g4_pending.clone()),
+                );
+
+                // Build ObjectPipelineConfig
+                let g2_to_g4_config = ObjectPipelineBuilder::<G2>::new()
+                    .policy(presence_filter)
+                    .pending_tracker(g2_to_g4_pending)
+                    .lock_manager(lock_manager)
+                    .build();
+
+                // Add G2→G4 pipeline to engine
+                engine_builder = engine_builder
+                    .with_object_ops(object_ops)
+                    .with_g2_to_g4_pipeline(g2_to_g4_config);
+
+                tracing::info!("G2→G4 object storage pipeline configured with presence checking");
+            } else {
+                tracing::warn!(
+                    "Object storage configured but no parallel_worker available - G2→G4 pipeline disabled"
+                );
+            }
         }
 
         match engine_builder.build() {

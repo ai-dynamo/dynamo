@@ -57,13 +57,14 @@ aws-sdk-s3 = { version = "1", optional = true }
 aws-config = { version = "1", optional = true }
 rayon = { version = "1", optional = true }
 tokio-rayon = { version = "2", optional = true }
+chrono = { version = "0.4", optional = true }
 
 [features]
-default = ["testing"]
+default = ["testing", "s3"]
 console = []
 testing = ["dynamo-nova-backend"]
 kvbm-bench = ["testing", "dep:clap", "dep:indicatif"]
-s3 = ["dep:aws-sdk-s3", "dep:aws-config", "dep:rayon", "dep:tokio-rayon"]
+s3 = ["dep:aws-sdk-s3", "dep:aws-config", "dep:rayon", "dep:tokio-rayon", "dep:chrono"]
 
 [dev-dependencies]
 dynamo-memory = {workspace=true, features = ["unsafe-slices"]}

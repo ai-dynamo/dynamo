@@ -33,15 +33,17 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use dashmap::DashMap;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::v2::distributed::leader::InstanceLeader;
 use crate::v2::distributed::object::ObjectBlockOps;
+use crate::v2::distributed::worker::RemoteDescriptor;
 use crate::v2::logical::LogicalLayoutHandle;
 use crate::v2::logical::blocks::{BlockMetadata, BlockRegistry, WeakBlock};
 use crate::v2::logical::manager::BlockManager;
-use crate::v2::physical::transfer::PhysicalLayout;
-use crate::v2::{BlockId, G1, G2, G3};
+use crate::v2::physical::transfer::{PhysicalLayout, TransferOptions};
+use crate::v2::{BlockId, G1, G2, G3, SequenceHash};
 
 use super::handle::{TransferHandle, TransferId, TransferState};
 use super::pipeline::{
@@ -61,6 +63,13 @@ use super::source::SourceBlocks;
 /// - G1→G2: BlockManager<G2> destination (host memory)
 /// - G2→G3: BlockManager<G3> destination (disk/NVMe)
 /// - G2→G4: ObjectBlockOps destination (object storage like S3)
+///
+/// # Distributed G2→G4 Offloading
+///
+/// For distributed setups where the leader doesn't have physical layouts (only workers do),
+/// use `with_enable_remote_g4(true)` instead of `with_g2_to_g4_pipeline()`. This enables
+/// remote G4 offloading where workers execute object storage uploads via their local
+/// `ObjectBlockOps` implementations.
 #[allow(dead_code)]
 pub struct OffloadEngine {
     /// Reference to the instance leader for transfers
@@ -71,12 +80,14 @@ pub struct OffloadEngine {
     g1_to_g2: Option<Pipeline<G1, G2>>,
     /// G2→G3 pipeline (BlockManager destination)
     g2_to_g3: Option<Pipeline<G2, G3>>,
-    /// G2→G4 pipeline (Object storage destination)
+    /// G2→G4 pipeline (Object storage destination) - for local mode only
     g2_to_g4: Option<ObjectPipeline<G2>>,
     /// Active transfer tracking
     transfers: Arc<DashMap<TransferId, Arc<std::sync::Mutex<TransferState>>>>,
     /// Chain router task handle (routes G1→G2 output to downstream pipelines)
     _chain_router_handle: Option<JoinHandle<()>>,
+    /// Remote G4 offload task handle (for distributed mode)
+    _remote_g4_offload_handle: Option<JoinHandle<()>>,
 }
 
 impl OffloadEngine {
@@ -284,6 +295,8 @@ pub struct OffloadEngineBuilder {
     g2_to_g4_config: Option<ObjectPipelineConfig<G2>>,
     /// Optional runtime handle override (defaults to leader.runtime())
     runtime: Option<tokio::runtime::Handle>,
+    /// Enable remote G4 offloading via workers' ObjectBlockOps (for distributed mode)
+    enable_remote_g4: bool,
 }
 
 impl OffloadEngineBuilder {
@@ -301,6 +314,7 @@ impl OffloadEngineBuilder {
             g2_to_g3_config: None,
             g2_to_g4_config: None,
             runtime: None,
+            enable_remote_g4: false,
         }
     }
 
@@ -371,8 +385,26 @@ impl OffloadEngineBuilder {
     ///
     /// Uses `ObjectPipelineConfig` instead of `PipelineConfig` since G4
     /// is object storage, not a BlockManager destination.
+    ///
+    /// For distributed setups where the leader doesn't have physical layouts,
+    /// use `with_enable_remote_g4(true)` instead.
     pub fn with_g2_to_g4_pipeline(mut self, config: ObjectPipelineConfig<G2>) -> Self {
         self.g2_to_g4_config = Some(config);
+        self
+    }
+
+    /// Enable remote G4 offloading via workers' ObjectBlockOps.
+    ///
+    /// In distributed setups, the leader doesn't have physical layouts (only workers do).
+    /// This enables G2→G4 offloading where:
+    /// 1. G1→G2 chain output is routed to a remote offload task
+    /// 2. The task calls workers' ObjectBlockOps::put_blocks() via RPC
+    /// 3. Workers upload blocks from their local G2 to object storage
+    /// 4. Per-block results are returned and logged
+    ///
+    /// This is mutually exclusive with `with_g2_to_g4_pipeline()` - use one or the other.
+    pub fn with_enable_remote_g4(mut self, enable: bool) -> Self {
+        self.enable_remote_g4 = enable;
         self
     }
 
@@ -428,23 +460,31 @@ impl OffloadEngineBuilder {
         };
 
         // Build G2→G4 pipeline if configured (object storage destination)
+        // Note: For distributed mode, use enable_remote_g4 instead
         let g2_to_g4 = if let Some(config) = self.g2_to_g4_config {
             let object_ops = self
                 .object_ops
                 .ok_or_else(|| anyhow::anyhow!("ObjectBlockOps required for G2→G4 pipeline"))?;
-            let g2_layout = self
-                .g2_physical_layout
-                .ok_or_else(|| anyhow::anyhow!("G2 physical layout required for G2→G4 pipeline"))?;
 
+            // ObjectPipeline takes LogicalLayoutHandle - the ObjectBlockOps implementation
+            // resolves this to a physical layout internally
             Some(ObjectPipeline::new(
                 config,
                 object_ops,
-                g2_layout,
+                LogicalLayoutHandle::G2,
                 self.leader.clone(),
                 runtime.clone(),
             ))
         } else {
             None
+        };
+
+        // Create channel for remote G4 offload if enabled
+        let (remote_g4_tx, remote_g4_rx) = if self.enable_remote_g4 {
+            let (tx, rx) = mpsc::channel::<RemoteG4OffloadRequest>(64);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
         };
 
         // Wire up auto-chaining from G1→G2 to downstream G2→G3/G2→G4 pipelines
@@ -455,17 +495,23 @@ impl OffloadEngineBuilder {
                     let g2_to_g3_queue = g2_to_g3.as_ref().map(|p| p.eval_queue.clone());
                     let g2_to_g4_queue = g2_to_g4.as_ref().map(|p| p.eval_queue.clone());
 
-                    // Only spawn if there's at least one downstream pipeline
-                    if g2_to_g3_queue.is_some() || g2_to_g4_queue.is_some() {
+                    // Check if we have any downstream target (local pipelines or remote G4)
+                    let has_g2_to_g4_local = g2_to_g4_queue.is_some();
+                    let has_g2_to_g4_remote = remote_g4_tx.is_some();
+
+                    // Only spawn if there's at least one downstream target
+                    if g2_to_g3_queue.is_some() || has_g2_to_g4_local || has_g2_to_g4_remote {
                         tracing::debug!(
                             has_g2_to_g3 = g2_to_g3_queue.is_some(),
-                            has_g2_to_g4 = g2_to_g4_queue.is_some(),
+                            has_g2_to_g4_local,
+                            has_g2_to_g4_remote,
                             "Spawning chain router for G1→G2 auto-chaining"
                         );
                         Some(runtime.spawn(chain_router_task(
                             chain_rx,
                             g2_to_g3_queue,
                             g2_to_g4_queue,
+                            remote_g4_tx,
                         )))
                     } else {
                         tracing::debug!(
@@ -483,6 +529,14 @@ impl OffloadEngineBuilder {
             None
         };
 
+        // Spawn remote G4 offload task if enabled
+        let remote_g4_offload_handle = if let Some(rx) = remote_g4_rx {
+            tracing::info!("Enabling remote G4 offload via workers' ObjectBlockOps");
+            Some(runtime.spawn(remote_g4_offload_task(rx, self.leader.clone())))
+        } else {
+            None
+        };
+
         Ok(OffloadEngine {
             leader: self.leader,
             registry,
@@ -491,11 +545,24 @@ impl OffloadEngineBuilder {
             g2_to_g4,
             transfers: Arc::new(DashMap::new()),
             _chain_router_handle: chain_router_handle,
+            _remote_g4_offload_handle: remote_g4_offload_handle,
         })
     }
 }
 
-/// Routes chain output from G1→G2 to downstream G2→G3 and G2→G4 pipelines.
+/// Request for remote G4 offload (distributed mode).
+///
+/// Contains the information needed to call workers' ObjectBlockOps::put_blocks().
+struct RemoteG4OffloadRequest {
+    /// Transfer ID for tracking
+    transfer_id: TransferId,
+    /// Sequence hashes (keys for object storage)
+    keys: Vec<SequenceHash>,
+    /// Block IDs in G2 layout
+    block_ids: Vec<BlockId>,
+}
+
+/// Routes chain output from G1→G2 to downstream G2→G3/G2→G4 pipelines.
 ///
 /// Blocks are converted to WeakBlocks for best-effort offloading - if they're
 /// evicted before the downstream pipeline processes them, that's acceptable.
@@ -504,6 +571,7 @@ async fn chain_router_task(
     mut chain_rx: ChainOutputRx<G2>,
     g2_to_g3_queue: Option<Arc<CancellableQueue<PipelineInput<G2>>>>,
     g2_to_g4_queue: Option<Arc<CancellableQueue<PipelineInput<G2>>>>,
+    remote_g4_tx: Option<mpsc::Sender<RemoteG4OffloadRequest>>,
 ) {
     while let Some(output) = chain_rx.recv().await {
         let ChainOutput {
@@ -520,6 +588,17 @@ async fn chain_router_task(
         // This allows blocks to be evicted if memory pressure requires it
         let weak_blocks: Vec<WeakBlock<G2>> =
             blocks.iter().map(|block| block.downgrade()).collect();
+
+        // Extract sequence hashes and block IDs for remote G4 offload before dropping
+        let remote_g4_data: Option<(Vec<SequenceHash>, Vec<BlockId>)> =
+            if remote_g4_tx.is_some() {
+                Some((
+                    blocks.iter().map(|b| b.sequence_hash()).collect(),
+                    blocks.iter().map(|b| b.block_id()).collect(),
+                ))
+            } else {
+                None
+            };
 
         // Drop strong references - blocks can now be evicted if needed
         drop(blocks);
@@ -542,20 +621,98 @@ async fn chain_router_task(
             }
         }
 
-        // Enqueue to G2→G4 if available
+        // Enqueue to local G2→G4 pipeline if available
         if let Some(ref queue) = g2_to_g4_queue {
             let input = PipelineInput {
                 transfer_id,
-                source: SourceBlocks::Weak(weak_blocks),
-                state,
+                source: SourceBlocks::Weak(weak_blocks.clone()),
+                state: state.clone(),
             };
             if !queue.push(transfer_id, input) {
                 tracing::debug!(%transfer_id, "G2→G4 chain enqueue skipped (cancelled)");
             }
         }
+
+        // Send to remote G4 offload if enabled (distributed mode)
+        if let (Some(tx), Some((keys, block_ids))) = (&remote_g4_tx, remote_g4_data) {
+            let request = RemoteG4OffloadRequest {
+                transfer_id,
+                keys,
+                block_ids,
+            };
+            if tx.send(request).await.is_err() {
+                tracing::debug!(%transfer_id, "Remote G4 offload channel closed");
+            }
+        }
     }
 
     tracing::debug!("Chain router task shutting down");
+}
+
+/// Task that processes remote G4 offload requests.
+///
+/// In distributed mode, this task receives requests from the chain router
+/// and calls workers' ObjectBlockOps to upload blocks to object storage.
+/// Uses execute_remote_offload with RemoteDescriptor::Object to coordinate
+/// workers uploading their local G2 data to S3.
+async fn remote_g4_offload_task(
+    mut rx: mpsc::Receiver<RemoteG4OffloadRequest>,
+    leader: Arc<InstanceLeader>,
+) {
+    tracing::info!("Remote G4 offload task started");
+
+    while let Some(request) = rx.recv().await {
+        let num_blocks = request.keys.len();
+        tracing::debug!(
+            %request.transfer_id,
+            num_blocks,
+            "Processing remote G4 offload request"
+        );
+
+        // Use the leader's execute_remote_offload with RemoteDescriptor::Object
+        // This coordinates all workers to upload from their local G2 to object storage
+        let result = leader.execute_remote_offload(
+            LogicalLayoutHandle::G2, // Source is G2 (host memory)
+            RemoteDescriptor::Object {
+                keys: request.keys.clone(),
+            },
+            request.block_ids.clone(),
+            TransferOptions::default(),
+        );
+
+        match result {
+            Ok(notification) => {
+                // Wait for all workers to complete
+                match notification.await {
+                    Ok(()) => {
+                        tracing::info!(
+                            %request.transfer_id,
+                            num_blocks,
+                            "Remote G4 offload completed successfully"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            %request.transfer_id,
+                            num_blocks,
+                            error = %e,
+                            "Remote G4 offload failed"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    %request.transfer_id,
+                    num_blocks,
+                    error = %e,
+                    "Failed to initiate remote G4 offload"
+                );
+            }
+        }
+    }
+
+    tracing::info!("Remote G4 offload task shutting down");
 }
 
 #[cfg(test)]

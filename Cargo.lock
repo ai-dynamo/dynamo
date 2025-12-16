@@ -3211,6 +3211,7 @@ dependencies = [
  "bincode 2.0.1",
  "blake3",
  "bytes",
+ "chrono",
  "clap 4.5.53",
  "crossbeam-queue",
  "cudarc 0.18.2",
@@ -3656,6 +3657,7 @@ dependencies = [
 name = "dynamo-tokens"
 version = "0.7.0"
 dependencies = [
+ "bs58",
  "bytemuck",
  "dashmap 6.1.0",
  "derive-getters",

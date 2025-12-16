@@ -326,6 +326,23 @@ impl std::fmt::Debug for PositionalLineageHash {
     }
 }
 
+impl std::fmt::Display for PositionalLineageHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let position = self.position();
+        let current_hash = self.current_hash_fragment();
+        let current_hash_b58 = bs58::encode(current_hash.to_be_bytes()).into_string();
+
+        if position == 0 {
+            // Position 0: don't show parent hash
+            write!(f, "{}:{}", position, current_hash_b58)
+        } else {
+            let parent_hash = self.parent_hash_fragment();
+            let parent_hash_b58 = bs58::encode(parent_hash.to_be_bytes()).into_string();
+            write!(f, "{}:{}:{}", position, current_hash_b58, parent_hash_b58)
+        }
+    }
+}
+
 /// A collection of tokens, represented as a `Vec<Token>`.
 ///
 /// Provides convenience methods for conversion and manipulation.

@@ -210,10 +210,14 @@ impl PendingWorkerState {
 
         // 5. Build optional object client with rank-based key formatting
         // Uses object config from leader to ensure all workers have consistent settings
+        // Note: We use block_in_place because this sync function may be called from
+        // within a tokio async context (e.g., RPC handler)
         let object_client = if let Some(object_config) = &config.object {
-            let client = runtime
-                .handle()
-                .block_on(create_object_client(object_config, Some(config.rank)))?;
+            let client = tokio::task::block_in_place(|| {
+                runtime
+                    .handle()
+                    .block_on(create_object_client(object_config, Some(config.rank)))
+            })?;
             tracing::info!(
                 rank = config.rank,
                 "Object storage client configured from leader config"
