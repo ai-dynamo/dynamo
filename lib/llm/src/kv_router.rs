@@ -31,11 +31,13 @@ pub mod protocols;
 pub mod publisher;
 pub mod recorder;
 pub mod scheduler;
-pub mod scoring;
 pub mod sequence;
 pub mod subscriber;
+pub mod worker_query;
 
+use indexer::WorkerKvQueryResponse;
 pub use prefill_router::PrefillRouter;
+use worker_query::WorkerQueryClient;
 
 use crate::{
     kv_router::{
@@ -45,11 +47,12 @@ use crate::{
             compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         protocols::{
-            LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult, WorkerWithDpRank,
+            LocalBlockHash, RouterRequest, RouterResponse, WorkerId, WorkerSelectionResult,
+            WorkerWithDpRank,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         sequence::SequenceError,
-        subscriber::start_kv_router_background,
+        subscriber::{start_kv_router_background, start_kv_router_background_nats_core},
     },
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
@@ -65,7 +68,7 @@ use crate::{
 pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
 // for metric publishing (push-based)
-pub const KV_EVENT_SUBJECT: &str = "kv_events";
+pub const KV_EVENT_SUBJECT: &str = "kv-events";
 pub const KV_HIT_RATE_SUBJECT: &str = "kv-hit-rate";
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
 
@@ -76,6 +79,10 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 // for radix tree snapshot storage
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
+
+// for worker-local kvindexer query
+pub const WORKER_KV_INDEXER_QUERY_SUBJECT: &str = "worker_kv_indexer_query";
+pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
 
 // for router discovery registration
 pub const KV_ROUTER_COMPONENT: &str = "kv-router";
@@ -270,6 +277,8 @@ pub struct KvRouter {
     cancellation_token: tokio_util::sync::CancellationToken,
 
     client: Client,
+
+    worker_query_client: Option<WorkerQueryClient>,
 }
 
 impl KvRouter {
@@ -296,7 +305,7 @@ impl KvRouter {
             endpoint: endpoint_id.name.clone(),
         };
         let discovery_stream = discovery
-            .list_and_watch(discovery_key, Some(cancellation_token.clone()))
+            .list_and_watch(discovery_key.clone(), Some(cancellation_token.clone()))
             .await?;
         let runtime_configs_rx =
             watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
@@ -333,33 +342,104 @@ impl KvRouter {
             component.clone(),
             block_size,
             instance_ids_rx,
-            runtime_configs_rx,
+            runtime_configs_rx.clone(),
             selector,
             kv_router_config.router_replica_sync,
             consumer_id.clone(),
         )
         .await?;
 
+        // Initialize worker query client using namespace abstraction
+        // (created before background task so we can use it for startup recovery)
+        let worker_query_client =
+            worker_query::WorkerQueryClient::new(component.clone(), runtime_configs_rx.clone());
+        tracing::info!("Worker query client initialized");
+
         // Start KV event subscriber background process (only when use_kv_events is enabled)
+        // This is spawned as a background task to avoid blocking router startup.
+        // The task waits for runtime_configs to determine whether to use NATS Core or JetStream.
         if kv_router_config.use_kv_events
             && let Indexer::KvIndexer(ref kv_indexer) = indexer
         {
-            start_kv_router_background(
-                component.clone(),
-                consumer_id,
-                kv_indexer.event_sender(),
-                kv_indexer.remove_worker_sender(),
-                kv_router_config
-                    .router_snapshot_threshold
-                    .map(|_| kv_indexer.get_workers_sender()),
-                kv_router_config
-                    .router_snapshot_threshold
-                    .map(|_| kv_indexer.snapshot_event_sender()),
-                cancellation_token.clone(),
-                kv_router_config.router_snapshot_threshold,
-                kv_router_config.router_reset_states,
-            )
-            .await?;
+            // Clone everything needed for the background task
+            let component_clone = component.clone();
+            let kv_indexer_clone = kv_indexer.clone();
+            let cancellation_token_clone = cancellation_token.clone();
+            let mut runtime_configs_rx_clone = runtime_configs_rx.clone();
+            let worker_query_client_clone =
+                worker_query::WorkerQueryClient::new(component.clone(), runtime_configs_rx.clone());
+
+            tokio::spawn(async move {
+                // Wait for runtime_configs to have at least one entry
+                let (all_local_indexer, count) = loop {
+                    {
+                        let configs = runtime_configs_rx_clone.borrow();
+                        if !configs.is_empty() {
+                            let all_local_indexer =
+                                configs.values().all(|c| c.enable_local_indexer);
+                            break (all_local_indexer, configs.len());
+                        }
+                    }
+
+                    // Wait for changes to runtime_configs
+                    tokio::select! {
+                        _ = cancellation_token_clone.cancelled() => {
+                            tracing::debug!("Subscriber selection task cancelled");
+                            return;
+                        }
+                        result = runtime_configs_rx_clone.changed() => {
+                            if result.is_err() {
+                                tracing::debug!("Runtime configs channel closed");
+                                return;
+                            }
+                        }
+                    }
+                };
+
+                if all_local_indexer {
+                    // All workers have local_indexer enabled - use NATS Core
+                    tracing::info!(
+                        "All {count} workers have local_indexer enabled, using NATS Core subscription"
+                    );
+
+                    if let Err(e) = start_kv_router_background_nats_core(
+                        component_clone.clone(),
+                        kv_indexer_clone.event_sender(),
+                        kv_indexer_clone.remove_worker_sender(),
+                        cancellation_token_clone.clone(),
+                        worker_query_client_clone,
+                    )
+                    .await
+                    {
+                        tracing::error!("Failed to start NATS Core subscriber: {e}");
+                    }
+                } else {
+                    // Not all workers have local_indexer - use JetStream
+                    tracing::info!(
+                        "Not all workers have local_indexer enabled, using JetStream subscription"
+                    );
+
+                    if let Err(e) = start_kv_router_background(
+                        component_clone.clone(),
+                        consumer_id,
+                        kv_indexer_clone.event_sender(),
+                        kv_indexer_clone.remove_worker_sender(),
+                        kv_router_config
+                            .router_snapshot_threshold
+                            .map(|_| kv_indexer_clone.get_workers_sender()),
+                        kv_router_config
+                            .router_snapshot_threshold
+                            .map(|_| kv_indexer_clone.snapshot_event_sender()),
+                        cancellation_token_clone.clone(),
+                        kv_router_config.router_snapshot_threshold,
+                        kv_router_config.router_reset_states,
+                    )
+                    .await
+                    {
+                        tracing::error!("Failed to start JetStream subscriber: {e}");
+                    }
+                }
+            });
         }
 
         tracing::info!("KV Routing initialized");
@@ -370,6 +450,7 @@ impl KvRouter {
             kv_router_config,
             cancellation_token,
             client,
+            worker_query_client: Some(worker_query_client),
         })
     }
 
@@ -501,6 +582,62 @@ impl KvRouter {
     /// Dump all events from the indexer
     pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         self.indexer.dump_events().await
+    }
+
+    /// Query a specific worker's local KV indexer for its events
+    /// (See docstring for `WorkerQueryClient.query_worker()`)
+    pub async fn query_worker_local_kv(
+        &self,
+        worker_id: WorkerId,
+        start_event_id: Option<u64>,
+        end_event_id: Option<u64>,
+    ) -> Result<WorkerKvQueryResponse> {
+        let query_client = self
+            .worker_query_client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Worker query client not available (NATS required)"))?;
+
+        query_client
+            .query_worker(worker_id, start_event_id, end_event_id)
+            .await
+    }
+
+    /// Recover missed KV events from a specific worker.
+    ///
+    /// Queries the worker's local KV indexer for events starting from
+    /// `start_event_id` and applies them to the router's indexer.
+    ///
+    /// # Arguments
+    ///
+    /// * `worker_id` - The worker to recover from
+    /// * `start_event_id` - First event ID to fetch (inclusive), or None to start from beginning
+    /// * `end_event_id` - Last event ID to fetch (inclusive), or None for all
+    pub async fn recover_from_worker(
+        &self,
+        worker_id: WorkerId,
+        start_event_id: Option<u64>,
+        end_event_id: Option<u64>,
+    ) -> Result<usize> {
+        let query_client = self
+            .worker_query_client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Worker query client not available"))?;
+
+        let event_tx = match &self.indexer {
+            Indexer::KvIndexer(kv_indexer) => kv_indexer.event_sender(),
+            Indexer::None => {
+                anyhow::bail!("Cannot recover: indexer is disabled (--overlap_score_weight is 0)")
+            }
+        };
+
+        subscriber::recover_from_worker(
+            query_client,
+            worker_id,
+            start_event_id,
+            end_event_id,
+            &event_tx,
+        )
+        .await
     }
 }
 

@@ -44,7 +44,7 @@ use std::{
     collections::{HashMap, VecDeque},
     iter,
     rc::Rc,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -178,9 +178,9 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RouterEvent {
     /// The ID of the worker emitting the event.
-    worker_id: WorkerId,
+    pub worker_id: WorkerId,
     /// The cache event associated with the worker.
-    event: KvCacheEvent,
+    pub event: KvCacheEvent,
 }
 
 impl RouterEvent {
@@ -197,6 +197,39 @@ impl RouterEvent {
     pub fn new(worker_id: WorkerId, event: KvCacheEvent) -> Self {
         Self { worker_id, event }
     }
+}
+
+// -------
+// Distributed router - Worker KV Query types
+// -------
+
+/// Request to query a worker's local KV indexer.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WorkerKvQueryRequest {
+    /// The worker ID of the worker to query.
+    pub worker_id: WorkerId,
+
+    /// Start event ID (inclusive). If `None`, dumps entire tree.
+    pub start_event_id: Option<u64>,
+    /// End event ID (inclusive). If `None`, returns up to newest available.
+    pub end_event_id: Option<u64>,
+}
+
+/// Response from a worker's local KV indexer.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum WorkerKvQueryResponse {
+    /// Events served from the circular buffer (with original event IDs)
+    Events(Vec<RouterEvent>),
+    /// Full tree dump (with synthetic 0-indexed event IDs)
+    TreeDump(Vec<RouterEvent>),
+    /// Requested range is newer than available data
+    TooNew {
+        requested_start: Option<u64>,
+        requested_end: Option<u64>,
+        newest_available: u64,
+    },
+    /// Invalid range: end_id < start_id
+    InvalidRange { start_id: u64, end_id: u64 },
 }
 
 /// A block in the Radix Tree.
@@ -870,6 +903,7 @@ struct RoutingDecisionRequest {
 }
 
 /// The KV Indexer, managing the KV store and handling events and match requests.
+#[derive(Clone)]
 pub struct KvIndexer {
     /// A `CancellationToken` for managing shutdown.
     cancel: CancellationToken,
@@ -885,10 +919,11 @@ pub struct KvIndexer {
     dump_tx: mpsc::Sender<DumpRequest>,
     /// A sender for routing decision requests.
     routing_tx: mpsc::Sender<RoutingDecisionRequest>,
-    /// A handle to the background task managing the KV store.
-    task: OnceLock<std::thread::JoinHandle<()>>,
     /// The size of the KV block this indexer can handle.
     kv_block_size: u32,
+    /// Reference counter for Clone-aware Drop.
+    /// Only the last clone should cancel the token on drop.
+    _ref_count: Arc<()>,
 }
 
 impl KvIndexer {
@@ -918,9 +953,10 @@ impl KvIndexer {
         let (dump_tx, dump_rx) = mpsc::channel::<DumpRequest>(16);
         let (routing_tx, mut routing_rx) = mpsc::channel::<RoutingDecisionRequest>(2048);
         let (prune_tx, mut prune_rx) = mpsc::channel::<()>(1);
+
         let cancel_clone = token.clone();
 
-        let task = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             // Create a single-threaded tokio runtime
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -1110,9 +1146,6 @@ impl KvIndexer {
             tracing::debug!("KvCacheIndexer task completed");
         });
 
-        let once = OnceLock::new();
-        once.set(task).unwrap();
-
         Self {
             cancel: token,
             event_tx,
@@ -1121,8 +1154,8 @@ impl KvIndexer {
             get_workers_tx,
             dump_tx,
             routing_tx,
-            task: once,
             kv_block_size,
+            _ref_count: Arc::new(()),
         }
     }
 
@@ -1225,9 +1258,6 @@ impl KvIndexerInterface for KvIndexer {
 
     fn shutdown(&mut self) {
         self.cancel.cancel();
-        if let Some(task) = self.task.take() {
-            task.join().expect("Failed to join kv indexer task");
-        }
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
@@ -1281,7 +1311,305 @@ impl KvIndexerInterface for KvIndexer {
 
 impl Drop for KvIndexer {
     fn drop(&mut self) {
-        self.shutdown();
+        // Only cancel the token if we're the last reference.
+        // This allows clones to be dropped without killing the background task.
+        if Arc::strong_count(&self._ref_count) == 1 {
+            self.shutdown();
+        }
+    }
+}
+
+// -------------------------------------------------
+// Decentralized router: LocalKvIndexer for workers
+// -------------------------------------------------
+
+/// A thin wrapper around KvIndexer that buffers recent events
+/// (e.g. which may be queued by router upon startup)
+///
+pub struct LocalKvIndexer {
+    /// The underlying indexer
+    indexer: KvIndexer,
+    /// Circular buffer of recent events
+    event_buffer: Mutex<VecDeque<RouterEvent>>,
+    /// Maximum number of events to keep in buffer
+    max_buffer_size: usize, // Router sets this to WORKER_KV_INDEXER_BUFFER_SIZE
+}
+
+impl LocalKvIndexer {
+    /// create a new LocalKvIndexer pointing to a KvIndexer.
+    pub fn new(
+        token: CancellationToken,
+        kv_block_size: u32,
+        metrics: Arc<KvIndexerMetrics>,
+        max_buffer_size: usize,
+    ) -> Self {
+        Self {
+            indexer: KvIndexer::new(token, kv_block_size, metrics),
+            event_buffer: Mutex::new(VecDeque::with_capacity(max_buffer_size)),
+            max_buffer_size,
+        }
+    }
+
+    /// Get all buffered events (oldest first).
+    pub fn get_all_events_in_buffer(&self) -> Vec<RouterEvent> {
+        let buffer = self.event_buffer.lock().unwrap();
+        buffer.iter().cloned().collect()
+    }
+
+    /// Query events by ID range, returning events in `[start_id, end_id]` (both inclusive).
+    ///
+    /// ### Arguments
+    ///
+    /// * `start_id` - Starting event ID (inclusive). If `None`, dumps entire tree.
+    /// * `end_id` - Ending event ID (inclusive). If `None`, returns up to newest available.
+    ///
+    /// ### Returns
+    ///
+    /// - `Events`: Buffered events with original IDs (when range is within buffer)
+    /// - `TreeDump`: Full tree dump with synthetic IDs (when range is too old or unspecified)
+    /// - `TooNew`: Error when requested range is newer than available data
+    /// - `InvalidRange`: Error when end_id < start_id
+    pub async fn get_events_in_id_range(
+        &self,
+        start_id: Option<u64>,
+        end_id: Option<u64>,
+    ) -> WorkerKvQueryResponse {
+        // Validate range if both specified
+        if let (Some(s), Some(e)) = (start_id, end_id)
+            && e < s
+        {
+            tracing::warn!(start_id = s, end_id = e, "Invalid range: end_id < start_id");
+            return WorkerKvQueryResponse::InvalidRange {
+                start_id: s,
+                end_id: e,
+            };
+        }
+
+        // Get buffer state
+        let (first_id, last_id) = {
+            let buffer = self.event_buffer.lock().unwrap();
+            if buffer.is_empty() {
+                (None, None)
+            } else {
+                (
+                    Some(buffer.front().unwrap().event.event_id),
+                    Some(buffer.back().unwrap().event.event_id),
+                )
+            }
+        };
+
+        // If no start_id specified, dump entire tree
+        if start_id.is_none() {
+            tracing::debug!("No start_id specified, dumping entire tree");
+            let events = self.dump_events().await.unwrap_or_default();
+            return WorkerKvQueryResponse::TreeDump(events);
+        }
+
+        let start_id = start_id.unwrap();
+        let end_id = end_id.unwrap_or_else(|| last_id.unwrap_or(start_id));
+
+        // Check for empty buffer
+        let Some(first_buffered) = first_id else {
+            tracing::debug!("Buffer empty, dumping entire tree");
+            let events = self.dump_events().await.unwrap_or_default();
+            return WorkerKvQueryResponse::TreeDump(events);
+        };
+        let last_buffered = last_id.unwrap();
+
+        // Check if request is too new
+        if start_id > last_buffered {
+            tracing::warn!(
+                start_id,
+                last_buffered,
+                "Requested start_id is newer than buffer"
+            );
+            return WorkerKvQueryResponse::TooNew {
+                requested_start: Some(start_id),
+                requested_end: Some(end_id),
+                newest_available: last_buffered,
+            };
+        }
+
+        // Check if start_id is too old (before buffer) -> tree dump
+        if start_id < first_buffered {
+            tracing::info!(
+                start_id,
+                first_buffered,
+                "Requested start_id is older than buffer, dumping entire tree"
+            );
+            let events = self.dump_events().await.unwrap_or_default();
+            return WorkerKvQueryResponse::TreeDump(events);
+        }
+
+        // Serve from buffer
+        let buffer = self.event_buffer.lock().unwrap();
+
+        let start_idx = match buffer.binary_search_by_key(&start_id, |e| e.event.event_id) {
+            Ok(idx) => idx,
+            Err(insertion_point) => insertion_point,
+        };
+
+        // Clamp end_id to buffer bounds
+        let clamped_end_id = end_id.min(last_buffered);
+        let end_idx = match buffer.binary_search_by_key(&clamped_end_id, |e| e.event.event_id) {
+            Ok(idx) => idx + 1, // Include the matched element
+            Err(insertion_point) => insertion_point,
+        };
+
+        let events: Vec<RouterEvent> = buffer
+            .iter()
+            .skip(start_idx)
+            .take(end_idx.saturating_sub(start_idx))
+            .cloned()
+            .collect();
+
+        WorkerKvQueryResponse::Events(events)
+    }
+
+    /// Record an event in the buffer
+    fn record_event(&self, event: RouterEvent) {
+        let mut buffer = self.event_buffer.lock().unwrap();
+
+        // Check that event id is consecutive to last one
+        if let Some(last_event) = buffer.back()
+            && event.event.event_id != last_event.event.event_id + 1
+        {
+            let expected = last_event.event.event_id + 1;
+            tracing::error!(
+                worker_id = event.worker_id,
+                expected,
+                got = event.event.event_id,
+                "Non-consecutive KV event id; buffer may have gaps"
+            );
+        }
+        tracing::debug!(
+            "Recorded event {:?} in buffer, now size is {}",
+            event,
+            buffer.len()
+        );
+
+        // Add to back
+        buffer.push_back(event);
+
+        // Remove from front if over capacity (circular buffer behavior)
+        while buffer.len() > self.max_buffer_size {
+            buffer.pop_front();
+        }
+    }
+
+    /// Apply event with buffering.
+    ///
+    /// This records the event in the buffer and forwards it to the underlying indexer.
+    pub async fn apply_event_with_buffer(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        // Record in buffer
+        self.record_event(event.clone());
+
+        // Forward to underlying indexer
+        self.indexer
+            .event_sender()
+            .send(event)
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)
+    }
+
+    /// Clear the event buffer.
+    pub fn clear_buffer(&self) {
+        let mut buffer = self.event_buffer.lock().unwrap();
+        buffer.clear();
+    }
+
+    /// Get the current buffer size.
+    pub fn buffer_len(&self) -> usize {
+        let buffer = self.event_buffer.lock().unwrap();
+        buffer.len()
+    }
+
+    // Delegation methods to underlying KvIndexer
+    /// Get a sender for `RouterEvent`s.
+    pub fn event_sender(&self) -> mpsc::Sender<RouterEvent> {
+        self.indexer.event_sender()
+    }
+
+    /// Get a sender for dump requests (snapshot events).
+    pub fn snapshot_event_sender(&self) -> mpsc::Sender<DumpRequest> {
+        self.indexer.snapshot_event_sender()
+    }
+
+    /// Get a sender for worker removal requests.
+    pub fn remove_worker_sender(&self) -> mpsc::Sender<WorkerId> {
+        self.indexer.remove_worker_sender()
+    }
+
+    /// Get a sender for get workers requests.
+    pub fn get_workers_sender(&self) -> mpsc::Sender<GetWorkersRequest> {
+        self.indexer.get_workers_sender()
+    }
+
+    /// Get the KV block size.
+    pub fn block_size(&self) -> u32 {
+        self.indexer.block_size()
+    }
+}
+
+// Implement KvIndexerInterface by delegating to the underlying indexer
+#[async_trait]
+impl KvIndexerInterface for LocalKvIndexer {
+    async fn find_matches(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<OverlapScores, KvRouterError> {
+        self.indexer.find_matches(sequence).await
+    }
+
+    async fn find_matches_for_request(
+        &self,
+        tokens: &[u32],
+    ) -> Result<OverlapScores, KvRouterError> {
+        self.indexer.find_matches_for_request(tokens).await
+    }
+
+    async fn apply_event(&mut self, event: RouterEvent) {
+        // Use the buffering version
+        let _ = self.apply_event_with_buffer(event).await;
+    }
+
+    async fn remove_worker(&mut self, worker: WorkerId) {
+        let _ = self.indexer.remove_worker_sender().send(worker).await;
+    }
+
+    fn shutdown(&mut self) {
+        // Note: Since indexer is Arc<KvIndexer>, we can't call mutable methods directly.
+        // The indexer will be shut down when the CancellationToken is cancelled
+        // or when the last Arc reference is dropped.
+    }
+
+    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        self.indexer.dump_events().await
+    }
+
+    async fn process_routing_decision(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
+        // TODO I guess the local kvindexers have little use for this method?
+        // Keeping it here now to implement the trait fully
+        self.indexer
+            .process_routing_decision(worker, local_hashes, sequence_hashes)
+            .await
+    }
+
+    async fn process_routing_decision_for_request(
+        &self,
+        tokens: &[u32],
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        // TODO I guess the local kvindexers have little use for this method?
+        // Keeping it here now to implement the trait fully
+        self.indexer
+            .process_routing_decision_for_request(tokens, worker)
+            .await
     }
 }
 
@@ -1766,8 +2094,8 @@ impl Drop for KvIndexerSharded {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
+    use crate::kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
     use rstest::rstest;
     use rstest_reuse::{self, *};
     use tokio::time;
@@ -2976,5 +3304,316 @@ mod tests {
         assert!(!result.contains_key(&WorkerWithDpRank::from_worker_id(worker_0)));
         assert!(result.contains_key(&WorkerWithDpRank::from_worker_id(worker_1)));
         assert!(result.contains_key(&WorkerWithDpRank::from_worker_id(worker_2)));
+    }
+
+    // LocalKvIndexer tests
+    fn make_indexer_with_events(ids: &[u64]) -> LocalKvIndexer {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            32,
+        );
+        {
+            let mut buffer = indexer.event_buffer.lock().unwrap();
+            for &id in ids {
+                buffer.push_back(RouterEvent::new(
+                    0,
+                    KvCacheEvent {
+                        event_id: id,
+                        data: KvCacheEventData::Cleared,
+                        dp_rank: 0,
+                    },
+                ));
+            }
+        }
+        indexer
+    }
+
+    #[tokio::test]
+    async fn returns_slice_within_range() {
+        let indexer = make_indexer_with_events(&[1, 2, 3, 4, 5]);
+
+        // Helper to extract events from response
+        let extract_events = |resp: WorkerKvQueryResponse| -> Vec<RouterEvent> {
+            match resp {
+                WorkerKvQueryResponse::Events(e) => e,
+                WorkerKvQueryResponse::TreeDump(e) => e,
+                _ => panic!("Unexpected response type"),
+            }
+        };
+
+        let get_ids = |events: Vec<RouterEvent>| -> Vec<u64> {
+            events.iter().map(|e| e.event.event_id).collect()
+        };
+
+        // Test get_events_in_id_range (buffer queries)
+        // Range is [start, end] inclusive
+        let result = indexer.get_events_in_id_range(Some(2), Some(4)).await;
+        let ids = get_ids(extract_events(result));
+        assert_eq!(ids, vec![2, 3, 4]); // inclusive range [2, 4]
+
+        let result = indexer.get_events_in_id_range(Some(2), Some(6)).await;
+        let ids = get_ids(extract_events(result));
+        assert_eq!(ids, vec![2, 3, 4, 5]); // clamp end to buffer max
+
+        // start_id=0 is before buffer (first is 1), so should trigger tree dump
+        let result = indexer.get_events_in_id_range(Some(0), Some(4)).await;
+        assert!(matches!(result, WorkerKvQueryResponse::TreeDump(_)));
+
+        let result = indexer.get_events_in_id_range(Some(3), Some(3)).await;
+        let ids = get_ids(extract_events(result));
+        assert_eq!(ids, vec![3]); // single element when start == end
+
+        // Invalid range: end < start
+        let result = indexer.get_events_in_id_range(Some(5), Some(2)).await;
+        assert!(matches!(result, WorkerKvQueryResponse::InvalidRange { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_get_events_in_id_range_all_cases() {
+        // Create indexer with small buffer (5 events max)
+        // This way older events will only be in the tree, not the buffer
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4, // block_size
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5, // max_buffer_size - only keeps 5 most recent events
+        );
+
+        // Helper to create a test event
+        let make_event = |id: u64| {
+            RouterEvent::new(
+                0, // worker_id
+                KvCacheEvent {
+                    event_id: id,
+                    data: KvCacheEventData::Stored(KvCacheStoreData {
+                        parent_hash: None,
+                        blocks: vec![KvCacheStoredBlockData {
+                            block_hash: ExternalSequenceBlockHash(id * 100),
+                            tokens_hash: LocalBlockHash(id * 200),
+                        }],
+                    }),
+                    dp_rank: 0,
+                },
+            )
+        };
+
+        // Add 10 events (IDs 5-14)
+        // Buffer will only keep the last 5: events 10-14
+        // Tree will have all blocks
+        for id in 5..15 {
+            indexer
+                .apply_event_with_buffer(make_event(id))
+                .await
+                .unwrap();
+        }
+
+        // Wait for events to be processed by the tree
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Helper to extract events from response
+        let extract_events = |resp: WorkerKvQueryResponse| -> Vec<RouterEvent> {
+            match resp {
+                WorkerKvQueryResponse::Events(e) => e,
+                WorkerKvQueryResponse::TreeDump(e) => e,
+                _ => panic!("Unexpected response type: {:?}", resp),
+            }
+        };
+
+        // Helper to extract event IDs from result
+        let get_ids = |events: Vec<RouterEvent>| -> Vec<u64> {
+            events.iter().map(|e| e.event.event_id).collect()
+        };
+
+        // Verify buffer state: should have events 10-14 (last 5)
+        let buffer_events = indexer.get_all_events_in_buffer();
+        assert_eq!(
+            get_ids(buffer_events),
+            vec![10, 11, 12, 13, 14],
+            "Buffer should have events 10-14"
+        );
+
+        // ========== BUFFER PATH TESTS (start_id >= first_buffered) ==========
+        // Range is [start, end] inclusive
+
+        // Test: start_id within buffer, no end
+        let result = indexer.get_events_in_id_range(Some(11), None).await;
+        assert!(matches!(result, WorkerKvQueryResponse::Events(_)));
+        assert_eq!(
+            get_ids(extract_events(result)),
+            vec![11, 12, 13, 14],
+            "start_id=11 (in buffer) should return [11, 14]"
+        );
+
+        // Test: start_id at buffer boundary
+        let result = indexer.get_events_in_id_range(Some(10), None).await;
+        assert!(matches!(result, WorkerKvQueryResponse::Events(_)));
+        assert_eq!(
+            get_ids(extract_events(result)),
+            vec![10, 11, 12, 13, 14],
+            "start_id=10 (buffer start) should return [10, 14]"
+        );
+
+        // Test: both start and end within buffer (inclusive)
+        let result = indexer.get_events_in_id_range(Some(11), Some(13)).await;
+        assert!(matches!(result, WorkerKvQueryResponse::Events(_)));
+        assert_eq!(
+            get_ids(extract_events(result)),
+            vec![11, 12, 13],
+            "range [11, 13] inclusive should return 3 events"
+        );
+
+        let result = indexer.get_events_in_id_range(Some(10), Some(14)).await;
+        assert!(matches!(result, WorkerKvQueryResponse::Events(_)));
+        assert_eq!(
+            get_ids(extract_events(result)),
+            vec![10, 11, 12, 13, 14],
+            "range [10, 14] should return all buffer events"
+        );
+
+        // ========== TREE DUMP PATH TESTS (range extends before buffer) ==========
+        // Note: Tree dumps return synthetic 0-indexed event IDs, so we just check
+        // that we get events back (the IDs won't match original IDs)
+
+        // Test: (None, None) dumps entire tree
+        let result = indexer.get_events_in_id_range(None, None).await;
+        assert!(matches!(result, WorkerKvQueryResponse::TreeDump(_)));
+        assert_eq!(
+            extract_events(result).len(),
+            10,
+            "(None, None) should dump entire tree (10 events)"
+        );
+
+        // Test: (None, Some(_)) dumps entire tree
+        let result = indexer.get_events_in_id_range(None, Some(8)).await;
+        assert!(matches!(result, WorkerKvQueryResponse::TreeDump(_)));
+        assert_eq!(
+            extract_events(result).len(),
+            10,
+            "(None, Some(_)) dumps entire tree - end_id is ignored for tree dumps"
+        );
+
+        // Test: start_id before buffer triggers tree dump
+        let result = indexer.get_events_in_id_range(Some(7), None).await;
+        assert!(matches!(result, WorkerKvQueryResponse::TreeDump(_)));
+        assert_eq!(
+            extract_events(result).len(),
+            10,
+            "start_id=7 (before buffer) should dump entire tree"
+        );
+
+        let result = indexer.get_events_in_id_range(Some(5), Some(12)).await;
+        assert!(matches!(result, WorkerKvQueryResponse::TreeDump(_)));
+        assert_eq!(
+            extract_events(result).len(),
+            10,
+            "range [5, 12] extending before buffer should dump entire tree"
+        );
+
+        // ========== EDGE CASES ==========
+
+        // Single element when start == end (inclusive range)
+        let result = indexer.get_events_in_id_range(Some(12), Some(12)).await;
+        assert!(matches!(result, WorkerKvQueryResponse::Events(_)));
+        assert_eq!(
+            get_ids(extract_events(result)),
+            vec![12],
+            "start == end should return single event"
+        );
+
+        // InvalidRange when start > end
+        let result = indexer.get_events_in_id_range(Some(15), Some(10)).await;
+        assert!(
+            matches!(result, WorkerKvQueryResponse::InvalidRange { .. }),
+            "start > end should return InvalidRange"
+        );
+
+        // TooNew when start_id is beyond buffer
+        let result = indexer.get_events_in_id_range(Some(100), Some(200)).await;
+        assert!(
+            matches!(result, WorkerKvQueryResponse::TooNew { .. }),
+            "start_id beyond buffer should return TooNew"
+        );
+
+        // Request with end beyond buffer but valid start -> buffer returns what it has
+        let result = indexer.get_events_in_id_range(Some(12), Some(100)).await;
+        assert!(matches!(result, WorkerKvQueryResponse::Events(_)));
+        assert_eq!(
+            get_ids(extract_events(result)),
+            vec![12, 13, 14],
+            "range with end beyond buffer should return available buffer events"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_buffer_and_serialization() {
+        // Tests components of the LocalKvIndexer query without using nats
+
+        let worker_id = 42u64;
+
+        // Create a local indexer
+        let token = CancellationToken::new();
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
+
+        // Add events to local indexer's buffer
+        let test_event_1 = RouterEvent::new(
+            worker_id,
+            KvCacheEvent {
+                event_id: 1,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(100),
+                        tokens_hash: LocalBlockHash(200),
+                    }],
+                }),
+                dp_rank: 0,
+            },
+        );
+
+        // Apply events with buffer
+        local_indexer
+            .apply_event_with_buffer(test_event_1)
+            .await
+            .unwrap();
+
+        // Wait for events to be processed
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Get buffered events (what the query service would return)
+        let buffered_events = local_indexer.get_all_events_in_buffer();
+
+        // Verify buffer contents
+        assert_eq!(buffered_events.len(), 1, "Buffer should have 1 event");
+        assert_eq!(buffered_events[0].worker_id, worker_id);
+        assert_eq!(buffered_events[0].event.event_id, 1);
+
+        // Build the response that would be sent (Events variant)
+        let response = WorkerKvQueryResponse::Events(buffered_events.clone());
+
+        // Test serialization/deserialization (simulating NATS round-trip)
+        let serialized = serde_json::to_vec(&response).unwrap();
+        let deserialized: WorkerKvQueryResponse = serde_json::from_slice(&serialized).unwrap();
+
+        // Verify response correctness
+        let events = match deserialized {
+            WorkerKvQueryResponse::Events(e) => e,
+            _ => panic!("Expected Events variant"),
+        };
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].worker_id, worker_id);
+        assert_eq!(events[0].event.event_id, 1);
+
+        // Verify event data
+        match &events[0].event.data {
+            KvCacheEventData::Stored(store_data) => {
+                assert_eq!(store_data.blocks.len(), 1);
+                assert_eq!(store_data.blocks[0].block_hash.0, 100);
+                assert_eq!(store_data.blocks[0].tokens_hash.0, 200);
+            }
+            _ => panic!("Expected Stored event"),
+        }
     }
 }

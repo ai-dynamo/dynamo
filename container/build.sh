@@ -300,6 +300,9 @@ get_options() {
         --enable-media-nixl)
             ENABLE_MEDIA_NIXL=true
             ;;
+        --enable-media-ffmpeg)
+            ENABLE_MEDIA_FFMPEG=true
+            ;;
         --make-efa)
             NIXL_UCX_REF=$NIXL_UCX_EFA_REF
             ;;
@@ -332,6 +335,15 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
+        --registry)
+            # Override the default registry
+            if [ "$2" ]; then
+                REGISTRY=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
         --no-tag-latest)
             NO_TAG_LATEST=true
             ;;
@@ -353,6 +365,15 @@ get_options() {
         esac
         shift
     done
+
+    # Handle registry override if specified
+    if [ -n "$REGISTRY" ]; then
+        TRTLLM_BASE_IMAGE="${TRTLLM_BASE_IMAGE/nvcr.io/$REGISTRY}"
+        VLLM_BASE_IMAGE="${VLLM_BASE_IMAGE/nvcr.io/$REGISTRY}"
+        NONE_BASE_IMAGE="${NONE_BASE_IMAGE/nvcr.io/$REGISTRY}"
+        SGLANG_BASE_IMAGE="${SGLANG_BASE_IMAGE/nvcr.io/$REGISTRY}"
+        SGLANG_FRAMEWORK_IMAGE="${SGLANG_FRAMEWORK_IMAGE/nvcr.io/$REGISTRY}"
+    fi
 
     # Validate that --uid and --gid are only used with local-dev target
     if [[ -n "${CUSTOM_UID:-}" || -n "${CUSTOM_GID:-}" ]]; then
@@ -484,6 +505,7 @@ show_help() {
     echo "  [--make-efa Enables EFA support for NIXL]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
     echo "  [--enable-media-nixl Enable media processing with NIXL support (default: true for frameworks, false for none)]"
+    echo "  [--enable-media-ffmpeg Enable media processing with FFMPEG support (default: true for frameworks, false for none)]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
@@ -491,6 +513,7 @@ show_help() {
     echo "  [--no-tag-latest do not add latest-{framework} tag to built image]"
     echo "  [--multi-arch build for both amd64 and arm64 platforms (uses Dockerfile.*-multi)]"
     echo "  [--push push the built image to a registry (required for multi-arch builds)]"
+    echo "  [--registry registry URL to replace nvcr.io in base images]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -851,7 +874,19 @@ if [ -z "${ENABLE_MEDIA_NIXL}" ]; then
 fi
 BUILD_ARGS+=" --build-arg ENABLE_MEDIA_NIXL=${ENABLE_MEDIA_NIXL} "
 
-# NIXL_UCX_REF: Used in dynamo base stages.
+# ENABLE_MEDIA_FFMPEG: Enable media processing with FFMPEG support
+# Used in base Dockerfile for maturin build feature flag.
+# Can be explicitly overridden with --enable-media-ffmpeg flag
+if [ -z "${ENABLE_MEDIA_FFMPEG}" ]; then
+    if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
+        ENABLE_MEDIA_FFMPEG=true
+    else
+        ENABLE_MEDIA_FFMPEG=false
+    fi
+fi
+BUILD_ARGS+=" --build-arg ENABLE_MEDIA_FFMPEG=${ENABLE_MEDIA_FFMPEG} "
+
+# NIXL_UCX_REF: Used in base Dockerfile only.
 if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
 fi
@@ -913,7 +948,7 @@ fi
 
 echo "*********************"
 echo "$RUN_PREFIX docker buildx build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE $PUSH_FLAG $MULTI_ARCH_FLAG"
-echo "*********************" 
+echo "*********************"
 
 
 # Use BuildKit for enhanced metadata

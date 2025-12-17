@@ -60,7 +60,9 @@ inputs:
     description: 'Push multi-arch build to registry'
     required: false
     default: 'false'
-
+  use_ci_registry:
+    description: 'Use CI registry instead of default registry'
+    required: false
 outputs:
   image_tag:
     description: 'Image Tag'
@@ -156,8 +158,15 @@ runs:
         fi
 
 
+        if [ "${{ inputs.use_ci_registry }}" == "true" ]; then
+          REGISTRY="${ECR_HOSTNAME}"
+        else
+          REGISTRY="nvcr.io"
+        fi
+
         # Execute build and capture output (show on console AND save to file)
         ./container/build.sh --tag "$IMAGE_TAG" \
+          --registry $REGISTRY \
           --target ${{ inputs.target }} \
           --vllm-max-jobs 10 \
           --framework ${{ inputs.framework }} \
