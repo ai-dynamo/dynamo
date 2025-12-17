@@ -270,24 +270,18 @@ impl PrefillRouter {
 
         // Extract worker_id from the response annotations
         while let Some(item) = response.next().await {
-            if let Some(event) = item.event.as_ref() {
-                if event == "worker_id" {
-                    if let Some(comments) = item.comment.as_ref() {
-                        if let Some(first_comment) = comments.first() {
-                            if let Ok(worker_info) =
-                                serde_json::from_str::<WorkerIdInfo>(first_comment)
-                            {
-                                if let Some(prefill_worker_id) = worker_info.prefill_worker_id {
-                                    tracing::debug!(
-                                        prefill_worker_id = prefill_worker_id,
-                                        "Extracted prefill worker ID from query response"
-                                    );
-                                    return Ok(prefill_worker_id);
-                                }
-                            }
-                        }
-                    }
-                }
+            if let Some(event) = item.event.as_ref()
+                && event == "worker_id"
+                && let Some(comments) = item.comment.as_ref()
+                && let Some(first_comment) = comments.first()
+                && let Ok(worker_info) = serde_json::from_str::<WorkerIdInfo>(first_comment)
+                && let Some(prefill_worker_id) = worker_info.prefill_worker_id
+            {
+                tracing::debug!(
+                    prefill_worker_id = prefill_worker_id,
+                    "Extracted prefill worker ID from query response"
+                );
+                return Ok(prefill_worker_id);
             }
         }
 
@@ -412,12 +406,12 @@ impl
 
         // Check for GAIE disaggregated worker selection (query_instance_id:)
         // Empty value signals the full disagg flow: get prefill worker, then decode worker
-        if let Some(query_type_str) = req.get_annotation_value("query_instance_id") {
-            if query_type_str.is_empty() {
-                return self
-                    .get_prefill_and_decode_worker_ids(req, context, request_id, &next)
-                    .await;
-            }
+        if let Some(query_type_str) = req.get_annotation_value("query_instance_id")
+            && query_type_str.is_empty()
+        {
+            return self
+                .get_prefill_and_decode_worker_ids(req, context, request_id, &next)
+                .await;
         }
 
         // Standard disaggregated serving flow (also used by GAIE Stage 2)

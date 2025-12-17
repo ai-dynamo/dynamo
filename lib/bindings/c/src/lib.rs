@@ -1017,22 +1017,21 @@ fn spawn_prefill_watcher(
                 );
 
                 // Get the endpoint and activate the prefill router
-                if let Ok(ns) = drt.namespace(&endpoint_id.namespace) {
-                    if let Ok(comp) = ns.component(&endpoint_id.component) {
-                        let endpoint = comp.endpoint(&endpoint_id.name);
-                        if let Err(e) = model_manager.activate_prefill_router(card.name(), endpoint)
-                        {
-                            tracing::warn!(
-                                model_name = card.name(),
-                                error = %e,
-                                "Failed to activate prefill router"
-                            );
-                        } else {
-                            tracing::info!(
-                                model_name = card.name(),
-                                "Prefill router activated successfully"
-                            );
-                        }
+                if let Ok(ns) = drt.namespace(&endpoint_id.namespace)
+                    && let Ok(comp) = ns.component(&endpoint_id.component)
+                {
+                    let endpoint = comp.endpoint(&endpoint_id.name);
+                    if let Err(e) = model_manager.activate_prefill_router(card.name(), endpoint) {
+                        tracing::warn!(
+                            model_name = card.name(),
+                            error = %e,
+                            "Failed to activate prefill router"
+                        );
+                    } else {
+                        tracing::info!(
+                            model_name = card.name(),
+                            "Prefill router activated successfully"
+                        );
                     }
                 }
             }

@@ -104,6 +104,7 @@ pub fn router_endpoint_id(namespace: String) -> EndpointId {
 /// Query instance types for worker selection
 /// - "prefill" → select a prefill worker (disaggregated serving)
 /// - "decode" → select a decode worker (disaggregated serving)
+///
 /// Note: Empty value ("query_instance_id:") is handled by PrefillRouter for disagg orchestration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
