@@ -424,7 +424,7 @@ impl
 
         // Handle prefill result
         match prefill_result {
-            Ok((maybe_prefill_result, prefill_worker_id, bootstrap_info)) => {
+            Ok((maybe_prefill_result, _prefill_worker_id, bootstrap_info)) => {
                 tracing::debug!("Prefill completed, proceeding to decode");
 
                 let mut decode_req = req;
