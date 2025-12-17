@@ -33,11 +33,12 @@ impl Default for JsonParserType {
 pub fn try_tool_call_parse_json(
     message: &str,
     config: &JsonParserConfig,
+    tools: Option<&[super::ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     match config.parser_type {
-        JsonParserType::Basic => try_tool_call_parse_basic_json(message, config),
-        JsonParserType::DeepseekV3 => parse_tool_calls_deepseek_v3(message, config),
-        JsonParserType::DeepseekV31 => parse_tool_calls_deepseek_v3_1(message, config),
+        JsonParserType::Basic => try_tool_call_parse_basic_json(message, config, tools),
+        JsonParserType::DeepseekV3 => parse_tool_calls_deepseek_v3(message, config, tools),
+        JsonParserType::DeepseekV31 => parse_tool_calls_deepseek_v3_1(message, config, tools),
     }
 }
 

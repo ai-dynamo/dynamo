@@ -89,7 +89,7 @@ DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="31116825b39f4e6a6a1e127001f5204b73d1dc32" # 1.2.0rc2
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="e4c707845ff58fcc0b1d87afb4dd0e64885c780a" # 1.2.0rc5
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
@@ -98,7 +98,7 @@ TRTLLM_GIT_URL=""
 DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc3"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc5"
 TENSORRTLLM_PIP_WHEEL=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
@@ -122,8 +122,13 @@ SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
 NIXL_REF=0.7.1
 NIXL_UCX_REF=v1.19.0
 NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
+NIXL_GDRCOPY_REF=v2.5.1
 
 NO_CACHE=""
+
+# KVBM (KV Cache Block Manager) - default disabled, enabled automatically for VLLM/TRTLLM
+# or can be explicitly enabled via --enable-kvbm flag
+ENABLE_KVBM=false
 
 # sccache configuration for S3
 USE_SCCACHE=""
@@ -194,7 +199,6 @@ get_options() {
             fi
             ;;
         --base-image)
-            # Note: --base-image cannot be used with --dev-image
             if [ "$2" ]; then
                 BASE_IMAGE=$2
                 shift
@@ -213,14 +217,6 @@ get_options() {
         --target)
             if [ "$2" ]; then
                 TARGET=$2
-                shift
-            else
-                missing_requirement "$1"
-            fi
-            ;;
-        --dev-image)
-            if [ "$2" ]; then
-                DEV_IMAGE_INPUT=$2
                 shift
             else
                 missing_requirement "$1"
@@ -272,7 +268,7 @@ get_options() {
             ;;
         --cache-from)
             if [ "$2" ]; then
-                CACHE_FROM="--cache-from $2"
+                CACHE_FROM+="--cache-from $2 "
                 shift
             else
                 missing_requirement "$1"
@@ -280,7 +276,7 @@ get_options() {
             ;;
         --cache-to)
             if [ "$2" ]; then
-                CACHE_TO="--cache-to $2"
+                CACHE_TO+="--cache-to $2 "
                 shift
             else
                 missing_requirement "$1"
@@ -299,6 +295,9 @@ get_options() {
             ;;
         --enable-media-nixl)
             ENABLE_MEDIA_NIXL=true
+            ;;
+        --enable-media-ffmpeg)
+            ENABLE_MEDIA_FFMPEG=true
             ;;
         --make-efa)
             NIXL_UCX_REF=$NIXL_UCX_EFA_REF
@@ -348,20 +347,10 @@ get_options() {
         shift
     done
 
-    # Validate argument combinations
-    if [[ -n "${DEV_IMAGE_INPUT:-}" && -n "${BASE_IMAGE:-}" ]]; then
-        error "ERROR: --dev-image cannot be used with --base-image. Use --dev-image to build from existing images or --base-image to build new images."
-    fi
-
-    # Validate that --target and --dev-image cannot be used together
-    if [[ -n "${DEV_IMAGE_INPUT:-}" && -n "${TARGET:-}" ]]; then
-        error "ERROR: --target cannot be used with --dev-image. Use --target to build from scratch or --dev-image to build from existing images."
-    fi
-
-    # Validate that --uid and --gid are only used with local-dev related options
+    # Validate that --uid and --gid are only used with local-dev target
     if [[ -n "${CUSTOM_UID:-}" || -n "${CUSTOM_GID:-}" ]]; then
-        if [[ -z "${DEV_IMAGE_INPUT:-}" && "${TARGET:-}" != "local-dev" ]]; then
-            error "ERROR: --uid and --gid can only be used with --dev-image or --target local-dev"
+        if [[ "${TARGET:-}" != "local-dev" ]]; then
+            error "ERROR: --uid and --gid can only be used with --target local-dev"
         fi
     fi
 
@@ -463,9 +452,8 @@ show_help() {
     echo "  [--cache-from cache location to start from]"
     echo "  [--cache-to location where to cache the build output]"
     echo "  [--tag tag for image]"
-    echo "  [--dev-image dev image to build local-dev from]"
-    echo "  [--uid user ID for local-dev images (only with --dev-image or --target local-dev)]"
-    echo "  [--gid group ID for local-dev images (only with --dev-image or --target local-dev)]"
+    echo "  [--uid user ID for local-dev images (only with --target local-dev)]"
+    echo "  [--gid group ID for local-dev images (only with --target local-dev)]"
     echo "  [--no-cache disable docker build cache]"
     echo "  [--dry-run print docker commands without running]"
     echo "  [--build-context name=path to add build context]"
@@ -473,6 +461,7 @@ show_help() {
     echo "  [--make-efa Enables EFA support for NIXL]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
     echo "  [--enable-media-nixl Enable media processing with NIXL support (default: true for frameworks, false for none)]"
+    echo "  [--enable-media-ffmpeg Enable media processing with FFMPEG support (default: true for frameworks, false for none)]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
@@ -547,16 +536,12 @@ fi
 # Add NIXL_REF as a build argument
 BUILD_ARGS+=" --build-arg NIXL_REF=${NIXL_REF} "
 
-# Function to build local-dev image with header
+# Function to build local-dev image
 build_local_dev_with_header() {
     local dev_base_image="$1"
     local tags="$2"
     local success_msg="$3"
     local header_title="$4"
-
-    echo "======================================"
-    echo "$header_title"
-    echo "======================================"
 
     # Get user info right before using it
     USER_UID=${CUSTOM_UID:-$(id -u)}
@@ -570,7 +555,8 @@ build_local_dev_with_header() {
         exit 1
     fi
 
-    echo "Building new local-dev image from: $dev_base_image"
+    echo ""
+    echo "Now building new local-dev image from: $dev_base_image"
     echo "User 'dynamo' will have UID: $USER_UID, GID: $USER_GID"
 
     # Show the docker command being executed if not in dry-run mode
@@ -597,8 +583,8 @@ build_local_dev_with_header() {
     # Show usage instructions
     echo ""
     echo "To run the local-dev image as the local user ($USER_UID/$USER_GID):"
-    # Extract the last tag from the tags string
-    last_tag=$(echo "$tags" | grep -o -- '--tag [^ ]*' | tail -1 | cut -d' ' -f2)
+    # Extract the first tag from the tags string (the full version tag, not the latest tag)
+    last_tag=$(echo "$tags" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
     # Calculate relative path to run.sh from current working directory
     # Get the directory where build.sh is located
     build_dir="$(dirname "${BASH_SOURCE[0]}")"
@@ -802,15 +788,15 @@ fi
 
 # ENABLE_KVBM: Used in base Dockerfile for block-manager feature.
 #              Declared but not currently used in Dockerfile.{vllm,trtllm}.
+# Force KVBM to be enabled for VLLM and TRTLLM frameworks
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
     echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
     ENABLE_KVBM=true
-else
-    ENABLE_KVBM=false
 fi
+# For other frameworks, ENABLE_KVBM defaults to false unless --enable-kvbm flag was provided
 
-if [  ! -z ${ENABLE_KVBM} ]; then
-    echo "Enabling the KVBM in the dynamo image"
+if [[ ${ENABLE_KVBM} == "true" ]]; then
+    echo "Enabling KVBM in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
 fi
 
@@ -826,10 +812,27 @@ if [ -z "${ENABLE_MEDIA_NIXL}" ]; then
 fi
 BUILD_ARGS+=" --build-arg ENABLE_MEDIA_NIXL=${ENABLE_MEDIA_NIXL} "
 
+# ENABLE_MEDIA_FFMPEG: Enable media processing with FFMPEG support
+# Used in base Dockerfile for maturin build feature flag.
+# Can be explicitly overridden with --enable-media-ffmpeg flag
+if [ -z "${ENABLE_MEDIA_FFMPEG}" ]; then
+    if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
+        ENABLE_MEDIA_FFMPEG=true
+    else
+        ENABLE_MEDIA_FFMPEG=false
+    fi
+fi
+BUILD_ARGS+=" --build-arg ENABLE_MEDIA_FFMPEG=${ENABLE_MEDIA_FFMPEG} "
+
 # NIXL_UCX_REF: Used in base Dockerfile only.
-#               Passed to framework Dockerfile.{vllm,sglang,...} where it's NOT used.
 if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
+fi
+
+# NIXL_GDRCOPY_REF: Used in dynamo base stages.
+if [ -n "${NIXL_GDRCOPY_REF}" ]; then
+    BUILD_ARGS+=" --build-arg NIXL_GDRCOPY_REF=${NIXL_GDRCOPY_REF} "
+
 fi
 
 # MAX_JOBS is only used by Dockerfile.vllm
@@ -869,117 +872,27 @@ fi
 
 show_image_options
 
-if [ -z "$RUN_PREFIX" ]; then
-    set -x
+# Always build the main image first
+# Create build log directory for BuildKit reports
+BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
+mkdir -p "${BUILD_LOG_DIR}"
+SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
+
+# Use BuildKit for enhanced metadata
+if docker buildx version &>/dev/null; then
+    $RUN_PREFIX docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+    BUILD_EXIT_CODE=${PIPESTATUS[0]}
+else
+    $RUN_PREFIX DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+    BUILD_EXIT_CODE=${PIPESTATUS[0]}
 fi
 
-
-# Skip Build 1 and Build 2 if DEV_IMAGE_INPUT is set (we'll handle it at the bottom)
-if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
-    # Follow 2-step build process for all frameworks
-    if [[ $FRAMEWORK != "NONE" ]]; then
-        # Define base image tag with framework suffix to prevent clobbering
-        # Different frameworks require different base configurations:
-        # - VLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=cuda-dl-base
-        # - SGLANG: Python 3.10, BASE_IMAGE=cuda-dl-base
-        # - TRTLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=pytorch
-        # Without unique tags, building different frameworks would overwrite each other's names
-        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}-${FRAMEWORK,,}"
-        # Start base image build
-        echo "======================================"
-        echo "Starting Build 1: Base Image"
-        echo "======================================"
-
-        # Create build log directory for BuildKit reports
-        BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
-        mkdir -p "${BUILD_LOG_DIR}"
-        BASE_BUILD_LOG="${BUILD_LOG_DIR}/base-image-build.log"
-
-        # Use BuildKit for enhanced metadata
-        if [ -z "$RUN_PREFIX" ]; then
-            if docker buildx version &>/dev/null; then
-                docker buildx build --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            else
-                DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            fi
-
-            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
-                exit ${BUILD_EXIT_CODE}
-            fi
-        else
-            $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-        fi
-
-        # Start framework build
-        echo "======================================"
-        echo "Starting Build 2: Framework Image"
-        echo "======================================"
-
-        FRAMEWORK_BUILD_LOG="${BUILD_LOG_DIR}/framework-${FRAMEWORK,,}-build.log"
-
-        BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
-
-        # Use BuildKit for enhanced metadata
-        if [ -z "$RUN_PREFIX" ]; then
-            if docker buildx version &>/dev/null; then
-                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            else
-                DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            fi
-
-            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
-                exit ${BUILD_EXIT_CODE}
-            fi
-        else
-            $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-        fi
-    else
-        # Create build log directory for BuildKit reports
-        BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
-        mkdir -p "${BUILD_LOG_DIR}"
-        SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
-
-        # Use BuildKit for enhanced metadata
-        if [ -z "$RUN_PREFIX" ]; then
-            if docker buildx version &>/dev/null; then
-                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            else
-                DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
-                BUILD_EXIT_CODE=${PIPESTATUS[0]}
-            fi
-
-            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
-                exit ${BUILD_EXIT_CODE}
-            fi
-        else
-            $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-        fi
-    fi
+if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+    exit ${BUILD_EXIT_CODE}
 fi
 
-# Handle --dev-image option (build local-dev from existing dev image)
-if [[ -n "${DEV_IMAGE_INPUT:-}" ]]; then
-    # Validate that the dev image is not already a local-dev image
-    if [[ "$DEV_IMAGE_INPUT" == *"-local-dev" ]]; then
-        echo "ERROR: Cannot use local-dev image as dev image input: '$DEV_IMAGE_INPUT'"
-        exit 1
-    fi
-
-    # Build tag arguments - always add -local-dev suffix for --dev-image
-    # Generate local-dev tag from input image
-    if [[ "$DEV_IMAGE_INPUT" == *:* ]]; then
-        LOCAL_DEV_TAG="--tag ${DEV_IMAGE_INPUT}-local-dev"
-    else
-        LOCAL_DEV_TAG="--tag ${DEV_IMAGE_INPUT}:latest-local-dev"
-    fi
-
-    build_local_dev_with_header "$DEV_IMAGE_INPUT" "$LOCAL_DEV_TAG" "Successfully built local-dev image: ${LOCAL_DEV_TAG#--tag }" "Building Local-Dev Image"
-elif [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
+# Handle local-dev target
+if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
     # Use the first tag name (TAG) if available, otherwise use latest
     if [[ -n "$TAG" ]]; then
         DEV_IMAGE=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
@@ -1001,7 +914,9 @@ elif [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
         LOCAL_DEV_TAGS+=" --tag ${LATEST_TAG_NAME}-local-dev"
     fi
 
-    build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built local-dev images" "Starting Build 3: Local-Dev Image"
+    # Extract first tag for success message
+    FIRST_TAG=$(echo "$LOCAL_DEV_TAGS" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
+    build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built $FIRST_TAG" "Building Local-Dev Image"
 fi
 
 
