@@ -774,7 +774,6 @@ class BaseWorkerHandler(ABC):
                 logger.debug(
                     f"Starting token generation for request {request_id} (no LoRA)"
                 )
-
             gen = self.engine_client.generate(
                 prompt,
                 sampling_params,
@@ -967,12 +966,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     async def _generate_text_mode(self, request, context, request_id):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""
         # Get text input using InputParamManager
-        input_text = self.input_param_manager.get_input_param(
+        input_data = self.input_param_manager.get_input_param(
             request, use_tokenizer=True
         )
 
         # Build prompt for vLLM
-        prompt = TextPrompt(prompt=input_text)
+        if isinstance(input_data, list):
+            prompt = TokensPrompt(prompt_token_ids=input_data)
+        else:
+            prompt = TextPrompt(prompt=input_data)
 
         # Build sampling params from OpenAI-style request
         sampling_params = build_sampling_params_openai(
@@ -1073,14 +1075,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Prefill Request ID: {request_id}")
 
-        if self.use_vllm_tokenizer:
-            # Text-in-text-out mode: use InputParamManager
-            async for chunk in self._generate_text_mode(request, context, request_id):
-                yield chunk
-        else:
-            # Token-in-token-out mode: internal protocol format
-            async for chunk in self._generate_token_mode(request, context, request_id):
-                yield chunk
+        # Token-in-token-out mode: internal protocol format
+        async for chunk in self._generate_token_mode(request, context, request_id):
+            yield chunk
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
