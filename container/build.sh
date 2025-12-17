@@ -107,6 +107,10 @@ VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
 VLLM_BASE_IMAGE_TAG="25.04-cuda12.9-devel-ubuntu24.04"
+VLLM_BASE_IMAGE_TAG_CU13="25.11-cuda13.0-devel-ubuntu24.04"
+VLLM_RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
+VLLM_RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
+VLLM_RUNTIME_IMAGE_TAG_CU13="13.0.2-runtime-ubuntu24.04"
 
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
@@ -156,6 +160,16 @@ get_options() {
         --framework)
             if [ "$2" ]; then
                 FRAMEWORK=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --cuda-version)
+            if [ "$2" ]; then
+                echo "INFO: Setting CUDA_VERSION to $2"
+                CUDA_VERSION=$2
+                BUILD_ARGS+=" --build-arg CUDA_VERSION=$2 "
                 shift
             else
                 missing_requirement "$1"
@@ -316,7 +330,6 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-
         --sccache-region)
             if [ "$2" ]; then
                 SCCACHE_REGION=$2
@@ -379,11 +392,20 @@ get_options() {
         if [ -z "$BASE_IMAGE_TAG" ]; then
             BASE_IMAGE_TAG=${FRAMEWORK}_BASE_IMAGE_TAG
             BASE_IMAGE_TAG=${!BASE_IMAGE_TAG}
+            echo "INFO: Using default base image tag for $FRAMEWORK: $BASE_IMAGE_TAG"
         fi
 
         if [ -z "$BASE_IMAGE" ]; then
             BASE_IMAGE=${FRAMEWORK}_BASE_IMAGE
             BASE_IMAGE=${!BASE_IMAGE}
+        fi
+
+        if [[ $FRAMEWORK == "VLLM" ]] && [[ $CUDA_VERSION == "13."* ]]; then
+            BASE_IMAGE_TAG=$VLLM_BASE_IMAGE_TAG_CU13
+            BUILD_ARGS+=" --build-arg BASE_IMAGE_TAG=${VLLM_BASE_IMAGE_TAG_CU13} "
+            RUNTIME_IMAGE_TAG=$VLLM_RUNTIME_IMAGE_TAG_CU13
+            BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${VLLM_RUNTIME_IMAGE_TAG_CU13} "
+            echo "INFO: Overriding base image tag for vLLM with CUDA 13: $BASE_IMAGE_TAG AND RUNTIME_IMAGE_TAG: $RUNTIME_IMAGE_TAG"
         fi
 
         if [ -z "$BASE_IMAGE" ]; then
@@ -521,17 +543,6 @@ if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
         BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=12.9.0-runtime-ubuntu24.04 "
         echo "INFO: Automatically setting RUNTIME_IMAGE_TAG=12.9.0-runtime-ubuntu24.04 for vLLM ARM64"
     fi
-
-    if [[ "$BUILD_ARGS" != *"CUDA_VERSION"* ]]; then
-        BUILD_ARGS+=" --build-arg CUDA_VERSION=129 "
-        echo "INFO: Automatically setting CUDA_VERSION=129 for vLLM ARM64"
-    fi
-
-    if [[ "$BUILD_ARGS" != *"TORCH_BACKEND"* ]]; then
-        BUILD_ARGS+=" --build-arg TORCH_BACKEND=cu129 "
-        echo "INFO: Automatically setting TORCH_BACKEND=cu129 for vLLM ARM64"
-    fi
-
 fi
 
 # Update DOCKERFILE if framework is VLLM
