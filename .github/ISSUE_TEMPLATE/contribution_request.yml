@@ -8,6 +8,18 @@ body:
       value: |
         Thank you for your interest in contributing to Dynamo! Please fill out this form so we can review your proposal.
 
+  - type: dropdown
+    id: change-type
+    attributes:
+      label: Type of Change
+      options:
+        - Bug fix
+        - New feature
+        - Refactoring
+        - Performance improvement
+    validations:
+      required: true
+
   - type: textarea
     id: problem
     attributes:
@@ -38,18 +50,6 @@ body:
     validations:
       required: true
 
-  - type: dropdown
-    id: change-type
-    attributes:
-      label: Type of Change
-      options:
-        - Bug fix
-        - New feature
-        - Refactoring
-        - Performance improvement
-    validations:
-      required: true
-
   - type: textarea
     id: files-affected
     attributes:
@@ -57,4 +57,3 @@ body:
       description: Which files or components will you modify?
     validations:
       required: true
-

@@ -38,7 +38,7 @@ Thank you for your interest in contributing to Dynamo. To help us review your wo
 
 ### Issue-First Workflow Steps
 
-**If you are an external contributor and your change requires a GitHub Issue**, please follow this workflow:
+**If you are an external contributor and your change requires a GitHub Issue**, please follow this workflow. This process ensures that external contributions are well-aligned with the project's goals and reduces the likelihood of significant rework.
 
 1. **Create a GitHub Issue First** – Before writing any code, [open a GitHub Issue](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml) using the **Contribution Request** template.
 
@@ -66,8 +66,6 @@ Thank you for your interest in contributing to Dynamo. To help us review your wo
 8. **Check CODEOWNERS** – Review the [CODEOWNERS](https://github.com/ai-dynamo/dynamo/blob/main/CODEOWNERS) file to identify which team members need to sign off on your PR based on the files you've modified.
 
 9. **Request a Review** – Add whomever approved your GitHub Issue as a reviewer on your PR. Please also add [@dagil-nvidia](https://github.com/dagil-nvidia) for visibility.
-
-This workflow ensures that external contributions are well-aligned with the project's goals and reduces the likelihood of significant rework.
 
 > **Note on AI-Generated Code**: While Dynamo encourages the use of AI-generated code, it is the full responsibility of the submitter to understand every change in the PR. Failure to demonstrate sufficient understanding of the submitted code will result in rejection.
 
