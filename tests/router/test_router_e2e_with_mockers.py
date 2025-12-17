@@ -284,6 +284,7 @@ class DisaggMockerProcess:
         self._process.__exit__(exc_type, exc_val, exc_tb)
 
 
+@pytest.mark.timeout(42)  # ~3x average (~13.80s), rounded up
 def test_mocker_kv_router(
     request, runtime_services_dynamic_ports, predownload_tokenizers
 ):
@@ -326,6 +327,7 @@ def test_mocker_kv_router(
 
 
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
+@pytest.mark.timeout(60)  # ~3x average (~19.86s), rounded up
 def test_mocker_two_kv_router(
     request,
     runtime_services_dynamic_ports,
@@ -381,6 +383,7 @@ def test_mocker_two_kv_router(
 
 
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
+@pytest.mark.timeout(60)  # ~3x average (~19.86s), rounded up (when enabled)
 def test_mocker_kv_router_overload_503(
     request, runtime_services_dynamic_ports, predownload_tokenizers
 ):
@@ -418,6 +421,7 @@ def test_mocker_kv_router_overload_503(
             mockers.__exit__(None, None, None)
 
 
+@pytest.mark.timeout(22)  # ~3x average (~7.10s), rounded up
 def test_kv_push_router_bindings(
     request, runtime_services_dynamic_ports, predownload_tokenizers
 ):
@@ -464,7 +468,7 @@ def test_kv_push_router_bindings(
     ],
     ids=["jetstream", "file"],  # "nats_core" commented out to match commented test case
 )
-@pytest.mark.timeout(120)  # Typically ~20s; fail fast on hangs in CI/xdist.
+@pytest.mark.timeout(27)  # ~3x average (~8.93s), rounded up
 def test_indexers_sync(
     request,
     runtime_services_dynamic_ports,
@@ -532,6 +536,7 @@ def test_indexers_sync(
             mockers.__exit__(None, None, None)
 
 
+@pytest.mark.timeout(42)  # ~3x average (~13.80s), rounded up
 def test_query_instance_id_returns_worker_and_tokens(
     request, runtime_services_dynamic_ports, predownload_tokenizers
 ):
@@ -567,6 +572,7 @@ def test_query_instance_id_returns_worker_and_tokens(
 
 
 @pytest.mark.parametrize("use_nats_core", [False, True], ids=["jetstream", "nats_core"])
+@pytest.mark.timeout(29)  # ~3x average (~9.55s), rounded up
 def test_router_decisions(
     request, runtime_services_dynamic_ports, predownload_tokenizers, use_nats_core
 ):
@@ -616,6 +622,7 @@ def test_router_decisions(
 
 
 @pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
+@pytest.mark.timeout(59)  # ~3x average (~19.51s), rounded up
 def test_router_decisions_disagg(
     request, runtime_services_dynamic_ports, predownload_tokenizers, registration_order
 ):
@@ -716,6 +723,7 @@ def test_router_decisions_disagg(
 
 
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.timeout(39)  # ~3x average (~12.84s), rounded up
 def test_busy_threshold_endpoint(
     request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
 ):
