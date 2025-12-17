@@ -22,7 +22,9 @@ use tracing;
 
 use llm_rs::kv_router::protocols::*;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks, start_zmq_listener};
+use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+use serde_json::json;
 
 #[pyfunction]
 pub fn compute_block_hash_for_seq_py(tokens: Vec<u32>, kv_block_size: usize) -> PyResult<Vec<u64>> {
@@ -1055,6 +1057,31 @@ pub(crate) struct KvPushRouter {
     inner: Arc<llm_rs::kv_router::KvPushRouter>,
 }
 
+/// Inject worker_id info from tracker into response's disaggregated_params.
+/// This is needed for Python bindings to expose worker routing info since
+/// the raw LLMEngineOutput doesn't go through DeltaGenerator (which adds nvext).
+fn inject_worker_id_from_tracker(
+    data: &mut llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+    tracker: &RequestTracker,
+) {
+    let Some(worker_info) = tracker.get_worker_info() else {
+        return;
+    };
+
+    let worker_id_json =
+        serde_json::to_value(&worker_info).expect("WorkerIdInfo serialization should not fail");
+
+    if let Some(obj) = data
+        .disaggregated_params
+        .as_mut()
+        .and_then(|p| p.as_object_mut())
+    {
+        obj.insert("worker_id".to_string(), worker_id_json);
+    } else {
+        data.disaggregated_params = Some(json!({"worker_id": worker_id_json}));
+    }
+}
+
 // TODO: can this reuse the stream conversion method in Client bindings?
 impl KvPushRouter {
     /// Helper method to process a request and create a Python async generator
@@ -1062,6 +1089,7 @@ impl KvPushRouter {
         py: Python<'p>,
         inner: Arc<llm_rs::kv_router::KvPushRouter>,
         request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+        tracker: Option<Arc<RequestTracker>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let single_in = SingleIn::new(request);
@@ -1071,7 +1099,17 @@ impl KvPushRouter {
             // Spawn a task to process the stream
             tokio::spawn(async move {
                 let mut stream = stream;
-                while let Some(response) = stream.next().await {
+                let mut first_item = true;
+
+                while let Some(mut response) = stream.next().await {
+                    // Inject worker_id into first response if tracker is available
+                    if first_item {
+                        first_item = false;
+                        if let (Some(tracker), Some(data)) = (&tracker, &mut response.data) {
+                            inject_worker_id_from_tracker(data, tracker);
+                        }
+                    }
+
                     // Convert LLMEngineOutput to PyObject
                     let py_response = Python::with_gil(|py| {
                         pythonize(py, &response.data)
@@ -1190,6 +1228,9 @@ impl KvPushRouter {
             None
         };
 
+        // Create tracker to capture worker routing info from KvRouter
+        let tracker = Arc::new(RequestTracker::new());
+
         // Build the PreprocessedRequest
         let mut request_builder =
             llm_rs::protocols::common::preprocessor::PreprocessedRequest::builder();
@@ -1201,7 +1242,8 @@ impl KvPushRouter {
             .output_options(output_options)
             .router_config_override(router_config_override)
             .dp_rank(dp_rank)
-            .extra_args(extra_args);
+            .extra_args(extra_args)
+            .tracker(Some(tracker.clone()));
 
         // Set backend_instance_id if worker_id is provided
         if let Some(worker_id) = worker_id {
@@ -1211,7 +1253,7 @@ impl KvPushRouter {
         let request = request_builder.build().map_err(to_pyerr)?;
 
         // Use the helper method to process the request
-        Self::process_request_to_stream(py, self.inner.clone(), request)
+        Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
     }
 
     fn generate_from_request<'p>(
@@ -1220,11 +1262,21 @@ impl KvPushRouter {
         request: PyObject,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the request directly into PreprocessedRequest
-        let request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
+        let mut request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
             depythonize(request.bind(py)).map_err(to_pyerr)?;
 
+        // Create tracker if not already set, to capture worker routing info
+        let tracker = match request.tracker {
+            Some(ref t) => t.clone(),
+            None => {
+                let t = Arc::new(RequestTracker::new());
+                request.tracker = Some(t.clone());
+                t
+            }
+        };
+
         // Use the helper method to process the request
-        Self::process_request_to_stream(py, self.inner.clone(), request)
+        Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
     }
 
     #[pyo3(signature = (token_ids, router_config_override=None, request_id=None))]
