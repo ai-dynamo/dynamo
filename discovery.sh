@@ -1,8 +1,7 @@
 #!/bin/bash
-# discovery.sh - Local development helper for Kubernetes discovery
+# discovery.sh - Helper for managing Kubernetes discovery resources
 #
-# Creates mock EndpointSlices that point to localhost, enabling local workers
-# to be discovered through a real Kubernetes cluster.
+# Manages EndpointSlices and DynamoWorkerMetadata CRs for Dynamo discovery.
 #
 # Usage:
 #   ./discovery.sh create <worker-name> [port] [ready]    # Create an EndpointSlice
@@ -21,10 +20,7 @@
 #
 # The created EndpointSlice will have:
 #   - Labels for Dynamo discovery (nvidia.com/dynamo-discovery-backend=kubernetes, etc.)
-#   - Localhost test annotation (nvidia.com/dynamo-discovery-localhost=true)
-#   - The system port set to your local port for metadata fetching
-#   - A dummy placeholder IP (K8s doesn't allow loopback IPs in EndpointSlices)
-#     The Rust code ignores this IP when the localhost annotation is present
+#   - The system port for metadata fetching
 
 set -euo pipefail
 
@@ -88,9 +84,6 @@ create_endpoint_slice() {
     
     local slice_name="dynamo-local-${worker_name}"
     local pod_name="local-${worker_name}-$(whoami)"
-    
-    # Use a dummy placeholder IP - Kubernetes doesn't allow loopback addresses in EndpointSlices.
-    # Our Rust code ignores this IP when the localhost annotation is present and uses 127.0.0.1 instead.
     local placeholder_ip="10.255.255.1"
     
     log_info "Creating EndpointSlice: ${slice_name}"
@@ -112,9 +105,7 @@ metadata:
     ${LABEL_PREFIX}-discovery-test: "true"
     ${LABEL_PREFIX}-worker-name: "${worker_name}"
   annotations:
-    ${LABEL_PREFIX}-discovery-localhost: "true"
-    ${LABEL_PREFIX}-local-port: "${local_port}"
-    description: "Local development EndpointSlice for worker ${worker_name}"
+    description: "Test EndpointSlice for worker ${worker_name}"
 addressType: IPv4
 ports:
   - name: system
@@ -251,8 +242,6 @@ list_metadata() {
     kubectl get dynamoworkermetadatas -n "${NAMESPACE}" \
         -o custom-columns=\
 'NAME:.metadata.name,'\
-'INSTANCE-ID:.spec.instanceId,'\
-'POD-UID:.spec.podUid,'\
 'AGE:.metadata.creationTimestamp' \
         2>/dev/null || log_info "No DynamoWorkerMetadata CRs found"
 }

@@ -33,27 +33,14 @@ const FIELD_MANAGER: &str = "dynamo-worker";
 )]
 #[serde(rename_all = "camelCase")]
 pub struct DynamoWorkerMetadataSpec {
-    /// UID of the pod that owns this metadata
-    /// Used for owner reference and correlation with EndpointSlice
-    pub pod_uid: String,
-
-    /// Instance ID derived from hashing the pod name
-    /// Matches the instance_id used in DiscoveryInstance
-    pub instance_id: u64,
-
     /// Raw JSON blob containing the DiscoveryMetadata
-    /// This allows storing arbitrary discovery data without tight coupling
     pub data: serde_json::Value,
 }
 
 impl DynamoWorkerMetadataSpec {
-    /// Create a new spec with the given pod UID, instance ID, and data
-    pub fn new(pod_uid: String, instance_id: u64, data: serde_json::Value) -> Self {
-        Self {
-            pod_uid,
-            instance_id,
-            data,
-        }
+    /// Create a new spec with the given data
+    pub fn new(data: serde_json::Value) -> Self {
+        Self { data }
     }
 }
 
@@ -62,7 +49,6 @@ impl DynamoWorkerMetadataSpec {
 /// # Arguments
 /// * `pod_name` - Name of the pod (used as CR name and in owner reference)
 /// * `pod_uid` - UID of the pod (for owner reference - enables garbage collection)
-/// * `instance_id` - Instance ID derived from hashing the pod name
 /// * `metadata` - The DiscoveryMetadata to serialize into the CR's data field
 ///
 /// # Returns
@@ -70,16 +56,10 @@ impl DynamoWorkerMetadataSpec {
 pub fn build_cr(
     pod_name: &str,
     pod_uid: &str,
-    instance_id: u64,
     metadata: &DiscoveryMetadata,
 ) -> Result<DynamoWorkerMetadata> {
-    // Serialize DiscoveryMetadata to JSON
     let data = serde_json::to_value(metadata)?;
-
-    // Create the spec
-    let spec = DynamoWorkerMetadataSpec::new(pod_uid.to_string(), instance_id, data);
-
-    // Create the CR
+    let spec = DynamoWorkerMetadataSpec::new(data);
     let mut cr = DynamoWorkerMetadata::new(pod_name, spec);
 
     // Set owner reference to the pod for automatic garbage collection
@@ -155,14 +135,8 @@ mod tests {
             "model_cards": {}
         });
 
-        let spec = DynamoWorkerMetadataSpec::new(
-            "abc-123-def".to_string(),
-            0x1234567890abcdef,
-            data.clone(),
-        );
+        let spec = DynamoWorkerMetadataSpec::new(data.clone());
 
-        assert_eq!(spec.pod_uid, "abc-123-def");
-        assert_eq!(spec.instance_id, 0x1234567890abcdef);
         assert_eq!(spec.data, data);
     }
 
@@ -173,17 +147,11 @@ mod tests {
             "model_cards": {}
         });
 
-        let spec = DynamoWorkerMetadataSpec::new(
-            "abc-123-def".to_string(),
-            0x1234567890abcdef,
-            data,
-        );
+        let spec = DynamoWorkerMetadataSpec::new(data);
 
         let cr = DynamoWorkerMetadata::new("my-worker-pod", spec);
 
         assert_eq!(cr.metadata.name, Some("my-worker-pod".to_string()));
-        assert_eq!(cr.spec.pod_uid, "abc-123-def");
-        assert_eq!(cr.spec.instance_id, 0x1234567890abcdef);
     }
 
     #[test]
@@ -202,41 +170,16 @@ mod tests {
             "model_cards": {}
         });
 
-        let spec = DynamoWorkerMetadataSpec::new(
-            "pod-uid-123".to_string(),
-            12345,
-            data.clone(),
-        );
+        let spec = DynamoWorkerMetadataSpec::new(data.clone());
 
         let cr = DynamoWorkerMetadata::new("test-pod", spec);
 
-        // Serialize to JSON
         let json = serde_json::to_string(&cr).expect("Failed to serialize CR");
 
-        // Deserialize back
         let deserialized: DynamoWorkerMetadata =
             serde_json::from_str(&json).expect("Failed to deserialize CR");
 
-        assert_eq!(deserialized.spec.pod_uid, "pod-uid-123");
-        assert_eq!(deserialized.spec.instance_id, 12345);
         assert_eq!(deserialized.spec.data, data);
-    }
-
-    #[test]
-    fn test_camel_case_serialization() {
-        let spec = DynamoWorkerMetadataSpec::new(
-            "pod-uid".to_string(),
-            42,
-            serde_json::json!({}),
-        );
-
-        let json = serde_json::to_string(&spec).expect("Failed to serialize spec");
-
-        // Verify camelCase field names in JSON
-        assert!(json.contains("podUid"));
-        assert!(json.contains("instanceId"));
-        assert!(!json.contains("pod_uid"));
-        assert!(!json.contains("instance_id"));
     }
 }
 

@@ -247,11 +247,7 @@ impl DiscoveryDaemon {
                 // Deserialize the data field to DiscoveryMetadata
                 match serde_json::from_value::<DiscoveryMetadata>(arc_cr.spec.data.clone()) {
                     Ok(metadata) => {
-                        tracing::trace!(
-                            "Loaded metadata from CR '{}' with instance_id={:x}",
-                            cr_name,
-                            arc_cr.spec.instance_id
-                        );
+                        tracing::trace!("Loaded metadata from CR '{}'", cr_name);
                         Some((cr_name.clone(), Arc::new(metadata)))
                     }
                     Err(e) => {

@@ -51,30 +51,13 @@ spec:
               type: object
               description: Spec contains the worker metadata
               required:
-                - podUid
-                - instanceId
                 - data
               properties:
-                podUid:
-                  type: string
-                  description: UID of the pod that owns this metadata
-                instanceId:
-                  type: integer
-                  format: int64
-                  description: Instance ID derived from hashing the pod name
                 data:
                   type: object
                   description: Raw JSON blob containing DiscoveryMetadata
                   x-kubernetes-preserve-unknown-fields: true
       additionalPrinterColumns:
-        - name: Pod-UID
-          type: string
-          description: UID of the owning pod
-          jsonPath: .spec.podUid
-        - name: Instance-ID
-          type: integer
-          description: Instance ID (hash of pod name)
-          jsonPath: .spec.instanceId
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp

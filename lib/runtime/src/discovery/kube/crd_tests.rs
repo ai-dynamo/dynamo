@@ -107,11 +107,7 @@ async fn test_create_cr() -> Result<()> {
     let data = serde_json::to_value(&mock_metadata)?;
 
     // Create the spec
-    let spec = DynamoWorkerMetadataSpec::new(
-        "test-pod-uid-123".to_string(),
-        12345,
-        data,
-    );
+    let spec = DynamoWorkerMetadataSpec::new(data);
 
     // Create the CR
     let cr = DynamoWorkerMetadata::new(&cr_name, spec);
@@ -121,8 +117,6 @@ async fn test_create_cr() -> Result<()> {
 
     // Verify
     assert_eq!(created.metadata.name, Some(cr_name.clone()));
-    assert_eq!(created.spec.pod_uid, "test-pod-uid-123");
-    assert_eq!(created.spec.instance_id, 12345);
 
     // Cleanup
     cleanup_cr(&api, &cr_name).await;
@@ -153,21 +147,13 @@ async fn test_update_cr_server_side_apply() -> Result<()> {
         },
     );
 
-    let spec = DynamoWorkerMetadataSpec::new(
-        "pod-uid-456".to_string(),
-        111,
-        serde_json::to_value(&initial_metadata)?,
-    );
+    let spec = DynamoWorkerMetadataSpec::new(serde_json::to_value(&initial_metadata)?);
 
     let cr = DynamoWorkerMetadata::new(&cr_name, spec);
 
     // Create using server-side apply (works for both create and update)
     let params = PatchParams::apply("dynamo-worker-test").force();
-    let created = api
-        .patch(&cr_name, &params, &Patch::Apply(&cr))
-        .await?;
-
-    assert_eq!(created.spec.instance_id, 111);
+    api.patch(&cr_name, &params, &Patch::Apply(&cr)).await?;
 
     // Now update with additional endpoint
     let updated_metadata = MockDiscoveryMetadata::new()
@@ -192,11 +178,7 @@ async fn test_update_cr_server_side_apply() -> Result<()> {
             },
         );
 
-    let updated_spec = DynamoWorkerMetadataSpec::new(
-        "pod-uid-456".to_string(),
-        111,
-        serde_json::to_value(&updated_metadata)?,
-    );
+    let updated_spec = DynamoWorkerMetadataSpec::new(serde_json::to_value(&updated_metadata)?);
 
     let updated_cr = DynamoWorkerMetadata::new(&cr_name, updated_spec);
 
@@ -253,11 +235,7 @@ async fn test_get_and_deserialize_cr() -> Result<()> {
             },
         );
 
-    let spec = DynamoWorkerMetadataSpec::new(
-        "real-pod-uid-789".to_string(),
-        0xdeadbeef,
-        serde_json::to_value(&metadata)?,
-    );
+    let spec = DynamoWorkerMetadataSpec::new(serde_json::to_value(&metadata)?);
 
     let cr = DynamoWorkerMetadata::new(&cr_name, spec);
 
@@ -267,10 +245,6 @@ async fn test_get_and_deserialize_cr() -> Result<()> {
 
     // Get the CR back
     let fetched = api.get(&cr_name).await?;
-
-    // Verify basic fields
-    assert_eq!(fetched.spec.pod_uid, "real-pod-uid-789");
-    assert_eq!(fetched.spec.instance_id, 0xdeadbeef);
 
     // Deserialize the data blob back to MockDiscoveryMetadata
     let deserialized: MockDiscoveryMetadata =
@@ -326,7 +300,6 @@ async fn test_full_lifecycle() -> Result<()> {
     let api: Api<DynamoWorkerMetadata> = Api::default_namespaced(client);
 
     let cr_name = test_cr_name("lifecycle");
-    let pod_uid = "lifecycle-pod-uid";
     let instance_id = 0x123456789abcdef0u64;
 
     // Cleanup
@@ -336,11 +309,7 @@ async fn test_full_lifecycle() -> Result<()> {
 
     // Step 1: Create with empty metadata
     let empty_metadata = MockDiscoveryMetadata::new();
-    let spec = DynamoWorkerMetadataSpec::new(
-        pod_uid.to_string(),
-        instance_id,
-        serde_json::to_value(&empty_metadata)?,
-    );
+    let spec = DynamoWorkerMetadataSpec::new(serde_json::to_value(&empty_metadata)?);
     let cr = DynamoWorkerMetadata::new(&cr_name, spec);
     api.patch(&cr_name, &params, &Patch::Apply(&cr)).await?;
 
@@ -361,11 +330,7 @@ async fn test_full_lifecycle() -> Result<()> {
             transport: "nats://localhost:4222".to_string(),
         },
     );
-    let spec_v2 = DynamoWorkerMetadataSpec::new(
-        pod_uid.to_string(),
-        instance_id,
-        serde_json::to_value(&meta_v2)?,
-    );
+    let spec_v2 = DynamoWorkerMetadataSpec::new(serde_json::to_value(&meta_v2)?);
     let cr_v2 = DynamoWorkerMetadata::new(&cr_name, spec_v2);
     api.patch(&cr_name, &params, &Patch::Apply(&cr_v2)).await?;
 
@@ -406,11 +371,7 @@ async fn test_full_lifecycle() -> Result<()> {
                 model_name: "test-model".to_string(),
             },
         );
-    let spec_v3 = DynamoWorkerMetadataSpec::new(
-        pod_uid.to_string(),
-        instance_id,
-        serde_json::to_value(&meta_v3)?,
-    );
+    let spec_v3 = DynamoWorkerMetadataSpec::new(serde_json::to_value(&meta_v3)?);
     let cr_v3 = DynamoWorkerMetadata::new(&cr_name, spec_v3);
     api.patch(&cr_name, &params, &Patch::Apply(&cr_v3)).await?;
 

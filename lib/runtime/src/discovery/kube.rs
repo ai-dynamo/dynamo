@@ -140,16 +140,12 @@ impl Discovery for KubeDiscoveryClient {
         let cr = build_cr(
             &self.pod_info.pod_name,
             &self.pod_info.pod_uid,
-            instance_id,
             &*metadata,
         )?;
 
         apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await?;
 
-        tracing::debug!(
-            "Persisted metadata to DynamoWorkerMetadata CR for instance_id={:x}",
-            instance_id
-        );
+        tracing::debug!("Persisted metadata to DynamoWorkerMetadata CR");
 
         Ok(instance)
     }
@@ -193,16 +189,12 @@ impl Discovery for KubeDiscoveryClient {
         let cr = build_cr(
             &self.pod_info.pod_name,
             &self.pod_info.pod_uid,
-            instance_id,
             &*metadata,
         )?;
 
         apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await?;
 
-        tracing::debug!(
-            "Persisted metadata removal to DynamoWorkerMetadata CR for instance_id={:x}",
-            instance_id
-        );
+        tracing::debug!("Persisted metadata removal to DynamoWorkerMetadata CR");
 
         Ok(())
     }
