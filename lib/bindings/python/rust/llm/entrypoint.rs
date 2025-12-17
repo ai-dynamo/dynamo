@@ -154,6 +154,7 @@ pub(crate) struct EntrypointArgs {
     kv_cache_block_size: Option<u32>,
     http_host: Option<String>,
     http_port: u16,
+    http_metrics_port: Option<u16>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
@@ -168,7 +169,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, custom_backend_metrics_endpoint=None, custom_backend_metrics_polling_interval=None, is_prefill=false, engine_factory=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, custom_backend_metrics_endpoint=None, custom_backend_metrics_polling_interval=None, is_prefill=false, engine_factory=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -181,6 +182,7 @@ impl EntrypointArgs {
         kv_cache_block_size: Option<u32>,
         http_host: Option<String>,
         http_port: Option<u16>,
+        http_metrics_port: Option<u16>,
         tls_cert_path: Option<PathBuf>,
         tls_key_path: Option<PathBuf>,
         extra_engine_args: Option<PathBuf>,
@@ -226,6 +228,7 @@ impl EntrypointArgs {
             kv_cache_block_size,
             http_host,
             http_port: http_port.unwrap_or(DEFAULT_HTTP_PORT),
+            http_metrics_port,
             tls_cert_path,
             tls_key_path,
             extra_engine_args,
@@ -267,6 +270,7 @@ pub fn make_engine<'p>(
         .router_config(args.router_config.clone().map(|rc| rc.into()))
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
+        .http_metrics_port(args.http_metrics_port)
         .tls_cert_path(args.tls_cert_path.clone())
         .tls_key_path(args.tls_key_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))

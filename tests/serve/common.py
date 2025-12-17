@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 import pytest
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
-from tests.serve.conftest import ServicePorts
+from tests.conftest import ServicePorts
 from tests.utils.client import send_request
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig, EngineProcess
@@ -53,8 +53,8 @@ def run_serve_deployment(
 
     if ports is not None:
         dynamic_frontend_port = int(ports.frontend_port)
-        dynamic_system_port1 = int(ports.system_port1)
-        dynamic_system_port2 = int(ports.system_port2)
+        dynamic_system_port1 = int(ports.system_ports[0])
+        dynamic_system_port2 = int(ports.system_ports[1])
         # The environments are used by the bash scripts to set the ports.
         merged_env.update(
             {

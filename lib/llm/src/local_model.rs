@@ -43,6 +43,7 @@ pub struct LocalModelBuilder {
     kv_cache_block_size: u32,
     http_host: Option<String>,
     http_port: u16,
+    http_metrics_port: Option<u16>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     migration_limit: u32,
@@ -64,6 +65,7 @@ impl Default for LocalModelBuilder {
             kv_cache_block_size: DEFAULT_KV_CACHE_BLOCK_SIZE,
             http_host: Default::default(),
             http_port: DEFAULT_HTTP_PORT,
+            http_metrics_port: None,
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
             model_path: Default::default(),
@@ -122,6 +124,11 @@ impl LocalModelBuilder {
 
     pub fn http_port(&mut self, port: u16) -> &mut Self {
         self.http_port = port;
+        self
+    }
+
+    pub fn http_metrics_port(&mut self, port: Option<u16>) -> &mut Self {
+        self.http_metrics_port = port;
         self
     }
 
@@ -259,6 +266,7 @@ impl LocalModelBuilder {
                 template,
                 http_host: self.http_host.take(),
                 http_port: self.http_port,
+                http_metrics_port: self.http_metrics_port,
                 tls_cert_path: self.tls_cert_path.take(),
                 tls_key_path: self.tls_key_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
@@ -311,6 +319,7 @@ impl LocalModelBuilder {
             template,
             http_host: self.http_host.take(),
             http_port: self.http_port,
+            http_metrics_port: self.http_metrics_port,
             tls_cert_path: self.tls_cert_path.take(),
             tls_key_path: self.tls_key_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
@@ -330,6 +339,7 @@ pub struct LocalModel {
     template: Option<RequestTemplate>,
     http_host: Option<String>,
     http_port: u16,
+    http_metrics_port: Option<u16>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     router_config: RouterConfig,
@@ -378,6 +388,10 @@ impl LocalModel {
 
     pub fn http_port(&self) -> u16 {
         self.http_port
+    }
+
+    pub fn http_metrics_port(&self) -> Option<u16> {
+        self.http_metrics_port
     }
 
     pub fn tls_cert_path(&self) -> Option<&Path> {
