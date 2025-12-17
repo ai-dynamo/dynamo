@@ -23,24 +23,10 @@ A standalone implementation of KvRouter that demonstrates usage with TensorRT-LL
 
 This example shows how to use KvRouter with TensorRT-LLM workers to intelligently route requests across multiple GPUs based on KV cache overlap and load metrics. The router maintains a view of each worker's cached blocks and routes new requests to the worker with the best combination of cache overlap and available capacity.
 
-This is a TensorRT-LLM version of the vLLM-based router standalone example. The core routing logic and RadixTree data structure remain the same, but the worker implementation uses TensorRT-LLM's LLM API instead of vLLM's AsyncLLM.
-
-## Key Differences from vLLM Version
-
-### Backend Engine
-- Uses TensorRT-LLM's `LLM` API with pytorch backend
-- Configured with `KvCacheConfig` for KV cache event emission
-- Uses `tensorrt_llm.llmapi.tokenizer.tokenizer_factory()` for tokenization
-
-### Event APIs
-- Metrics: `llm.get_stats_async()` streams engine statistics
-- KV Events: `llm.get_kv_cache_events_async()` streams cache events
-- Both are published over ZMQ to the router
-
-### Request Processing
-- Manual chat template application using tokenizer's `apply_chat_template()`
-- Streaming responses via `llm.generate_async()`
-- OpenAI-compatible response formatting (without vLLM's serving components)
+Key features:
+- **KV cache-aware routing**: Routes requests to workers with matching cached blocks
+- **Multimodal support**: Handles vision-language models (e.g., Qwen2-VL) with image inputs
+- **MM hash routing**: Identical images produce identical hashes for cache reuse
 
 ## How It Works
 
@@ -48,18 +34,25 @@ This is a TensorRT-LLM version of the vLLM-based router standalone example. The 
 
 The router uses a **RadixTree** data structure (written in Rust) to efficiently track which blocks each worker has cached. When a new request arrives, the router:
 
-1. Uses `find_matches` to calculate overlap scores (number of matching blocks) between the request and each worker's cached blocks
-2. Combines this with current load metrics to select the optimal worker
-3. Routes the request to the chosen worker for processing
+1. Tokenizes the request and computes block hashes (including MM hashes for images)
+2. Uses `find_matches` to calculate overlap scores between the request and each worker's cached blocks
+3. Combines this with current load metrics to select the optimal worker
+4. Routes the request to the chosen worker for processing
+
+### Multimodal Routing
+
+For vision-language models:
+1. Images are processed using `default_multimodal_input_loader` from TensorRT-LLM
+2. Image placeholders are expanded to visual tokens using HuggingFace `AutoProcessor`
+3. `apply_mm_hashes` computes a content hash for each image
+4. The MM hash is included in block hash computation, so identical images produce cache hits
 
 ### Event-Driven Updates
 
 The router receives two types of events from TensorRT-LLM engines:
 
-1. **KV Events**: Emitted automatically when blocks are stored/removed from cache
+1. **KV Events**: Emitted automatically when blocks are stored/removed from cache (includes `mm_keys` for multimodal)
 2. **Load Metrics**: GPU cache usage and waiting request count
-
-These events keep the router's view of worker state up-to-date in real-time.
 
 ## Components
 
@@ -67,69 +60,110 @@ These events keep the router's view of worker state up-to-date in real-time.
 - **TrtllmWorkers**: Manages multiple TensorRT-LLM worker processes
 - Each worker runs on a separate GPU with KV cache event emission enabled
 - Publishes metrics and KV events over ZMQ
-- Provides `direct()` method for sending requests to specific workers
+- Extracts `mm_hash` from TRTLLM's `mm_keys` field for multimodal routing
 
 ### `router.py`
-- **KvRouter**: Core routing logic using RadixTree (copied from vLLM version)
+- **KvRouter**: Core routing logic using RadixTree
 - Subscribes to KV cache events and load metrics from workers
 - Implements `get_best_worker()` to select optimal routing destination
-- Runs background tasks to periodically update worker states
 
 ### `api.py`
 - **ServiceAPI**: FastAPI server providing OpenAI-compatible chat completions endpoint
-- Uses TensorRT-LLM's tokenizer for chat template application and tokenization
-- Routes requests through the router to select best worker
+- Handles multimodal inputs (images) via `default_multimodal_input_loader`
+- Computes block hashes including MM hashes for routing decisions
 - Streams responses in OpenAI format
 
-### `perf.sh`
-- Benchmarking script using `aiperf` to test the router setup
-- Configured for streaming chat completions with synthetic workloads
-- Tests concurrent requests to evaluate routing performance
+### `test_router.py`
+- Comprehensive test suite for router functionality
+- Includes local hash computation tests and server-side multimodal tests
+- Run with `--mm-only` for multimodal-specific tests
 
 ## Requirements
 
+- **TensorRT-LLM >= 1.2.0rc5**: You need TensorRT-LLM version 1.2.0-rc6 or later, which includes multimodal information (`mm_keys`) in KV cache events. This is required for MM hash-based routing. See [PR #9604](https://github.com/NVIDIA/TensorRT-LLM/pull/9604) for details.
 - TensorRT-LLM with pytorch backend
 - Multiple GPUs (one per worker)
 - Python 3.10+
-- Required packages: fastapi, uvicorn, httpx, zmq, tensorrt_llm
+- Required packages: fastapi, uvicorn, httpx, zmq, tensorrt_llm, transformers
 
 ## Usage
 
-1. **Start the router API**:
-   ```bash
-   python api.py \
-     --model Qwen/Qwen2.5-0.5B-Instruct \
-     --num-workers 2 \
-     --block-size 32 \
-     --base-kv-events-port 5557 \
-     --base-metrics-port 5657 \
-     --router-port 7000 \
-     --http-port 8000
-   ```
+### 1. Start the API Server
 
-   Note: TensorRT-LLM uses block_size=32 by default, not 64 like vLLM.
+```bash
+python api.py \
+  --model Qwen/Qwen2-VL-2B-Instruct \
+  --num-workers 2 \
+  --block-size 32 \
+  --base-kv-events-port 5557 \
+  --base-metrics-port 5657 \
+  --router-port 7000 \
+  --http-port 8000
+```
 
-   The script will:
-   - Initialize TensorRT-LLM engines on each GPU
-   - Start ZMQ publishers for metrics and KV events
-   - Start the router service
-   - Start the OpenAI-compatible API server
+This will:
+- Initialize TensorRT-LLM engines on each GPU
+- Start ZMQ publishers for metrics and KV events
+- Start the router service
+- Start the OpenAI-compatible API server
 
-2. **Ping the endpoint (optional)**:
-   ```bash
-   ./ping.sh
-   ```
+### 2. Test with curl
 
-3. **Run performance benchmark**:
-   ```bash
-   ./perf.sh
-   ```
+**Text-only request:**
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen2-VL-2B-Instruct",
+    "messages": [{"role": "user", "content": "Hello, how are you?"}],
+    "max_tokens": 100,
+    "stream": false
+  }' | jq
+```
+
+**Multimodal request (with images):**
+```bash
+curl -s -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen2-VL-2B-Instruct",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe both images in detail."},
+        {"type": "image_url", "image_url": {"url": "https://huggingface.co/datasets/Sayali9141/traffic_signal_images/resolve/main/61.jpg"}},
+        {"type": "image_url", "image_url": {"url": "http://images.cocodataset.org/test2017/000000000001.jpg"}}
+      ]
+    }],
+    "max_tokens": 500,
+    "stream": false
+  }' | jq
+```
+
+### 3. Run Tests
+
+```bash
+# Run all tests
+python test_router.py
+
+# Run multimodal tests only
+python test_router.py --mm-only
+
+# Verbose output
+python test_router.py -v
+```
+
+### 4. Check endpoint health
+
+```bash
+./ping.sh
+```
 
 ## Configuration
 
 ### Command-line Arguments
 
-- `--model`: HuggingFace model name (default: Qwen/Qwen2.5-0.5B-Instruct)
+- `--model`: HuggingFace model name (default: Qwen/Qwen2-VL-2B-Instruct)
 - `--num-workers`: Number of GPU workers (default: 2)
 - `--block-size`: KV cache block size (default: 32, TensorRT-LLM's default)
 - `--base-kv-events-port`: Base port for KV events ZMQ (default: 5557)
@@ -137,27 +171,18 @@ These events keep the router's view of worker state up-to-date in real-time.
 - `--router-port`: Router HTTP service port (default: 7000)
 - `--http-port`: API server port (default: 8000)
 
+### Environment Variables
+
+- `DYNAMO_DEBUG=1`: Enable debug file dumps to `/tmp/debug_*.txt`
+- `LOGLEVEL=DEBUG`: Set logging level (DEBUG, INFO, WARNING, ERROR)
+- `TRANSFORMERS_ATTN_IMPLEMENTATION=eager`: Disable FlashAttention (set automatically)
+
 ### Port Assignment
 
 Workers use sequential ports:
 - Worker 0: KV events on 5557, metrics on 5657
 - Worker 1: KV events on 5558, metrics on 5658
 - Worker N: KV events on 5557+N, metrics on 5657+N
-
-## Example Request
-
-```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen2.5-0.5B-Instruct",
-    "messages": [
-      {"role": "user", "content": "Hello, how are you?"}
-    ],
-    "max_tokens": 100,
-    "stream": true
-  }'
-```
 
 ## Architecture Diagram
 
@@ -181,22 +206,34 @@ curl http://localhost:8000/v1/chat/completions \
          │ Select    │
          │ Worker    │
          ▼           │
-┌─────────────────┐ │
-│  TrtllmWorkers  │ │
-│   (worker.py)   │◄┘
+┌─────────────────┐  │
+│  TrtllmWorkers  │  │
+│   (worker.py)   │◄-┘
 └─────────────────┘
     │         │
     ▼         ▼
   GPU 0     GPU 1
 ```
 
-## Notes
+## Multimodal KV Cache Routing
 
-- This is a standalone toy implementation for pedagogical purposes
-- Production dynamo uses NATS for events and etcd for service discovery
-- Each worker needs its own GPU (set via CUDA_VISIBLE_DEVICES)
-- TensorRT-LLM models may take time to compile on first run
-- Block size should match the model's configuration for optimal cache reuse
+When processing multimodal requests:
+
+1. **API Layer** (`api.py`):
+   - Parses OpenAI-format messages with `image_url` content
+   - Uses `default_multimodal_input_loader` to process images
+   - Expands image placeholders to visual tokens via `AutoProcessor`
+   - Computes `mm_hash` using `apply_mm_hashes`
+   - Includes `mm_hash` in block hash computation for routing
+
+2. **Worker Layer** (`worker.py`):
+   - Receives multimodal input and passes to TRTLLM
+   - Extracts `mm_hash` from TRTLLM's `mm_keys` in KV events
+   - Publishes KV events with `mm_extra_info` to router
+
+3. **Router Layer** (`router.py`):
+   - RadixTree matches blocks including MM hash
+   - Same image content = same hash = cache hit on same worker
 
 ## Troubleshooting
 
@@ -205,39 +242,29 @@ curl http://localhost:8000/v1/chat/completions \
 - Ensure CUDA is properly installed
 - Try a smaller model if memory is limited
 
-**Issue**: KV Event "IterationResult is not properly instantiated" error
-- This is a known limitation in some TensorRT-LLM versions
-- KV events may only work after processing the first request
-- The system will continue to work in degraded mode (load balancing only, no cache overlap tracking)
-- To fix: ensure you're using TensorRT-LLM >= 1.0.0 with pytorch backend
-- Workaround: the error can be safely ignored - routing will still work based on load metrics
-
 **Issue**: Router not receiving events
 - Verify ZMQ ports are not in use
 - Check firewall settings
 - Review worker logs for event publishing errors
-- KV events may require processing at least one request first
 
-**Issue**: Chat template errors
-- Some models may not have chat templates
-- Fallback formatting will be used automatically
-- You can customize `_format_messages_simple()` for your model
+**Issue**: Multimodal requests failing
+- Ensure model supports vision (e.g., Qwen2-VL)
+- Check image URLs are accessible
+- Verify `transformers` and `qwen_vl_utils` are installed
 
-## Comparison with vLLM Version
+**Issue**: First request hangs after code changes
+- Kill the process and restart
+- This may be due to TRTLLM initialization state
 
-| Aspect | vLLM Version | TensorRT-LLM Version |
-|--------|--------------|---------------------|
-| Engine | vLLM AsyncLLM | TensorRT-LLM LLM |
-| Backend | vLLM v1 | pytorch backend |
-| Tokenizer | vLLM's wrapper | tensorrt_llm tokenizer_factory |
-| Chat Preprocessing | OpenAI serving components | Manual template application |
-| Event Format | Same | Same |
-| Router Logic | Same (RadixTree) | Same (RadixTree) |
-| Communication | ZMQ | ZMQ |
+## Notes
+
+- This is a standalone implementation for pedagogical purposes
+- Production dynamo uses NATS for events and etcd for service discovery
+- Each worker needs its own GPU
+- TensorRT-LLM models may take time to compile on first run
 
 ## See Also
 
 - [vLLM Router Standalone](../router_standalone/) - Original vLLM version
 - [TensorRT-LLM Documentation](https://github.com/NVIDIA/TensorRT-LLM)
 - [Dynamo Documentation](../../../docs/)
-

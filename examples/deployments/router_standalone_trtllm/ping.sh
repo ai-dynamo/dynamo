@@ -14,12 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-curl -X POST http://localhost:8000/v1/chat/completions \
+# Simple health check - sends a basic chat request
+# Model name should match what you started api.py with
+
+curl -s -X POST http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
-    -H "Accept: text/event-stream" \
     -d '{
-    "model": "Qwen/Qwen3-0.6B",
+    "model": "Qwen/Qwen2-VL-2B-Instruct",
     "messages": [{"role": "user", "content": "Hello!"}],
-    "stream": true,
-    "max_tokens": 100
-    }'
+    "stream": false,
+    "max_tokens": 50
+    }' | jq

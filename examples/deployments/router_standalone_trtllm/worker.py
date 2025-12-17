@@ -539,7 +539,7 @@ class TrtllmWorkers:
 
     def __init__(
         self,
-        model: str = "Qwen/Qwen2.5-0.5B-Instruct",
+        model: str = "Qwen/Qwen2-VL-2B-Instruct",
         block_size: int = 32,
         base_kv_events_port: int = 5557,
         base_metrics_port: int = 5657,
