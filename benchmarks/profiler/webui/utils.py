@@ -13,13 +13,13 @@ from pathlib import Path
 import gradio as gr
 import numpy as np
 import yaml
+
 from aiconfigurator.webapp.components.profiling import (
     create_performance_results_section,
     create_profiling_ui_components,
     inject_profiling_assets,
     load_profiling_javascript,
 )
-
 from benchmarks.profiler.utils.pareto import compute_pareto
 
 logger = logging.getLogger(__name__)
@@ -639,6 +639,8 @@ def create_gradio_interface(
             1. **GPU Hours Analysis** (recommended): Select any row in the GPU Hours table - automatically determines both prefill and decode
             2. **Individual**: Select one row in the Prefill table AND one row in the Decode table
             The selection will be processed automatically once complete.
+
+            **Chart Reference Points:** 🔴 Max Throughput Under SLA · 🟡 Max Throughput Overall · 🟢 Latency-Optimized (lowest latency under SLA)
 
             > 📝 **Note:** The dotted red line in the prefill and decode charts are default TTFT and ITL SLAs if not specified.
 
