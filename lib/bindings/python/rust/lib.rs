@@ -579,7 +579,8 @@ impl DistributedRuntime {
             //
             // If a NATS server is configured via env, enable the client regardless of request plane.
             nats_config: if request_plane.is_nats()
-                || std::env::var(dynamo_runtime::config::environment_names::nats::NATS_SERVER).is_ok()
+                || std::env::var(dynamo_runtime::config::environment_names::nats::NATS_SERVER)
+                    .is_ok()
             {
                 Some(dynamo_runtime::transports::nats::ClientOptions::default())
             } else {
