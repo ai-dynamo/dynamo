@@ -81,9 +81,10 @@ impl InnerPrefillRouter {
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
 /// from the prefill response and injecting them into the decode request.
 ///
-/// Supports two GAIE modes via query_instance_id state machine:
+/// Supports regular Dynamo and GAIE integrated mode via query_instance_id state machine:
 /// - GAIE Stage 1: query_instance_id transitions "" → "prefill" → "decode", returns only worker IDs
 /// - GAIE Stage 2: target_prefill_worker_id/target_decode_worker_id are set, full execution with specified workers
+/// - Non-GAIE: like GAIE Stage 2 but the worker ids have to be determined.
 pub struct PrefillRouter {
     prefill_router: OnceLock<InnerPrefillRouter>,
     cancel_token: CancellationToken,
@@ -212,7 +213,7 @@ impl PrefillRouter {
     ///
     /// Handles two modes based on response type:
     /// - Query-only mode (GAIE Stage 1): Response has worker_id annotation, returns WorkerIdOnly
-    /// - Execution mode (normal/GAIE Stage 2): Response has disaggregated_params, returns FullResult
+    /// - Execution mode (normal/GAIE Stage 2) and non-GAIE flow: Response has disaggregated_params, returns FullResult
     async fn call_prefill(
         &self,
         request: SingleIn<PreprocessedRequest>,
@@ -339,7 +340,7 @@ impl
         let engine_ctx = context.context();
 
         // Check for GAIE Stage 1: empty query_instance_id signals query-only mode
-        // State machine: "" → "prefill" → "decode"
+        // State machine: "" -> "prefill" -> "decode"
         let is_gaie_stage1 = req
             .get_annotation_value("query_instance_id")
             .is_some_and(|s| s.is_empty());
@@ -349,7 +350,7 @@ impl
                 request_id = %request_id,
                 "GAIE Stage 1: Starting query-only disaggregated flow"
             );
-            // Transition state: "" → "prefill"
+            // Transition state: "" -> "prefill"
             req.annotations
                 .retain(|a| !a.starts_with("query_instance_id"));
             req.annotations
@@ -391,7 +392,7 @@ impl
         // Link the prefill context as a child so that kill signals propagate
         engine_ctx.link_child(prefill_context.context());
 
-        // Attempt prefill (or query for worker ID in GAIE Stage 1)
+        // Attempt prefill
         let prefill_result = self.call_prefill(prefill_context).await;
 
         // Abort if cancelled during prefill
@@ -403,91 +404,31 @@ impl
             ));
         }
 
-        // Handle prefill result
-        match prefill_result {
-            Ok(PrefillCallResult::WorkerIdOnly(prefill_worker_id)) => {
-                // GAIE Stage 1: Got prefill worker ID, now query for decode worker
+        // Handle prefill result - extract prefill_worker_id and optional full result
+        let (prefill_worker_id_from_query, prefill_result_full) = match prefill_result {
+            Ok(PrefillCallResult::WorkerIdOnly(worker_id)) => {
                 tracing::debug!(
                     request_id = %request_id,
-                    prefill_worker_id = prefill_worker_id,
+                    prefill_worker_id = worker_id,
                     "GAIE Stage 1: Prefill worker selected, querying decode worker"
                 );
-
-                // Prepare decode query request
-                let mut decode_req = req;
-                // Restore original max_tokens (though not used in query mode)
-                decode_req.stop_conditions.max_tokens = original_max_tokens;
-
-                // Transition state: "prefill" → "decode"
-                decode_req
-                    .annotations
-                    .retain(|a| !a.starts_with("query_instance_id"));
-                decode_req
-                    .annotations
-                    .push(format!("query_instance_id:{}", QueryInstanceType::Decode));
-
-                // Add prefill_worker_id annotation for decode router to include in response
-                decode_req
-                    .annotations
-                    .push(format!("prefill_worker_id:{}", prefill_worker_id));
-
-                // Set overlap_score_weight = 0 for decode (load-based only)
-                let existing_override = decode_req.router_config_override.take();
-                decode_req.router_config_override = Some(RouterConfigOverride {
-                    overlap_score_weight: Some(0.0),
-                    ..existing_override.unwrap_or_default()
-                });
-
-                // Forward to decode router
-                let decode_request = context.map(|_| decode_req);
-                next.generate(decode_request).await
+                (Some(worker_id), None)
             }
-
-            Ok(PrefillCallResult::FullResult(prefill_result)) => {
-                // Normal/GAIE Stage 2: Full prefill completed, proceed to decode
+            Ok(PrefillCallResult::FullResult(result)) => {
                 tracing::debug!(
                     request_id = %request_id,
                     "Prefill succeeded, using disaggregated params for decode"
                 );
-
-                let mut decode_req = req;
-                // Update request with prefill result
-                decode_req.prefill_result = Some(prefill_result.clone());
-                // Restore original max_tokens for decode
-                decode_req.stop_conditions.max_tokens = original_max_tokens;
-
-                // Set router_config_override for decode: overlap_score_weight = 0
-                let existing_override = decode_req.router_config_override.take();
-                decode_req.router_config_override = Some(RouterConfigOverride {
-                    overlap_score_weight: Some(0.0),
-                    ..existing_override.unwrap_or_default()
-                });
-
-                // GAIE Stage 2: If target decode worker is specified, route directly to it
-                if let Some(decode_worker_id) = target_decode_worker {
-                    decode_req.backend_instance_id = Some(decode_worker_id);
-                    tracing::debug!(
-                        request_id = %request_id,
-                        decode_worker_id = decode_worker_id,
-                        "GAIE Stage 2: Routing decode to pre-selected worker"
-                    );
-                }
-
-                // Map the modified request through with preserved context
-                let decode_request = context.map(|_| decode_req);
-                next.generate(decode_request).await
+                (None, Some(result))
             }
-
             Err(PrefillError::NotActivated) => {
                 if is_gaie_stage1 {
-                    // GAIE Stage 1 requires prefill router to be activated
                     tracing::error!(
                         request_id = %request_id,
                         "GAIE Stage 1 failed: Prefill router not activated"
                     );
                     return Err(anyhow::anyhow!(PrefillError::NotActivated));
                 }
-
                 if self.enforce_disagg {
                     tracing::error!(
                         "Prefill router not activated, but disaggregated mode is enforced. Failing request."
@@ -495,12 +436,10 @@ impl
                     return Err(anyhow::anyhow!(PrefillError::NotActivated));
                 }
                 tracing::debug!("Prefill router not activated, falling back to decode-only");
-                next.generate(context.map(|_| req)).await
+                return next.generate(context.map(|_| req)).await;
             }
-
             Err(e) => {
                 if is_gaie_stage1 {
-                    // GAIE Stage 1 errors should propagate
                     tracing::error!(
                         request_id = %request_id,
                         error = %e,
@@ -508,7 +447,6 @@ impl
                     );
                     return Err(anyhow::anyhow!(e));
                 }
-
                 if self.enforce_disagg {
                     tracing::error!(
                         error = %e,
@@ -520,8 +458,51 @@ impl
                     error = %e,
                     "Remote prefill failed, falling back to decode-only. This may impact performance in disaggregated deployments. Verify prefill workers are healthy and accessible."
                 );
-                next.generate(context.map(|_| req)).await
+                return next.generate(context.map(|_| req)).await;
             }
+        };
+
+        // Unified decode request preparation
+        let mut decode_req = req;
+        decode_req.stop_conditions.max_tokens = original_max_tokens;
+
+        // Set router_config_override for decode: overlap_score_weight = 0
+        let existing_override = decode_req.router_config_override.take();
+        decode_req.router_config_override = Some(RouterConfigOverride {
+            overlap_score_weight: Some(0.0),
+            ..existing_override.unwrap_or_default()
+        });
+
+        // GAIE Stage 1: Transition query_instance_id state and add prefill_worker_id
+        if let Some(prefill_worker_id) = prefill_worker_id_from_query {
+            decode_req
+                .annotations
+                .retain(|a| !a.starts_with("query_instance_id"));
+            decode_req
+                .annotations
+                .push(format!("query_instance_id:{}", QueryInstanceType::Decode));
+            decode_req
+                .annotations
+                .push(format!("prefill_worker_id:{}", prefill_worker_id));
         }
+
+        // Normal/GAIE Stage 2: Set prefill_result from full execution
+        if let Some(result) = prefill_result_full {
+            decode_req.prefill_result = Some(result);
+        }
+
+        // GAIE Stage 2: Route to pre-selected decode worker if specified
+        if let Some(decode_worker_id) = target_decode_worker {
+            decode_req.backend_instance_id = Some(decode_worker_id);
+            tracing::debug!(
+                request_id = %request_id,
+                decode_worker_id = decode_worker_id,
+                "GAIE Stage 2: Routing decode to pre-selected worker"
+            );
+        }
+
+        // Forward to decode router
+        let decode_request = context.map(|_| decode_req);
+        next.generate(decode_request).await
     }
 }
