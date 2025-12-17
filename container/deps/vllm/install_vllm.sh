@@ -97,24 +97,30 @@ export CUDA_HOME=/usr/local/cuda
 
 # Derive torch backend from CUDA version (e.g., "12.9" -> "cu129")
 TORCH_BACKEND="cu$(echo $CUDA_VERSION | tr -d '.')"
+CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
 
 echo "=== Installing prerequisites ==="
 uv pip install pip cuda-python
 
 echo "\n=== Configuration Summary ==="
 echo "  VLLM_REF=$VLLM_REF | ARCH=$ARCH | CUDA_VERSION=$CUDA_VERSION | TORCH_BACKEND=$TORCH_BACKEND"
-echo "  FLASHINF_REF=$FLASHINF_REF | LMCACHE_REF=$LMCACHE_REF | DEEPGEMM_REF=$DEEPGEMM_REF"
 echo "  TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST | INSTALLATION_DIR=$INSTALLATION_DIR"
 
-echo "\n=== Installing LMCache ==="
-if [ "$ARCH" = "amd64" ]; then
-    # LMCache installation currently fails on arm64 due to CUDA dependency issues
-    # Install LMCache BEFORE vLLM so vLLM's dependencies take precedence
-    uv pip install lmcache==${LMCACHE_REF} --torch-backend=${TORCH_BACKEND}
-    echo "✓ LMCache ${LMCACHE_REF} installed"
+if ${CUDA_VERSION_MAJOR} == "12"; then
+    echo "  FLASHINF_REF=$FLASHINF_REF | LMCACHE_REF=$LMCACHE_REF | DEEPGEMM_REF=$DEEPGEMM_REF"
+    echo "\n=== Installing LMCache ==="
+    if [ "$ARCH" = "amd64" ]; then
+        # LMCache installation currently fails on arm64 due to CUDA dependency issues
+        # Install LMCache BEFORE vLLM so vLLM's dependencies take precedence
+        uv pip install lmcache==${LMCACHE_REF} --torch-backend=${TORCH_BACKEND}
+        echo "✓ LMCache ${LMCACHE_REF} installed"
+    else
+        echo "⚠ Skipping LMCache on ARM64 (compatibility issues)"
+    fi
 else
-    echo "⚠ Skipping LMCache on ARM64 (compatibility issues)"
+    echo "  FLASHINF_REF=$FLASHINF_REF | LMCache will not be installed as it doesn't support CUDA 13 yet | DEEPGEMM_REF=$DEEPGEMM_REF"
 fi
+
 
 echo "\n=== Cloning vLLM repository ==="
 # Clone needed for DeepGEMM and EP kernels install scripts
