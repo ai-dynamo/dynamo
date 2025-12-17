@@ -825,34 +825,69 @@ pub fn add_query_instance_id(
     set_kv_annotation(request, "query_instance_id".to_string(), "")
 }
 
-/// Utility function to add worker_id annotation to an OpenAI request
-/// Supports both aggregated (decode_worker_id only) and disaggregated (both IDs) modes
-pub fn add_worker_id_annotation(
+/// Set worker IDs directly on the NvExt fields for GAIE Stage 2
+///
+/// For disaggregated mode: sets `prefill_worker_id` and `decode_worker_id`
+/// For aggregated mode: sets `backend_instance_id` (when both IDs are the same)
+pub fn set_worker_ids_for_stage2(
     request: &mut NvCreateChatCompletionRequest,
     decode_worker_id: Option<i64>,
     prefill_worker_id: Option<i64>,
 ) -> &mut NvCreateChatCompletionRequest {
-    use dynamo_llm::protocols::openai::nvext::WorkerIdInfo;
+    let nvext = request.nvext.get_or_insert_with(|| {
+        NvExt::builder()
+            .build()
+            .expect("NvExt builder should not fail")
+    });
 
-    let worker_info = WorkerIdInfo {
-        decode_worker_id: decode_worker_id.map(|id| id as u64),
-        prefill_worker_id: prefill_worker_id.map(|id| id as u64),
-    };
+    // Check if this is aggregated mode (same worker for both)
+    let is_aggregated = prefill_worker_id == decode_worker_id;
 
-    if let Ok(json) = serde_json::to_string(&worker_info) {
-        set_kv_annotation(request, "worker_id".to_string(), json)
+    if is_aggregated {
+        // Aggregated: use backend_instance_id for direct routing
+        if let Some(id) = decode_worker_id {
+            nvext.backend_instance_id = Some(id as u64);
+            tracing::debug!(
+                backend_instance_id = id,
+                "GAIE Stage 2 Aggregated: Setting backend_instance_id"
+            );
+        }
     } else {
-        request
+        // Disaggregated: use separate prefill and decode worker IDs
+        if let Some(id) = prefill_worker_id {
+            nvext.prefill_worker_id = Some(id as u64);
+        }
+        if let Some(id) = decode_worker_id {
+            nvext.decode_worker_id = Some(id as u64);
+        }
+        tracing::debug!(
+            prefill_worker_id = ?prefill_worker_id,
+            decode_worker_id = ?decode_worker_id,
+            "GAIE Stage 2 Disaggregated: Setting prefill and decode worker IDs"
+        );
     }
+
+    request
 }
 
-/// Utility function to add token_data annotation to an OpenAI request
-pub fn add_token_data_annotation<'a>(
+/// Set token_data directly on the NvExt field for GAIE Stage 2
+pub fn set_token_data_for_stage2<'a>(
     request: &'a mut NvCreateChatCompletionRequest,
     tokens: &[u32],
 ) -> &'a mut NvCreateChatCompletionRequest {
-    let tokens_json = serde_json::to_string(tokens).unwrap_or_default();
-    set_kv_annotation(request, "token_data".to_string(), tokens_json)
+    let nvext = request.nvext.get_or_insert_with(|| {
+        NvExt::builder()
+            .build()
+            .expect("NvExt builder should not fail")
+    });
+
+    nvext.token_data = Some(tokens.to_vec());
+    tracing::debug!(
+        token_count = tokens.len(),
+        "GAIE Stage 2: Setting token_data"
+    );
+
+    request
 }
 
 /// Ensure `nvext` exists and return a mutable slice of annotations.
@@ -879,14 +914,16 @@ fn set_kv_annotation(
     request
 }
 
-/// Wrapper function that queries worker selection and annotates the original request
+/// Wrapper function that queries worker selection and prepares the request for GAIE Stage 2
 ///
-/// This function performs the complete flow:
-/// 1. Clones the original request and adds "query_instance_id:agg" annotation
+/// This function performs the complete GAIE Stage 1 flow:
+/// 1. Clones the original request and adds "query_instance_id:" (empty) annotation
 /// 2. Calls engine.generate() with the modified request
 /// 3. Extracts worker_id info and tokens from the response stream
-/// 4. Adds worker_id and token_data annotations to the original request
-/// 5. Returns WorkerSelectionResult and the annotated request
+/// 4. Sets the appropriate NvExt fields on the original request for Stage 2:
+///    - Disaggregated: prefill_worker_id, decode_worker_id, token_data
+///    - Aggregated: backend_instance_id, token_data
+/// 5. Returns WorkerSelectionResult and the modified request ready for Stage 2
 ///
 /// # Parameters
 /// - `engine`: The worker selection pipeline engine
@@ -894,7 +931,7 @@ fn set_kv_annotation(
 ///
 /// # Returns
 /// A tuple containing (WorkerSelectionResult, modified_original_request)
-/// where the modified_original_request has worker_id and token_data annotations added
+/// where the modified_original_request is ready for GAIE Stage 2 execution
 pub async fn query_worker_selection_and_annotate(
     engine: &ServiceEngine<
         SingleIn<NvCreateChatCompletionRequest>,
@@ -902,18 +939,20 @@ pub async fn query_worker_selection_and_annotate(
     >,
     mut original_request: NvCreateChatCompletionRequest,
 ) -> anyhow::Result<(WorkerSelectionResult, NvCreateChatCompletionRequest)> {
+    // GAIE Stage 1: Query for worker selection
     let mut query_request = original_request.clone();
     add_query_instance_id(&mut query_request);
     let single_in = SingleIn::new(query_request);
     let response_stream = engine.generate(single_in).await?;
     let result = extract_worker_selection_from_stream(response_stream).await?;
 
-    add_worker_id_annotation(
+    // Prepare request for GAIE Stage 2: Set NvExt fields directly
+    set_worker_ids_for_stage2(
         &mut original_request,
         result.decode_worker_id,
         result.prefill_worker_id,
     );
-    add_token_data_annotation(&mut original_request, &result.tokens);
+    set_token_data_for_stage2(&mut original_request, &result.tokens);
 
     Ok((result, original_request))
 }
