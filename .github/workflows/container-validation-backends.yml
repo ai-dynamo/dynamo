@@ -346,70 +346,70 @@ jobs:
       #     test_type: "pre_merge"
       #     platform_arch: ${{ matrix.platform.arch }}
 
-  # trtllm:
-  #   name: trtllm builder multi-arch
-  #   runs-on: builder-cpu-amd-runner
-  #   needs: [create-buildkit-builders]
-  #   steps:
-  #     - name: Output Node Name
-  #       shell: bash
-  #       run: |
-  #         echo ${K8S_NODE_NAME}
-  #     - name: Checkout code
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-  #     - name: Define buildkit builders
-  #       uses: ./.github/actions/define-buildkit-builders
-  #       with:
-  #         builder_name: ${{ env.BUILDER_NAME }}
-  #         replicas: '1'
-  #         linux_amd64: 'false'
-  #         linux_arm64: 'true'
-  #         linux_amd64_gpu: 'true'
-  #     - name: Docker Login
-  #       uses: ./.github/actions/docker-login
-  #       with:
-  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-  #     - name: Build Container
-  #       id: build-image
-  #       uses: ./.github/actions/docker-build
-  #       with:
-  #         framework: trtllm
-  #         target: runtime
-  #         multi_arch_build: 'true'
-  #         multi_arch_push: 'false'
-  #         push: 'false'
-  #         ci_token: ${{ secrets.CI_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  #         use_ci_registry: 'true'
-  #     # - name: Docker Tag and Push
-  #     #   uses: ./.github/actions/docker-tag-push
-  #     #   with:
-  #     #     local_image: ${{ steps.build-image.outputs.image_tag }}
-  #     #     push_tags: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
-  #     #     conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-trtllm-{0}', matrix.platform.arch) || '' }}
-  #     #     aws_push: 'true'
-  #     #     azure_push: 'true'
-  #     #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #     #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #     #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #     # - name: Run tests
-  #     #   if: ${{ matrix.platform.arch != 'arm64' }}
-  #     #   uses: ./.github/actions/pytest
-  #     #   with:
-  #     #     image_tag: ${{ steps.build-image.outputs.image_tag }}
-  #     #     pytest_marks: "pre_merge and trtllm and (gpu_0 or gpu_1)"
-  #     #     framework: "trtllm"
-  #     #     test_type: "pre_merge"
-  #     #     platform_arch: ${{ matrix.platform.arch }}
+  trtllm:
+    name: trtllm builder multi-arch
+    runs-on: builder-cpu-amd-runner
+    needs: [create-buildkit-builders]
+    steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Define buildkit builders
+        uses: ./.github/actions/define-buildkit-builders
+        with:
+          builder_name: ${{ env.BUILDER_NAME }}
+          replicas: '1'
+          linux_amd64: 'false'
+          linux_arm64: 'true'
+          linux_amd64_gpu: 'true'
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build Container
+        id: build-image
+        uses: ./.github/actions/docker-build
+        with:
+          framework: trtllm
+          target: runtime
+          multi_arch_build: 'true'
+          multi_arch_push: 'false'
+          push: 'false'
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          use_ci_registry: 'true'
+      # - name: Docker Tag and Push
+      #   uses: ./.github/actions/docker-tag-push
+      #   with:
+      #     local_image: ${{ steps.build-image.outputs.image_tag }}
+      #     push_tags: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
+      #     conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-trtllm-{0}', matrix.platform.arch) || '' }}
+      #     aws_push: 'true'
+      #     azure_push: 'true'
+      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      # - name: Run tests
+      #   if: ${{ matrix.platform.arch != 'arm64' }}
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ steps.build-image.outputs.image_tag }}
+      #     pytest_marks: "pre_merge and trtllm and (gpu_0 or gpu_1)"
+      #     framework: "trtllm"
+      #     test_type: "pre_merge"
+      #     platform_arch: ${{ matrix.platform.arch }}
 
   # deploy-test-fault-tolerance:
   #   runs-on: cpu-amd-m5-2xlarge
