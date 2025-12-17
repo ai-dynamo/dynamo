@@ -5,9 +5,6 @@ mod crd;
 mod daemon;
 mod utils;
 
-// #[cfg(all(test, feature = "integration"))]
-mod crd_tests;
-
 pub use crd::{DynamoWorkerMetadata, DynamoWorkerMetadataSpec};
 pub use utils::hash_pod_name;
 
