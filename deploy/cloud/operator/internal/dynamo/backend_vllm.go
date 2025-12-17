@@ -25,7 +25,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 
 	if isMultinode {
 		// Apply multinode-specific argument modifications
-		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, component.Resources)
+		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, component.Resources, numberOfNodes)
 
 		// Remove probes for multinode worker and leader
 		if role == RoleWorker {
@@ -71,10 +71,10 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 
 // updateVLLMMultinodeArgs will inject Ray-specific flags for tensor parallel multinode deployments
 // OR data parallel flags for data parallel multinode deployments
-func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources) {
+func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources, numberOfNodes int32) {
 	expandedArgs := getExpandedArgs(container)
 	if needsRayDistributedLaunch(expandedArgs, resources) {
-		injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer)
+		injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer, numberOfNodes)
 	} else if needsDataParallelLaunch(expandedArgs, resources) {
 		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, resources)
 	} else {
@@ -93,15 +93,19 @@ func getExpandedArgs(container *corev1.Container) []string {
 	return expandedArgs
 }
 
-func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
+func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, numberOfNodes int32) {
 	switch role {
 	case RoleLeader:
 		fullCommand := strings.Join(container.Command, " ")
 		originalArgs := strings.Join(container.Args, " ")
-		// Prepend ray start --head command to existing args
-		container.Args = []string{fmt.Sprintf("ray start --head --port=%s && %s %s", VLLMPort, fullCommand, originalArgs)}
+		// Use Ray executor for multi-node vLLM deployments.
+		// vLLM will create a placement group spanning all Ray nodes and spawn workers automatically.
+		// DO NOT pass --nnodes or --node-rank - these are only for mp backend.
+		// The Ray executor handles multi-node distribution via placement groups.
+		vllmMultinodeFlags := "--distributed-executor-backend ray"
+		container.Args = []string{fmt.Sprintf("ray start --head --port=%s && %s %s %s", VLLMPort, fullCommand, originalArgs, vllmMultinodeFlags)}
 	case RoleWorker:
-		// Worker nodes only run Ray, completely replace args
+		// Worker nodes only run Ray agent - vLLM on leader will spawn Ray actors on workers
 		leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 		container.Args = []string{fmt.Sprintf("ray start --address=%s:%s --block", leaderHostname, VLLMPort)}
 	}
