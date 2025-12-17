@@ -395,13 +395,65 @@ impl
         }
 
         // Handle prefill result
-        let prefill_result = match prefill_result {
-            Ok(result) => {
+        match prefill_result {
+            Ok(prefill_result) => {
                 tracing::debug!(
                     request_id = %request_id,
-                    "Prefill succeeded, proceeding to decode"
+                    "Prefill succeeded, using disaggregated params for decode"
                 );
-                result
+
+                let mut decode_req = req;
+                // Restore original max_tokens for decode
+                decode_req.stop_conditions.max_tokens = original_max_tokens;
+                // Set router_config_override for decode: overlap_score_weight = 0
+                let existing_override = decode_req.router_config_override.take();
+                decode_req.router_config_override = Some(RouterConfigOverride {
+                    overlap_score_weight: Some(0.0),
+                    ..existing_override.unwrap_or_default()
+                });
+
+                // GAIE Stage 1: Extract prefill_worker_id and transition query_instance_id state
+                if is_gaie_stage1 {
+                    let prefill_worker_id = prefill_result
+                        .disaggregated_params
+                        .get("worker_id")
+                        .and_then(|v| serde_json::from_value::<WorkerIdInfo>(v.clone()).ok())
+                        .and_then(|info| info.prefill_worker_id);
+
+                    if let Some(worker_id) = prefill_worker_id {
+                        tracing::debug!(
+                            request_id = %request_id,
+                            prefill_worker_id = worker_id,
+                            "GAIE Stage 1: Prefill worker selected, querying decode worker"
+                        );
+                        decode_req
+                            .annotations
+                            .retain(|a| !a.starts_with("query_instance_id"));
+                        decode_req
+                            .annotations
+                            .push(format!("query_instance_id:{}", QueryInstanceType::Decode));
+                        decode_req
+                            .annotations
+                            .push(format!("prefill_worker_id:{}", worker_id));
+                    }
+                } else {
+                    // Normal/GAIE Stage 2: Set prefill_result for decode
+                    decode_req.prefill_result = Some(prefill_result);
+                }
+
+                // GAIE Stage 2: Route to pre-selected decode worker if specified
+                if let Some(decode_worker_id) = target_decode_worker {
+                    decode_req.backend_instance_id = Some(decode_worker_id);
+                    tracing::debug!(
+                        request_id = %request_id,
+                        decode_worker_id = decode_worker_id,
+                        "GAIE Stage 2: Routing decode to pre-selected worker"
+                    );
+                }
+
+                // Map the modified request through with preserved context
+                let decode_request = context.map(|_| decode_req);
+                next.generate(decode_request).await
             }
             Err(e) => {
                 // Prefill was active but failed during execution
@@ -416,63 +468,8 @@ impl
                     error = %e,
                     "Remote prefill failed, falling back to decode-only. This may impact performance in disaggregated deployments. Verify prefill workers are healthy and accessible."
                 );
-                return next.generate(context.map(|_| req)).await;
+                next.generate(context.map(|_| req)).await
             }
-        };
-
-        // Unified decode request preparation
-        let mut decode_req = req;
-        decode_req.stop_conditions.max_tokens = original_max_tokens;
-
-        // Set router_config_override for decode: overlap_score_weight = 0
-        let existing_override = decode_req.router_config_override.take();
-        decode_req.router_config_override = Some(RouterConfigOverride {
-            overlap_score_weight: Some(0.0),
-            ..existing_override.unwrap_or_default()
-        });
-
-        // GAIE Stage 1: Extract prefill_worker_id and transition query_instance_id state
-        if is_gaie_stage1 {
-            // Extract prefill_worker_id from disaggregated_params
-            let prefill_worker_id = prefill_result
-                .disaggregated_params
-                .get("worker_id")
-                .and_then(|v| serde_json::from_value::<WorkerIdInfo>(v.clone()).ok())
-                .and_then(|info| info.prefill_worker_id);
-
-            if let Some(worker_id) = prefill_worker_id {
-                tracing::debug!(
-                    request_id = %request_id,
-                    prefill_worker_id = worker_id,
-                    "GAIE Stage 1: Prefill worker selected, querying decode worker"
-                );
-                decode_req
-                    .annotations
-                    .retain(|a| !a.starts_with("query_instance_id"));
-                decode_req
-                    .annotations
-                    .push(format!("query_instance_id:{}", QueryInstanceType::Decode));
-                decode_req
-                    .annotations
-                    .push(format!("prefill_worker_id:{}", worker_id));
-            }
-        } else {
-            // Normal/GAIE Stage 2: Set prefill_result for decode
-            decode_req.prefill_result = Some(prefill_result);
         }
-
-        // GAIE Stage 2: Route to pre-selected decode worker if specified
-        if let Some(decode_worker_id) = target_decode_worker {
-            decode_req.backend_instance_id = Some(decode_worker_id);
-            tracing::debug!(
-                request_id = %request_id,
-                decode_worker_id = decode_worker_id,
-                "GAIE Stage 2: Routing decode to pre-selected worker"
-            );
-        }
-
-        // Forward to decode router
-        let decode_request = context.map(|_| decode_req);
-        next.generate(decode_request).await
     }
 }
