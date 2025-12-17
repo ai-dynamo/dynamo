@@ -7,20 +7,37 @@ MULTI_ROUND="${MULTI_ROUND:-8}"
 MOUNT_DIR="${MOUNT_DIR:-${PWD}}"
 CONTAINER_NAME=disaggr-test-$(date +%s)-$$
 
-STREAMING=true
-CTX_GPU_FRAC=0.85
-
 config=$1
-model_path=$2
-isl=$3
-osl=$4
-concurrency_list=$5
+concurrency_list=$2
 
-SERVED_MODEL_NAME=model
+SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"model"}
 NTASKS_PER_NODE=${NTASKS_PER_NODE:-4}
+BENCHMARK_KIND=${BENCHMARK_KIND:-"sa"}
+
+if [[ "${BENCHMARK_KIND}" != "sa" && "${BENCHMARK_KIND}" != "aiperf" ]]; then
+    echo "ERROR: BENCHMARK_KIND must be either 'sa' or 'aiperf'. Got '${BENCHMARK_KIND}'."
+    exit 1
+fi
+
+
+if [[ -z "${MODEL_PATH}" ]]; then
+    echo "ERROR: MODEL_PATH environment variable must be set."
+    exit 1
+fi
+
+if [[ -z "${ISL}" ]]; then
+    echo "ERROR: ISL environment variable must be set."
+    exit 1
+fi
+
+if [[ -z "${OSL}" ]]; then
+    echo "ERROR: OSL environment variable must be set."
+    exit 1
+fi
+
 
 WORK_DIR=${MOUNT_DIR}
-LOG_DIR=$WORK_DIR/${kind}-bm-${isl}-${osl}
+LOG_DIR=$WORK_DIR/dynamo-disagg-bm-${ISL}-${OSL}
 SCRIPTS_DIR=${WORK_DIR}/
 mkdir -p ${LOG_DIR}
 echo "trying to submit job"
@@ -99,19 +116,20 @@ if [ -z "$DECODE_COUNT" ]; then
 fi
 echo "Decode Count: $DECODE_COUNT"
 
-gen_tp_size=$(grep 'decode_tp_size:' "${full_logdir}/instance_config.yaml" | awk '{print $2}')
-if [ -z "$gen_tp_size" ]; then
+decode_tp_size=$(grep 'decode_tp_size:' "${full_logdir}/instance_config.yaml" | awk '{print $2}')
+if [ -z "$decode_tp_size" ]; then
     echo "Error: Failed to extract decode_tp_size from instance_config.yaml"
     exit 1
 fi
-echo "Decode TP Size: $gen_tp_size"
+echo "Decode TP Size: $decode_tp_size"
 
-num_gen_nodes=$((gen_tp_size/NTASKS_PER_NODE))
+num_decode_nodes=$((decode_tp_size/NTASKS_PER_NODE))
+decode_nodes=$((num_decode_nodes * DECODE_COUNT))
 for ((i=1; i<=DECODE_COUNT; i++)); do
   echo "Running Decode Worker: ${i}"
   decode_node_list=()
-  for ((j=0; j<num_gen_nodes; j++)); do
-    node_idx=$(((i-1)*num_gen_nodes + j))
+  for ((j=0; j<num_decode_nodes; j++)); do
+    node_idx=$(((i-1)*num_decode_nodes + j))
     decode_node_list+=("${nodes[node_idx]}")
   done
   decode_nodes_csv=$(IFS=, ; echo "${decode_node_list[*]}")
@@ -120,12 +138,12 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
       --container-mounts=${container_mounts} \
       --mpi=pmix \
       -w ${decode_nodes_csv} \
-      --nodes ${num_gen_nodes} $gpus_per_node \
-      --ntasks $gen_tp_size \
+      --nodes ${num_decode_nodes} $gpus_per_node \
+      --ntasks $decode_tp_size \
       --oversubscribe \
       --overlap \
       -e UCX_NET_DEVICES,TRTLLM_UCX_INTERFACE \
-      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${config} "decode" &> ${full_logdir}/output_decode_worker_${i}.log &
+      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${config} ${MODEL_PATH} ${SERVED_MODEL_NAME} "decode" &> ${full_logdir}/output_decode_worker_${i}.log &
   echo "$!" >> "$PID_FILE"
 done
 
@@ -136,9 +154,16 @@ if [ -z "$PREFILL_COUNT" ]; then
 fi
 echo "Prefill Count: $PREFILL_COUNT"
 
+prefill_tp_size=$(grep 'prefill_tp_size:' "${full_logdir}/instance_config.yaml" | awk '{print $2}')
+if [ -z "$prefill_tp_size" ]; then
+    echo "Error: Failed to extract prefill_tp_size from instance_config.yaml"
+    exit 1
+fi
+echo "Prefill TP Size: $prefill_tp_size"
+
 # start the prefill workers
 prefill_pids=()
-prefill_start_idx=$gen_nodes
+prefill_start_idx=$decode_nodes
 for ((i=1; i<=PREFILL_COUNT; i++)); do
   echo "Running Prefill Worker: ${i}"
   node_idx=$((prefill_start_idx + (i-1)))
@@ -148,14 +173,16 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
         --mpi=pmix --overlap -w ${nodes[node_idx]} \
         --oversubscribe \
         --overlap \
-        --ntasks $(( ctx_tp_size < ntasks_per_node ? ctx_tp_size : ntasks_per_node )) \
+        --ntasks $(( prefill_tp_size < ntasks_per_node ? prefill_tp_size : ntasks_per_node )) \
         --nodes 1 $gpus_per_node \
         -e UCX_NET_DEVICES,TRTLLM_UCX_INTERFACE \
-        bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/prefill_config.yaml ${ctx_gpus} ${served_model_name} ${model_path} 'prefill' $ctx_enable_attention_dp &> ${full_logdir}/output_prefill_worker_${i}.log &
+        bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${config} ${MODEL_PATH} ${SERVED_MODEL_NAME} 'prefill' &> ${full_logdir}/output_prefill_worker_${i}.log &
   prefill_pids+=($!)
   echo "$!" >> "$PID_FILE"
 done
 
+ctx_gpus=$((prefill_tp_size*PREFILL_COUNT))
+decode_gpus=$((decode_tp_size*DECODE_COUNT))
 
 # start the loadgen
 srun -l --container-name=${CONTAINER_NAME} \
@@ -163,7 +190,7 @@ srun -l --container-name=${CONTAINER_NAME} \
         --container-env HEAD_NODE_IP,HEAD_NODE,SCRIPTS_DIR \
         --mpi=pmix --overlap -N 1 -n 1 \
 	    -w ${nodes[0]} \
-        bash ${SCRIPTS_DIR}/scripts/bench.sh ${served_model_name} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${ctx_gpus} ${gen_gpus} ${model_path} ${isl} ${osl} ${kind} ${benchmark_kind} > ${full_logdir}/bench.log 2>&1
+        bash ${SCRIPTS_DIR}/scripts/bench.sh ${SERVED_MODEL_NAME} ${MULTI_ROUND} ${DECODE_COUNT} "${concurrency_list}" true ${full_logdir} ${ctx_gpus} ${decode_gpus} ${MODEL_PATH} ${ISL} ${OSL} "dynamo-disagg ${BENCHMARK_KIND} > ${full_logdir}/bench.log 2>&1
 
 
 # Cleanup will be handled by the EXIT trap
