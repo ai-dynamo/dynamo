@@ -36,6 +36,12 @@ use crate::kv_router::{
 };
 use dynamo_runtime::config::environment_names::nats as env_nats;
 
+// Error handling configuration for ZMQ operations
+const INITIAL_BACKOFF_MS: u64 = 10;
+const MAX_BACKOFF_MS: u64 = 5000;
+const MAX_CONSECUTIVE_ERRORS: u32 = 10;
+const MAX_BACKOFF_EXPONENT: u32 = 8; // Cap at 2^8 = 256x multiplier to prevent overflow
+
 // -------------------------------------------------------------------------
 // KV Event Publishers -----------------------------------------------------
 // -------------------------------------------------------------------------
@@ -125,15 +131,14 @@ impl KvEventPublisher {
         // Infer worker_id from component's connection
         let worker_id = component.drt().connection_id();
 
+        let component_name = component.name();
         tracing::info!(
-            worker_id,
-            component = component.name(),
-            "Initializing KvEventPublisher for worker {worker_id} in component {component}"
+            "Initializing KvEventPublisher for worker {worker_id} in component {component_name}"
         );
 
         if enable_local_indexer {
             tracing::info!(
-                "LocalKvIndexer enabled for worker {worker_id} in component {component}"
+                "LocalKvIndexer enabled for worker {worker_id} in component {component_name}"
             );
         }
 
@@ -321,23 +326,25 @@ async fn start_worker_kv_query_service(
     let mut subscriber = match component.subscribe(&subject).await {
         Ok(sub) => sub,
         Err(e) => {
-            tracing::error!(worker_id, %subject, %e, "Query service failed to subscribe");
+            tracing::error!(
+                "Query service failed to subscribe for worker {worker_id} on subject {subject}: {e}"
+            );
             return;
         }
     };
-    tracing::info!(worker_id, %subject, "Query service listening on NATS");
+    tracing::info!("Query service listening on NATS for worker {worker_id} on subject {subject}");
 
     // Receive query request from router, retrieve event(s) from LocalKvIndexer, return response
     loop {
         tokio::select! {
             _ = cancellation_token.cancelled() => {
-                tracing::info!(worker_id, "Query service received cancellation signal");
+                tracing::info!("Query service received cancellation signal for worker {worker_id}");
                 break;
             }
 
             msg = subscriber.next() => {
                 let Some(msg) = msg else {
-                    tracing::warn!(worker_id, "Query service NATS stream ended");
+                    tracing::warn!("Query service NATS stream ended for worker {worker_id}");
                     break;
                 };
 
@@ -345,12 +352,12 @@ async fn start_worker_kv_query_service(
                 let request: WorkerKvQueryRequest = match serde_json::from_slice(&msg.payload) {
                     Ok(request) => request,
                     Err(e) => {
-                        tracing::error!(worker_id, %e, "Failed to deserialize WorkerKvQueryRequest");
+                        tracing::error!("Failed to deserialize WorkerKvQueryRequest for worker {worker_id}: {e}");
                         continue;
                     }
                 };
 
-                tracing::debug!(worker_id, ?request, "Received query request");
+                tracing::debug!("Received query request for worker {worker_id}: {request:?}");
 
                 // Query events based on optional start/end ids
                 let response = local_indexer
@@ -362,7 +369,7 @@ async fn start_worker_kv_query_service(
                     let payload = match serde_json::to_vec(&response) {
                         Ok(p) => p,
                         Err(e) => {
-                            tracing::error!(worker_id, %e, "Failed to serialize response");
+                            tracing::error!("Failed to serialize response for worker {worker_id}: {e}");
                             continue;
                         }
                     };
@@ -373,19 +380,13 @@ async fn start_worker_kv_query_service(
                         .kv_router_nats_publish(reply_subject.to_string(), payload.into())
                         .await
                     {
-                        tracing::error!(worker_id, %e, "Failed to send reply");
+                        tracing::error!("Failed to send reply for worker {worker_id}: {e}");
                     }
                 }
             }
         }
     }
 }
-
-// Error handling configuration for ZMQ operations
-const INITIAL_BACKOFF_MS: u64 = 10;
-const MAX_BACKOFF_MS: u64 = 5000;
-const MAX_CONSECUTIVE_ERRORS: u32 = 10;
-const MAX_BACKOFF_EXPONENT: u32 = 8; // Cap at 2^8 = 256x multiplier to prevent overflow
 
 /// Calculate exponential backoff duration based on consecutive error count
 fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
@@ -475,7 +476,7 @@ pub async fn start_zmq_listener(
                 let mut frames: Vec<Vec<u8>> = msg.into_vec().into_iter().map(|frame| frame.to_vec()).collect();
 
                 if frames.len() != 3 {
-                    tracing::warn!(expected=3, actual=%frames.len(), "Received unexpected ZMQ frame count");
+                    tracing::warn!("Received unexpected ZMQ frame count: expected 3, actual {}", frames.len());
                     continue;
                 }
 
@@ -484,7 +485,7 @@ pub async fn start_zmq_listener(
                 let seq_bytes = frames.pop().unwrap();
 
                 if seq_bytes.len() != 8 {
-                    tracing::warn!(expected=8, actual=%seq_bytes.len(), "Invalid sequence number byte length");
+                    tracing::warn!("Invalid sequence number byte length: expected 8, actual {}", seq_bytes.len());
                     continue;
                 }
 
@@ -494,7 +495,7 @@ pub async fn start_zmq_listener(
                 let batch_result = rmps::from_slice::<KvEventBatch>(&payload);
                 let Ok(batch) = batch_result else {
                     let e = batch_result.unwrap_err();
-                    tracing::warn!(error=%e, "Failed to decode KVEventBatch msgpack");
+                    tracing::warn!("Failed to decode KVEventBatch msgpack: {e}");
                     continue;
                 };
 
@@ -2023,8 +2024,6 @@ mod test_integration_publisher {
     #[tokio::test]
     #[ignore] // Mark as ignored as requested, because CI's integrations still don't have NATS
     async fn test_kvstats_prometheus_gauge_updates() {
-        use crate::kv_router::publisher::kvstats;
-
         // Test that publish() updates Prometheus gauges correctly using real Component
         let publisher = WorkerMetricsPublisher::new().unwrap();
 
