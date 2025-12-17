@@ -273,6 +273,12 @@ def parse_args():
         default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
+    parser.add_argument(
+        "--exp-python-factory",
+        action="store_true",
+        default=False,
+        help="[EXPERIMENTAL] Enable Python-based engine factory. When set, engines will be created via a Python callback instead of the default Rust pipeline.",
+    )
 
     flags = parser.parse_args()
 
@@ -375,9 +381,8 @@ async def async_main():
             "custom_backend_metrics_polling_interval"
         ] = flags.custom_backend_metrics_polling_interval
 
-    # Soon we will be able to customise the engine from Python
-    # Pass the engine factory callback to Rust
-    # kwargs["engine_factory"] = engine_factory
+    if flags.exp_python_factory:
+        kwargs["engine_factory"] = engine_factory
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

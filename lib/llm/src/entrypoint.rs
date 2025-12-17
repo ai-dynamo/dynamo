@@ -17,13 +17,16 @@ use dynamo_runtime::pipeline::RouterMode;
 use crate::{
     backend::ExecutionContext, engines::StreamingEngine, kv_router::KvRouterConfig,
     local_model::LocalModel, model_card::ModelDeploymentCard,
+    types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
 
 /// Callback type for engine factory (async)
-/// TODO: This will need to return an engine type
 pub type EngineFactoryCallback = Arc<
-    dyn Fn(ModelDeploymentCard) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>
-        + Send
+    dyn Fn(
+            ModelDeploymentCard,
+        ) -> Pin<
+            Box<dyn Future<Output = anyhow::Result<OpenAIChatCompletionsStreamingEngine>> + Send>,
+        > + Send
         + Sync,
 >;
 

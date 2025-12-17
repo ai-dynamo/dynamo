@@ -434,24 +434,27 @@ impl ModelWatcher {
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
                 // Work in progress. This will allow creating  a chat_engine from Python.
-                if let Some(ref factory) = self.engine_factory {
-                    factory(card.clone()).await?;
-                }
-                let chat_engine = entrypoint::build_routed_pipeline::<
-                    NvCreateChatCompletionRequest,
-                    NvCreateChatCompletionStreamResponse,
-                >(
-                    card,
-                    &client,
-                    self.router_config.router_mode,
-                    worker_monitor.clone(),
-                    kv_chooser.clone(),
-                    tokenizer_hf.clone(),
-                    prefill_chooser.clone(),
-                    self.router_config.enforce_disagg,
-                )
-                .await
-                .context("build_routed_pipeline")?;
+                let chat_engine = if let Some(ref factory) = self.engine_factory {
+                    factory(card.clone())
+                        .await
+                        .context("python engine_factory")?
+                } else {
+                    entrypoint::build_routed_pipeline::<
+                        NvCreateChatCompletionRequest,
+                        NvCreateChatCompletionStreamResponse,
+                    >(
+                        card,
+                        &client,
+                        self.router_config.router_mode,
+                        worker_monitor.clone(),
+                        kv_chooser.clone(),
+                        tokenizer_hf.clone(),
+                        prefill_chooser.clone(),
+                        self.router_config.enforce_disagg,
+                    )
+                    .await
+                    .context("build_routed_pipeline")?
+                };
                 self.manager
                     .add_chat_completions_model(card.name(), checksum, chat_engine)
                     .context("add_chat_completions_model")?;
