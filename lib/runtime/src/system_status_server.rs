@@ -688,17 +688,32 @@ async fn engine_route_handler(
 
 /// HTTP service discovery config handler
 /// Returns Prometheus HTTP service discovery format
+/// Frontends use Frontend discovery type (host + port only)
+/// Other instances use Endpoint discovery type (includes host, port, gpu_uuids)
 #[tracing::instrument(skip_all, level = "trace")]
 async fn http_sd_config_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     let discovery = state.drt().discovery();
 
-    let metrics_endpoints = match discovery
-        .list(crate::discovery::DiscoveryQuery::AllMetricsEndpoints)
+    // Query frontends
+    let frontend_endpoints = match discovery
+        .list(crate::discovery::DiscoveryQuery::AllFrontends)
         .await
     {
         Ok(endpoints) => endpoints,
         Err(e) => {
-            tracing::error!("Failed to list metrics endpoints: {}", e);
+            tracing::warn!("Failed to list frontends: {}", e);
+            Vec::new()
+        }
+    };
+
+    // Query all endpoints (which include host, port, gpu_uuids)
+    let all_endpoints = match discovery
+        .list(crate::discovery::DiscoveryQuery::AllEndpoints)
+        .await
+    {
+        Ok(endpoints) => endpoints,
+        Err(e) => {
+            tracing::error!("Failed to list endpoints: {}", e);
             let mut headers = HeaderMap::new();
             headers.insert(
                 axum::http::header::CONTENT_TYPE,
@@ -708,7 +723,7 @@ async fn http_sd_config_handler(state: Arc<SystemStatusState>) -> impl IntoRespo
                 StatusCode::INTERNAL_SERVER_ERROR,
                 headers,
                 Json(json!({
-                    "error": "Failed to list metrics endpoints",
+                    "error": "Failed to list endpoints",
                     "message": e.to_string(),
                 })),
             )
@@ -716,35 +731,60 @@ async fn http_sd_config_handler(state: Arc<SystemStatusState>) -> impl IntoRespo
         }
     };
 
-    // Convert to Prometheus http_sd format
-    let targets: Vec<HttpSdTarget> = metrics_endpoints
+    // Convert frontends to Prometheus http_sd format (never include GPU UUIDs)
+    let frontend_targets: Vec<HttpSdTarget> = frontend_endpoints
         .into_iter()
         .filter_map(|instance| {
-            if let crate::discovery::DiscoveryInstance::MetricsEndpoint {
-                namespace,
+            if let crate::discovery::DiscoveryInstance::Frontend {
                 instance_id,
                 host,
                 port,
-                gpu_uuids,
             } = instance
             {
-                // Use host and port directly for targets
                 let target = format!("{}:{}", host, port);
 
-                // Build labels
                 let mut labels = serde_json::Map::new();
-                labels.insert("namespace".to_string(), json!(namespace));
+                labels.insert("namespace".to_string(), json!("frontend"));
                 labels.insert(
                     "instance_id".to_string(),
                     json!(format!("{:x}", instance_id)),
                 );
-                // Construct URL for __meta_url label (assume http scheme)
                 let url = format!("http://{}:{}/metrics", host, port);
                 labels.insert("__meta_url".to_string(), json!(url));
-                if !gpu_uuids.is_empty() {
-                    labels.insert("gpu_uuids".to_string(), json!(gpu_uuids.join(",")));
+                // Frontends never include GPU UUIDs
+
+                Some(HttpSdTarget {
+                    targets: vec![target],
+                    labels,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Convert endpoints to Prometheus http_sd format (include GPU UUIDs if available)
+    let endpoint_targets: Vec<HttpSdTarget> = all_endpoints
+        .into_iter()
+        .filter_map(|instance| {
+            if let crate::discovery::DiscoveryInstance::Endpoint(inst) = instance {
+                let target = format!("{}:{}", inst.host, inst.port);
+
+                let mut labels = serde_json::Map::new();
+                labels.insert("namespace".to_string(), json!(inst.namespace));
+                labels.insert("component".to_string(), json!(inst.component));
+                labels.insert("endpoint".to_string(), json!(inst.endpoint));
+                labels.insert(
+                    "instance_id".to_string(),
+                    json!(format!("{:x}", inst.instance_id)),
+                );
+                let url = format!("http://{}:{}/metrics", inst.host, inst.port);
+                labels.insert("__meta_url".to_string(), json!(url));
+                // Endpoints include GPU UUIDs if they have them
+                if !inst.gpu_uuids.is_empty() {
+                    labels.insert("gpu_uuids".to_string(), json!(inst.gpu_uuids.join(",")));
                     // Add individual GPU labels (gpu0, gpu1, etc.)
-                    for (index, uuid) in gpu_uuids.iter().enumerate() {
+                    for (index, uuid) in inst.gpu_uuids.iter().enumerate() {
                         labels.insert(format!("gpu{}", index), json!(uuid));
                     }
                 }
@@ -759,9 +799,17 @@ async fn http_sd_config_handler(state: Arc<SystemStatusState>) -> impl IntoRespo
         })
         .collect();
 
+    // Combine frontends and endpoints
+    let frontend_count = frontend_targets.len();
+    let endpoint_count = endpoint_targets.len();
+    let mut targets = frontend_targets;
+    targets.extend(endpoint_targets);
+
     tracing::trace!(
-        "Returning {} metrics endpoints in http_sd format",
-        targets.len()
+        "Returning {} metrics endpoints in http_sd format ({} frontends, {} endpoints)",
+        targets.len(),
+        frontend_count,
+        endpoint_count
     );
 
     // Set Content-Type header as required by Prometheus http_sd spec
@@ -1395,6 +1443,9 @@ mod integration_tests {
                             namespace: "test_namespace".to_string(),
                             instance_id: 1,
                             transport: crate::component::TransportType::Nats(endpoint.to_string()),
+                            host: "localhost".to_string(),
+                            port: 8080,
+                            gpu_uuids: Vec::new(),
                         },
                         health_check_payload.clone(),
                     );

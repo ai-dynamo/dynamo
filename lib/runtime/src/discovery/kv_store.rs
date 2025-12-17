@@ -16,7 +16,7 @@ use crate::storage::kv;
 
 const INSTANCES_BUCKET: &str = "v1/instances";
 const MODELS_BUCKET: &str = "v1/mdc";
-const METRICS_ENDPOINTS_BUCKET: &str = "v1/metrics-endpoints";
+const FRONTENDS_BUCKET: &str = "v1/frontends";
 
 /// Discovery implementation backed by a kv::Store
 pub struct KVStoreDiscovery {
@@ -42,9 +42,9 @@ impl KVStoreDiscovery {
         format!("{}/{}/{}/{:x}", namespace, component, endpoint, instance_id)
     }
 
-    /// Build the key path for a metrics endpoint (relative to bucket, not absolute)
-    fn metrics_endpoint_key(namespace: &str, instance_id: u64) -> String {
-        format!("{}/{:x}", namespace, instance_id)
+    /// Build the key path for a frontend (relative to bucket, not absolute)
+    fn frontend_key(instance_id: u64) -> String {
+        format!("{:x}", instance_id)
     }
 
     /// Extract prefix for querying based on discovery query
@@ -87,10 +87,7 @@ impl KVStoreDiscovery {
             } => {
                 format!("{}/{}/{}/{}", MODELS_BUCKET, namespace, component, endpoint)
             }
-            DiscoveryQuery::AllMetricsEndpoints => METRICS_ENDPOINTS_BUCKET.to_string(),
-            DiscoveryQuery::NamespacedMetricsEndpoints { namespace } => {
-                format!("{}/{}", METRICS_ENDPOINTS_BUCKET, namespace)
-            }
+            DiscoveryQuery::AllFrontends => FRONTENDS_BUCKET.to_string(),
         }
     }
 
@@ -199,23 +196,20 @@ impl Discovery for KVStoreDiscovery {
                 }
                 (MODELS_BUCKET, key)
             }
-            DiscoveryInstance::MetricsEndpoint {
-                namespace,
+            DiscoveryInstance::Frontend {
                 instance_id,
                 host,
                 port,
-                ..
             } => {
-                let key = Self::metrics_endpoint_key(namespace, *instance_id);
+                let key = Self::frontend_key(*instance_id);
                 tracing::debug!(
-                    "KVStoreDiscovery::register: Registering metrics endpoint instance_id={}, namespace={}, host={}, port={}, key={}",
+                    "KVStoreDiscovery::register: Registering frontend instance_id={}, host={}, port={}, key={}",
                     instance_id,
-                    namespace,
                     host,
                     port,
                     key
                 );
-                (METRICS_ENDPOINTS_BUCKET, key)
+                (FRONTENDS_BUCKET, key)
             }
         };
 
@@ -311,19 +305,14 @@ impl Discovery for KVStoreDiscovery {
                 }
                 (MODELS_BUCKET, key)
             }
-            DiscoveryInstance::MetricsEndpoint {
-                namespace,
-                instance_id,
-                ..
-            } => {
-                let key = Self::metrics_endpoint_key(namespace, *instance_id);
+            DiscoveryInstance::Frontend { instance_id, .. } => {
+                let key = Self::frontend_key(*instance_id);
                 tracing::debug!(
-                    "Unregistering metrics endpoint instance_id={}, namespace={}, key={}",
+                    "Unregistering frontend instance_id={}, key={}",
                     instance_id,
-                    namespace,
                     key
                 );
-                (METRICS_ENDPOINTS_BUCKET, key)
+                (FRONTENDS_BUCKET, key)
             }
         };
 
@@ -351,7 +340,7 @@ impl Discovery for KVStoreDiscovery {
         } else if prefix.starts_with(MODELS_BUCKET) {
             MODELS_BUCKET
         } else {
-            METRICS_ENDPOINTS_BUCKET
+            FRONTENDS_BUCKET
         };
 
         // Get bucket - if it doesn't exist, return empty list
@@ -389,7 +378,7 @@ impl Discovery for KVStoreDiscovery {
         } else if prefix.starts_with(MODELS_BUCKET) {
             MODELS_BUCKET
         } else {
-            METRICS_ENDPOINTS_BUCKET
+            FRONTENDS_BUCKET
         };
 
         tracing::trace!(
@@ -519,6 +508,9 @@ mod tests {
             component: "comp1".to_string(),
             endpoint: "ep1".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
+            host: "localhost".to_string(),
+            port: 8080,
+            gpu_uuids: Vec::new(),
         };
 
         let instance = client.register(spec).await.unwrap();
@@ -632,111 +624,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_kv_store_discovery_register_metrics_endpoint() {
+    async fn test_kv_store_discovery_register_frontend() {
         let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
         let client = KVStoreDiscovery::new(store, cancel_token);
 
-        let spec = DiscoverySpec::MetricsEndpoint {
-            namespace: "test-ns".to_string(),
+        let spec = DiscoverySpec::Frontend {
             host: "localhost".to_string(),
             port: 8080,
-            gpu_uuids: Vec::new(),
         };
 
         let instance = client.register(spec).await.unwrap();
 
         match instance {
-            DiscoveryInstance::MetricsEndpoint {
-                namespace,
+            DiscoveryInstance::Frontend {
                 host,
                 port,
                 instance_id,
-                ..
             } => {
-                assert_eq!(namespace, "test-ns");
                 assert_eq!(host, "localhost");
                 assert_eq!(port, 8080);
                 assert_eq!(instance_id, client.instance_id());
             }
-            _ => panic!("Expected MetricsEndpoint instance"),
+            _ => panic!("Expected Frontend instance"),
         }
     }
 
     #[tokio::test]
-    async fn test_kv_store_discovery_list_metrics_endpoints() {
+    async fn test_kv_store_discovery_list_frontends() {
         let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
         let client = KVStoreDiscovery::new(store, cancel_token);
 
-        // Register metrics endpoints in different namespaces
-        // Note: A single instance (same instance_id) can register metrics endpoints in multiple namespaces
-        let spec1 = DiscoverySpec::MetricsEndpoint {
-            namespace: "ns1".to_string(),
+        // Register frontends
+        let spec1 = DiscoverySpec::Frontend {
             host: "localhost".to_string(),
             port: 8080,
-            gpu_uuids: Vec::new(),
         };
         client.register(spec1).await.unwrap();
 
-        let spec2 = DiscoverySpec::MetricsEndpoint {
-            namespace: "ns2".to_string(),
+        let spec2 = DiscoverySpec::Frontend {
             host: "localhost".to_string(),
             port: 8081,
-            gpu_uuids: Vec::new(),
         };
         client.register(spec2).await.unwrap();
 
-        let spec3 = DiscoverySpec::MetricsEndpoint {
-            namespace: "ns3".to_string(),
+        let spec3 = DiscoverySpec::Frontend {
             host: "localhost".to_string(),
             port: 8082,
-            gpu_uuids: Vec::new(),
         };
         client.register(spec3).await.unwrap();
 
-        // List all metrics endpoints
+        // List all frontends
         let all = client
-            .list(DiscoveryQuery::AllMetricsEndpoints)
+            .list(DiscoveryQuery::AllFrontends)
             .await
             .unwrap();
         assert_eq!(all.len(), 3);
-
-        // List namespaced metrics endpoints
-        let ns1 = client
-            .list(DiscoveryQuery::NamespacedMetricsEndpoints {
-                namespace: "ns1".to_string(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(ns1.len(), 1);
-
-        let ns2 = client
-            .list(DiscoveryQuery::NamespacedMetricsEndpoints {
-                namespace: "ns2".to_string(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(ns2.len(), 1);
-
-        let ns3 = client
-            .list(DiscoveryQuery::NamespacedMetricsEndpoints {
-                namespace: "ns3".to_string(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(ns3.len(), 1);
     }
 
     #[tokio::test]
-    async fn test_kv_store_discovery_watch_metrics_endpoints() {
+    async fn test_kv_store_discovery_watch_frontends() {
         let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
         let client = Arc::new(KVStoreDiscovery::new(store, cancel_token.clone()));
 
         // Start watching before registering
         let mut stream = client
-            .list_and_watch(DiscoveryQuery::AllMetricsEndpoints, None)
+            .list_and_watch(DiscoveryQuery::AllFrontends, None)
             .await
             .unwrap();
 
@@ -744,11 +699,9 @@ mod tests {
         let register_task = tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-            let spec = DiscoverySpec::MetricsEndpoint {
-                namespace: "test-ns".to_string(),
+            let spec = DiscoverySpec::Frontend {
                 host: "localhost".to_string(),
                 port: 8080,
-                gpu_uuids: Vec::new(),
             };
             client_clone.register(spec).await.unwrap();
         });
@@ -757,17 +710,11 @@ mod tests {
         let event = stream.next().await.unwrap().unwrap();
         match event {
             DiscoveryEvent::Added(instance) => match instance {
-                DiscoveryInstance::MetricsEndpoint {
-                    namespace,
-                    host,
-                    port,
-                    ..
-                } => {
-                    assert_eq!(namespace, "test-ns");
+                DiscoveryInstance::Frontend { host, port, .. } => {
                     assert_eq!(host, "localhost");
                     assert_eq!(port, 8080);
                 }
-                _ => panic!("Expected MetricsEndpoint instance"),
+                _ => panic!("Expected Frontend instance"),
             },
             _ => panic!("Expected Added event"),
         }

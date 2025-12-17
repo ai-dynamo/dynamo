@@ -481,6 +481,9 @@ mod integration_tests {
                 namespace: "test_namespace".to_string(),
                 instance_id: 12345,
                 transport: crate::component::TransportType::Nats(endpoint.to_string()),
+                host: "localhost".to_string(),
+                port: 8080,
+                gpu_uuids: Vec::new(),
             },
             payload.clone(),
         );

@@ -104,14 +104,8 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             },
         ) => inst_ns == namespace && inst_comp == component && inst_ep == endpoint,
 
-        // Metrics endpoint matching
-        (DiscoveryInstance::MetricsEndpoint { .. }, DiscoveryQuery::AllMetricsEndpoints) => true,
-        (
-            DiscoveryInstance::MetricsEndpoint {
-                namespace: inst_ns, ..
-            },
-            DiscoveryQuery::NamespacedMetricsEndpoints { namespace },
-        ) => inst_ns == namespace,
+        // Frontend matching
+        (DiscoveryInstance::Frontend { .. }, DiscoveryQuery::AllFrontends) => true,
 
         // Cross-type matches return false
         (
@@ -120,8 +114,7 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             | DiscoveryQuery::NamespacedModels { .. }
             | DiscoveryQuery::ComponentModels { .. }
             | DiscoveryQuery::EndpointModels { .. }
-            | DiscoveryQuery::AllMetricsEndpoints
-            | DiscoveryQuery::NamespacedMetricsEndpoints { .. },
+            | DiscoveryQuery::AllFrontends,
         ) => false,
         (
             DiscoveryInstance::Model { .. },
@@ -129,11 +122,10 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             | DiscoveryQuery::NamespacedEndpoints { .. }
             | DiscoveryQuery::ComponentEndpoints { .. }
             | DiscoveryQuery::Endpoint { .. }
-            | DiscoveryQuery::AllMetricsEndpoints
-            | DiscoveryQuery::NamespacedMetricsEndpoints { .. },
+            | DiscoveryQuery::AllFrontends,
         ) => false,
         (
-            DiscoveryInstance::MetricsEndpoint { .. },
+            DiscoveryInstance::Frontend { .. },
             DiscoveryQuery::AllEndpoints
             | DiscoveryQuery::NamespacedEndpoints { .. }
             | DiscoveryQuery::ComponentEndpoints { .. }
@@ -211,7 +203,7 @@ impl Discovery for MockDiscovery {
                     match i {
                         DiscoveryInstance::Endpoint(inst) => inst.instance_id,
                         DiscoveryInstance::Model { instance_id, .. } => *instance_id,
-                        DiscoveryInstance::MetricsEndpoint { instance_id, .. } => *instance_id,
+                        DiscoveryInstance::Frontend { instance_id, .. } => *instance_id,
                     }
                 }).collect();
 
@@ -220,7 +212,7 @@ impl Discovery for MockDiscovery {
                     let id = match &instance {
                         DiscoveryInstance::Endpoint(inst) => inst.instance_id,
                         DiscoveryInstance::Model { instance_id, .. } => *instance_id,
-                        DiscoveryInstance::MetricsEndpoint { instance_id, .. } => *instance_id,
+                        DiscoveryInstance::Frontend { instance_id, .. } => *instance_id,
                     };
                     if known_instances.insert(id) {
                         yield Ok(DiscoveryEvent::Added(instance));
@@ -257,6 +249,9 @@ mod tests {
             component: "test-comp".to_string(),
             endpoint: "test-ep".to_string(),
             transport: crate::component::TransportType::Nats("test-subject".to_string()),
+            host: "localhost".to_string(),
+            port: 8080,
+            gpu_uuids: Vec::new(),
         };
 
         let query = DiscoveryQuery::Endpoint {

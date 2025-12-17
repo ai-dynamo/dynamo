@@ -353,6 +353,19 @@ impl ModelManager {
             component: router_endpoint_id.component.clone(),
             endpoint: router_endpoint_id.name.clone(),
             transport,
+            // Get metrics endpoint information (host, port, gpu_uuids)
+            host: if let Some(system_info) = endpoint.component().drt().system_status_server_info() {
+                dynamo_runtime::system_status_server::resolve_advertise_host(&system_info.hostname())
+            } else {
+                "localhost".to_string()
+            },
+            port: endpoint
+                .component()
+                .drt()
+                .system_status_server_info()
+                .map(|info| info.port())
+                .unwrap_or(8081),
+            gpu_uuids: dynamo_runtime::system_status_server::get_local_gpu_uuids(),
         };
 
         discovery.register(discovery_spec).await?;

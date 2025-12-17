@@ -91,6 +91,12 @@ pub struct Instance {
     pub namespace: String,
     pub instance_id: u64,
     pub transport: TransportType,
+    /// Host address for metrics endpoint
+    pub host: String,
+    /// Port for metrics endpoint
+    pub port: u16,
+    /// GPU UUIDs associated with this instance (empty for non-GPU instances)
+    pub gpu_uuids: Vec<String>,
 }
 
 impl Instance {

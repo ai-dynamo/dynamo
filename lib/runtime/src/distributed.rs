@@ -242,20 +242,22 @@ impl DistributedRuntime {
                         .set(Arc::new(system_status_server_info))
                         .expect("System status server info should only be set once");
 
-                    // Register metrics endpoint with discovery
-                    // Use "system" namespace for the system status server's metrics endpoint
+                    // Register system endpoint with discovery (system server does not include GPU UUIDs)
                     let advertise_host = system_status_server::resolve_advertise_host(&host);
                     let metrics_url = format!("http://{}:{}/metrics", advertise_host, addr.port());
-                    let metrics_spec = crate::discovery::DiscoverySpec::MetricsEndpoint {
+                    let endpoint_spec = crate::discovery::DiscoverySpec::Endpoint {
                         namespace: "system".to_string(),
+                        component: "system".to_string(),
+                        endpoint: "metrics".to_string(),
+                        transport: crate::component::TransportType::Http(format!("http://{}:{}", advertise_host, addr.port())),
                         host: advertise_host,
                         port: addr.port(),
-                        gpu_uuids: system_status_server::get_local_gpu_uuids(),
+                        gpu_uuids: Vec::new(), // System server does not have GPU UUIDs
                     };
 
                     match distributed_runtime
                         .discovery_client
-                        .register(metrics_spec)
+                        .register(endpoint_spec)
                         .await
                     {
                         Ok(_) => {

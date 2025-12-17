@@ -121,12 +121,29 @@ impl EndpointConfigBuilder {
             // Build transport based on request plane mode
             let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
 
+            // Get metrics endpoint information (host, port, gpu_uuids)
+            let metrics_host = if let Some(system_info) = endpoint.drt().system_status_server_info() {
+                crate::system_status_server::resolve_advertise_host(&system_info.hostname())
+            } else {
+                // Fallback to localhost if system status server is not available
+                "localhost".to_string()
+            };
+            let metrics_port = endpoint
+                .drt()
+                .system_status_server_info()
+                .map(|info| info.port())
+                .unwrap_or(8081); // Default system port
+            let gpu_uuids = crate::system_status_server::get_local_gpu_uuids();
+
             let instance = Instance {
                 component: endpoint_id.component.clone(),
                 endpoint: endpoint_id.name.clone(),
                 namespace: endpoint_id.namespace.clone(),
                 instance_id: connection_id,
                 transport,
+                host: metrics_host,
+                port: metrics_port,
+                gpu_uuids,
             };
             tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
             let guard = system_health.lock();
@@ -200,11 +217,28 @@ impl EndpointConfigBuilder {
         // Build transport for discovery service based on request plane mode
         let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
 
+        // Get metrics endpoint information (host, port, gpu_uuids)
+        let metrics_host = if let Some(system_info) = endpoint.drt().system_status_server_info() {
+            crate::system_status_server::resolve_advertise_host(&system_info.hostname())
+        } else {
+            // Fallback to localhost if system status server is not available
+            "localhost".to_string()
+        };
+        let metrics_port = endpoint
+            .drt()
+            .system_status_server_info()
+            .map(|info| info.port())
+            .unwrap_or(8081); // Default system port
+        let gpu_uuids = crate::system_status_server::get_local_gpu_uuids();
+
         let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
             namespace: endpoint_id.namespace.clone(),
             component: endpoint_id.component.clone(),
             endpoint: endpoint_id.name.clone(),
             transport,
+            host: metrics_host,
+            port: metrics_port,
+            gpu_uuids,
         };
 
         if let Err(e) = discovery.register(discovery_spec).await {

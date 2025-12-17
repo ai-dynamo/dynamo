@@ -57,12 +57,8 @@ pub enum DiscoveryQuery {
         component: String,
         endpoint: String,
     },
-    /// Query all metrics endpoints in the system
-    AllMetricsEndpoints,
-    /// Query all metrics endpoints in a specific namespace
-    NamespacedMetricsEndpoints {
-        namespace: String,
-    },
+    /// Query all frontends in the system
+    AllFrontends,
 }
 
 /// Specification for registering objects in the discovery plane
@@ -76,6 +72,12 @@ pub enum DiscoverySpec {
         endpoint: String,
         /// Transport type and routing information
         transport: TransportType,
+        /// Host address for metrics endpoint
+        host: String,
+        /// Port for metrics endpoint
+        port: u16,
+        /// GPU UUIDs associated with this instance (empty for non-GPU instances)
+        gpu_uuids: Vec<String>,
     },
     Model {
         namespace: String,
@@ -89,12 +91,10 @@ pub enum DiscoverySpec {
         /// Key format: {namespace}/{component}/{endpoint}/{instance_id}[/{model_suffix}]
         model_suffix: Option<String>,
     },
-    /// Metrics endpoint specification for registration
-    MetricsEndpoint {
-        namespace: String,
+    /// Frontend specification for registration (frontends only, no GPU UUIDs)
+    Frontend {
         host: String,
         port: u16,
-        gpu_uuids: Vec<String>,
     },
 }
 
@@ -138,18 +138,6 @@ impl DiscoverySpec {
     /// Attaches an instance ID to create a DiscoveryInstance
     pub fn with_instance_id(self, instance_id: u64) -> DiscoveryInstance {
         match self {
-            Self::Endpoint {
-                namespace,
-                component,
-                endpoint,
-                transport,
-            } => DiscoveryInstance::Endpoint(crate::component::Instance {
-                namespace,
-                component,
-                endpoint,
-                instance_id,
-                transport,
-            }),
             Self::Model {
                 namespace,
                 component,
@@ -164,18 +152,29 @@ impl DiscoverySpec {
                 card_json,
                 model_suffix,
             },
-            Self::MetricsEndpoint {
-                namespace,
-                host,
-                port,
-                gpu_uuids,
-            } => DiscoveryInstance::MetricsEndpoint {
-                namespace,
+            Self::Frontend { host, port } => DiscoveryInstance::Frontend {
                 instance_id,
                 host,
                 port,
-                gpu_uuids,
             },
+            Self::Endpoint {
+                namespace,
+                component,
+                endpoint,
+                transport,
+                host,
+                port,
+                gpu_uuids,
+            } => DiscoveryInstance::Endpoint(crate::component::Instance {
+                namespace,
+                component,
+                endpoint,
+                instance_id,
+                transport,
+                host,
+                port,
+                gpu_uuids,
+            }),
         }
     }
 }
@@ -199,13 +198,11 @@ pub enum DiscoveryInstance {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_suffix: Option<String>,
     },
-    /// Registered metrics endpoint instance
-    MetricsEndpoint {
-        namespace: String,
+    /// Registered frontend instance (frontends only, no GPU UUIDs)
+    Frontend {
         instance_id: u64,
         host: String,
         port: u16,
-        gpu_uuids: Vec<String>,
     },
 }
 
@@ -215,7 +212,7 @@ impl DiscoveryInstance {
         match self {
             Self::Endpoint(inst) => inst.instance_id,
             Self::Model { instance_id, .. } => *instance_id,
-            Self::MetricsEndpoint { instance_id, .. } => *instance_id,
+            Self::Frontend { instance_id, .. } => *instance_id,
         }
     }
 
@@ -230,8 +227,8 @@ impl DiscoveryInstance {
             Self::Endpoint(_) => {
                 anyhow::bail!("Cannot deserialize model from Endpoint instance")
             }
-            Self::MetricsEndpoint { .. } => {
-                anyhow::bail!("Cannot deserialize model from MetricsEndpoint instance")
+            Self::Frontend { .. } => {
+                anyhow::bail!("Cannot deserialize model from Frontend instance")
             }
         }
     }
@@ -280,13 +277,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_metrics_endpoint_serialization() {
-        let instance = DiscoveryInstance::MetricsEndpoint {
-            namespace: "test-namespace".to_string(),
+    fn test_frontend_serialization() {
+        let instance = DiscoveryInstance::Frontend {
             instance_id: 12345,
             host: "localhost".to_string(),
             port: 8080,
-            gpu_uuids: vec!["GPU-12345".to_string(), "GPU-67890".to_string()],
         };
 
         // Serialize to JSON
@@ -300,63 +295,48 @@ mod tests {
 
         // Verify fields
         match deserialized {
-            DiscoveryInstance::MetricsEndpoint {
-                namespace,
+            DiscoveryInstance::Frontend {
                 instance_id,
                 host,
                 port,
-                gpu_uuids,
             } => {
-                assert_eq!(namespace, "test-namespace");
                 assert_eq!(instance_id, 12345);
                 assert_eq!(host, "localhost");
                 assert_eq!(port, 8080);
-                assert_eq!(
-                    gpu_uuids,
-                    vec!["GPU-12345".to_string(), "GPU-67890".to_string()]
-                );
             }
-            _ => panic!("Expected MetricsEndpoint variant"),
+            _ => panic!("Expected Frontend variant"),
         }
     }
 
     #[test]
-    fn test_metrics_endpoint_spec_with_instance_id() {
-        let spec = DiscoverySpec::MetricsEndpoint {
-            namespace: "test-ns".to_string(),
+    fn test_frontend_spec_with_instance_id() {
+        let spec = DiscoverySpec::Frontend {
             host: "localhost".to_string(),
             port: 8080,
-            gpu_uuids: vec!["GPU-abc123".to_string()],
         };
 
         let instance = spec.with_instance_id(999);
 
         match instance {
-            DiscoveryInstance::MetricsEndpoint {
-                namespace,
+            DiscoveryInstance::Frontend {
                 instance_id,
                 host,
                 port,
-                gpu_uuids,
             } => {
-                assert_eq!(namespace, "test-ns");
                 assert_eq!(instance_id, 999);
                 assert_eq!(host, "localhost");
                 assert_eq!(port, 8080);
-                assert_eq!(gpu_uuids, vec!["GPU-abc123".to_string()]);
             }
-            _ => panic!("Expected MetricsEndpoint variant"),
+            _ => panic!("Expected Frontend variant"),
         }
     }
 
     #[test]
-    fn test_metrics_endpoint_instance_id() {
-        let instance = DiscoveryInstance::MetricsEndpoint {
-            namespace: "test-ns".to_string(),
+    fn test_frontend_instance_id() {
+        let instance = DiscoveryInstance::Frontend {
             instance_id: 777,
             host: "localhost".to_string(),
             port: 8080,
-            gpu_uuids: vec![],
         };
 
         assert_eq!(instance.instance_id(), 777);

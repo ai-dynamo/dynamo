@@ -119,20 +119,14 @@ impl Discovery for KubeDiscoveryClient {
                 );
                 metadata.register_model_card(instance.clone())?;
             }
-            DiscoveryInstance::MetricsEndpoint {
-                namespace,
-                host,
-                port,
-                ..
-            } => {
+            DiscoveryInstance::Frontend { host, port, .. } => {
                 tracing::info!(
-                    "Registered metrics endpoint: namespace={}, host={}, port={}, instance_id={:x}",
-                    namespace,
+                    "Registered frontend: host={}, port={}, instance_id={:x}",
                     host,
                     port,
                     instance_id
                 );
-                metadata.register_metrics_endpoint(instance.clone())?;
+                metadata.register_frontend(instance.clone())?;
             }
         }
 
@@ -151,8 +145,8 @@ impl Discovery for KubeDiscoveryClient {
             DiscoveryInstance::Model { .. } => {
                 metadata.unregister_model_card(&instance)?;
             }
-            DiscoveryInstance::MetricsEndpoint { .. } => {
-                // Metrics endpoints don't need explicit unregistration in Kube discovery
+            DiscoveryInstance::Frontend { .. } => {
+                // Frontends don't need explicit unregistration in Kube discovery
                 // They are managed via the system status server lifecycle
             }
         }
