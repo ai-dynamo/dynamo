@@ -50,13 +50,13 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.2.0rc3",
+    "tensorrt-llm==1.2.0rc5",
 ]
 
 vllm = [
     "uvloop",
     "nixl[cu12]<=0.7.1",
-    "vllm[flashinfer]==0.12.0",
+    "vllm[flashinfer,runai]==0.12.0",
 ]
 
 sglang = [

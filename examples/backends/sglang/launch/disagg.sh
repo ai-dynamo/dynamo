@@ -37,10 +37,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Enable tracing if requested
+TRACE_ARGS=()
 if [ "$ENABLE_OTEL" = true ]; then
     export DYN_LOGGING_JSONL=true
     export OTEL_EXPORT_ENABLED=1
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
+    TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
 
 # run ingress
@@ -52,7 +54,9 @@ DYNAMO_PID=$!
 #AssertionError: Prefill round robin balance is required when dp size > 1. Please make sure that the prefill instance is launched with `--load-balance-method round_robin` and `--prefill-round-robin-balance` is set for decode server.
 
 # run prefill worker
-OTEL_SERVICE_NAME=dynamo-worker-prefill DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_PREFILL:-8081} \
+# Use DYN_SYSTEM_PORT1/2 instead of *_PREFILL/*_DECODE env names so test
+# harnesses can set one simple pair for disaggregated deployments.
+OTEL_SERVICE_NAME=dynamo-worker-prefill DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 python3 -m dynamo.sglang \
   --model-path silence09/DeepSeek-R1-Small-2layers \
   --served-model-name silence09/DeepSeek-R1-Small-2layers \
@@ -65,11 +69,12 @@ python3 -m dynamo.sglang \
   --host 0.0.0.0 \
   --port 40000 \
   --disaggregation-transfer-backend nixl \
-  --enable-metrics --log-level debug &
+  --enable-metrics \
+  "${TRACE_ARGS[@]}" &
 PREFILL_PID=$!
 
 # run decode worker
-OTEL_SERVICE_NAME=dynamo-worker-decode DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_DECODE:-8082} \
+OTEL_SERVICE_NAME=dynamo-worker-decode DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang \
   --model-path silence09/DeepSeek-R1-Small-2layers \
   --served-model-name silence09/DeepSeek-R1-Small-2layers \
@@ -81,4 +86,5 @@ CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang \
   --disaggregation-bootstrap-port 12345 \
   --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl \
-  --enable-metrics --log-level debug
+  --enable-metrics \
+  "${TRACE_ARGS[@]}"

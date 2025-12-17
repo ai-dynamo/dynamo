@@ -8,10 +8,14 @@ This module defines the default health check payload for vLLM backends.
 """
 
 import logging
+from typing import TYPE_CHECKING, Optional
 
 from dynamo.health_check import HealthCheckPayload
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.v1.engine.async_llm import AsyncLLM
 
 
 def _get_bos_token_id_from_engine(engine_client) -> int:
@@ -45,6 +49,36 @@ def _get_bos_token_id_from_engine(engine_client) -> int:
     return 1
 
 
+def _make_default_payload(
+    engine_client: Optional["AsyncLLM"], use_text_input: bool
+) -> dict:
+    sampling_options = {
+        "temperature": 0.0,
+    }
+
+    stop_conditions = {
+        "max_tokens": 1,
+        "stop": None,
+        "stop_token_ids": None,
+        "include_stop_str_in_output": False,
+        "ignore_eos": False,
+    }
+
+    if use_text_input:
+        return {
+            "prompt": "Test",
+            **sampling_options,
+            **stop_conditions,
+        }
+    else:
+        bos_token_id = _get_bos_token_id_from_engine(engine_client)
+        return {
+            "token_ids": [bos_token_id],
+            "sampling_options": sampling_options,
+            "stop_conditions": stop_conditions,
+        }
+
+
 class VllmHealthCheckPayload(HealthCheckPayload):
     """
     vLLM-specific health check payload.
@@ -52,31 +86,18 @@ class VllmHealthCheckPayload(HealthCheckPayload):
     Provides vLLM defaults and inherits environment override support from base class.
     """
 
-    def __init__(self, engine_client=None):
+    def __init__(self, engine_client=None, use_text_input: bool = False):
         """
         Initialize vLLM health check payload with vLLM-specific defaults.
 
         Args:
             engine_client: Optional vLLM AsyncLLM engine client to extract BOS token from.
                           If provided, will attempt to use the model's actual BOS token.
+            use_text_input: If True, use text-based input (prompt field) instead of token_ids.
+                           This should match the use_vllm_tokenizer config setting.
         """
-        bos_token_id = _get_bos_token_id_from_engine(engine_client)
 
-        # Set vLLM default payload - minimal request that completes quickly
-        # The handler expects token_ids, sampling_options, and stop_conditions
-        self.default_payload = {
-            "token_ids": [bos_token_id],
-            "sampling_options": {
-                "temperature": 0.0,
-            },
-            "stop_conditions": {
-                "max_tokens": 1,
-                "stop": None,
-                "stop_token_ids": None,
-                "include_stop_str_in_output": False,
-                "ignore_eos": False,
-            },
-        }
+        self.default_payload = _make_default_payload(engine_client, use_text_input)
         super().__init__()
 
 
@@ -87,7 +108,7 @@ class VllmPrefillHealthCheckPayload(HealthCheckPayload):
     The prefill handler expects PreprocessedRequest format with sampling_options and stop_conditions.
     """
 
-    def __init__(self, engine_client=None):
+    def __init__(self, engine_client=None, use_text_input: bool = False):
         """
         Initialize vLLM prefill health check payload with proper PreprocessedRequest structure.
 
@@ -95,23 +116,5 @@ class VllmPrefillHealthCheckPayload(HealthCheckPayload):
             engine_client: Optional vLLM AsyncLLM engine client to extract BOS token from.
                           If provided, will attempt to use the model's actual BOS token.
         """
-        bos_token_id = _get_bos_token_id_from_engine(engine_client)
-
-        # Prefill handler expects PreprocessedRequest format: token_ids, sampling_options, stop_conditions
-        # The handler will override max_tokens/min_tokens to 1 and add do_remote_decode
-        self.default_payload = {
-            "token_ids": [bos_token_id],
-            "sampling_options": {
-                "temperature": 0.0,
-                "top_p": 1.0,
-                "top_k": -1,
-            },
-            "stop_conditions": {
-                "stop": None,
-                "stop_token_ids": None,
-                "include_stop_str_in_output": False,
-                "ignore_eos": False,
-                "min_tokens": 0,
-            },
-        }
+        self.default_payload = _make_default_payload(engine_client, use_text_input)
         super().__init__()

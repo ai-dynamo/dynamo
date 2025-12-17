@@ -18,6 +18,48 @@ The NVIDIA Dynamo project uses containerized development and deployment to maint
   - `Dockerfile.frontend` - For Kubernetes Gateway API Inference Extension integration with EPP
   - `Dockerfile.epp` - For building the Endpoint Picker (EPP) image
 
+### Stage Summary for Frameworks
+
+<details>
+<summary>Show Stage Summary Table</summary>
+Dockerfile.${FRAMEWORK} General Structure
+
+Below is a summary of the general file structure for the framework Dockerfile stages. Some exceptions exist.
+
+| Stage/Filepath | Target |
+| --- | --- |
+| **STAGE dynamo_base** | **FROM ${BASE_IMAGE}** |
+| /bin/uv, /bin/uvx | COPY from ghcr.io/astral-sh/uv:latest (→ framework, runtime) |
+|  /usr/bin/nats-server | Downloaded from GitHub (→ runtime) |
+|  /usr/local/bin/etcd/ | Downloaded from GitHub (→ runtime) |
+|  /usr/local/rustup/ | Installed via rustup-init (→ wheel_builder, dev) |
+|  /usr/local/cargo/ | Installed via rustup-init (→ wheel_builder, dev) |
+|  /usr/local/cuda/ | Inherited from BASE_IMAGE (→ wheel_builder, runtime) |
+| **STAGE: wheel_builder** | **FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT}** |
+|  /usr/local/ucx/ | Built from source (→ runtime)
+|  /opt/nvidia/nvda_nixl/ | Built from source (→ runtime)
+|  /opt/nvidia/nvda_nixl/lib64/ | Built from source (→ runtime)
+|  /opt/dynamo/target/ | Cargo build output (→ runtime)
+|  /opt/dynamo/dist/*.whl | Built wheels (→ runtime)
+|  /opt/dynamo/dist/nixl/ | Built nixl wheels (→ runtime)
+| **STAGE: framework** | **FROM ${BASE_IMAGE}** |
+|  /opt/dynamo/venv/ | Created with uv venv (→ runtime)
+|  /${FRAMEWORK_INSTALL} | Built framework (→ runtime)
+| **STAGE: runtime** | **FROM ${RUNTIME_IMAGE}** |
+|  /usr/local/cuda/{bin,include,nvvm}/ | COPY from dynamo_base |
+|  /usr/bin/nats-server | COPY from dynamo_runtime |
+|  /usr/local/bin/etcd/ | COPY from dynamo_runtime |
+|  /usr/local/ucx/ | COPY from dynamo_runtime |
+|  /opt/nvidia/nvda_nixl/ | COPY from wheel_builder |
+|  /opt/dynamo/wheelhouse/ | COPY from wheel_builder |
+|  /opt/dynamo/venv/ | COPY from framework |
+|  /opt/vllm/ | COPY from framework |
+|  /workspace/{tests,examples,deploy}/ |COPY from build context |
+| **STAGE: dev** | **FROM runtime** |
+|  /usr/local/rustup/ | COPY from dynamo_runtime |
+|  /usr/local/cargo/ | COPY from dynamo_runtime |
+</details>
+
 ### Why Containerization?
 
 Each inference framework (vLLM, TensorRT-LLM, SGLang) has specific CUDA versions, Python dependencies, and system libraries. Containers provide consistent environments, framework isolation, and proper GPU configurations across development and production.
@@ -117,23 +159,6 @@ The `build.sh` script is responsible for building Docker images for different AI
 
 # Build with build arguments
 ./build.sh --build-arg CUSTOM_ARG=value
-```
-
-### build.sh --dev-image - Local Development Image Builder
-
-The `build.sh --dev-image` option takes a dev image and then builds a local-dev image, which contains proper local user permissions. It also includes extra developer utilities (debugging tools, text editors, system monitors, etc.).
-
-**Common Usage Examples:**
-
-```bash
-# Build local-dev image from dev image dynamo:latest-vllm
-./build.sh --dev-image dynamo:latest-vllm --framework vllm
-
-# Build with custom tag from dev image dynamo:latest-vllm
-./build.sh --dev-image dynamo:latest-vllm --framework vllm --tag my-local:dev
-
-# Dry run to see what would be built
-./build.sh --dev-image dynamo:latest-vllm --framework vllm --dry-run
 ```
 
 ### Building the Frontend Image
