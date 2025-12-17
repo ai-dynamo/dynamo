@@ -3422,6 +3422,7 @@ mod tests {
                         blocks: vec![KvCacheStoredBlockData {
                             block_hash: ExternalSequenceBlockHash(id * 100),
                             tokens_hash: LocalBlockHash(id * 200),
+                            mm_extra_info: None,
                         }],
                     }),
                     dp_rank: 0,
