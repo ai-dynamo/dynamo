@@ -529,11 +529,13 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         // Create backend based on configuration
         let backend: Box<dyn InactivePoolBackend<T>> = match self.inactive_backend.take() {
             Some(InactiveBackendConfig::HashMap { reuse_policy }) => {
+                tracing::info!("Using HashMap for inactive pool");
                 Box::new(HashMapBackend::new(reuse_policy))
             }
             Some(InactiveBackendConfig::Lru) => {
                 // Capacity automatically set to block_count
                 let capacity = NonZeroUsize::new(block_count).expect("block_count must be > 0");
+                tracing::info!("Using LRU for inactive pool");
                 Box::new(LruBackend::new(capacity))
             }
             Some(InactiveBackendConfig::MultiLru {
@@ -551,6 +553,10 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
                 let level_capacity =
                     NonZeroUsize::new(capacity_per_level).expect("capacity per level must be > 0");
 
+                tracing::info!(
+                    "Using MultiLRU inactive backend with thresholds: {:?}",
+                    frequency_thresholds
+                );
                 Box::new(
                     MultiLruBackend::new_with_thresholds(
                         level_capacity,
@@ -560,9 +566,12 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
                     .map_err(|e| BlockManagerBuilderError::InvalidBackend(e.to_string()))?,
                 )
             }
-            Some(InactiveBackendConfig::Lineage) => Box::new(LineageBackend::default()),
+            Some(InactiveBackendConfig::Lineage) => {
+                tracing::info!("Using Lineage inactive backend");
+                Box::new(LineageBackend::default())
+            }
             None => {
-                // Default to HashMap with FIFO
+                tracing::info!("Using default inactive backend: Lineage");
                 Box::new(LineageBackend::default())
             }
         };
