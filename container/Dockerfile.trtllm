@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.10.0
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -28,16 +29,15 @@
 # 2. COPY --chmod=775       - Sets permissions on copied children (not destination)
 # 3. chmod g+w (no -R)      - Fixes destination dirs only (milliseconds vs minutes)
 
-# This section contains build arguments that are common and shared with
-# the plain Dockerfile, so they should NOT have a default. The source of truth is from build.sh.
+##################################
+########## Build Arguments ########
+##################################
+
+# This section contains build arguments that are common and shared across various
+# Dockerfile.<frameworks>, so they should NOT have a default. The source of truth is from build.sh.
+
 ARG BASE_IMAGE
 ARG BASE_IMAGE_TAG
-
-ARG PYTHON_VERSION
-ARG ENABLE_KVBM
-ARG ENABLE_MEDIA_NIXL
-ARG ENABLE_MEDIA_FFMPEG
-ARG CARGO_BUILD_JOBS
 
 ARG PYTORCH_BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG PYTORCH_BASE_IMAGE_TAG="25.10-py3"
@@ -50,30 +50,12 @@ ARG TENSORRTLLM_PIP_WHEEL="tensorrt-llm"
 ARG TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 ARG GITHUB_TRTLLM_COMMIT
 
-# SCCACHE configuration
-ARG USE_SCCACHE
-ARG SCCACHE_BUCKET=""
-ARG SCCACHE_REGION=""
-
-# NIXL configuration
-ARG NIXL_UCX_REF
-ARG NIXL_REF
-ARG NIXL_GDRCOPY_REF
-
-# Define general architecture ARGs for supporting both x86 and aarch64 builds.
-#   ARCH: Used for package suffixes (e.g., amd64, arm64)
-#   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
-#
-# Default values are for x86/amd64:
-#   --build-arg ARCH=amd64 --build-arg ARCH_ALT=x86_64
-#
-# For arm64/aarch64, build with:
-#   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
-#
-# NOTE: There isn't an easy way to define one of these values based on the other value
-# without adding if statements everywhere, so just define both as ARGs for now.
-ARG ARCH=amd64
-ARG ARCH_ALT=x86_64
+##################################
+##### Rust Source Image ##########
+##################################
+# [RECOMMENDED] Pulls official image.
+# ARM Node pulls arm64 image, AMD pulls amd64 image.
+FROM rust:1.90 AS rust_source
 
 # Copy artifacts from NGC PyTorch image
 FROM ${PYTORCH_BASE_IMAGE}:${PYTORCH_BASE_IMAGE_TAG} AS pytorch_base
@@ -84,8 +66,7 @@ FROM ${PYTORCH_BASE_IMAGE}:${PYTORCH_BASE_IMAGE_TAG} AS pytorch_base
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dynamo_base
 
-ARG ARCH
-ARG ARCH_ALT
+ARG TARGETARCH
 
 USER root
 WORKDIR /opt/dynamo
@@ -93,50 +74,49 @@ WORKDIR /opt/dynamo
 # Install uv package manager
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
+
+# Install Rust by copying from official image (better handling of multi-arch builds)
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+COPY --from=rust_source /usr/local/cargo /usr/local/cargo
+COPY --from=rust_source /usr/local/rustup /usr/local/rustup
+
+
 # Install NATS server
 ENV NATS_VERSION="v2.10.28"
 RUN --mount=type=cache,target=/var/cache/apt \
-    wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/${NATS_VERSION}/nats-server-${NATS_VERSION}-${ARCH}.deb && \
-    dpkg -i nats-server-${NATS_VERSION}-${ARCH}.deb && rm nats-server-${NATS_VERSION}-${ARCH}.deb
+    wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/${NATS_VERSION}/nats-server-${NATS_VERSION}-${TARGETARCH}.deb && \
+    dpkg -i nats-server-${NATS_VERSION}-${TARGETARCH}.deb && rm nats-server-${NATS_VERSION}-${TARGETARCH}.deb
 
 # Install etcd
 ENV ETCD_VERSION="v3.5.21"
-RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
+RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${TARGETARCH}.tar.gz -O /tmp/etcd.tar.gz && \
     mkdir -p /usr/local/bin/etcd && \
     tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
     rm /tmp/etcd.tar.gz
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
-# Rust Setup
-# Rust environment setup
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.90.0
-
-# Define Rust target based on ARCH_ALT ARG
-ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
-
-# Install Rust
-RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
-    chmod +x rustup-init && \
-    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
-    rm rustup-init && \
-    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
 
 ##################################
 ##### Wheel Build Image ##########
 ##################################
 
-# Redeclare ARCH_ALT ARG so it's available for interpolation in the FROM instruction
-ARG ARCH_ALT
+# Platform-specific base images with SYSTEM_ARCH_NAME embedded
+FROM quay.io/pypa/manylinux_2_28_x86_64 AS wheel_builder_base_amd64
+ENV SYSTEM_ARCH_NAME="x86_64"
 
-FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
+FROM quay.io/pypa/manylinux_2_28_aarch64 AS wheel_builder_base_arm64
+ENV SYSTEM_ARCH_NAME="aarch64"
+
+# Select the correct base image automatically
+ARG TARGETARCH
+FROM wheel_builder_base_${TARGETARCH} AS wheel_builder
 
 # Redeclare ARGs for this stage
-ARG ARCH
-ARG ARCH_ALT
+ARG TARGETARCH
 ARG CARGO_BUILD_JOBS
 
 WORKDIR /workspace
@@ -145,16 +125,16 @@ WORKDIR /workspace
 COPY --from=dynamo_base /usr/local/cuda /usr/local/cuda
 COPY --from=dynamo_base /etc/ld.so.conf.d/hpcx.conf /etc/ld.so.conf.d/hpcx.conf
 
-# Set environment variables first so they can be used in COPY commands
+# Set environment variables
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
     RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     CARGO_TARGET_DIR=/opt/dynamo/target \
     PATH=/usr/local/cargo/bin:$PATH
 
-# Copy artifacts from base stage
 COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
+
 # Install system dependencies
 RUN yum groupinstall -y 'Development Tools' &&  \
     dnf install -y almalinux-release-synergy && \
@@ -181,14 +161,13 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         librdmacm-devel \
         numactl-devel
 
-
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
     PROTOC_VERSION=25.3; \
-    case "${ARCH_ALT}" in \
-      x86_64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-x86_64.zip" ;; \
-      aarch64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-aarch_64.zip" ;; \
-      *) echo "Unsupported architecture: ${ARCH_ALT}" >&2; exit 1 ;; \
+    case "${TARGETARCH}" in \
+      amd64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-x86_64.zip" ;; \
+      arm64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-aarch_64.zip" ;; \
+      *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     wget --tries=3 --waitretry=5 -O /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${PROTOC_ZIP}"; \
     rm -f /usr/local/bin/protoc /usr/bin/protoc; \
@@ -205,7 +184,6 @@ ENV CUDA_PATH=/usr/local/cuda \
     LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH \
     NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 
-# Create virtual environment for building wheels
 ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
 RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
@@ -220,7 +198,7 @@ RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/g
     cd gdrcopy/packages && \
     CUDA=/usr/local/cuda ./build-rpm-packages.sh && \
     rpm -Uvh gdrcopy-kmod-*.el8.noarch.rpm && \
-    rpm -Uvh gdrcopy-*.el8.${ARCH_ALT}.rpm && \
+    rpm -Uvh gdrcopy-*.el8.${SYSTEM_ARCH_NAME}.rpm && \
     rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
 
 # Install SCCACHE if requested
@@ -237,11 +215,12 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
 # Build FFmpeg from source
+ARG ENABLE_MEDIA_FFMPEG
 ARG FFMPEG_VERSION=7.1
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
 if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
         export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
@@ -276,7 +255,7 @@ fi
 # Build and install UCX
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
         export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
@@ -311,12 +290,14 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 # build and install nixl
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
         export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
         export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
     fi && \
+    export CC=$(which gcc) && \
+    export CXX=$(which g++) && \
     source ${VIRTUAL_ENV}/bin/activate && \
     git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
@@ -341,12 +322,14 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
         export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
         export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
     fi && \
+    export CC=$(which gcc) && \
+    export CXX=$(which g++) && \
     cd /workspace/nixl && \
     uv build . --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
@@ -358,21 +341,23 @@ COPY components/ /opt/dynamo/components/
 
 # Build dynamo wheels
 ARG ENABLE_KVBM
-ARG USE_SCCACHE
+ARG ENABLE_MEDIA_NIXL
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
         export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
         export RUSTC_WRAPPER="sccache"; \
     fi && \
+    export CC=$(which gcc) && \
+    export CXX=$(which g++) && \
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     FEATURES=""; \
-    if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
+    if [ "$ENABLE_MEDIA_NIXL" == "true" ]; then \
         FEATURES="$FEATURES dynamo-llm/media-nixl"; \
     fi; \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
@@ -383,14 +368,16 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
+    if [ "$ENABLE_KVBM" == "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out target/wheels && \
+        # Derive ARCH_ALT_COMPUTED from TARGETARCH for auditwheel platform
+        ARCH_ALT_COMPUTED=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") && \
         auditwheel repair \
             --exclude libnixl.so \
             --exclude libnixl_build.so \
             --exclude libnixl_common.so \
-            --plat manylinux_2_28_${ARCH_ALT} \
+            --plat manylinux_2_28_${ARCH_ALT_COMPUTED} \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \
     fi && \
@@ -411,7 +398,6 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 
-ARG ARCH_ALT
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
 # Install minimal dependencies needed for TensorRT-LLM installation
@@ -426,6 +412,11 @@ RUN apt-get update && \
         ca-certificates && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+# Fix libmlx5.so symlink for RDMA/InfiniBand support
+# If libmlx5.so not shipped with 24.04 rdma-core packaging, CMAKE will fail when looking for
+# generic dev name .so so we symlink .so.1 -> .so
+RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so || true
 
 # Create virtual environment
 RUN mkdir -p /opt/dynamo/venv && \
@@ -464,6 +455,7 @@ ARG HAS_TRTLLM_CONTEXT
 ARG TENSORRTLLM_PIP_WHEEL
 ARG TENSORRTLLM_INDEX_URL
 ARG GITHUB_TRTLLM_COMMIT
+ARG TARGETARCH
 
 # Copy only wheel files and commit info from trtllm_wheel stage from build_context
 COPY --from=trtllm_wheel /*.whl /trtllm_wheel/
@@ -495,6 +487,12 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
             exit 1; \
         fi; \
     else \
+        # Derive SYSTEM_ARCH_NAME from TARGETARCH
+        if [ "$TARGETARCH" = "arm64" ]; then \
+            SYSTEM_ARCH_NAME="aarch64"; \
+        else \
+            SYSTEM_ARCH_NAME="x86_64"; \
+        fi && \
         # Download and run install_tensorrt.sh from TensorRT-LLM GitHub before installing the wheel
         TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/.*==([0-9a-zA-Z.+-]+).*/\1/') && \
         (curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/v${TRTLLM_VERSION}/docker/common/install_tensorrt.sh" || \
@@ -508,7 +506,7 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         if echo "${TENSORRTLLM_PIP_WHEEL}" | grep -q '^tensorrt-llm=='; then \
             TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/tensorrt-llm==([0-9a-zA-Z.+-]+).*/\1/'); \
             PYTHON_TAG="cp$(echo ${PYTHON_VERSION} | tr -d '.')"; \
-            DIRECT_URL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-${TRTLLM_VERSION}-${PYTHON_TAG}-${PYTHON_TAG}-linux_${ARCH_ALT}.whl"; \
+            DIRECT_URL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-${TRTLLM_VERSION}-${PYTHON_TAG}-${PYTHON_TAG}-linux_${SYSTEM_ARCH_NAME}.whl"; \
             uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${DIRECT_URL}" triton==3.5.0; \
         else \
             uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" triton==3.5.0; \
@@ -534,9 +532,8 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
 # - Base for custom application containers
 #
 
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime_base
 
-ARG ARCH_ALT
 WORKDIR /workspace
 ENV ENV=${ENV:-/etc/shinit_v2}
 ENV VIRTUAL_ENV=/opt/dynamo/venv
@@ -565,20 +562,6 @@ ENV CUDA_HOME=/usr/local/cuda \
     TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
     TRITON_CUDART_PATH=/usr/local/cuda/include
 
-# Copy OpenMPI from PyTorch base image
-COPY --from=pytorch_base /opt/hpcx/ompi /opt/hpcx/ompi
-# Copy NUMA library from PyTorch base image
-COPY --from=pytorch_base /usr/lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
-
-# Copy UCX libraries, libucc.so is needed by pytorch. May not need to copy whole hpcx dir but only /opt/hpcx/ucc/
-COPY --from=pytorch_base /opt/hpcx /opt/hpcx
-# This is needed to make libucc.so visible so pytorch can use it.
-ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
-# Might not need to copy cusparseLt in the future once it's included in DLFW cuda container
-# networkx, packaging, setuptools get overridden by trtllm installation, so not copying them
-# pytorch-triton is copied after trtllm installation.
-COPY --from=pytorch_base /usr/local/cuda/lib64/libcusparseLt* /usr/local/cuda/lib64/
-
 # Copy nats and etcd from dynamo_base image
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
@@ -600,10 +583,43 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-# Install Python, build-essential and python3-dev as apt dependencies
+#########################################################################
+#  Branch & Merge Pattern to handle architecture naming
+#    This maps TARGETARCH (amd64/arm64) to the formatted string we need (x86_64/aarch64)
+#    without requiring ARG ARCH_ALT input.
+#########################################################################
+
+# Branch 1: AMD64 specific settings
+FROM runtime_base AS runtime_amd64
+ENV SYSTEM_ARCH_NAME="x86_64"
+
+# Branch 2: ARM64 specific settings
+FROM runtime_base AS runtime_arm64
+ENV SYSTEM_ARCH_NAME="aarch64"
+
+# 3. Merge: Select the correct branch automatically using TARGETARCH
+ARG TARGETARCH
+FROM runtime_${TARGETARCH} AS runtime
+
 ARG PYTHON_VERSION
-RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
-        ARCH_FOR_GPG=${ARCH_ALT}; \
+
+# Copy OpenMPI from PyTorch base image
+COPY --from=pytorch_base /opt/hpcx/ompi /opt/hpcx/ompi
+# Copy NUMA library from PyTorch base image
+COPY --from=pytorch_base /usr/lib/${SYSTEM_ARCH_NAME}-linux-gnu/libnuma.so* /usr/lib/${SYSTEM_ARCH_NAME}-linux-gnu/
+
+# Copy UCX libraries, libucc.so is needed by pytorch. May not need to copy whole hpcx dir but only /opt/hpcx/ucc/
+COPY --from=pytorch_base /opt/hpcx /opt/hpcx
+# This is needed to make libucc.so visible so pytorch can use it.
+ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
+# Might not need to copy cusparseLt in the future once it's included in DLFW cuda container
+# networkx, packaging, setuptools get overridden by trtllm installation, so not copying them
+# pytorch-triton is copied after trtllm installation.
+COPY --from=pytorch_base /usr/local/cuda/lib64/libcusparseLt* /usr/local/cuda/lib64/
+
+# Install Python, build-essential and python3-dev as apt dependencies
+RUN if [ ${SYSTEM_ARCH_NAME} = "x86_64" ]; then \
+        ARCH_FOR_GPG=${SYSTEM_ARCH_NAME}; \
     else \
         ARCH_FOR_GPG="sbsa"; \
     fi && \
@@ -655,12 +671,12 @@ SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 
 ENV DYNAMO_HOME=/workspace
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${SYSTEM_ARCH_NAME}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
 # Copy libgomp.so from framework image
 COPY --from=framework /usr/local/tensorrt /usr/local/tensorrt
-COPY --from=framework /usr/lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH_ALT}-linux-gnu/
+COPY --from=framework /usr/lib/${SYSTEM_ARCH_NAME}-linux-gnu/libgomp.so* /usr/lib/${SYSTEM_ARCH_NAME}-linux-gnu/
 
 # Copy pre-built venv with PyTorch and TensorRT-LLM from framework stage
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
@@ -682,7 +698,8 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/lib/pkgconfig/; \
     true # in case ffmpeg not enabled
 
-ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib
+
+ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${SYSTEM_ARCH_NAME}-linux-gnu/lib
 ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
 ENV LD_LIBRARY_PATH=\
 $NIXL_LIB_DIR:\
@@ -690,7 +707,7 @@ $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 /opt/hpcx/ompi/lib:\
-/usr/lib/${ARCH_ALT}-linux-gnu/nvshmem/13/:\
+/usr/lib/${SYSTEM_ARCH_NAME}-linux-gnu/nvshmem/13/:\
 $TENSORRT_LIB_DIR:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt/lib:\
@@ -839,4 +856,5 @@ RUN uv pip install --no-cache maturin[patchelf]
 COPY pyproject.toml README.md hatch_build.py /workspace/
 RUN uv pip install --no-cache --no-deps -e .
 
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
