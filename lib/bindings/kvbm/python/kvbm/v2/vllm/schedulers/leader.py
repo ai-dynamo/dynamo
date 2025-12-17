@@ -73,8 +73,6 @@ class SchedulerConnectorLeader:
                 "Rebuild kvbm with: maturin develop --features v2"
             )
 
-        print("[KVBM DEBUG] SchedulerConnectorLeader.__init__ START", flush=True)
-
         self.vllm_config = vllm_config
         self.kvbm_config = kvbm_config
         self.vllm_kv_cache_config = kv_cache_config
