@@ -305,14 +305,18 @@ class DisaggMockerProcess:
 
 
 @pytest.mark.parallel
-def test_mocker_kv_router(request, runtime_services_session, predownload_tokenizers):
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+def test_mocker_kv_router(
+    request, runtime_services_session, predownload_tokenizers, request_plane
+):
     """
     Test KV router with multiple mocker engine instances.
     This test doesn't require GPUs and runs quickly for pre-merge validation.
+    Tests both NATS and TCP request planes.
     """
 
     # runtime_services starts etcd and nats
-    logger.info("Starting mocker KV router test")
+    logger.info(f"Starting mocker KV router test with request_plane={request_plane}")
 
     # Create mocker args dictiona: FixtureRequestry: tuple[NatsServer, EtcdServer]: NoneType
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
@@ -321,13 +325,18 @@ def test_mocker_kv_router(request, runtime_services_session, predownload_tokeniz
         # Start mocker instances with the new CLI interface
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         mockers = MockerProcess(
-            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+            request,
+            mocker_args=mocker_args,
+            num_mockers=NUM_MOCKERS,
+            request_plane=request_plane,
         )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
         # Get unique port for this test
-        frontend_port = get_unique_ports(request, num_ports=1)[0]
+        frontend_port = get_unique_ports(
+            request, num_ports=1, request_plane=request_plane
+        )[0]
 
         # Run basic router test (starts router internally and waits for workers to be ready)
         _test_router_basic(
@@ -337,6 +346,7 @@ def test_mocker_kv_router(request, runtime_services_session, predownload_tokeniz
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
+            request_plane=request_plane,
         )
 
     finally:

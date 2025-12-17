@@ -74,6 +74,7 @@ class SGLangProcess:
         num_workers: int = 2,
         single_gpu: bool = False,
         data_parallel_size: Optional[int] = None,
+        request_plane: str = "tcp",
     ):
         """Initialize SGLang workers with dynamo integration.
 
@@ -88,6 +89,7 @@ class SGLangProcess:
             num_workers: Number of SGLang worker processes
             single_gpu: If True, all workers share GPU 0
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
+            request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
         """
         # Generate unique namespace for isolation
         namespace_suffix = generate_random_suffix()
@@ -168,6 +170,7 @@ class SGLangProcess:
                 {
                     "CUDA_VISIBLE_DEVICES": gpu_device,
                     "DYN_NAMESPACE": self.namespace,
+                    "DYN_REQUEST_PLANE": request_plane,
                     "PYTHONHASHSEED": "0",  # for deterministic event id's
                 }
             )
@@ -291,16 +294,20 @@ class SGLangProcess:
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_sglang_kv_router_basic(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, predownload_models, set_ucx_tls_no_mm, request_plane
 ):
     """
     Quick e2e sanity test for KV router with SGLang engine instances.
+    Tests both NATS and TCP request planes.
     """
 
     # runtime_services starts etcd and nats
     N_SGLANG_WORKERS = 2
-    logger.info(f"Starting SGLang KV router test with {N_SGLANG_WORKERS} workers")
+    logger.info(
+        f"Starting SGLang KV router test with {N_SGLANG_WORKERS} workers using request_plane={request_plane}"
+    )
 
     try:
         # Start SGLang workers
@@ -310,6 +317,7 @@ def test_sglang_kv_router_basic(
             sglang_args=SGLANG_ARGS,
             num_workers=N_SGLANG_WORKERS,
             single_gpu=True,  # fit workers into one GPU
+            request_plane=request_plane,
         )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
         sglang_workers.__enter__()
@@ -324,6 +332,7 @@ def test_sglang_kv_router_basic(
             num_requests=NUM_REQUESTS,
             frontend_timeout=180,  # 3 minutes should be plenty for TinyLlama
             store_backend="etcd",  # Explicit for clarity
+            request_plane=request_plane,
         )
 
     finally:
