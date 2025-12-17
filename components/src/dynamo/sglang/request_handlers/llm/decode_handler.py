@@ -26,6 +26,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         publisher: DynamoSglangPublisher,
         prefill_client: Optional[Client] = None,
         prefill_router_client: Optional[Client] = None,
+        isl_histogram=None,
+        osl_histogram=None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -36,6 +38,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             publisher: Metrics publisher for the worker.
             prefill_client: Optional client for prefill worker in disaggregated mode.
             prefill_router_client: Optional client for prefill router in disaggregated mode.
+            isl_histogram: Optional histogram for input sequence length metrics.
+            osl_histogram: Optional histogram for output sequence length metrics.
 
         Raises:
             ValueError: If prefill_client is not provided in decode serving mode.
@@ -46,6 +50,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config,
             publisher,
             prefill_client,
+            isl_histogram,
+            osl_histogram,
         )
         if self.serving_mode == DisaggregationMode.DECODE:
             if self.prefill_client is None:

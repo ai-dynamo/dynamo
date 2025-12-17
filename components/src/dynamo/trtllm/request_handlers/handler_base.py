@@ -73,6 +73,8 @@ class RequestHandlerConfig:
     ] = None  # DistributedRuntime reference for graceful shutdown
     metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
     kv_block_size: int = 32
+    isl_histogram: Optional[Any] = None  # Input sequence length histogram
+    osl_histogram: Optional[Any] = None  # Output sequence length histogram
 
 
 class HandlerBase:
@@ -94,6 +96,16 @@ class HandlerBase:
         # Store runtime reference for graceful shutdown
         self.runtime = config.runtime
         self.kv_block_size: int = config.kv_block_size
+        # Metrics
+        self.isl_histogram = config.isl_histogram
+        self.osl_histogram = config.osl_histogram
+
+    def _observe_sequence_lengths(self, isl: int, osl: int) -> None:
+        """Record ISL and OSL metrics."""
+        if self.isl_histogram:
+            self.isl_histogram.observe(float(isl))
+        if self.osl_histogram:
+            self.osl_histogram.observe(float(osl))
 
     def check_error(self, result: dict):
         """
@@ -438,6 +450,11 @@ class HandlerBase:
                             "total_tokens": int(num_input_tokens + next_total_toks),
                             "prompt_tokens_details": prompt_tokens_details,
                         }
+
+                        # Record ISL/OSL metrics
+                        self._observe_sequence_lengths(
+                            num_input_tokens, next_total_toks
+                        )
 
                     if res.finished and not out.get("finish_reason"):
                         out["finish_reason"] = "unknown"

@@ -31,6 +31,8 @@ class BaseWorkerHandler(ABC):
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
         prefill_client: Optional[Client] = None,
+        isl_histogram=None,
+        osl_histogram=None,
     ) -> None:
         """Initialize base worker handler.
 
@@ -40,6 +42,8 @@ class BaseWorkerHandler(ABC):
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher for the worker.
             prefill_client: Optional client for prefill worker in disaggregated mode.
+            isl_histogram: Optional histogram for input sequence length metrics.
+            osl_histogram: Optional histogram for output sequence length metrics.
         """
         self.component = component
         self.engine = engine
@@ -60,6 +64,17 @@ class BaseWorkerHandler(ABC):
             if not self.skip_tokenizer_init
             else None
         )
+
+        # Metrics
+        self.isl_histogram = isl_histogram
+        self.osl_histogram = osl_histogram
+
+    def _observe_sequence_lengths(self, isl: int, osl: int) -> None:
+        """Record ISL and OSL metrics."""
+        if self.isl_histogram:
+            self.isl_histogram.observe(float(isl))
+        if self.osl_histogram:
+            self.osl_histogram.observe(float(osl))
 
     @abstractmethod
     async def generate(self, request: Dict[str, Any], context: Context):
