@@ -128,13 +128,42 @@ cd $INSTALLATION_DIR
 git clone https://github.com/vllm-project/vllm.git vllm
 cd vllm
 git checkout $VLLM_REF
+# TODO: remove this cherry-pick when vllm is upgraded to > 0.12.0 (when the fix is shipped)
+git cherry-pick --no-commit 799804d140fc99ce3964648ba91aaa810cf28fef # nvshmem fix for CUDA 13.0
+echo "✓ vLLM repository cloned"
 
 echo "\n=== Installing vLLM & FlashInfer ==="
 echo "Installing vLLM $VLLM_REF from PyPI..."
-
-uv pip install vllm[flashinfer,runai]==$VLLM_REF --torch-backend=${TORCH_BACKEND}
-uv pip install flashinfer-cubin==$FLASHINF_REF
-uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
+if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
+    uv pip install vllm[flashinfer,runai]==$VLLM_REF --torch-backend=${TORCH_BACKEND}
+    uv pip install flashinfer-cubin==$FLASHINF_REF
+    uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
+elif [[ "$CUDA_VERSION_MAJOR" == "13" ]]; then
+    if [ "$ARCH" = "amd64" ]; then
+        echo "Installing vLLM $VLLM_REF from PyPI..."
+        # LMCache installation currently fails on arm64 due to CUDA dependency issues
+        # Install LMCache BEFORE vLLM so vLLM's dependencies take precedence
+        uv pip install \
+            --no-cache \
+            --index-strategy=unsafe-best-match \
+            --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND} \
+            nixl[cu13]==0.7.1 \
+            https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER}/vllm-${VLLM_VER}+${TORCH_BACKEND}-cp38-abi3-manylinux_2_31_x86_64.whl[flashinfer,runai] \
+            --torch-backend=${TORCH_BACKEND}
+        uv pip install flashinfer-cubin==$FLASHINF_REF
+        uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
+        echo "✓ vLLM installation completed"
+    else
+        echo "⚠ Skipping LMCache on ARM64 (compatibility issues, missing aarch64 wheels)"
+        echo "Building vLLM from source for ${ARCH} architecture..."
+        echo "Try to install specific PyTorch and other dependencies first"
+        uv pip install --index-strategy=unsafe-best-match --index https://download.pytorch.org/whl/ -r requirements/cuda.txt
+        uv pip install setuptools_scm # required to build vLLM from source
+        MAX_JOBS=${MAX_JOBS} uv pip install -v --no-cache --no-build-isolation .
+    fi
+else
+    echo "❌ Unsupported CUDA version for vLLM installation: ${CUDA_VERSION}"
+fi
 
 echo "✓ vLLM installation completed"
 
