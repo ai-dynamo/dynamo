@@ -82,7 +82,7 @@ impl InnerPrefillRouter {
 /// from the prefill response and injecting them into the decode request.
 ///
 /// Supports regular Dynamo and GAIE integrated mode via query_instance_id state machine:
-/// - GAIE Stage 1: query_instance_id transitions "" → "prefill" → "decode", returns only worker IDs
+/// - GAIE Stage 1: query_instance_id transitions "" -> "prefill" -> "decode", returns only worker IDs
 /// - GAIE Stage 2: target_prefill_worker_id/target_decode_worker_id are set, full execution with specified workers
 /// - Non-GAIE: like GAIE Stage 2 but the worker ids have to be determined.
 pub struct PrefillRouter {
@@ -339,7 +339,7 @@ impl
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
 
-        // Check for GAIE Stage 1: empty query_instance_id signals query-only mode
+        // GAIE Stage 1: the presence of the empty query_instance_id signals query-only mode
         // State machine: "" -> "prefill" -> "decode"
         let is_gaie_stage1 = req
             .get_annotation_value("query_instance_id")
@@ -357,7 +357,7 @@ impl
                 .push(format!("query_instance_id:{}", QueryInstanceType::Prefill));
         }
 
-        // Check for GAIE Stage 2: pre-selected worker IDs
+        // GAIE Stage 2: pre-selected worker IDs from Stage 1.
         let target_prefill_worker = req.target_prefill_worker_id;
         let target_decode_worker = req.target_decode_worker_id;
 
@@ -422,13 +422,6 @@ impl
                 (None, Some(result))
             }
             Err(PrefillError::NotActivated) => {
-                if is_gaie_stage1 {
-                    tracing::error!(
-                        request_id = %request_id,
-                        "GAIE Stage 1 failed: Prefill router not activated"
-                    );
-                    return Err(anyhow::anyhow!(PrefillError::NotActivated));
-                }
                 if self.enforce_disagg {
                     tracing::error!(
                         "Prefill router not activated, but disaggregated mode is enforced. Failing request."
@@ -439,14 +432,6 @@ impl
                 return next.generate(context.map(|_| req)).await;
             }
             Err(e) => {
-                if is_gaie_stage1 {
-                    tracing::error!(
-                        request_id = %request_id,
-                        error = %e,
-                        "GAIE Stage 1 failed during prefill worker query"
-                    );
-                    return Err(anyhow::anyhow!(e));
-                }
                 if self.enforce_disagg {
                     tracing::error!(
                         error = %e,
