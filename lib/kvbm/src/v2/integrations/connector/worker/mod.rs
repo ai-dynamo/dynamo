@@ -434,9 +434,10 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         tracing::debug!("Clearing connector metadata");
 
         // Verify that forward pass events have been consumed by save_kv_layer
-        let events = self.state.forward_pass_events.lock().unwrap();
+        let events = self.state.forward_pass_events.lock().unwrap().take();
         if events.is_some() {
-            tracing::warn!(
+            // todo: if wthere are no worker actions, remove the event from the leaders metadata message
+            tracing::trace!(
                 "Forward pass events not consumed - save_kv_layer may not have been called on last layer"
             );
             // Don't bail here - this could happen if there was an error during forward pass
