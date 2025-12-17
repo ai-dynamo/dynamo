@@ -414,6 +414,303 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "changing service from single-node to multi-node",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							// Single-node (nil Multinode)
+							Multinode: nil,
+						},
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							// Multi-node (NodeCount > 1)
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 2,
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.services[main] cannot change node topology (between single-node and multi-node) after creation",
+		},
+		{
+			name: "changing service from multi-node to single-node",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							// Multi-node
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 3,
+							},
+						},
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							// Single-node (nil Multinode)
+							Multinode: nil,
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.services[main] cannot change node topology (between single-node and multi-node) after creation",
+		},
+		{
+			name: "changing multinode NodeCount within multi-node range is allowed",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 2,
+							},
+						},
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 4,
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "keeping service as single-node is allowed",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Multinode: nil,
+						},
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Multinode: nil,
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "keeping service as multi-node is allowed",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 3,
+							},
+						},
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 3,
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "changing from single-node (NodeCount=1) to multi-node (NodeCount=2)",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 1,
+							},
+						},
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 2,
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.services[main] cannot change node topology (between single-node and multi-node) after creation",
+		},
+		{
+			name: "changing from multi-node (NodeCount=2) to single-node (NodeCount=1)",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 2,
+							},
+						},
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 1,
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.services[main] cannot change node topology (between single-node and multi-node) after creation",
+		},
+		{
+			name: "multiple services with one changing topology",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Multinode: nil,
+						},
+						"prefill": {
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 2,
+							},
+						},
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							// Changing from single-node to multi-node
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 3,
+							},
+						},
+						"prefill": {
+							// Keeping as multi-node (OK)
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 4,
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.services[main] cannot change node topology (between single-node and multi-node) after creation",
+		},
+		{
+			name: "adding new service with multinode is allowed",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Multinode: nil,
+						},
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Multinode: nil,
+						},
+						"decode": {
+							// New service with multinode - should be allowed
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 4,
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "adding new service without multinode is allowed",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 2,
+							},
+						},
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+								NodeCount: 2,
+							},
+						},
+						"gateway": {
+							// New service without multinode - should be allowed
+							Multinode: nil,
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {

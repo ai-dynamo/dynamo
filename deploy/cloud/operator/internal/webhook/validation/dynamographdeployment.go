@@ -91,11 +91,32 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.D
 // validateImmutableFields checks that immutable fields have not been changed.
 // Appends warnings to the provided slice.
 func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv1alpha1.DynamoGraphDeployment, warnings *admission.Warnings) error {
+	var errs []error
+
 	if v.deployment.Spec.BackendFramework != old.Spec.BackendFramework {
 		*warnings = append(*warnings, "Changing spec.backendFramework may cause unexpected behavior")
-		return fmt.Errorf("spec.backendFramework is immutable and cannot be changed after creation")
+		errs = append(errs, fmt.Errorf("spec.backendFramework is immutable and cannot be changed after creation"))
 	}
-	return nil
+
+	// Validate that node topology (single-node vs multi-node) is not changed for each service.
+	for serviceName, newService := range v.deployment.Spec.Services {
+		// Get old service (if exists)
+		oldService, exists := old.Spec.Services[serviceName]
+		if !exists {
+			// New service, no comparison needed
+			continue
+		}
+
+		if oldService.IsMultinode() != newService.IsMultinode() {
+			errs = append(errs, fmt.Errorf(
+				"spec.services[%s] cannot change node topology (between single-node and multi-node) after creation",
+				serviceName,
+			))
+		}
+	}
+
+	return errors.Join(errs...)
+
 }
 
 // validateReplicasChanges checks if replicas were changed for services with scaling adapter enabled.
