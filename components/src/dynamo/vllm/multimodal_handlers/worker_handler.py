@@ -227,6 +227,11 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         # Remove the image features from the request as they are not required
         request.multimodal_inputs = None
 
+        logger.info(f"Prepared multimodal data size: {len(multi_modal_data['image'])}")
+
+        # Deepcopy the request to avoid modifying the original
+        # when we adjust sampling params for prefill
+
         pd_request = copy.deepcopy(request)
         # Do prefill and remote decode if enable_disagg is true
         if self.enable_disagg and self.decode_worker_client:
