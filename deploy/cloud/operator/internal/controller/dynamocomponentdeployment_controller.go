@@ -295,7 +295,7 @@ type ComponentReconcileResult struct {
 	status               metav1.ConditionStatus
 	reason               string
 	message              string
-	serviceReplicaStatus v1alpha1.ServiceReplicaStatus
+	serviceReplicaStatus *v1alpha1.ServiceReplicaStatus
 }
 
 func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
@@ -307,7 +307,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		return ComponentReconcileResult{}, fmt.Errorf("failed to create or update the deployment: %w", err)
 	}
 
-	serviceReplicaStatus := v1alpha1.ServiceReplicaStatus{
+	serviceReplicaStatus := &v1alpha1.ServiceReplicaStatus{
 		ComponentKind:     v1alpha1.ComponentKindDeployment,
 		ComponentName:     deployment.Name,
 		Replicas:          deployment.Status.Replicas,
@@ -476,9 +476,9 @@ func getLeaderWorkerSetReplicasStatus(leaderWorkerSet *leaderworkersetv1.LeaderW
 	}
 }
 
-func combineLWSReplicaStatuses(serviceReplicaStatuses []v1alpha1.ServiceReplicaStatus) v1alpha1.ServiceReplicaStatus {
+func combineLWSReplicaStatuses(serviceReplicaStatuses []v1alpha1.ServiceReplicaStatus) *v1alpha1.ServiceReplicaStatus {
 	if len(serviceReplicaStatuses) == 0 {
-		return v1alpha1.ServiceReplicaStatus{}
+		return nil
 	}
 
 	firstServiceStatus := serviceReplicaStatuses[0]
@@ -495,7 +495,7 @@ func combineLWSReplicaStatuses(serviceReplicaStatuses []v1alpha1.ServiceReplicaS
 	}
 
 	firstServiceStatus.ReadyReplicas = &readyReplicas
-	return firstServiceStatus
+	return &firstServiceStatus
 }
 
 // IsLeaderWorkerSetReady determines if a LeaderWorkerSet is fully ready and available

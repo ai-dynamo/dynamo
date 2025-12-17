@@ -1401,7 +1401,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				status:   metav1.ConditionTrue,
 				reason:   "AllLeaderWorkerSetsReady",
 				message:  "All LeaderWorkerSets are ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
 					ReadyReplicas:   ptr.To(int32(1)),
@@ -1480,7 +1480,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				status:   metav1.ConditionFalse,
 				reason:   "SomeLeaderWorkerSetsNotReady",
 				message:  "Some LeaderWorkerSets are not ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
 					ReadyReplicas:   ptr.To(int32(2)),
@@ -1559,7 +1559,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				status:   metav1.ConditionTrue,
 				reason:   "AllLeaderWorkerSetsReady",
 				message:  "All LeaderWorkerSets are ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
 					ReadyReplicas:   ptr.To(int32(3)),
@@ -1704,7 +1704,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				status:   metav1.ConditionTrue,
 				reason:   "DeploymentReady",
 				message:  "Deployment is ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
 					Replicas:          2,
@@ -1745,7 +1745,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				status:   metav1.ConditionFalse,
 				reason:   "DeploymentNotReady",
 				message:  "Deployment is not ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
 					Replicas:          1,
@@ -1851,7 +1851,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				status:   metav1.ConditionFalse,
 				reason:   "DeploymentNotReady",
 				message:  "Deployment is not ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
 					Replicas:          1,
@@ -1879,7 +1879,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				status:   metav1.ConditionTrue,
 				reason:   "DeploymentReady",
 				message:  "Deployment is ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
 					Replicas:          2,
@@ -1907,7 +1907,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				status:   metav1.ConditionFalse,
 				reason:   "SomeLeaderWorkerSetsNotReady",
 				message:  "Some LeaderWorkerSets are not ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
 					Replicas:        3,
@@ -1933,7 +1933,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				status:   metav1.ConditionTrue,
 				reason:   "AllLeaderWorkerSetsReady",
 				message:  "All LeaderWorkerSets are ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
 					Replicas:        3,
