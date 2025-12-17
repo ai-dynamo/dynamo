@@ -979,60 +979,72 @@ fn spawn_prefill_watcher(
                 }
             };
 
-            if let DiscoveryEvent::Added(instance) = event {
-                let (endpoint_id, card) = match &instance {
-                    DiscoveryInstance::Model {
-                        namespace,
-                        component,
-                        endpoint,
-                        ..
-                    } => {
-                        // Filter by namespace
-                        if namespace != &target_namespace {
-                            continue;
+            match event {
+                DiscoveryEvent::Added(instance) => {
+                    let (endpoint_id, card) = match &instance {
+                        DiscoveryInstance::Model {
+                            namespace,
+                            component,
+                            endpoint,
+                            ..
+                        } => {
+                            // Filter by namespace
+                            if namespace != &target_namespace {
+                                continue;
+                            }
+
+                            let eid = EndpointId {
+                                namespace: namespace.clone(),
+                                component: component.clone(),
+                                name: endpoint.clone(),
+                            };
+
+                            match instance.deserialize_model::<ModelDeploymentCard>() {
+                                Ok(card) => (eid, card),
+                                Err(_) => continue,
+                            }
                         }
+                        _ => continue,
+                    };
 
-                        let eid = EndpointId {
-                            namespace: namespace.clone(),
-                            component: component.clone(),
-                            name: endpoint.clone(),
-                        };
+                    // Only handle prefill models
+                    if !card.model_type.supports_prefill() {
+                        continue;
+                    }
 
-                        match instance.deserialize_model::<ModelDeploymentCard>() {
-                            Ok(card) => (eid, card),
-                            Err(_) => continue,
+                    tracing::info!(
+                        model_name = card.name(),
+                        "Prefill model discovered, activating prefill router"
+                    );
+
+                    // Get the endpoint and activate the prefill router
+                    if let Ok(ns) = drt.namespace(&endpoint_id.namespace)
+                        && let Ok(comp) = ns.component(&endpoint_id.component)
+                    {
+                        let endpoint = comp.endpoint(&endpoint_id.name);
+                        if let Err(e) = model_manager.activate_prefill_router(card.name(), endpoint)
+                        {
+                            tracing::warn!(
+                                model_name = card.name(),
+                                error = %e,
+                                "Failed to activate prefill router"
+                            );
+                        } else {
+                            tracing::info!(
+                                model_name = card.name(),
+                                "Prefill router activated successfully"
+                            );
                         }
                     }
-                    _ => continue,
-                };
-
-                // Only handle prefill models
-                if !card.model_type.supports_prefill() {
-                    continue;
                 }
-
-                tracing::info!(
-                    model_name = card.name(),
-                    "Prefill model discovered, activating prefill router"
-                );
-
-                // Get the endpoint and activate the prefill router
-                if let Ok(ns) = drt.namespace(&endpoint_id.namespace)
-                    && let Ok(comp) = ns.component(&endpoint_id.component)
-                {
-                    let endpoint = comp.endpoint(&endpoint_id.name);
-                    if let Err(e) = model_manager.activate_prefill_router(card.name(), endpoint) {
-                        tracing::warn!(
-                            model_name = card.name(),
-                            error = %e,
-                            "Failed to activate prefill router"
-                        );
-                    } else {
-                        tracing::info!(
-                            model_name = card.name(),
-                            "Prefill router activated successfully"
-                        );
-                    }
+                DiscoveryEvent::Removed(instance_id) => {
+                    // Log removal for observability
+                    // Note: The PrefillRouter remains active - worker availability
+                    // is handled dynamically by the underlying Client's instance tracking
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        "Prefill worker instance removed from discovery"
+                    );
                 }
             }
         }
