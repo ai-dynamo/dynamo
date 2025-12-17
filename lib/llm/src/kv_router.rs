@@ -765,12 +765,20 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let context_id = request.context().id().to_string();
 
         // Check if this is a query_instance_id request and parse its type
-        // Format: "query_instance_id:type" where type is "prefill" or "decode"
-        // Note: Empty value ("query_instance_id:") is handled by PrefillRouter for disagg orchestration
+        // Format: "query_instance_id:type" where type is "prefill", "decode", or "" (empty for aggregated)
+        // Empty value ("query_instance_id:") means GAIE Aggregated mode - return same worker as both prefill and decode
+        let query_instance_annotation = request.get_annotation_value("query_instance_id");
+        let is_aggregated_query = query_instance_annotation
+            .as_ref()
+            .is_some_and(|s| s.is_empty());
         let query_instance_type: Option<QueryInstanceType> =
-            if let Some(type_str) = request.get_annotation_value("query_instance_id") {
+            if let Some(type_str) = &query_instance_annotation {
                 match type_str.parse::<QueryInstanceType>() {
                     Ok(t) => Some(t),
+                    Err(_) if type_str.is_empty() => {
+                        // Empty value is valid for aggregated mode, not a warning
+                        None
+                    }
                     Err(e) => {
                         tracing::warn!("Invalid query_instance_id type '{}': {}", type_str, e);
                         None
@@ -807,13 +815,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             (id, dp_rank, overlap_blocks)
         } else {
             // Otherwise, find the best match
+            // Don't update states if this is a query-only request (disagg or aggregated)
+            let should_update_states = query_instance_type.is_none() && !is_aggregated_query;
             let (best_worker, overlap_amount) = self
                 .chooser
                 .find_best_match(
                     Some(&context_id),
                     &request.token_ids,
                     request.router_config_override.as_ref(),
-                    query_instance_type.is_none(), // Don't update states if query_instance_id
+                    should_update_states,
                 )
                 .await?;
             (best_worker.worker_id, best_worker.dp_rank, overlap_amount)
@@ -823,33 +833,48 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // without routing to the actual worker. Returns LLMEngineOutput with disaggregated_params
         // containing worker_id info, same structure as normal execution for uniform extraction.
         let stream_context = request.context().clone();
-        if let Some(query_type) = query_instance_type {
-            let worker_id_info = match query_type {
-                QueryInstanceType::Prefill => {
-                    tracing::trace!(
-                        query_type = "prefill",
-                        prefill_worker_id = instance_id,
-                        "Returning prefill worker selection"
-                    );
-                    WorkerIdInfo {
-                        prefill_worker_id: Some(instance_id),
-                        decode_worker_id: None,
-                    }
+
+        // Handle query-only requests (GAIE Stage 1)
+        if query_instance_type.is_some() || is_aggregated_query {
+            let worker_id_info = if is_aggregated_query {
+                // GAIE Aggregated mode: same worker serves both prefill and decode
+                tracing::trace!(
+                    query_type = "aggregated",
+                    worker_id = instance_id,
+                    "Returning aggregated worker selection (same worker for prefill and decode)"
+                );
+                WorkerIdInfo {
+                    prefill_worker_id: Some(instance_id),
+                    decode_worker_id: Some(instance_id),
                 }
-                QueryInstanceType::Decode => {
-                    // Get prefill_worker_id from annotation (set by caller after prefill selection)
-                    let prefill_worker_id = request
-                        .get_annotation_value("prefill_worker_id")
-                        .and_then(|s| s.parse::<u64>().ok());
-                    tracing::trace!(
-                        query_type = "decode",
-                        prefill_worker_id = ?prefill_worker_id,
-                        decode_worker_id = instance_id,
-                        "Returning decode worker selection"
-                    );
-                    WorkerIdInfo {
-                        prefill_worker_id,
-                        decode_worker_id: Some(instance_id),
+            } else {
+                match query_instance_type.unwrap() {
+                    QueryInstanceType::Prefill => {
+                        tracing::trace!(
+                            query_type = "prefill",
+                            prefill_worker_id = instance_id,
+                            "Returning prefill worker selection"
+                        );
+                        WorkerIdInfo {
+                            prefill_worker_id: Some(instance_id),
+                            decode_worker_id: None,
+                        }
+                    }
+                    QueryInstanceType::Decode => {
+                        // Get prefill_worker_id from annotation (set by caller after prefill selection)
+                        let prefill_worker_id = request
+                            .get_annotation_value("prefill_worker_id")
+                            .and_then(|s| s.parse::<u64>().ok());
+                        tracing::trace!(
+                            query_type = "decode",
+                            prefill_worker_id = ?prefill_worker_id,
+                            decode_worker_id = instance_id,
+                            "Returning decode worker selection"
+                        );
+                        WorkerIdInfo {
+                            prefill_worker_id,
+                            decode_worker_id: Some(instance_id),
+                        }
                     }
                 }
             };

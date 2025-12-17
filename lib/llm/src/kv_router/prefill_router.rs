@@ -287,12 +287,12 @@ impl
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         // Extract request data while preserving context
-        let (mut req, context) = request.into_parts();
+        let (req, context) = request.into_parts();
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
 
         // GAIE Stage 1: the presence of the empty query_instance_id signals query-only mode
-        // State machine: "" -> "prefill" -> "decode"
+        // State machine: "" -> "prefill" -> "decode" (disagg) OR "" -> aggregated worker (agg fallback)
         let is_gaie_stage1 = req
             .get_annotation_value("query_instance_id")
             .is_some_and(|s| s.is_empty());
@@ -300,13 +300,8 @@ impl
         if is_gaie_stage1 {
             tracing::info!(
                 request_id = %request_id,
-                "GAIE Stage 1: Starting query-only disaggregated flow"
+                "GAIE Stage 1: Starting query-only flow"
             );
-            // Transition state: "" -> "prefill"
-            req.annotations
-                .retain(|a| !a.starts_with("query_instance_id"));
-            req.annotations
-                .push(format!("query_instance_id:{}", QueryInstanceType::Prefill));
         }
 
         // GAIE Stage 2: pre-selected worker IDs from Stage 1.
@@ -322,12 +317,55 @@ impl
             );
         }
 
+        // Check if prefill router is active BEFORE attempting prefill
+        // This determines whether we use disaggregated or aggregated flow
+        let prefill_is_active = self.prefill_router.get().is_some();
+
+        if !prefill_is_active {
+            // AGGREGATED FLOW: No prefill worker, route directly to decode
+            if self.enforce_disagg {
+                tracing::error!(
+                    "Prefill router not activated, but disaggregated mode is enforced. Failing request."
+                );
+                return Err(anyhow::anyhow!(PrefillError::NotActivated));
+            }
+
+            if is_gaie_stage1 {
+                tracing::debug!(
+                    request_id = %request_id,
+                    "GAIE Aggregated: Prefill not active, forwarding to decode with empty query_instance_id"
+                );
+                // Forward with empty query_instance_id annotation intact
+                // kv_router.rs will handle this as aggregated query mode
+            } else {
+                tracing::debug!("Prefill router not activated, falling back to decode-only");
+            }
+
+            return next.generate(context.map(|_| req)).await;
+        }
+
+        // DISAGGREGATED FLOW: Prefill router is active
+
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
         // Prepare prefill request with max_tokens = 1
         let mut prefill_req = req.clone();
         prefill_req.stop_conditions.max_tokens = Some(1);
+
+        // GAIE Stage 1 Disagg: Set query_instance_id to "prefill" for prefill worker selection
+        if is_gaie_stage1 {
+            prefill_req
+                .annotations
+                .retain(|a| !a.starts_with("query_instance_id"));
+            prefill_req
+                .annotations
+                .push(format!("query_instance_id:{}", QueryInstanceType::Prefill));
+            tracing::debug!(
+                request_id = %request_id,
+                "GAIE Stage 1 Disagg: Querying prefill worker"
+            );
+        }
 
         // GAIE Stage 2: If target prefill worker is specified, route directly to it
         if let Some(prefill_worker_id) = target_prefill_worker {
@@ -365,17 +403,8 @@ impl
                 );
                 result
             }
-            Err(PrefillError::NotActivated) => {
-                if self.enforce_disagg {
-                    tracing::error!(
-                        "Prefill router not activated, but disaggregated mode is enforced. Failing request."
-                    );
-                    return Err(anyhow::anyhow!(PrefillError::NotActivated));
-                }
-                tracing::debug!("Prefill router not activated, falling back to decode-only");
-                return next.generate(context.map(|_| req)).await;
-            }
             Err(e) => {
+                // Prefill was active but failed during execution
                 if self.enforce_disagg {
                     tracing::error!(
                         error = %e,
