@@ -753,9 +753,9 @@ pub struct WorkerSelectionResult {
 
 /// Helper function to extract worker selection information from the annotation stream
 ///
-/// The response format is:
-/// - Event: "worker_id" with JSON comment: {"prefill_worker_id": 123, "decode_worker_id": 456}
-/// - Event: "token_data" with JSON comment: [1, 2, 3, ...]
+/// The response format (from disaggregated_params in nvext):
+/// - worker_id: {"prefill_worker_id": 123, "decode_worker_id": 456}
+/// - token_ids: [1, 2, 3, ...]
 pub async fn extract_worker_selection_from_stream(
     mut stream: Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
 ) -> anyhow::Result<WorkerSelectionResult> {
@@ -765,62 +765,35 @@ pub async fn extract_worker_selection_from_stream(
     let mut result = WorkerSelectionResult::default();
 
     while let Some(response) = stream.next().await {
-        let Some(event) = &response.event else {
-            continue;
-        };
-
-        match event.as_str() {
-            "worker_id" => {
-                tracing::debug!("Found worker_id event");
-
-                let Some(first_comment) = response.comment.as_ref().and_then(|v| v.first()) else {
-                    tracing::debug!("worker_id event without comments");
-                    continue;
-                };
-
-                // Parse as WorkerIdInfo JSON
-                match serde_json::from_str::<WorkerIdInfo>(first_comment) {
-                    Ok(worker_info) => {
-                        result.decode_worker_id = worker_info.decode_worker_id.map(|id| id as i64);
-                        result.prefill_worker_id =
-                            worker_info.prefill_worker_id.map(|id| id as i64);
-                        tracing::debug!(
-                            decode_worker_id = ?result.decode_worker_id,
-                            prefill_worker_id = ?result.prefill_worker_id,
-                            "Parsed worker_id info"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to parse WorkerIdInfo from '{}': {}",
-                            first_comment,
-                            e
-                        );
-                    }
-                }
+        // Check for data in nvext (worker_id and token_ids are direct fields)
+        // nvext is a serde_json::Value, so we access it as a JSON object
+        if let Some(data) = &response.data
+            && let Some(nvext) = &data.nvext
+        {
+            // Extract worker_id
+            if let Some(worker_id_value) = nvext.get("worker_id")
+                && let Ok(worker_info) =
+                    serde_json::from_value::<WorkerIdInfo>(worker_id_value.clone())
+            {
+                result.decode_worker_id = worker_info.decode_worker_id.map(|id| id as i64);
+                result.prefill_worker_id = worker_info.prefill_worker_id.map(|id| id as i64);
+                tracing::debug!(
+                    decode_worker_id = ?result.decode_worker_id,
+                    prefill_worker_id = ?result.prefill_worker_id,
+                    "Parsed worker_id from nvext"
+                );
             }
 
-            "token_data" => {
-                tracing::debug!("Found token_data event");
-
-                let Some(first_comment) = response.comment.as_ref().and_then(|v| v.first()) else {
-                    tracing::debug!("token_data event without comments");
-                    continue;
-                };
-
-                match serde_json::from_str::<Vec<u32>>(first_comment) {
-                    Ok(parsed_tokens) => {
-                        result.tokens = parsed_tokens;
-                        tracing::debug!("Successfully parsed {} tokens", result.tokens.len());
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to parse tokens from '{}': {}", first_comment, e);
-                    }
-                }
-            }
-
-            other => {
-                tracing::trace!("Unknown event type: '{}'", other);
+            // Extract token_ids
+            if let Some(token_ids_value) = nvext.get("token_ids")
+                && let Ok(parsed_tokens) =
+                    serde_json::from_value::<Vec<u32>>(token_ids_value.clone())
+            {
+                result.tokens = parsed_tokens;
+                tracing::debug!(
+                    "Successfully parsed {} tokens from nvext",
+                    result.tokens.len()
+                );
             }
         }
     }

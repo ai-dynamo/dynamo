@@ -35,6 +35,11 @@ pub struct NvExtResponse {
     /// Populated when client requests `extra_fields: ["timing"]`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timing: Option<TimingInfo>,
+
+    /// Token IDs for GAIE Stage 1 query-only mode
+    /// Contains the tokenized prompt for reuse in Stage 2
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_ids: Option<Vec<u32>>,
 }
 
 /// NVIDIA LLM extensions to the OpenAI API

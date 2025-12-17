@@ -223,6 +223,23 @@ impl PrefillRouter {
             ));
         };
 
+        let mut prompt_tokens_details = first_output
+            .data
+            .as_ref()
+            .and_then(|o| o.completion_usage.as_ref())
+            .and_then(|u| u.prompt_tokens_details.clone());
+
+        while let Some(next) = prefill_response.next().await {
+            if let Some(o) = next.data.as_ref()
+                && prompt_tokens_details.is_none()
+            {
+                prompt_tokens_details = o
+                    .completion_usage
+                    .as_ref()
+                    .and_then(|u| u.prompt_tokens_details.clone());
+            }
+        }
+
         if let Some(err) = first_output.err() {
             return Err(PrefillError::PrefillError(format!(
                 "Prefill router returned error in output: {err:?}"
@@ -240,23 +257,6 @@ impl PrefillRouter {
                 "Prefill router output missing disaggregated_params".to_string(),
             ));
         };
-
-        // Extract prompt_tokens_details from remaining stream items if available
-        let mut prompt_tokens_details = output
-            .completion_usage
-            .as_ref()
-            .and_then(|u| u.prompt_tokens_details.clone());
-
-        while let Some(next) = prefill_response.next().await {
-            if let Some(o) = next.data.as_ref()
-                && prompt_tokens_details.is_none()
-            {
-                prompt_tokens_details = o
-                    .completion_usage
-                    .as_ref()
-                    .and_then(|u| u.prompt_tokens_details.clone());
-            }
-        }
 
         Ok(PrefillResult {
             disaggregated_params,
