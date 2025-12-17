@@ -65,8 +65,8 @@ jobs:
     # - name: debuggin
     #   shell: bash
     #   run: |
-    #     sleep 3600 
-        
+    #     sleep 3600
+
     - name: Define buildkit builders
       uses: ./.github/actions/define-buildkit-builders
       with:
@@ -82,7 +82,7 @@ jobs:
   #       docker buildx inspect --bootstrap
 
 
-  
+
 
   cleanup-cluster-builder:
     name: Cleanup Builder
@@ -97,20 +97,20 @@ jobs:
     # - name: debuggin
     #   shell: bash
     #   run: |
-    #     sleep 3600 
-        
-    - name: Define buildkit builders
-      uses: ./.github/actions/define-buildkit-builders
-      with:
-        builder_name: ${{ env.BUILDER_NAME }}
-        replicas: '1'
-        linux_amd64: 'false'
-        linux_arm64: 'true'
-        linux_amd64_gpu: 'true'
-    - name: Cleanup Buildkit Builder
-      shell: bash
-      run: |
-        docker buildx rm ${{ env.BUILDER_NAME }} || true
+    #     sleep 3600
+
+    # - name: Define buildkit builders
+    #   uses: ./.github/actions/define-buildkit-builders
+    #   with:
+    #     builder_name: ${{ env.BUILDER_NAME }}
+    #     replicas: '1'
+    #     linux_amd64: 'false'
+    #     linux_arm64: 'true'
+    #     linux_amd64_gpu: 'true'
+    # - name: Cleanup Buildkit Builder
+    #   shell: bash
+    #   run: |
+    #     docker buildx rm ${{ env.BUILDER_NAME }} || true
 
 
   # operator:
@@ -156,7 +156,7 @@ jobs:
   #     # - name: debuggin
   #     #   shell: bash
   #     #   run: |
-  #     #     sleep 3600 
+  #     #     sleep 3600
   #     - name: Linter
   #       shell: bash
   #       env:
