@@ -394,7 +394,9 @@ pub struct KvCacheStoredBlockData {
     /// The hash of the tokens in the block.
     pub tokens_hash: LocalBlockHash,
     /// Extra multimodal metadata for this block
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Note: Do NOT use skip_serializing_if with bincode - it breaks deserialization
+    /// because bincode is positional and expects all fields to be present.
+    #[serde(default)]
     pub mm_extra_info: Option<BlockExtraInfo>,
 }
 
