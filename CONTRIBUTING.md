@@ -40,16 +40,20 @@ Thank you for your interest in contributing to Dynamo. To help us review your wo
 
 **If you are an external contributor and your change requires a GitHub Issue**, please follow this workflow:
 
-1. **Create a GitHub Issue First** – Before writing any code, [open a GitHub Issue](https://github.com/ai-dynamo/dynamo/issues/new/choose) using the appropriate template (Bug Report or Feature Request).
+1. **Create a GitHub Issue First** – Before writing any code, [open a GitHub Issue](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml) using the **Contribution Request** template.
 
 2. **Identify the Problem** – Clearly explain the problem you are trying to solve, including any relevant context, error messages, or use cases.
 
 3. **Recommend a Solution** – Propose your intended solution or approach in the issue. Include:
-   - **Scope estimate**: T-shirt size (S/M/L/XL)
+   - **Estimated PR size**: XS / S / M / L / XL / XXL (use your best judgment)
    - **Files affected**: Approximate number and which components/interfaces
-   - **Type of change**: New code only, or refactoring existing code?
+   - **Type of change**:
+     - **Bug fix**: Corrects existing behavior with minimal code changes; should include tests that capture the issue
+     - **New feature**: Adds new behavior or capability; requires comprehensive tests for the new functionality
+     - **Refactoring**: Restructures code without changing behavior; no new tests required
+     - **Performance improvement**: Optimizes existing behavior; should include before/after benchmarks
 
-   This helps the Dynamo team understand your plan, assess complexity, and provide early feedback. PRs that significantly exceed their stated scope may be rejected.
+   This helps the Dynamo team understand your plan, assess complexity, and provide early feedback. PRs that significantly exceed their stated size may be rejected.
 
 4. **Get Approval** – Wait for the Dynamo team to review and approve both the problem statement and your proposed solution. This ensures alignment with the project's architecture and roadmap before you invest time in implementation. Once approved, a maintainer will apply the `approved-for-pr` label to your issue.
 
@@ -247,4 +251,4 @@ you can use `-s` or `--signoff` to add the `Signed-off-by` line to
 the end of the commit message.
 
 ⚠️ **Contributor-Friendly DCO Guide:**
-If your pull request fails the DCO check, don’t worry! Check out our [DCO Troubleshooting Guide](DCO.md) for step-by-step instructions to fix it quickly.
+If your pull request fails the DCO check, don't worry! Check out our [DCO Troubleshooting Guide](DCO.md) for step-by-step instructions to fix it quickly.
