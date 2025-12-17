@@ -690,6 +690,13 @@ FROM runtime AS dev
 ARG WORKSPACE_DIR=/workspace
 
 USER root
+
+# Copy additional CUDA tools needed for building kernels from source (cargo build)
+COPY --from=base /usr/local/cuda/bin/nvlink /usr/local/cuda/bin/nvlink
+COPY --from=base /usr/local/cuda/bin/crt /usr/local/cuda/bin/crt
+COPY --from=base /usr/local/cuda/lib64/libcudart_static.a /usr/local/cuda/lib64/
+COPY --from=base /usr/local/cuda/lib64/libculibos.a /usr/local/cuda/lib64/
+
 # Install utilities as root
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends  \
