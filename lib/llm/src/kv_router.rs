@@ -20,9 +20,6 @@ use dynamo_runtime::{
 };
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-
-use crate::protocols::openai::nvext::WorkerIdInfo;
 
 pub mod approx;
 pub mod indexer;
@@ -726,6 +723,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Check if this is a query_instance_id request first
         let query_instance_id = request.has_annotation("query_instance_id");
 
+        let block_size = self.chooser.block_size() as usize;
         let (instance_id, dp_rank, overlap_amount) = if let Some(id) = request.backend_instance_id {
             // If instance_id is set, use it and compute actual overlap
             let dp_rank = request.dp_rank.unwrap_or(0);
@@ -765,6 +763,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             (best_worker.worker_id, best_worker.dp_rank, overlap_amount)
         };
 
+        // Record KV hit rate if tracking is enabled
+        if let Some(ref tracker) = request.tracker {
+            let isl_blocks = request.token_ids.len().div_ceil(block_size);
+            tracker.record_kv_hit(overlap_amount, isl_blocks);
+        }
+
         // if request has the annotation "query_instance_id",
         // then the request will not be routed to the worker,
         // and instead the worker_instance_id will be returned.
@@ -786,20 +790,27 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
         backend_input.dp_rank = Some(dp_rank);
 
-        // Get prefill worker ID from prefill_result if available
-        // In aggregated mode, prefill_result is None, so we use decode_worker_id for both
-        let decode_worker_id = instance_id;
-        let prefill_worker_id = backend_input
-            .prefill_result
-            .as_ref()
-            .and_then(|prefill_result| {
-                prefill_result
-                    .disaggregated_params
-                    .get("worker_id")
-                    .and_then(|v| serde_json::from_value::<WorkerIdInfo>(v.clone()).ok())
-                    .and_then(|info| info.prefill_worker_id)
-            })
-            .or(Some(decode_worker_id)); // Use decode_worker_id if no separate prefill worker
+        // Record worker IDs in tracker based on request phase.
+        // The tracker is shared via Arc, so all recordings happen in the frontend process.
+        // - Prefill-only request (max_tokens=1, set by PrefillRouter): record prefill_worker_id
+        // - Decode phase (has prefill_result): record decode_worker_id
+        // - Aggregated mode (neither): record both as same instance
+        if let Some(ref tracker) = backend_input.tracker {
+            let is_prefill_only = backend_input.stop_conditions.max_tokens == Some(1);
+            let is_decode_phase = backend_input.prefill_result.is_some();
+
+            if is_prefill_only {
+                // Prefill-only request: record this instance as prefill worker
+                tracker.record_prefill_worker(instance_id);
+            } else if is_decode_phase {
+                // Decode phase: prefill_worker already recorded, record decode worker
+                tracker.record_decode_worker(instance_id);
+            } else {
+                // Aggregated mode: same instance handles both prefill and decode
+                tracker.record_prefill_worker(instance_id);
+                tracker.record_decode_worker(instance_id);
+            }
+        }
 
         let updated_request = context.map(|_| backend_input);
 
@@ -810,7 +821,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut prefill_marked = false;
-            let mut first_item = true;
 
             loop {
                 tokio::select! {
@@ -822,7 +832,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     }
 
                     item = response_stream.next() => {
-                        let Some(mut item) = item else {
+                        let Some(item) = item else {
                             break;
                         };
 
@@ -831,34 +841,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 tracing::warn!("Failed to mark prefill completed for request {context_id}: {e}");
                             }
                             prefill_marked = true;
-                        }
-
-                        // Always inject worker_id in first item's disaggregated_params
-                        // This is needed for:
-                        // 1. PrefillRouter to know which prefill worker was chosen
-                        // 2. Client response when extra_fields contains "worker_id"
-                        if first_item {
-                            first_item = false;
-
-                            let Some(ref mut data) = item.data else {
-                                yield item;
-                                continue;
-                            };
-
-                            // prefill_worker_id comes from prefill_result.disaggregated_params or falls back to instance_id
-                            // decode_worker_id is always the current instance_id
-                            let worker_id_info = WorkerIdInfo {
-                                prefill_worker_id,
-                                decode_worker_id: Some(decode_worker_id),
-                            };
-                            let worker_id_json = serde_json::to_value(&worker_id_info)
-                                .expect("WorkerIdInfo serialization should not fail");
-
-                            if let Some(obj) = data.disaggregated_params.as_mut().and_then(|p| p.as_object_mut()) {
-                                obj.insert("worker_id".to_string(), worker_id_json);
-                            } else {
-                                data.disaggregated_params = Some(json!({"worker_id": worker_id_json}));
-                            }
                         }
 
                         yield item;

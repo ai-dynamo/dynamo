@@ -285,6 +285,11 @@ impl
 
         let prefill_request = prefill_context;
 
+        // Record prefill start time if tracking is enabled
+        if let Some(ref tracker) = req.tracker {
+            tracker.record_prefill_start();
+        }
+
         // Attempt prefill
         let prefill_result = self.call_prefill(prefill_request).await;
 

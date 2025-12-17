@@ -1,9 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
+use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::kv_router::RouterConfigOverride;
 #[cfg(feature = "media-nixl")]
@@ -101,6 +104,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_fields: Option<Vec<String>>,
+
+    /// Optional request tracker for per-request metrics (shared with DeltaGenerator)
+    #[builder(default)]
+    #[serde(skip)]
+    pub tracker: Option<Arc<RequestTracker>>,
 }
 
 impl PreprocessedRequest {

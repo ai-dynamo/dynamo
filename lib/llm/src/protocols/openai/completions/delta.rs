@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 use crate::{
     protocols::{
-        common::{self, timing::RequestTimingTracker},
-        openai::nvext::{NvExtProvider, NvExtResponse, TimingInfo, WorkerIdInfo},
+        common::{self, timing::RequestTracker},
+        openai::nvext::{NvExtProvider, NvExtResponse, TimingInfo},
     },
     types::TokenIdType,
 };
@@ -40,7 +42,7 @@ impl NvCreateCompletionRequest {
     // inspect the request to extract options
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
         // Check if client requested timing in extra_fields
-        let enable_timing = self
+        let enable_tracking = self
             .nvext()
             .and_then(|nv| nv.extra_fields.as_ref())
             .is_some_and(|fields| fields.iter().any(|f| f == "timing"));
@@ -53,7 +55,7 @@ impl NvCreateCompletionRequest {
                 .map(|opts| opts.include_usage)
                 .unwrap_or(false),
             enable_logprobs: self.inner.logprobs.unwrap_or(0) > 0,
-            enable_timing,
+            enable_tracking,
         };
 
         DeltaGenerator::new(self.inner.model.clone(), options, request_id)
@@ -64,7 +66,7 @@ impl NvCreateCompletionRequest {
 pub struct DeltaGeneratorOptions {
     pub enable_usage: bool,
     pub enable_logprobs: bool,
-    pub enable_timing: bool,
+    pub enable_tracking: bool,
 }
 
 pub struct DeltaGenerator {
@@ -75,7 +77,7 @@ pub struct DeltaGenerator {
     system_fingerprint: Option<String>,
     usage: dynamo_async_openai::types::CompletionUsage,
     options: DeltaGeneratorOptions,
-    timing_tracker: Option<RequestTimingTracker>,
+    tracker: Option<Arc<RequestTracker>>,
 }
 
 impl DeltaGenerator {
@@ -101,9 +103,9 @@ impl DeltaGenerator {
 
         let completion_id = format!("cmpl-{request_id}");
 
-        // Create timing tracker if timing is enabled
-        let timing_tracker = if options.enable_timing {
-            Some(RequestTimingTracker::new())
+        // Create request tracker if tracking is enabled
+        let tracker = if options.enable_tracking {
+            Some(Arc::new(RequestTracker::new()))
         } else {
             None
         };
@@ -116,8 +118,13 @@ impl DeltaGenerator {
             system_fingerprint: None,
             usage,
             options,
-            timing_tracker,
+            tracker,
         }
+    }
+
+    /// Returns the request tracker if tracking is enabled, for sharing with PreprocessedRequest.
+    pub fn tracker(&self) -> Option<Arc<RequestTracker>> {
+        self.tracker.clone()
     }
 
     pub fn update_isl(&mut self, isl: u32) {
@@ -291,20 +298,16 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         let mut response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
 
         // Record first token time (only succeeds on first call due to OnceLock)
-        if let Some(ref tracker) = self.timing_tracker {
+        if let Some(ref tracker) = self.tracker {
             tracker.record_first_token();
         }
 
-        // Extract worker_id from disaggregated_params
-        let worker_id_info = delta
-            .disaggregated_params
-            .as_ref()
-            .and_then(|params| params.get("worker_id"))
-            .and_then(|v| serde_json::from_value::<WorkerIdInfo>(v.clone()).ok());
+        // Get worker_id info from tracker (set by KvPushRouter)
+        let worker_id_info = self.tracker.as_ref().and_then(|t| t.get_worker_info());
 
         // Get timing info if this is the final response (has finish_reason)
         let timing_info: Option<TimingInfo> = if finish_reason.is_some() {
-            self.timing_tracker.as_ref().map(|tracker| {
+            self.tracker.as_ref().map(|tracker| {
                 tracker.record_finish();
                 tracker.get_timing_info()
             })
