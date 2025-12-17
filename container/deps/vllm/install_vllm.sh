@@ -106,7 +106,7 @@ echo "\n=== Configuration Summary ==="
 echo "  VLLM_REF=$VLLM_REF | ARCH=$ARCH | CUDA_VERSION=$CUDA_VERSION | TORCH_BACKEND=$TORCH_BACKEND"
 echo "  TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST | INSTALLATION_DIR=$INSTALLATION_DIR"
 
-if ${CUDA_VERSION_MAJOR} == "12"; then
+if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
     echo "  FLASHINF_REF=$FLASHINF_REF | LMCACHE_REF=$LMCACHE_REF | DEEPGEMM_REF=$DEEPGEMM_REF"
     echo "\n=== Installing LMCache ==="
     if [ "$ARCH" = "amd64" ]; then
