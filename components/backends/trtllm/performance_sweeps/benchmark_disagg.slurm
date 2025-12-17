@@ -42,6 +42,8 @@ SCRIPTS_DIR=${WORK_DIR}/
 mkdir -p ${LOG_DIR}
 echo "trying to submit job"
 
+config=$(realpath "$config")
+
 sub_dir=$LOG_DIR/$(python3 -c "import yaml, uuid; print(yaml.safe_load(open('${config}')).get('name', 'benchmark-' + uuid.uuid4().hex))")
 
 echo "concurrency_list: ${concurrency_list}"
@@ -49,7 +51,14 @@ echo "concurrency_list: ${concurrency_list}"
 full_logdir=${sub_dir}
 mkdir -p ${full_logdir}
 
-container_mounts=${MOUNT_DIR}:${MOUNT_DIR},${model_path}:${model_path},${config}:${config}
+container_mounts=${MOUNT_DIR}:${MOUNT_DIR},${MODEL_PATH}:${MODEL_PATH},${config}:${config}
+
+# start the container
+srun -l --container-image=${IMAGE} \
+        --container-name=${CONTAINER_NAME} \
+        --container-mounts=${container_mounts} \
+        --mpi=pmix \
+        echo "Container up."
 
 srun --container-name ${CONTAINER_NAME} \
     --container-mounts ${container_mounts} \
@@ -104,7 +113,7 @@ echo "$SERVER_PID" >> "$PID_FILE"
 sleep 10
 
 if [[ -n $(scontrol show config | grep "GresTypes" | grep "gpu") ]]; then
-    gpus_per_node="--gpus-per-node ${ntasks_per_node}"
+    gpus_per_node="--gpus-per-node ${NTASKS_PER_NODE}"
 else
     gpus_per_node=""
 fi
@@ -123,7 +132,7 @@ if [ -z "$decode_tp_size" ]; then
 fi
 echo "Decode TP Size: $decode_tp_size"
 
-num_decode_nodes=$((decode_tp_size/NTASKS_PER_NODE))
+num_decode_nodes=$(((decode_tp_size+NTASKS_PER_NODE-1)/NTASKS_PER_NODE))
 decode_nodes=$((num_decode_nodes * DECODE_COUNT))
 for ((i=1; i<=DECODE_COUNT; i++)); do
   echo "Running Decode Worker: ${i}"
@@ -173,7 +182,7 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
         --mpi=pmix --overlap -w ${nodes[node_idx]} \
         --oversubscribe \
         --overlap \
-        --ntasks $(( prefill_tp_size < ntasks_per_node ? prefill_tp_size : ntasks_per_node )) \
+        --ntasks $(( prefill_tp_size < NTASKS_PER_NODE ? prefill_tp_size : NTASKS_PER_NODE )) \
         --nodes 1 $gpus_per_node \
         -e UCX_NET_DEVICES,TRTLLM_UCX_INTERFACE \
         bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${config} ${MODEL_PATH} ${SERVED_MODEL_NAME} 'prefill' &> ${full_logdir}/output_prefill_worker_${i}.log &
@@ -190,7 +199,7 @@ srun -l --container-name=${CONTAINER_NAME} \
         --container-env HEAD_NODE_IP,HEAD_NODE,SCRIPTS_DIR \
         --mpi=pmix --overlap -N 1 -n 1 \
 	    -w ${nodes[0]} \
-        bash ${SCRIPTS_DIR}/scripts/bench.sh ${SERVED_MODEL_NAME} ${MULTI_ROUND} ${DECODE_COUNT} "${concurrency_list}" true ${full_logdir} ${ctx_gpus} ${decode_gpus} ${MODEL_PATH} ${ISL} ${OSL} "dynamo-disagg ${BENCHMARK_KIND} > ${full_logdir}/bench.log 2>&1
+        bash ${SCRIPTS_DIR}/scripts/bench.sh ${SERVED_MODEL_NAME} ${MULTI_ROUND} ${DECODE_COUNT} "${concurrency_list}" true ${full_logdir} ${ctx_gpus} ${decode_gpus} ${MODEL_PATH} ${ISL} ${OSL} "dynamo-disagg" ${BENCHMARK_KIND} > ${full_logdir}/bench.log 2>&1
 
 
 # Cleanup will be handled by the EXIT trap
