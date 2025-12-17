@@ -10,7 +10,6 @@ mod crd_tests;
 
 pub use crd::{DynamoWorkerMetadata, DynamoWorkerMetadataSpec};
 pub use utils::hash_pod_name;
-pub use utils::LOCALHOST_TEST_ANNOTATION;
 
 use crd::{apply_cr, build_cr};
 use daemon::DiscoveryDaemon;
