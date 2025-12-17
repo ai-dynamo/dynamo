@@ -1842,7 +1842,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 		wantConditionStatus      metav1.ConditionStatus
 		wantConditionReason      string
 		wantConditionMessage     string
-		wantServiceReplicaStatus v1alpha1.ServiceReplicaStatus
+		wantServiceReplicaStatus *v1alpha1.ServiceReplicaStatus
 	}{
 		{
 			name: "deployment backed DCD that is unready",
@@ -1863,7 +1863,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			wantConditionStatus:  metav1.ConditionFalse,
 			wantConditionReason:  "DeploymentNotReady",
 			wantConditionMessage: "Deployment is not ready",
-			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:     v1alpha1.ComponentKindDeployment,
 				ComponentName:     "test-component",
 				Replicas:          1,
@@ -1891,7 +1891,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			wantConditionStatus:  metav1.ConditionTrue,
 			wantConditionReason:  "DeploymentReady",
 			wantConditionMessage: "Deployment is ready",
-			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:     v1alpha1.ComponentKindDeployment,
 				ComponentName:     "test-component",
 				Replicas:          2,
@@ -1918,7 +1918,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			wantConditionStatus:  metav1.ConditionFalse,
 			wantConditionReason:  "SomeLeaderWorkerSetsNotReady",
 			wantConditionMessage: "Some LeaderWorkerSets are not ready",
-			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 				ComponentName:   "test-component-0",
 				Replicas:        3,
@@ -1944,7 +1944,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			wantConditionStatus:  metav1.ConditionTrue,
 			wantConditionReason:  "AllLeaderWorkerSetsReady",
 			wantConditionMessage: "All LeaderWorkerSets are ready",
-			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 				ComponentName:   "test-component-0",
 				Replicas:        3,
