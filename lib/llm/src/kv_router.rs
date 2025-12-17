@@ -820,55 +820,60 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         };
 
         // If request has a query_instance_id annotation, return worker selection info
-        // without routing to the actual worker.
+        // without routing to the actual worker. Returns LLMEngineOutput with disaggregated_params
+        // containing worker_id info, same structure as normal execution for uniform extraction.
         let stream_context = request.context().clone();
         if let Some(query_type) = query_instance_type {
-            let mut responses: Vec<Annotated<LLMEngineOutput>> = Vec::new();
-
-            match query_type {
+            let worker_id_info = match query_type {
                 QueryInstanceType::Prefill => {
-                    // Prefill worker selection: return worker_id with prefill_worker_id
-                    let worker_id_info = WorkerIdInfo {
-                        prefill_worker_id: Some(instance_id),
-                        decode_worker_id: None,
-                    };
-                    responses.push(Annotated::from_annotation("worker_id", &worker_id_info)?);
-                    responses.push(Annotated::from_annotation(
-                        "token_data",
-                        &request.token_ids,
-                    )?);
                     tracing::trace!(
                         query_type = "prefill",
                         prefill_worker_id = instance_id,
                         "Returning prefill worker selection"
                     );
+                    WorkerIdInfo {
+                        prefill_worker_id: Some(instance_id),
+                        decode_worker_id: None,
+                    }
                 }
                 QueryInstanceType::Decode => {
-                    // Decode worker selection: return worker_id with both prefill and decode worker IDs
                     // Get prefill_worker_id from annotation (set by caller after prefill selection)
                     let prefill_worker_id = request
                         .get_annotation_value("prefill_worker_id")
                         .and_then(|s| s.parse::<u64>().ok());
-
-                    let worker_id_info = WorkerIdInfo {
-                        prefill_worker_id,
-                        decode_worker_id: Some(instance_id),
-                    };
-                    responses.push(Annotated::from_annotation("worker_id", &worker_id_info)?);
-                    responses.push(Annotated::from_annotation(
-                        "token_data",
-                        &request.token_ids,
-                    )?);
                     tracing::trace!(
                         query_type = "decode",
                         prefill_worker_id = ?prefill_worker_id,
                         decode_worker_id = instance_id,
                         "Returning decode worker selection"
                     );
+                    WorkerIdInfo {
+                        prefill_worker_id,
+                        decode_worker_id: Some(instance_id),
+                    }
                 }
-            }
+            };
 
-            let stream = stream::iter(responses);
+            // Return as LLMEngineOutput with disaggregated_params (same structure as normal execution)
+            let output = LLMEngineOutput {
+                token_ids: vec![],
+                tokens: None,
+                text: None,
+                cum_log_probs: None,
+                log_probs: None,
+                top_logprobs: None,
+                finish_reason: None,
+                stop_reason: None,
+                index: None,
+                disaggregated_params: Some(json!({
+                    "worker_id": worker_id_info,
+                    "token_ids": request.token_ids
+                })),
+                extra_args: None,
+                completion_usage: None,
+            };
+            let response = Annotated::from_data(output);
+            let stream = stream::iter(vec![response]);
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
         let (mut backend_input, context) = request.into_parts();

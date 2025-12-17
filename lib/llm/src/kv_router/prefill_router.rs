@@ -42,14 +42,6 @@ pub enum PrefillError {
     NoDisaggregatedParams(String),
 }
 
-/// Result from call_prefill that handles both query-only and execution modes
-enum PrefillCallResult {
-    /// GAIE Stage 1: Only worker ID was returned (query-only mode)
-    WorkerIdOnly(u64),
-    /// Normal execution: Full prefill result with disaggregated params
-    FullResult(PrefillResult),
-}
-
 /// The inner router used by PrefillRouter
 enum InnerPrefillRouter {
     /// KV-aware routing using KvPushRouter
@@ -211,13 +203,12 @@ impl PrefillRouter {
 
     /// Call the prefill router and extract result.
     ///
-    /// Handles two modes based on response type:
-    /// - Query-only mode (GAIE Stage 1): Response has worker_id annotation, returns WorkerIdOnly
-    /// - Execution mode (normal/GAIE Stage 2) and non-GAIE flow: Response has disaggregated_params, returns FullResult
+    /// Returns PrefillResult with disaggregated_params containing worker_id info.
+    /// Works uniformly for both GAIE Stage 1 (query-only) and normal execution.
     async fn call_prefill(
         &self,
         request: SingleIn<PreprocessedRequest>,
-    ) -> Result<PrefillCallResult, PrefillError> {
+    ) -> Result<PrefillResult, PrefillError> {
         // Get the prefill router, error if not activated
         let Some(prefill_router) = self.prefill_router.get() else {
             return Err(PrefillError::NotActivated);
@@ -231,62 +222,6 @@ impl PrefillRouter {
                 "Prefill router returned no output (stream ended)".to_string(),
             ));
         };
-
-        // Check if this is a query-only response (GAIE Stage 1)
-        // In query mode, KvRouter returns worker_id annotation instead of actual data
-        if let Some(event) = first_output.event.as_ref()
-            && event == "worker_id"
-        {
-            // Extract worker_id from annotation
-            let comments = first_output.comment.as_ref().ok_or_else(|| {
-                PrefillError::PrefillError("worker_id event missing comments field".to_string())
-            })?;
-
-            let first_comment = comments.first().ok_or_else(|| {
-                PrefillError::PrefillError("worker_id event has empty comments".to_string())
-            })?;
-
-            let worker_info: WorkerIdInfo = serde_json::from_str(first_comment).map_err(|e| {
-                PrefillError::PrefillError(format!(
-                    "Failed to parse WorkerIdInfo from '{}': {}",
-                    first_comment, e
-                ))
-            })?;
-
-            let prefill_worker_id = worker_info.prefill_worker_id.ok_or_else(|| {
-                PrefillError::PrefillError(
-                    "prefill_worker_id not set in WorkerIdInfo response".to_string(),
-                )
-            })?;
-
-            tracing::debug!(
-                prefill_worker_id = prefill_worker_id,
-                "GAIE Stage 1: Extracted prefill worker ID from query response"
-            );
-
-            // Drain remaining items (token_data annotation)
-            while prefill_response.next().await.is_some() {}
-
-            return Ok(PrefillCallResult::WorkerIdOnly(prefill_worker_id));
-        }
-
-        // Normal execution mode - extract full prefill result
-        let mut prompt_tokens_details = first_output
-            .data
-            .as_ref()
-            .and_then(|o| o.completion_usage.as_ref())
-            .and_then(|u| u.prompt_tokens_details.clone());
-
-        while let Some(next) = prefill_response.next().await {
-            if let Some(o) = next.data.as_ref()
-                && prompt_tokens_details.is_none()
-            {
-                prompt_tokens_details = o
-                    .completion_usage
-                    .as_ref()
-                    .and_then(|u| u.prompt_tokens_details.clone());
-            }
-        }
 
         if let Some(err) = first_output.err() {
             return Err(PrefillError::PrefillError(format!(
@@ -306,10 +241,27 @@ impl PrefillRouter {
             ));
         };
 
-        Ok(PrefillCallResult::FullResult(PrefillResult {
+        // Extract prompt_tokens_details from remaining stream items if available
+        let mut prompt_tokens_details = output
+            .completion_usage
+            .as_ref()
+            .and_then(|u| u.prompt_tokens_details.clone());
+
+        while let Some(next) = prefill_response.next().await {
+            if let Some(o) = next.data.as_ref()
+                && prompt_tokens_details.is_none()
+            {
+                prompt_tokens_details = o
+                    .completion_usage
+                    .as_ref()
+                    .and_then(|u| u.prompt_tokens_details.clone());
+            }
+        }
+
+        Ok(PrefillResult {
             disaggregated_params,
             prompt_tokens_details,
-        }))
+        })
     }
 }
 
@@ -404,22 +356,14 @@ impl
             ));
         }
 
-        // Handle prefill result - extract prefill_worker_id and optional full result
-        let (prefill_worker_id_from_query, prefill_result_full) = match prefill_result {
-            Ok(PrefillCallResult::WorkerIdOnly(worker_id)) => {
+        // Handle prefill result
+        let prefill_result = match prefill_result {
+            Ok(result) => {
                 tracing::debug!(
                     request_id = %request_id,
-                    prefill_worker_id = worker_id,
-                    "GAIE Stage 1: Prefill worker selected, querying decode worker"
+                    "Prefill succeeded, proceeding to decode"
                 );
-                (Some(worker_id), None)
-            }
-            Ok(PrefillCallResult::FullResult(result)) => {
-                tracing::debug!(
-                    request_id = %request_id,
-                    "Prefill succeeded, using disaggregated params for decode"
-                );
-                (None, Some(result))
+                result
             }
             Err(PrefillError::NotActivated) => {
                 if self.enforce_disagg {
@@ -458,22 +402,34 @@ impl
             ..existing_override.unwrap_or_default()
         });
 
-        // GAIE Stage 1: Transition query_instance_id state and add prefill_worker_id
-        if let Some(prefill_worker_id) = prefill_worker_id_from_query {
-            decode_req
-                .annotations
-                .retain(|a| !a.starts_with("query_instance_id"));
-            decode_req
-                .annotations
-                .push(format!("query_instance_id:{}", QueryInstanceType::Decode));
-            decode_req
-                .annotations
-                .push(format!("prefill_worker_id:{}", prefill_worker_id));
-        }
+        // GAIE Stage 1: Extract prefill_worker_id and transition query_instance_id state
+        if is_gaie_stage1 {
+            // Extract prefill_worker_id from disaggregated_params
+            let prefill_worker_id = prefill_result
+                .disaggregated_params
+                .get("worker_id")
+                .and_then(|v| serde_json::from_value::<WorkerIdInfo>(v.clone()).ok())
+                .and_then(|info| info.prefill_worker_id);
 
-        // Normal/GAIE Stage 2: Set prefill_result from full execution
-        if let Some(result) = prefill_result_full {
-            decode_req.prefill_result = Some(result);
+            if let Some(worker_id) = prefill_worker_id {
+                tracing::debug!(
+                    request_id = %request_id,
+                    prefill_worker_id = worker_id,
+                    "GAIE Stage 1: Prefill worker selected, querying decode worker"
+                );
+                decode_req
+                    .annotations
+                    .retain(|a| !a.starts_with("query_instance_id"));
+                decode_req
+                    .annotations
+                    .push(format!("query_instance_id:{}", QueryInstanceType::Decode));
+                decode_req
+                    .annotations
+                    .push(format!("prefill_worker_id:{}", worker_id));
+            }
+        } else {
+            // Normal/GAIE Stage 2: Set prefill_result for decode
+            decode_req.prefill_result = Some(prefill_result);
         }
 
         // GAIE Stage 2: Route to pre-selected decode worker if specified
