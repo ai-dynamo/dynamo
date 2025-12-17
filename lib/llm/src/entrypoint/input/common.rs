@@ -25,7 +25,7 @@ use crate::{
 
 use dynamo_runtime::{
     DistributedRuntime,
-    component::Client,
+    component::{Client, Endpoint},
     engine::{AsyncEngineStream, Data},
     pipeline::{
         Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
@@ -167,6 +167,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub async fn build_routed_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
+    endpoint: &Endpoint,
     client: &Client,
     router_mode: RouterMode,
     worker_monitor: Option<KvWorkerMonitor>,
@@ -190,6 +191,7 @@ where
         OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?;
     build_routed_pipeline_with_preprocessor(
         card,
+        endpoint,
         client,
         router_mode,
         worker_monitor,
@@ -205,6 +207,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     card: &ModelDeploymentCard,
+    endpoint: &Endpoint,
     client: &Client,
     router_mode: RouterMode,
     worker_monitor: Option<KvWorkerMonitor>,
@@ -227,7 +230,7 @@ where
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
-    let migration = Migration::from_mdc(card).into_operator();
+    let migration = Migration::from_mdc(card, endpoint)?.into_operator();
 
     // For KV routing, use the client from the chooser to ensure shared state
     let router_client = if router_mode == RouterMode::KV {

@@ -444,6 +444,7 @@ impl ModelWatcher {
                         NvCreateChatCompletionStreamResponse,
                     >(
                         card,
+                        &endpoint,
                         &client,
                         self.router_config.router_mode,
                         worker_monitor.clone(),
@@ -476,6 +477,7 @@ impl ModelWatcher {
                     NvCreateCompletionResponse,
                 >(
                     card,
+                    &endpoint,
                     &client,
                     self.router_config.router_mode,
                     worker_monitor,

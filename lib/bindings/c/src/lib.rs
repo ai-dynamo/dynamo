@@ -1218,6 +1218,7 @@ pub async fn create_worker_selection_pipeline_chat(
         NvCreateChatCompletionStreamResponse,
     >(
         &card_with_local_files,
+        &endpoint,
         &client,
         router_mode,
         worker_monitor,

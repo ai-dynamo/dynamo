@@ -305,6 +305,24 @@ pub mod kvrouter {
     pub const KV_CACHE_EVENTS_APPLIED: &str = "kv_cache_events_applied";
 }
 
+/// Migration operator Prometheus metric names
+pub mod migration {
+    /// Total number of request migrations
+    pub const MIGRATIONS_TOTAL: &str = "migrations_total";
+
+    /// Label name for the type of migration
+    pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
+
+    /// Migration type label values
+    pub mod migration_types {
+        /// Migration during stream creation - cannot reach worker
+        pub const NEW_REQUEST: &str = "new_request";
+
+        /// Migration during ongoing request - worker dropped
+        pub const ONGOING_REQUEST: &str = "ongoing_request";
+    }
+}
+
 // Shared regex patterns for Prometheus sanitization
 static METRIC_INVALID_CHARS_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[^a-zA-Z0-9_:]").unwrap());

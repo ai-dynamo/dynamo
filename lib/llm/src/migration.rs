@@ -10,12 +10,16 @@ use async_nats::client::{
     RequestError as NatsRequestError, RequestErrorKind::NoResponders as NatsNoResponders,
 };
 
+use prometheus::{IntCounterVec, Opts};
+
 use crate::{
     model_card::ModelDeploymentCard, preprocessor::BackendOutput,
     protocols::common::llm_backend::PreprocessedRequest,
 };
 
 use dynamo_runtime::{
+    component::Endpoint,
+    metrics::{MetricsHierarchy, prometheus_names::migration as migration_metrics},
     pipeline::{
         AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator, ResponseStream,
         ServerStreamingEngine, SingleIn, async_trait, network::STREAM_ERR_MSG,
@@ -23,20 +27,81 @@ use dynamo_runtime::{
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
+/// Metrics for tracking request migrations
+pub struct MigrationMetrics {
+    /// Counter for migrations, labeled by migration type
+    migrations_total: IntCounterVec,
+}
+
+impl MigrationMetrics {
+    /// Creates a new MigrationMetrics registered with the endpoint's metrics.
+    pub fn new(endpoint: &Endpoint) -> Result<Self> {
+        let migrations_total = endpoint.metrics().create_intcountervec(
+            migration_metrics::MIGRATIONS_TOTAL,
+            "Total number of request migrations due to worker unavailability",
+            &[migration_metrics::MIGRATION_TYPE_LABEL],
+            &[],
+        )?;
+
+        Ok(Self { migrations_total })
+    }
+
+    /// Creates a new MigrationMetrics that is not registered with Prometheus.
+    /// Use this for testing or when metrics registration is not needed.
+    pub fn new_unregistered() -> Self {
+        let migrations_total = IntCounterVec::new(
+            Opts::new(
+                migration_metrics::MIGRATIONS_TOTAL,
+                "Total number of request migrations due to worker unavailability",
+            ),
+            &[migration_metrics::MIGRATION_TYPE_LABEL],
+        )
+        .expect("Failed to create migrations_total metric");
+
+        Self { migrations_total }
+    }
+
+    pub fn inc_new_request(&self) {
+        self.migrations_total
+            .with_label_values(&[migration_metrics::migration_types::NEW_REQUEST])
+            .inc();
+    }
+
+    pub fn inc_ongoing_request(&self) {
+        self.migrations_total
+            .with_label_values(&[migration_metrics::migration_types::ONGOING_REQUEST])
+            .inc();
+    }
+
+    pub fn get_new_request_count(&self) -> u64 {
+        self.migrations_total
+            .with_label_values(&[migration_metrics::migration_types::NEW_REQUEST])
+            .get()
+    }
+
+    pub fn get_ongoing_request_count(&self) -> u64 {
+        self.migrations_total
+            .with_label_values(&[migration_metrics::migration_types::ONGOING_REQUEST])
+            .get()
+    }
+}
+
 pub struct Migration {
     migration_limit: u32,
+    metrics: Arc<MigrationMetrics>,
 }
 
 impl Migration {
-    pub fn from_mdc(mdc: &ModelDeploymentCard) -> Arc<Self> {
+    pub fn from_mdc(mdc: &ModelDeploymentCard, endpoint: &Endpoint) -> Result<Arc<Self>> {
         tracing::debug!(
             "model {} migration limit {}",
             mdc.display_name,
             mdc.migration_limit
         );
-        Arc::new(Self {
+        Ok(Arc::new(Self {
             migration_limit: mdc.migration_limit,
-        })
+            metrics: Arc::new(MigrationMetrics::new(endpoint)?),
+        }))
     }
 }
 
@@ -57,9 +122,14 @@ impl
         let (preprocessed_request, context) = request.transfer(());
         let engine_ctx = context.context();
         let engine_ctx_ = engine_ctx.clone();
-        let retry_manager =
-            RetryManager::build(engine_ctx, preprocessed_request, next, self.migration_limit)
-                .await?;
+        let retry_manager = RetryManager::build(
+            engine_ctx,
+            preprocessed_request,
+            next,
+            self.migration_limit,
+            self.metrics.clone(),
+        )
+        .await?;
         let response_stream = stream::unfold(retry_manager, move |mut retry_manager| async move {
             retry_manager
                 .next()
@@ -76,6 +146,7 @@ struct RetryManager {
     next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>>,
     next_stream: Option<ManyOut<Annotated<BackendOutput>>>,
     retries_left: u32,
+    metrics: Arc<MigrationMetrics>,
 }
 
 impl RetryManager {
@@ -84,6 +155,7 @@ impl RetryManager {
         preprocessed_request: PreprocessedRequest,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>>,
         retries_left: u32,
+        metrics: Arc<MigrationMetrics>,
     ) -> Result<Self> {
         let mut slf = Self {
             context,
@@ -91,6 +163,7 @@ impl RetryManager {
             next_generate: next,
             next_stream: None,
             retries_left: retries_left + 1, // +1 to account for the initial attempt
+            metrics,
         };
         slf.new_stream().await?;
         Ok(slf)
@@ -114,6 +187,7 @@ impl RetryManager {
                         .any(|e| e.to_string().starts_with(STREAM_ERR_MSG))
                 {
                     tracing::warn!("Stream disconnected... recreating stream...");
+                    self.metrics.inc_ongoing_request();
                     if let Err(err) = self.new_stream().await {
                         tracing::warn!("Cannot recreate stream: {:#}", err);
                     } else {
@@ -146,6 +220,7 @@ impl RetryManager {
                 && matches!(req_err.kind(), NatsNoResponders)
             {
                 tracing::warn!("Creating new stream... retrying...");
+                self.metrics.inc_new_request();
                 continue;
             }
             break;
@@ -495,9 +570,11 @@ mod tests {
             mock_engine;
 
         let ctx = Arc::new(Controller::new(context_id.clone()));
-        let mut retry_manager = RetryManager::build(ctx, request, next_generate, 0)
-            .await
-            .expect("Failed to build RetryManager");
+        let metrics = Arc::new(MigrationMetrics::new_unregistered());
+        let mut retry_manager =
+            RetryManager::build(ctx, request, next_generate, 0, metrics.clone())
+                .await
+                .expect("Failed to build RetryManager");
 
         let mut responses = Vec::new();
         while let Some(response) = retry_manager.next().await {
@@ -511,6 +588,9 @@ mod tests {
                 assert_eq!(output.token_ids, vec![101 + i as u32]); // 101, 102, 103, ..., 110
             }
         }
+
+        assert_eq!(metrics.get_new_request_count(), 0);
+        assert_eq!(metrics.get_ongoing_request_count(), 0);
     }
 
     /// Test case 2: New request migration
@@ -534,9 +614,11 @@ mod tests {
             mock_engine;
 
         let ctx = Arc::new(Controller::new(context_id.clone()));
-        let mut retry_manager = RetryManager::build(ctx, request, next_generate, 3)
-            .await
-            .expect("Failed to build RetryManager");
+        let metrics = Arc::new(MigrationMetrics::new_unregistered());
+        let mut retry_manager =
+            RetryManager::build(ctx, request, next_generate, 3, metrics.clone())
+                .await
+                .expect("Failed to build RetryManager");
 
         let mut responses = Vec::new();
         while let Some(response) = retry_manager.next().await {
@@ -550,6 +632,9 @@ mod tests {
                 assert_eq!(output.token_ids, vec![101 + i as u32]); // 101, 102, 103, ..., 110
             }
         }
+
+        assert_eq!(metrics.get_new_request_count(), 1);
+        assert_eq!(metrics.get_ongoing_request_count(), 0);
     }
 
     /// Test case 3: Ongoing request migration
@@ -574,9 +659,11 @@ mod tests {
             mock_engine;
 
         let ctx = Arc::new(Controller::new(context_id.clone()));
-        let mut retry_manager = RetryManager::build(ctx, request, next_generate, 3)
-            .await
-            .expect("Failed to build RetryManager");
+        let metrics = Arc::new(MigrationMetrics::new_unregistered());
+        let mut retry_manager =
+            RetryManager::build(ctx, request, next_generate, 3, metrics.clone())
+                .await
+                .expect("Failed to build RetryManager");
 
         let mut responses = Vec::new();
         while let Some(response) = retry_manager.next().await {
@@ -593,6 +680,9 @@ mod tests {
                 assert_eq!(output.token_ids, vec![101 + i as u32]); // 101, 102, 103, ..., 110
             }
         }
+
+        assert_eq!(metrics.get_new_request_count(), 0);
+        assert_eq!(metrics.get_ongoing_request_count(), 1);
     }
 
     /// Test case 4: New request migration - indefinite failure
@@ -615,12 +705,17 @@ mod tests {
 
         // Should fail to build due to initial stream creation failure after exhausting all 3 retries
         let ctx = Arc::new(Controller::new(context_id.clone()));
-        let retry_manager_result = RetryManager::build(ctx, request, next_generate, 3).await;
+        let metrics = Arc::new(MigrationMetrics::new_unregistered());
+        let retry_manager_result =
+            RetryManager::build(ctx, request, next_generate, 3, metrics.clone()).await;
 
         assert!(retry_manager_result.is_err());
         if let Err(error) = retry_manager_result {
             assert!(error.to_string().contains("no responders"));
         }
+
+        assert_eq!(metrics.get_new_request_count(), 4); // 3 retries + 1 final failure
+        assert_eq!(metrics.get_ongoing_request_count(), 0);
     }
 
     /// Test case 5: Ongoing request migration - indefinite failure
@@ -642,9 +737,11 @@ mod tests {
             mock_engine;
 
         let ctx = Arc::new(Controller::new(context_id.clone()));
-        let mut retry_manager = RetryManager::build(ctx, request, next_generate, 3) // 3 retries
-            .await
-            .expect("Failed to build RetryManager");
+        let metrics = Arc::new(MigrationMetrics::new_unregistered());
+        let mut retry_manager =
+            RetryManager::build(ctx, request, next_generate, 3, metrics.clone()) // 3 retries
+                .await
+                .expect("Failed to build RetryManager");
 
         let mut responses = Vec::new();
 
@@ -670,6 +767,9 @@ mod tests {
         if let Some(error) = error_response.err() {
             assert!(error.to_string().contains(STREAM_ERR_MSG));
         }
+
+        assert_eq!(metrics.get_new_request_count(), 3); // 2 retries + 1 final failure
+        assert_eq!(metrics.get_ongoing_request_count(), 1); // initial ongoing failure retry
     }
 
     /// Test case 6: Ongoing request migration - indefinite failure with stream errors
@@ -691,9 +791,11 @@ mod tests {
             mock_engine;
 
         let ctx = Arc::new(Controller::new(context_id.clone()));
-        let mut retry_manager = RetryManager::build(ctx, request, next_generate, 3) // 3 retries
-            .await
-            .expect("Failed to build RetryManager");
+        let metrics = Arc::new(MigrationMetrics::new_unregistered());
+        let mut retry_manager =
+            RetryManager::build(ctx, request, next_generate, 3, metrics.clone()) // 3 retries
+                .await
+                .expect("Failed to build RetryManager");
 
         let mut responses = Vec::new();
 
@@ -719,6 +821,9 @@ mod tests {
         if let Some(error) = error_response.err() {
             assert!(error.to_string().contains(STREAM_ERR_MSG));
         }
+
+        assert_eq!(metrics.get_new_request_count(), 0);
+        assert_eq!(metrics.get_ongoing_request_count(), 4); // 3 retries + 1 final failure
     }
 
     /// Test case 7: Request cancelled when creating new stream
@@ -745,7 +850,9 @@ mod tests {
         ctx.stop_generating();
 
         // Should fail to build due to stopped context
-        let retry_manager_result = RetryManager::build(ctx, request, next_generate, 3).await;
+        let metrics = Arc::new(MigrationMetrics::new_unregistered());
+        let retry_manager_result =
+            RetryManager::build(ctx, request, next_generate, 3, metrics.clone()).await;
 
         assert!(retry_manager_result.is_err());
         if let Err(error) = retry_manager_result {
@@ -755,5 +862,8 @@ mod tests {
                     .contains(&format!("Context id {} is stopped or killed", context_id))
             );
         }
+
+        assert_eq!(metrics.get_new_request_count(), 0);
+        assert_eq!(metrics.get_ongoing_request_count(), 0);
     }
 }
