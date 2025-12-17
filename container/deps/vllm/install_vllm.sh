@@ -11,7 +11,8 @@
 
 set -euo pipefail
 
-VLLM_REF="v0.12.0"
+VLLM_VER="0.12.0"
+VLLM_REF="v${VLLM_VER}"
 
 # Basic Configurations
 ARCH=$(uname -m)
@@ -19,7 +20,7 @@ MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 
 # VLLM and Dependency Configurations
-TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels
+TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels -- TODO: check if we need to add 12.0+PTX
 DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
 FLASHINF_REF="v0.5.3"
@@ -132,19 +133,17 @@ git checkout $VLLM_REF
 git cherry-pick --no-commit 799804d140fc99ce3964648ba91aaa810cf28fef # nvshmem fix for CUDA 13.0
 echo "✓ vLLM repository cloned"
 
+
 echo "\n=== Installing vLLM & FlashInfer ==="
-echo "Installing vLLM $VLLM_REF from PyPI..."
 if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
+    echo "Installing vLLM $VLLM_REF from PyPI..."
     uv pip install vllm[flashinfer,runai]==$VLLM_REF --torch-backend=${TORCH_BACKEND}
     uv pip install flashinfer-cubin==$FLASHINF_REF
     uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
 elif [[ "$CUDA_VERSION_MAJOR" == "13" ]]; then
     if [ "$ARCH" = "amd64" ]; then
-        echo "Installing vLLM $VLLM_REF from PyPI..."
-        # LMCache installation currently fails on arm64 due to CUDA dependency issues
-        # Install LMCache BEFORE vLLM so vLLM's dependencies take precedence
+        echo "Installing vLLM $VLLM_REF from GitHub since CUDA 13 x86_64 wheel is only present on GitHub..."
         uv pip install \
-            --no-cache \
             --index-strategy=unsafe-best-match \
             --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND} \
             nixl[cu13]==0.7.1 \
@@ -159,17 +158,16 @@ elif [[ "$CUDA_VERSION_MAJOR" == "13" ]]; then
         echo "Try to install specific PyTorch and other dependencies first"
         uv pip install --index-strategy=unsafe-best-match --index https://download.pytorch.org/whl/ -r requirements/cuda.txt
         uv pip install setuptools_scm # required to build vLLM from source
-        MAX_JOBS=${MAX_JOBS} uv pip install -v --no-cache --no-build-isolation .
+        MAX_JOBS=${MAX_JOBS} uv pip install -v --no-build-isolation .
     fi
 else
     echo "❌ Unsupported CUDA version for vLLM installation: ${CUDA_VERSION}"
+    exit 1
 fi
-
 echo "✓ vLLM installation completed"
 
 echo "\n=== Installing DeepGEMM ==="
 cd $INSTALLATION_DIR/vllm/tools
-
 if [ -n "$DEEPGEMM_REF" ]; then
     bash install_deepgemm.sh --cuda-version "${CUDA_VERSION}" --ref "$DEEPGEMM_REF"
 else
