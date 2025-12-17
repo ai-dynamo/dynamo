@@ -268,6 +268,13 @@ def parse_args():
 
 
 async def async_main():
+    # The system status server port is a worker concern.
+    #
+    # Serve tests set DYN_SYSTEM_PORT for the worker, but aggregated launch scripts
+    # start `dynamo.frontend` first. If the frontend inherits DYN_SYSTEM_PORT, it can
+    # bind that port before the worker, causing port conflicts and/or scraping the
+    # wrong metrics endpoint.
+    os.environ.pop("DYN_SYSTEM_PORT", None)
     flags = parse_args()
     dump_config(flags.dump_config_to, flags)
 

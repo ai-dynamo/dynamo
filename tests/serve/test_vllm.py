@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+import dataclasses
 import logging
 import os
 import random
@@ -17,6 +18,7 @@ from tests.serve.common import (
 )
 from tests.serve.conftest import MULTIMODAL_IMG_PATH, MULTIMODAL_IMG_URL
 from tests.serve.lora_utils import MinioLoraConfig
+from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload,
@@ -45,7 +47,10 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
 
 # vLLM test configurations
 # NOTE: pytest.mark.gpu_1 tests take ~5.5 minutes total to run sequentially (with models pre-cached)
-# TODO: Parallelize these tests to reduce total execution time
+# TODO: Now that these tests use dynamic ports, optimize the runtime by bin-packing and running
+# multiple engine deployments in parallel (while keeping GPU contention under control). This may
+# require annotating each config with approximate GPU RAM usage so a future collector/launcher can
+# bin-pack safely.
 vllm_configs = {
     "aggregated": VLLMConfig(
         name="aggregated",
@@ -222,6 +227,32 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "multimodal_agg_qwen2vl_2b_epd": VLLMConfig(
+        name="multimodal_agg_qwen2vl_2b_epd",
+        directory=vllm_dir,
+        script_name="agg_multimodal_epd.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen2-VL-2B-Instruct", "--single-gpu"],
+        request_payloads=[
+            chat_payload(
+                [
+                    {
+                        "type": "text",
+                        "text": "What colors are in the following image? Respond only with the colors.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["purple"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
     "multimodal_agg_llava_epd": VLLMConfig(
         name="multimodal_agg_llava_epd",
         directory=vllm_dir,
@@ -279,7 +310,7 @@ vllm_configs = {
         name="multimodal_agg_qwen",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
         delayed_start=0,
@@ -307,7 +338,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
         marks=[
-            pytest.mark.gpu_2,
+            pytest.mark.gpu_1,
             # https://github.com/ai-dynamo/dynamo/issues/4501
             pytest.mark.xfail(strict=False),
         ],
@@ -369,7 +400,7 @@ vllm_configs = {
         name="multimodal_audio_agg",
         directory="/workspace/examples/multimodal",
         script_name="audio_agg.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="Qwen/Qwen2-Audio-7B-Instruct",
         delayed_start=0,
         script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
@@ -565,19 +596,29 @@ def vllm_config_test(request):
 @pytest.mark.e2e
 @pytest.mark.nightly
 def test_serve_deployment(
-    vllm_config_test, request, runtime_services, predownload_models, image_server
+    vllm_config_test,
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_models,
+    image_server,
 ):
     """
     Test dynamo serve deployments with different graph configurations.
     """
-    config = vllm_config_test
-    run_serve_deployment(config, request)
+    config = dataclasses.replace(
+        vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
 @pytest.mark.vllm
 @pytest.mark.e2e
 @pytest.mark.gpu_2
-def test_multimodal_b64(request, runtime_services, predownload_models):
+@pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
+def test_multimodal_b64(
+    request, runtime_services_dynamic_ports, dynamo_dynamic_ports, predownload_models
+):
     """
     Test multimodal inference with base64 url passthrough.
 
@@ -618,7 +659,10 @@ def test_multimodal_b64(request, runtime_services, predownload_models):
         request_payloads=[b64_payload],
     )
 
-    run_serve_deployment(config, request)
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
 # LoRA Test Directory
@@ -628,7 +672,7 @@ lora_dir = os.path.join(vllm_dir, "launch/lora")
 def lora_chat_payload(
     lora_name: str,
     s3_uri: str,
-    system_port: int = 8081,
+    system_port: int = DefaultPort.SYSTEM1.value,
     repeat_count: int = 2,
     expected_response: Optional[list] = None,
     expected_log: Optional[list] = None,
@@ -666,7 +710,11 @@ def lora_chat_payload(
 @pytest.mark.timeout(600)
 @pytest.mark.nightly
 def test_lora_aggregated(
-    request, runtime_services, predownload_models, minio_lora_service
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    minio_lora_service,
+    dynamo_dynamic_ports,
 ):
     """
     Test LoRA inference with aggregated vLLM deployment.
@@ -683,7 +731,7 @@ def test_lora_aggregated(
     lora_payload = lora_chat_payload(
         lora_name=minio_config.lora_name,
         s3_uri=minio_config.get_s3_uri(),
-        system_port=8081,
+        system_port=DefaultPort.SYSTEM1.value,
         repeat_count=2,
     )
 
@@ -699,7 +747,15 @@ def test_lora_aggregated(
         request_payloads=[lora_payload],
     )
 
-    run_serve_deployment(config, request, extra_env=minio_config.get_env_vars())
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(
+        config,
+        request,
+        ports=dynamo_dynamic_ports,
+        extra_env=minio_config.get_env_vars(),
+    )
 
 
 @pytest.mark.vllm
@@ -709,7 +765,11 @@ def test_lora_aggregated(
 @pytest.mark.timeout(600)
 @pytest.mark.nightly
 def test_lora_aggregated_router(
-    request, runtime_services, predownload_models, minio_lora_service
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    minio_lora_service,
+    dynamo_dynamic_ports,
 ):
     """
     Test LoRA inference with aggregated vLLM deployment using KV router.
@@ -723,19 +783,19 @@ def test_lora_aggregated_router(
     minio_config: MinioLoraConfig = minio_lora_service
 
     # Create payloads that load LoRA on both workers and test inference
-    # Worker 1 (port 8081)
+    # Worker 1 (DefaultPort.SYSTEM1)
     lora_payload_worker1 = lora_chat_payload(
         lora_name=minio_config.lora_name,
         s3_uri=minio_config.get_s3_uri(),
-        system_port=8081,
+        system_port=DefaultPort.SYSTEM1.value,
         repeat_count=1,
     )
 
-    # Worker 2 (port 8082)
+    # Worker 2 (DefaultPort.SYSTEM2)
     lora_payload_worker2 = lora_chat_payload(
         lora_name=minio_config.lora_name,
         s3_uri=minio_config.get_s3_uri(),
-        system_port=8082,
+        system_port=DefaultPort.SYSTEM2.value,
         repeat_count=1,
     )
 
@@ -768,4 +828,9 @@ def test_lora_aggregated_router(
         ],
     )
 
-    run_serve_deployment(config, request, extra_env=env_vars)
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(
+        config, request, ports=dynamo_dynamic_ports, extra_env=env_vars
+    )
