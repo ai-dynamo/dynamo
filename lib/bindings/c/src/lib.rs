@@ -837,7 +837,7 @@ pub async fn extract_worker_selection_from_stream(
 /// Utility function to add the "query_instance_id" annotation to an OpenAI request
 ///
 /// This function modifies the request to include the annotation that signals the KV router
-/// to return worker selection information (worker_id and token_data) instead of
+/// to return worker selection information (worker_fid and token_data) instead of
 /// performing actual inference.
 ///
 /// # Parameters
@@ -848,7 +848,7 @@ pub async fn extract_worker_selection_from_stream(
 pub fn add_query_instance_id(
     request: &mut NvCreateChatCompletionRequest,
 ) -> &mut NvCreateChatCompletionRequest {
-    // Send empty value - router treats empty as aggregated worker selection
+    // Send empty value - router treats empty as aggregated / aggregated worker selection
     set_kv_annotation(request, "query_instance_id".to_string(), "")
 }
 
@@ -952,14 +952,17 @@ fn spawn_prefill_watcher(
     model_manager: Arc<ModelManager>,
     target_namespace: String,
 ) {
-    use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
     use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
     use dynamo_runtime::protocols::EndpointId;
     use futures::StreamExt;
 
     tokio::spawn(async move {
         let discovery = drt.discovery();
-        let mut stream = match discovery.list_and_watch(DiscoveryQuery::AllModels, None).await {
+        let mut stream = match discovery
+            .list_and_watch(DiscoveryQuery::AllModels, None)
+            .await
+        {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to start prefill discovery stream");

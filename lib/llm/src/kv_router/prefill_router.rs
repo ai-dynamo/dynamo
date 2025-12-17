@@ -482,7 +482,6 @@ impl
                 decode_req.stop_conditions.max_tokens = original_max_tokens;
 
                 // Set router_config_override for decode: overlap_score_weight = 0
-                // This ensures load-based selection (no KV overlap consideration after prefill)
                 let existing_override = decode_req.router_config_override.take();
                 decode_req.router_config_override = Some(RouterConfigOverride {
                     overlap_score_weight: Some(0.0),
