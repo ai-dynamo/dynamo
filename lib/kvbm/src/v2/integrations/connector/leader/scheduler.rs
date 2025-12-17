@@ -8,7 +8,6 @@ use crate::{
 };
 
 use dynamo_nova::events::EventHandle;
-use dynamo_tokens::Tokens;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -176,14 +175,22 @@ impl ConnectorLeader {
         &self,
         scheduler_output: SchedulerOutput,
     ) -> Result<KvConnectorMetadata> {
-        tracing::trace!(
-            "processing scheduler output for iteration: {}; active slots: {}",
-            scheduler_output.iteration,
-            self.slots.len()
+        tracing::debug!(
+            iteration = scheduler_output.iteration,
+            total_scheduled_tokens = scheduler_output.total_num_scheduled_tokens,
+            new_reqs = scheduler_output.scheduled_new_reqs.len(),
+            cached_reqs = scheduler_output.scheduled_cached_reqs.len(),
+            active_slots = self.slots.len(),
+            "process_scheduler_output ENTRY"
         );
 
         if scheduler_output.total_num_scheduled_tokens == 0 {
-            tracing::trace!("no scheduled tokens, early exiting");
+            tracing::debug!(
+                iteration = scheduler_output.iteration,
+                new_reqs = scheduler_output.scheduled_new_reqs.len(),
+                cached_reqs = scheduler_output.scheduled_cached_reqs.len(),
+                "No scheduled tokens, early exiting"
+            );
             return Ok(KvConnectorMetadata::new(scheduler_output.iteration));
         }
 
@@ -198,32 +205,37 @@ impl ConnectorLeader {
             match self.get_slot(&req.req_id) {
                 Ok(shared_slot) => {
                     let mut slot = shared_slot.lock();
-                    slot.advance_evaluated_tokens(req.num_computed_tokens);
 
                     // We are given all the block_ids for the request, but we need to filter out all those that may
                     // have been applied to the slot already.
                     let filtered_block_ids = slot.filter_block_ids(req.block_ids);
                     slot.apply_new_blocks(filtered_block_ids);
 
-                    // assert!(
-                    //     req.num_computed_tokens.is_multiple_of(self.block_size()),
-                    //     "num_computed_tokens must be a multiple of block_size; num_computed_tokens: {}; block_size: {}",
-                    //     req.num_computed_tokens,
-                    //     self.block_size()
-                    // );
-
-                    // when we start a new request, we are always starting at the beginning of a block
-                    // is might not be the first block, but it always aligned with a block boundary
+                    // Get scheduled tokens and compute total for offload evaluation.
+                    // We evaluate ALL tokens (computed + scheduled) so presence filters
+                    // handle any blocks already in G2 from external matches.
                     let num_scheduled_tokens = scheduler_output
                         .num_scheduled_tokens
                         .get(&req.req_id)
                         .copied()
                         .unwrap_or(0);
+                    let total_tokens = req.num_computed_tokens + num_scheduled_tokens;
+
+                    tracing::debug!(
+                        req_id = %req.req_id,
+                        num_computed_tokens = req.num_computed_tokens,
+                        num_scheduled_tokens,
+                        total_tokens,
+                        assigned_blocks = slot.assigned_block_count(),
+                        evaluated_tokens = slot.evaluated_tokens(),
+                        evaluated_blocks = slot.evaluated_blocks(),
+                        "new_request: evaluating blocks for offload"
+                    );
 
                     if let Err(e) = self.process_request_offload(
                         &req.req_id,
                         &mut slot,
-                        num_scheduled_tokens,
+                        total_tokens,
                         precondition,
                     ) {
                         tracing::error!(
@@ -243,6 +255,14 @@ impl ConnectorLeader {
         }
 
         for req in scheduler_output.scheduled_cached_reqs {
+            tracing::debug!(
+                req_id = %req.req_id,
+                new_token_ids_count = req.new_token_ids.len(),
+                new_block_ids_count = req.new_block_ids.len(),
+                num_computed_tokens = req.num_computed_tokens,
+                "Processing cached request"
+            );
+
             match self.get_slot(&req.req_id) {
                 Ok(shared_slot) => {
                     let mut slot = shared_slot.lock();
@@ -275,30 +295,26 @@ impl ConnectorLeader {
                         continue;
                     }
 
-                    // If we have new token IDs, extend the sequence
-                    if !req.new_token_ids.is_empty() {
-                        let tokens = Tokens::from(
-                            req.new_token_ids
-                                .iter()
-                                .map(|&t| t as i32)
-                                .collect::<Vec<_>>(),
-                        );
-                        if let Err(e) = slot.sequence.extend(tokens) {
-                            tracing::error!(
-                                "failed to extend sequence for req_id: {}: {}",
-                                req.req_id,
-                                e
-                            );
-                            continue;
-                        }
-                    }
+                    // NOTE: We do NOT extend tokens here from req.new_token_ids.
+                    //
+                    // Token extension is handled by Python's update_slot() method which calls
+                    // extend_slot_tokens() BEFORE build_connector_metadata() is invoked.
+                    // This ensures the slot's sequence is already up-to-date with the latest
+                    // tokens from vLLM's Request object.
+                    //
+                    // The scheduler output's new_token_ids field may be None/empty during
+                    // decode (vLLM doesn't always populate it), but update_slot() reliably
+                    // syncs tokens by comparing slot.total_tokens() vs request.all_token_ids.
+                    //
+                    // Applying tokens here would risk double-application or race conditions.
+                    // If vLLM ever starts populating new_token_ids during decode, we should
+                    // verify Python's total_tokens matches Rust's before deciding to apply.
 
-                    // Skip if no new block IDs
-                    if req.new_block_ids.is_empty() {
-                        continue;
+                    // Apply new block IDs if any (handles unassigned blocks correctly)
+                    let new_block_ids_count = req.new_block_ids.len();
+                    if !req.new_block_ids.is_empty() {
+                        slot.apply_new_blocks(req.new_block_ids);
                     }
-
-                    slot.apply_new_blocks(req.new_block_ids);
 
                     let num_scheduled_tokens = scheduler_output
                         .num_scheduled_tokens
@@ -306,7 +322,18 @@ impl ConnectorLeader {
                         .copied()
                         .unwrap_or(0);
 
-                    // Process offload with offset for cached requests
+                    tracing::debug!(
+                        req_id = %req.req_id,
+                        num_scheduled_tokens,
+                        new_block_ids = new_block_ids_count,
+                        assigned_blocks = slot.assigned_block_count(),
+                        evaluated_tokens = slot.evaluated_tokens(),
+                        evaluated_blocks = slot.evaluated_blocks(),
+                        "cached_request: evaluating blocks for offload"
+                    );
+
+                    // Always process offload - may have completed blocks from previous allocations
+                    // even if no new block IDs were allocated this step
                     if let Err(e) = self.process_request_offload(
                         &req.req_id,
                         &mut slot,
@@ -406,15 +433,31 @@ impl ConnectorLeader {
             return Ok(());
         }
 
-        // ask the slot for the next set of assigned_block_ids to offload
+        // Capture state before evaluation for debug logging
+        let evaluated_blocks_before = slot.evaluated_blocks();
+
+        // Ask the slot for the next set of assigned_block_ids to offload
         let block_mappings = slot.get_next_block_mappings(num_scheduled_tokens);
-        slot.advance_evaluated_tokens(num_scheduled_tokens);
+
+        // Only advance evaluated_tokens up to assigned blocks.
+        // This prevents advancing past blocks that haven't been assigned yet,
+        // which can happen due to a 1-iteration lag between token extension
+        // (via update_slot) and block assignment (via scheduler_output).
+        let max_tokens_with_blocks = slot.assigned_block_count() * slot.block_size();
+        let desired_tokens = slot.evaluated_tokens() + num_scheduled_tokens;
+        let capped_tokens = desired_tokens.min(max_tokens_with_blocks);
+        let actual_advance = capped_tokens.saturating_sub(slot.evaluated_tokens());
+        slot.advance_evaluated_tokens(actual_advance);
+
+        let evaluated_blocks_after = slot.evaluated_blocks();
 
         tracing::debug!(
             req_id,
-            "num_scheduled_tokens: {}; num_blocks_to_offload: {}",
             num_scheduled_tokens,
-            block_mappings.len(),
+            evaluated_blocks_before,
+            evaluated_blocks_after,
+            blocks_to_offload = block_mappings.len(),
+            "offload: queuing blocks"
         );
 
         let source_blocks: Vec<_> = block_mappings

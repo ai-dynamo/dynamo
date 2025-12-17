@@ -52,36 +52,39 @@ def process_scheduler_output(
         )
 
     # Process cached requests using the new API
+    #
+    # NOTE: We do NOT use cached.new_token_ids here. Token extension is handled by
+    # Python's update_slot() which calls extend_slot_tokens() BEFORE this function.
+    # vLLM's new_token_ids is only populated for pipeline parallelism (PP); when PP
+    # is not used, it's an empty list which would cause zip() to produce zero iterations.
+    # We always pass [] for new_token_ids since the Rust side ignores it anyway.
     cached = scheduler_output.scheduled_cached_reqs
     if cached is not None:
-        # Use the new API: resumed_req_ids is a set, all_token_ids is a dict
         resumed_req_ids = cached.resumed_req_ids
+        req_ids = cached.req_ids or []
+        new_block_ids_list = cached.new_block_ids or [None] * len(req_ids)
+        num_computed_tokens_list = cached.num_computed_tokens or [0] * len(req_ids)
+        num_output_tokens_list = cached.num_output_tokens or [0] * len(req_ids)
 
         for (
             req_id,
-            new_token_ids,
             new_block_ids,
             num_computed_tokens,
             num_output_tokens,
         ) in zip(
-            cached.req_ids,
-            cached.new_token_ids,
-            cached.new_block_ids,
-            cached.num_computed_tokens,
-            cached.num_output_tokens,
+            req_ids,
+            new_block_ids_list,
+            num_computed_tokens_list,
+            num_output_tokens_list,
         ):
-            # Determine if this request resumed from preemption
             resumed = req_id in resumed_req_ids
 
-            # Get all token IDs if this request resumed
+            # Get all token IDs if this request resumed from preemption
             all_token_ids = None
             if resumed and cached.all_token_ids:
                 all_token_ids = cached.all_token_ids.get(req_id)
                 if all_token_ids is not None:
                     all_token_ids = [int(token) for token in all_token_ids]
-
-            # Convert new token IDs
-            tokens = [int(token) for token in new_token_ids] if new_token_ids else []
 
             # Extract block IDs from the first sequence
             block_ids = (
@@ -93,7 +96,7 @@ def process_scheduler_output(
             output.add_cached_request(
                 req_id,
                 resumed,
-                tokens,
+                [],  # new_token_ids always empty - tokens handled by update_slot()
                 all_token_ids=all_token_ids,
                 new_block_ids=block_ids,
                 num_computed_tokens=int(num_computed_tokens),

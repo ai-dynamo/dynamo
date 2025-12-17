@@ -157,7 +157,17 @@ impl ConnectorLeader {
     /// and need to be synchronized to the slot.
     pub fn extend_slot_tokens(&self, request_id: &str, tokens: Vec<u32>) -> Result<()> {
         let slot = self.get_slot(request_id)?;
-        slot.lock().extend_tokens(tokens)
+        let mut slot = slot.lock();
+        let blocks_before = slot.sequence.blocks().len();
+        let total_before = slot.sequence.total_tokens();
+        let result = slot.extend_tokens(tokens);
+        let blocks_after = slot.sequence.blocks().len();
+        let total_after = slot.sequence.total_tokens();
+        eprintln!(
+            "[RUST EXTEND DEBUG] req_id={}, tokens_before={}, tokens_after={}, blocks_before={}, blocks_after={}",
+            request_id, total_before, total_after, blocks_before, blocks_after
+        );
+        result
     }
 
     /// Get the number of new tokens that can be loaded from external KV cache.

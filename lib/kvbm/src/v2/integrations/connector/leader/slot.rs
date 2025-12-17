@@ -636,6 +636,16 @@ impl RequestSlot {
             (self.evaluated_tokens + num_scheduled_tokens) / self.block_size();
         let new_blocks_to_evaluate = num_blocks_after_evaluation - evaluated_blocks;
 
+        tracing::debug!(
+            evaluated_tokens = self.evaluated_tokens,
+            num_scheduled_tokens,
+            evaluated_blocks,
+            num_blocks_after_evaluation,
+            new_blocks_to_evaluate,
+            assigned_blocks = self.block_matches.assigned_blocks.len(),
+            "get_next_block_mappings: computing offload candidates"
+        );
+
         self.block_matches
             .assigned_blocks
             .iter()
@@ -726,6 +736,16 @@ impl RequestSlot {
 
     pub fn evaluated_blocks(&self) -> usize {
         self.evaluated_tokens / self.block_size()
+    }
+
+    /// Get the number of tokens that have been evaluated for offload.
+    pub fn evaluated_tokens(&self) -> usize {
+        self.evaluated_tokens
+    }
+
+    /// Get the count of blocks that have been assigned physical block IDs.
+    pub fn assigned_block_count(&self) -> usize {
+        self.block_matches.assigned_blocks.len()
     }
 
     /// Get the total number of tokens in the slot's sequence.

@@ -15,6 +15,7 @@ For Phase 1, the leader:
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any, Optional
 
 import kvbm
@@ -89,6 +90,12 @@ class SchedulerConnectorLeader:
         # Create leader service for coordination (separate from runtime)
         self.leader = ConnectorLeader(self.runtime, self.block_size)
 
+        self.enable_decode_offload = os.getenv("KVBM_DECODE_OFFLOAD", "false") == "true"
+        print(
+            f"SchedulerConnectorLeader: enable_decode_offload: {self.enable_decode_offload}",
+            flush=True,
+        )
+
         instance_id = self.runtime.instance_id()
         print(
             f"SchedulerConnectorLeader initialized with Nova instance: {instance_id.hex()[:8]}...",
@@ -132,8 +139,12 @@ class SchedulerConnectorLeader:
             bytes: Serialized connector metadata
         """
         self.iteration = self.iteration + 1
+        if self.enable_decode_offload:
+            for req_id, _ in self.inflight_requests.items():
+                self.update_slot(req_id)
         output = process_scheduler_output(self.iteration, scheduler_output)
-        return bytes(self.leader.build_connector_metadata(output))
+        result = bytes(self.leader.build_connector_metadata(output))
+        return result
 
     def request_finished(
         self,

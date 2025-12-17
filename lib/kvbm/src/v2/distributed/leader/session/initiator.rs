@@ -1004,10 +1004,30 @@ impl InitiatorSession {
     }
 
     /// Consolidate all G2 blocks into shared storage.
+    ///
+    /// This method sorts blocks by sequence_hash position to ensure correct
+    /// positional correspondence for G2→G1 transfer. This is critical because
+    /// blocks from different sources (local G2, G3→G2, remote G2, G4) may arrive
+    /// in different orders, but the consumer expects them sorted by position.
     async fn consolidate_blocks(&mut self) {
-        let all_blocks = self.local_g2_blocks.take_all();
-        let matched_blocks = all_blocks.len();
+        let mut all_blocks = self.local_g2_blocks.take_all();
 
+        // Sort blocks by sequence_hash position (lowest to highest)
+        // This ensures correct positional correspondence for G2→G1 transfer
+        all_blocks.sort_by_key(|b| b.sequence_hash().position());
+
+        // Validate contiguous positions - catches ordering bugs before data corruption
+        let seq_hashes: Vec<SequenceHash> = all_blocks.iter().map(|b| b.sequence_hash()).collect();
+        if let Err(e) = validate_contiguous_positions(&seq_hashes) {
+            tracing::error!(
+                session_id = %self.session_id,
+                error = %e,
+                "Block position validation failed - potential data corruption avoided"
+            );
+            // The sorted order is still safer than unsorted even if validation fails
+        }
+
+        let matched_blocks = all_blocks.len();
         *self.all_g2_blocks.lock().await = Some(all_blocks);
 
         self.status_tx
@@ -1240,7 +1260,8 @@ impl InitiatorSession {
                     Ok(hash) => {
                         // Register the block with its sequence hash
                         // This adds it to the BlockRegistry for presence filtering
-                        let immutable = g2_manager.register_mutable_block_with_hash(dst_block, *seq_hash);
+                        let immutable =
+                            g2_manager.register_mutable_block_with_hash(dst_block, *seq_hash);
                         blocks.push(immutable);
                         success.push(hash);
                     }
@@ -1290,7 +1311,8 @@ impl InitiatorSession {
         }
 
         // Unwrap the Arc to get the Vec (this is the only owner since the message was just received)
-        let blocks = Arc::try_unwrap(blocks).expect("G4LoadComplete should be the sole owner of blocks");
+        let blocks =
+            Arc::try_unwrap(blocks).expect("G4LoadComplete should be the sole owner of blocks");
 
         // Add the registered G4 blocks to local_g2_blocks
         // These blocks are now registered in the BlockRegistry and will be
