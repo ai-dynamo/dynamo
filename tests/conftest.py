@@ -305,6 +305,8 @@ class NatsServer(ManagedProcess):
 
         self.port = port
         self.use_random_port = use_random_port  # Track if we allocated the port
+        self._request = request  # Store for restart
+        self._timeout = timeout
         data_dir = tempfile.mkdtemp(prefix="nats_")
         command = [
             "nats-server",
@@ -335,6 +337,39 @@ class NatsServer(ManagedProcess):
             logging.warning(f"Failed to release NatsServer port: {e}")
 
         return super().__exit__(exc_type, exc_val, exc_tb)
+
+    def stop(self):
+        """Stop the NATS server for restart. Does not release port or clean up fully."""
+        _logger.info(f"Stopping NATS server on port {self.port}")
+        self._terminate_process_group()
+        if self.proc:
+            try:
+                self.proc.wait(timeout=10)
+            except Exception as e:
+                _logger.warning(f"Error waiting for NATS process to stop: {e}")
+            self.proc = None
+
+    def start(self):
+        """Restart a stopped NATS server with fresh state."""
+        _logger.info(f"Starting NATS server on port {self.port} with fresh state")
+        # Clean up old data directory and create fresh one
+        if self.data_dir:
+            shutil.rmtree(self.data_dir, ignore_errors=True)
+        self.data_dir = tempfile.mkdtemp(prefix="nats_")
+
+        # Rebuild command with new data_dir
+        self.command = [
+            "nats-server",
+            "-js",
+            "--trace",
+            "--store_dir",
+            self.data_dir,
+            "-p",
+            str(self.port),
+        ]
+
+        self._start_process()
+        self._check_ports(self._timeout)
 
 
 class SharedManagedProcess:
