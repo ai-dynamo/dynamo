@@ -7,6 +7,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 
 # Configure TLLM_LOG_LEVEL before importing tensorrt_llm
 # This must happen before any tensorrt_llm imports
@@ -76,6 +77,70 @@ async def graceful_shutdown(runtime):
     logging.info("DistributedRuntime shutdown complete")
 
 
+def setup_signal_handlers(runtime, loop):
+    """
+    Set up robust signal handling that works even when the event loop is blocked.
+
+    This uses Python's signal.signal() instead of loop.add_signal_handler()
+    because signal.signal() handlers are called between Python bytecode
+    instructions, whereas loop.add_signal_handler() requires the event loop
+    to be actively processing events.
+
+    This is critical for TRT-LLM decode workers where the async generator
+    iteration (streaming token generation) can block the event loop from
+    processing signals registered via add_signal_handler().
+
+    Args:
+        runtime: The DistributedRuntime instance to shutdown
+        loop: The asyncio event loop to schedule the shutdown coroutine on
+    """
+    shutdown_initiated = threading.Event()
+
+    def handler(signum, frame):
+        """
+        Signal handler called by Python's signal subsystem.
+
+        This is invoked between Python bytecode instructions, not by the
+        asyncio event loop, so it works even when the event loop is blocked
+        in a tight async iteration loop.
+        """
+        signal_name = signal.Signals(signum).name
+        logging.info(f"{signal_name} received, initiating graceful shutdown")
+
+        # Prevent multiple shutdown attempts
+        if shutdown_initiated.is_set():
+            logging.warning(f"Shutdown already in progress, ignoring {signal_name}")
+            return
+        shutdown_initiated.set()
+
+        # Schedule the async shutdown on the event loop
+        # asyncio.run_coroutine_threadsafe is thread-safe and can be called
+        # from signal handler context. It adds the coroutine to the event
+        # loop's queue and wakes up the loop if necessary.
+        try:
+            asyncio.run_coroutine_threadsafe(graceful_shutdown(runtime), loop)
+            logging.debug("Shutdown coroutine scheduled on event loop")
+            # Don't wait for result here - we're in a signal handler context
+            # and should return quickly
+        except Exception as e:
+            logging.error(f"Failed to schedule shutdown coroutine: {e}")
+            # Fallback: try direct shutdown
+            try:
+                runtime.shutdown()
+            except Exception as fallback_error:
+                logging.error(f"Fallback shutdown also failed: {fallback_error}")
+
+    # Register handlers with Python's signal module
+    # This MUST be called from the main thread
+    signal.signal(signal.SIGTERM, handler)
+    signal.signal(signal.SIGINT, handler)
+
+    logging.info(
+        "Signal handlers set up for graceful shutdown (thread-safe via signal.signal)"
+    )
+    return shutdown_initiated
+
+
 async def get_engine_runtime_config(
     engine: TensorRTLLMEngine, config: Config
 ) -> ModelRuntimeConfig:
@@ -115,15 +180,14 @@ async def worker():
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(loop, config.store_kv, config.request_plane)
 
-    # Set up signal handler for graceful shutdown
-    def signal_handler():
-        # Schedule the shutdown coroutine instead of calling it directly
-        asyncio.create_task(graceful_shutdown(runtime))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    logging.info("Signal handlers set up for graceful shutdown")
+    # Set up thread-safe signal handlers for graceful shutdown.
+    # This uses signal.signal() instead of loop.add_signal_handler() because
+    # the latter requires the event loop to be processing events, which doesn't
+    # happen reliably during tight async iteration loops (e.g., TRT-LLM decode
+    # streaming). signal.signal() handlers are called between Python bytecode
+    # instructions, ensuring signals are processed even when the event loop
+    # appears "blocked" in an async for loop.
+    setup_signal_handlers(runtime, loop)
 
     await init(runtime, config)
 
