@@ -169,13 +169,6 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      - name: Login to Container Registries
-        uses: ./.github/actions/docker-login
-        with:
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
@@ -452,8 +445,6 @@ jobs:
           echo "🧪 Fault tolerance tests completed with exit code: ${TEST_EXIT_CODE}"
 
           exit ${TEST_EXIT_CODE}
-        continue-on-error: true
-
       - name: Process Fault Tolerance Test Results
         if: always()
         run: |
@@ -500,9 +491,7 @@ jobs:
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-operator job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -578,9 +567,8 @@ jobs:
 
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-test-vllm job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    # Run if push to main, or manually triggered
+    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
@@ -592,7 +580,7 @@ jobs:
           - agg
           - agg_router
           - disagg
-          - disagg_router
+          # - disagg_router
     name: deploy-test-vllm (${{ matrix.profile }})
     env:
       FRAMEWORK: vllm
@@ -720,8 +708,6 @@ jobs:
           echo "Test passed: Response matches expected format and content"
         fi
         exit $TEST_RESULT
-      continue-on-error: true
-
     - name: Process Deployment Test Results
       if: always()
       run: |
@@ -757,16 +743,42 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE
 
         # For debugging purposes, list all the resources before we delete
+        kubectl get dynamographdeployments
         kubectl get all
 
         echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
         kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE || true
 
+  # For now, this job is separated from the job matrix above for easier flow control handling
+  # Uncomment the disagg_router matrix entry from the above job and delete the below job
+  # when we want to run them under the same conditions.
+  # Current conditions:
+  # - Run vllm disagg_router on all commits
+  # - Run rest of jobs only on push to main or manual trigger
+  deploy-test-vllm-disagg-router:
+    runs-on: cpu-amd-m5-2xlarge
+    if: needs.changed-files.outputs.has_code_changes == 'true'
+    needs: [changed-files, deploy-operator, vllm]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        profile:
+          - disagg_router
+    name: deploy-test-vllm (${{ matrix.profile }})
+    env:
+      FRAMEWORK: vllm
+      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+      DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
+      MODEL_NAME: "Qwen/Qwen3-0.6B"
+    steps: *deploy-test-steps
+
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-test-sglang job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    # Run if push to main, or manually triggered
+    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, sglang]
     permissions:
       contents: read
@@ -787,9 +799,8 @@ jobs:
 
   deploy-test-trtllm:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-test-trtllm job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    # Run if push to main, or manually triggered
+    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, trtllm]
     permissions:
       contents: read
@@ -812,10 +823,8 @@ jobs:
 
   cleanup:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment the below if statement when we have a way to test the cleanup job in CI.
-    # if: always()
-    if: github.event.inputs.run_deploy_operator
-    needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
+    if: always()
+    needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm, deploy-test-vllm-disagg-router]
     steps:
     - name: Output Node Name
       shell: bash
@@ -848,6 +857,7 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
 
         # For debugging purposes, list all the resources before we uninstall
+        kubectl get dynamographdeployments
         kubectl get all
 
         echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."

@@ -23,6 +23,7 @@ pytest-forked==1.6.0
 pytest-httpserver==1.1.3
 pytest-md-report==0.7.0
 pytest-mypy==1.0.1
+pytest-order==1.3.0
 pytest-timeout==2.4.0
 pytest-xdist==3.8.0
 # Triton client to Dynamo gRPC server

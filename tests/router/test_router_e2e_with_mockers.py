@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import logging
 import os
+from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 import pytest
 
+from tests.conftest import EtcdServer, NatsServer
 from tests.router.common import (  # utilities
     _test_busy_threshold_endpoint,
     _test_python_router_bindings,
@@ -476,53 +478,82 @@ def test_kv_push_router_bindings(
             mockers.__exit__(None, None, None)
 
 
-@pytest.mark.parametrize("store_backend", ["etcd", "file"])
+# NO @pytest.mark.parallel - nats_core variant stops/restarts NATS
+@pytest.mark.parametrize(
+    "store_backend,use_nats_core,request_plane",
+    [
+        ("etcd", False, "nats"),  # JetStream mode
+        # ("etcd", True, "tcp"),  # ignored, needs unconditional nats_client
+        ("file", False, "nats"),  # File backend
+    ],
+    ids=["jetstream", "file"],  # "nats_core" commented out to match commented test case
+)
 def test_indexers_sync(
     request,
-    runtime_services_session,
     predownload_tokenizers,
     file_storage_backend,
     store_backend,
+    use_nats_core,
+    request_plane,
 ):
     """
     Test that two KV routers have synchronized indexer states after processing requests.
     This test verifies that both routers converge to the same internal state.
-    Tests with both etcd and file storage backends.
+
+    Tests with three configurations:
+    - jetstream: etcd backend, JetStream for KV events, NATS request plane
+    - nats_core: etcd backend, local indexer with NATS Core, TCP request plane
+                 (includes NATS interruption/recovery testing)
+    - file: file backend, JetStream for KV events, NATS request plane
     """
+    logger.info(
+        f"Starting indexers sync test: store_backend={store_backend}, "
+        f"use_nats_core={use_nats_core}, request_plane={request_plane}"
+    )
 
-    # runtime_services starts etcd and nats
-    logger.info(f"Starting indexers sync test with {store_backend} storage backend")
+    # Start NATS manually (needed for all variants - KV event sync)
+    with NatsServer(request) as nats_server:
+        # Start etcd if needed
+        etcd_ctx = EtcdServer(request) if store_backend == "etcd" else nullcontext()
+        with etcd_ctx:
+            # Create mocker args dictionary
+            mocker_args = {
+                "speedup_ratio": SPEEDUP_RATIO,
+                "block_size": BLOCK_SIZE,
+                "enable_local_indexer": use_nats_core,
+            }
 
-    # Create mocker args dictionary
-    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+            try:
+                # Start mocker instances
+                logger.info(f"Starting {NUM_MOCKERS} mocker instances")
+                mockers = MockerProcess(
+                    request,
+                    mocker_args=mocker_args,
+                    num_mockers=NUM_MOCKERS,
+                    store_backend=store_backend,
+                    request_plane=request_plane,
+                )
+                logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+                mockers.__enter__()
 
-    try:
-        # Start mocker instances
-        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
-        mockers = MockerProcess(
-            request,
-            mocker_args=mocker_args,
-            num_mockers=NUM_MOCKERS,
-            store_backend=store_backend,
-        )
-        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
-        mockers.__enter__()
+                # Use the common test implementation (creates its own runtimes for each router)
+                # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
+                _test_router_indexers_sync(
+                    engine_workers=mockers,
+                    block_size=BLOCK_SIZE,
+                    model_name=MODEL_NAME,
+                    num_workers=NUM_MOCKERS,
+                    store_backend=store_backend,
+                    request_plane=request_plane,
+                    test_nats_interruption=use_nats_core,
+                    nats_server=nats_server if use_nats_core else None,
+                )
 
-        # Use the common test implementation (creates its own runtimes for each router)
-        # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
-        _test_router_indexers_sync(
-            engine_workers=mockers,
-            block_size=BLOCK_SIZE,
-            model_name=MODEL_NAME,
-            num_workers=NUM_MOCKERS,
-            store_backend=store_backend,
-        )
+                logger.info("Indexers sync test completed successfully")
 
-        logger.info("Indexers sync test completed successfully")
-
-    finally:
-        if "mockers" in locals():
-            mockers.__exit__(None, None, None)
+            finally:
+                if "mockers" in locals():
+                    mockers.__exit__(None, None, None)
 
 
 @pytest.mark.parallel

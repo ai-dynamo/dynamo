@@ -31,7 +31,6 @@ pub mod protocols;
 pub mod publisher;
 pub mod recorder;
 pub mod scheduler;
-pub mod scoring;
 pub mod sequence;
 pub mod subscriber;
 pub mod worker_query;
