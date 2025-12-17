@@ -768,7 +768,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Format: "query_instance_id:type" where type is "prefill", "decode", or "" (empty for aggregated)
         // Empty value ("query_instance_id:") means GAIE Aggregated mode - return same worker as both prefill and decode
         let query_instance_annotation = request.get_annotation_value("query_instance_id");
-        let is_aggregated_query = query_instance_annotation
+        let is_gaie_agg_query = query_instance_annotation
             .as_ref()
             .is_some_and(|s| s.is_empty());
         let query_instance_type: Option<QueryInstanceType> =
@@ -815,8 +815,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             (id, dp_rank, overlap_blocks)
         } else {
             // Otherwise, find the best match
-            // Don't update states if this is a query-only request (disagg or aggregated)
-            let should_update_states = query_instance_type.is_none() && !is_aggregated_query;
+            // Don't update states if this is a query-only request (any query_instance_id annotation, empty or not)
+            let should_update_states = query_instance_annotation.is_none();
             let (best_worker, overlap_amount) = self
                 .chooser
                 .find_best_match(
@@ -835,8 +835,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let stream_context = request.context().clone();
 
         // Handle query-only requests (GAIE Stage 1)
-        if query_instance_type.is_some() || is_aggregated_query {
-            let worker_id_info = if is_aggregated_query {
+        if query_instance_type.is_some() || is_gaie_agg_query {
+            let worker_id_info = if is_gaie_agg_query {
                 // GAIE Aggregated mode: same worker serves both prefill and decode
                 tracing::trace!(
                     query_type = "aggregated",
