@@ -71,6 +71,7 @@ pub struct LLMMetricAnnotation {
     pub input_tokens: usize,
     pub output_tokens: usize,
     pub chunk_tokens: usize,
+    pub cached_tokens: Option<usize>,
 }
 
 impl LLMMetricAnnotation {
@@ -646,6 +647,7 @@ impl OpenAIPreprocessor {
                         input_tokens: isl,
                         output_tokens: current_osl,
                         chunk_tokens,
+                        cached_tokens: None,
                     };
 
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
@@ -673,20 +675,39 @@ impl OpenAIPreprocessor {
                     // again. The stream is exhausted and will panic if polled after None.
                     inner.finished = true;
 
-                    // Check if we need to send a usage chunk
-                    if inner.response_generator.is_usage_enabled()
-                        && inner.finish_reason_sent
-                        && !inner.usage_chunk_sent
-                    {
+                    if inner.finish_reason_sent && !inner.usage_chunk_sent {
                         inner.usage_chunk_sent = true;
 
-                        // Create the final usage chunk
                         let usage_chunk = inner.response_generator.create_usage_chunk();
+                        let usage = inner.response_generator.get_usage();
+                        let llm_metrics = LLMMetricAnnotation {
+                            input_tokens: usage.prompt_tokens as usize,
+                            output_tokens: usage.completion_tokens as usize,
+                            chunk_tokens: 0,
+                            cached_tokens: usage
+                                .prompt_tokens_details
+                                .as_ref()
+                                .and_then(|d| d.cached_tokens.map(|c| c as usize)),
+                        };
+
+                        // Create annotation string
+                        let annotation = llm_metrics.to_annotation::<()>().unwrap_or_else(|e| {
+                            tracing::warn!("Failed to serialize metrics: {}", e);
+                            Annotated::<()>::from_data(())
+                        });
+
+                        // Send the usage chunk if needed
+                        let data = if inner.response_generator.is_usage_enabled() {
+                            Some(usage_chunk)
+                        } else {
+                            None
+                        };
+
                         let annotated_usage = Annotated::<Resp> {
                             id: None,
-                            data: Some(usage_chunk),
-                            event: None,
-                            comment: None,
+                            data,
+                            event: Some(ANNOTATION_LLM_METRICS.to_string()),
+                            comment: annotation.comment,
                         };
 
                         tracing::trace!(
@@ -780,6 +801,7 @@ impl OpenAIPreprocessor {
     pub fn apply_tool_calling_jail<S>(
         tool_call_parser: Option<String>,
         tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
+        tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
@@ -788,6 +810,13 @@ impl OpenAIPreprocessor {
         use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
 
         let mut builder = JailedStream::builder();
+
+        // Set tool definitions if provided
+        if let Some(tool_definitions) = tool_definitions
+            && !tool_definitions.is_empty()
+        {
+            builder = builder.tool_definitions(tool_definitions);
+        }
 
         // Configure jail based on tool_choice
         match tool_choice {
@@ -970,11 +999,23 @@ impl
             has_tools,
         )?;
 
+        // Convert OpenAI tools to parser ToolDefinition format before applying jail
+        let tool_definitions = request.inner.tools.as_ref().map(|tools| {
+            tools
+                .iter()
+                .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
+                    name: tool.function.name.clone(),
+                    parameters: tool.function.parameters.clone(),
+                })
+                .collect()
+        });
+
         // Apply jail conditionally
         let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
             Box::pin(Self::apply_tool_calling_jail(
                 self.tool_call_parser.clone(),
                 request.inner.tool_choice.clone(),
+                tool_definitions,
                 stream,
             ))
         } else {

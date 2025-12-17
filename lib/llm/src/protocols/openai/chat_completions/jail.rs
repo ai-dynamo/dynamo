@@ -104,6 +104,7 @@ fn create_choice_stream(
     content: &str,
     tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
     finish_reason: Option<FinishReason>,
+    stop_reason: Option<dynamo_async_openai::types::StopReason>,
     logprobs: Option<ChatChoiceLogprobs>,
 ) -> ChatChoiceStream {
     #[allow(deprecated)]
@@ -118,6 +119,7 @@ fn create_choice_stream(
             reasoning_content: None,
         },
         finish_reason,
+        stop_reason,
         logprobs,
     }
 }
@@ -178,6 +180,7 @@ impl ChoiceJailState {
                             &prefix,
                             None,
                             choice.finish_reason,
+                            None,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
@@ -226,6 +229,7 @@ impl ChoiceJailState {
                                 trailing_part,
                                 None,
                                 choice.finish_reason,
+                                None,
                                 choice.logprobs.clone(),
                             );
                             emissions.push(ChoiceEmission::Trailing(trailing_choice));
@@ -258,6 +262,7 @@ impl ChoiceJailState {
                             &prefix,
                             None,
                             choice.finish_reason,
+                            None,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
@@ -301,6 +306,7 @@ impl ChoiceJailState {
                                 &content,
                                 None,
                                 choice.finish_reason,
+                                None,
                                 choice.logprobs.clone(),
                             );
                             emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
@@ -354,6 +360,7 @@ impl ChoiceJailState {
                         trailing_part,
                         None,
                         choice.finish_reason,
+                        None,
                         choice.logprobs.clone(),
                     );
                     emissions.push(ChoiceEmission::Trailing(trailing_choice));
@@ -383,6 +390,7 @@ impl ChoiceJailState {
                 &self.accumulated_content,
                 None,
                 self.stream_finish_reason, // For the accumulated content, assign the original stream finish reason, otherwise it will get lost
+                None,
                 None,
             );
 
@@ -462,6 +470,7 @@ pub struct JailedStream {
     jail_start_sequences: Vec<String>,
     jail_end_sequences: Vec<String>,
     tool_call_parser: Option<String>,
+    tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
     emission_mode: EmissionMode,
     marker_matcher: MarkerMatcher,
     jail_mode: JailMode,
@@ -557,6 +566,7 @@ impl JailedStream {
                                     index: choice.index,
                                     delta: choice.delta.clone(),
                                     finish_reason: choice.finish_reason,
+                                    stop_reason: choice.stop_reason.clone(),
                                     logprobs: choice.logprobs.clone(),
                                 };
                                 all_emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
@@ -749,8 +759,13 @@ impl JailedStream {
                 } else if early_exit {
                     // For early exit, find where the complete tool call ends
                     if let Some(parser) = &self.tool_call_parser {
-                        if let Ok((_, _)) =
-                            try_tool_call_parse_aggregate(accumulated_content, Some(parser)).await
+                        let tools_slice = self.tool_definitions.as_deref();
+                        if let Ok((_, _)) = try_tool_call_parse_aggregate(
+                            accumulated_content,
+                            Some(parser),
+                            tools_slice,
+                        )
+                        .await
                         {
                             let split_pos =
                                 find_tool_call_end_position(accumulated_content, Some(parser));
@@ -805,9 +820,11 @@ impl JailedStream {
         match &self.jail_mode {
             JailMode::MarkerBased => {
                 // Traditional marker-based tool call parsing
+                let tools_slice = self.tool_definitions.as_deref();
                 if let Ok((tool_calls, normal_text)) = try_tool_call_parse_aggregate(
                     accumulated_content,
                     self.tool_call_parser.as_deref(),
+                    tools_slice,
                 )
                 .await
                     && !tool_calls.is_empty()
@@ -834,6 +851,7 @@ impl JailedStream {
                         Some(tool_call_chunks),
                         None,
                         None,
+                        None,
                     );
                     return choice;
                 }
@@ -845,6 +863,7 @@ impl JailedStream {
                     accumulated_content,
                     None,
                     base_choice.finish_reason,
+                    base_choice.stop_reason.clone(),
                     base_choice.logprobs.clone(),
                 )
             }
@@ -857,6 +876,7 @@ impl JailedStream {
                         "",
                         Some(tool_call_chunks),
                         base_choice.finish_reason,
+                        None,
                         base_choice.logprobs.clone(),
                     ),
                     Ok(_) | Err(_) => {
@@ -867,6 +887,7 @@ impl JailedStream {
                             accumulated_content,
                             None,
                             base_choice.finish_reason,
+                            base_choice.stop_reason.clone(),
                             base_choice.logprobs.clone(),
                         )
                     }
@@ -939,7 +960,8 @@ impl JailedStream {
     async fn should_exit_jail_early(&self, accumulated: &str) -> bool {
         if let Some(ref parser) = self.tool_call_parser {
             // Try to parse - if successful and we have complete tool calls, exit early
-            match try_tool_call_parse_aggregate(accumulated, Some(parser)).await {
+            let tools_slice = self.tool_definitions.as_deref();
+            match try_tool_call_parse_aggregate(accumulated, Some(parser), tools_slice).await {
                 Ok((tool_calls, _normal_text)) => {
                     let result = !tool_calls.is_empty();
                     return result;
@@ -1021,6 +1043,7 @@ pub struct JailedStreamBuilder {
     jail_start_sequences: Vec<String>,
     jail_end_sequences: Vec<String>,
     tool_call_parser: Option<String>,
+    tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
     emission_mode: EmissionMode,
     jail_mode: JailMode,
 }
@@ -1032,6 +1055,7 @@ impl JailedStreamBuilder {
             jail_start_sequences: Vec::new(),
             jail_end_sequences: Vec::new(),
             tool_call_parser: None,
+            tool_definitions: None,
             emission_mode: EmissionMode::default(),
             jail_mode: JailMode::MarkerBased,
         }
@@ -1072,6 +1096,15 @@ impl JailedStreamBuilder {
     /// Set the tool call parser to use for detection and parsing
     pub fn tool_call_parser(mut self, parser: impl Into<String>) -> Self {
         self.tool_call_parser = Some(parser.into());
+        self
+    }
+
+    /// Set the tool definitions for runtime validation and parsing
+    pub fn tool_definitions(
+        mut self,
+        tools: Vec<dynamo_parsers::tool_calling::ToolDefinition>,
+    ) -> Self {
+        self.tool_definitions = Some(tools);
         self
     }
 
@@ -1185,6 +1218,7 @@ impl JailedStreamBuilder {
             jail_start_sequences: self.jail_start_sequences,
             jail_end_sequences: self.jail_end_sequences,
             tool_call_parser: self.tool_call_parser,
+            tool_definitions: self.tool_definitions,
             emission_mode: self.emission_mode,
             marker_matcher,
             jail_mode: self.jail_mode,

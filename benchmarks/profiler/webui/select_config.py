@@ -3,19 +3,19 @@
 
 import json
 import logging
-import os
 import queue
-from pathlib import Path
 
 from benchmarks.profiler.webui.utils import (
-    PlotType,
+    add_profiling_error,
+    clear_profiling_errors,
     create_gradio_interface,
     create_selection_handler,
-    populate_cost_data,
-    populate_decode_data,
-    populate_prefill_data,
+    generate_config_data,
     wait_for_selection,
 )
+
+# Re-export for use by profiler modules
+__all__ = ["pick_config_with_webui", "add_profiling_error", "clear_profiling_errors"]
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -26,55 +26,6 @@ formatter = logging.Formatter(
 )
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
-
-
-def generate_config_data(prefill_data, decode_data, args):
-    """
-    Generate JSON data file for WebUI from profiling results.
-
-    Args:
-        prefill_data: PrefillProfileData instance
-        decode_data: DecodeProfileData instance
-        args: Arguments containing SLA targets (ttft, itl, isl, osl) and output_dir
-
-    Returns a JSON data file for WebUI consumption,
-        see https://github.com/ai-dynamo/aiconfigurator/blob/main/src/aiconfigurator/webapp/components/profiling/standalone/sample_profiling_data.json for more details
-    """
-    # Load template
-    template_path = Path(__file__).parent / "data_template.json"
-    with open(template_path, "r") as f:
-        data = json.load(f)
-
-    # Construct output path
-    output_path = os.path.join(args.output_dir, "webui_data.json")
-
-    # Set SLA targets
-    data[PlotType.PREFILL]["chart"]["target_line"]["value"] = args.ttft
-    data[PlotType.PREFILL]["chart"]["target_line"][
-        "label"
-    ] = f"Target TTFT: {args.ttft} ms"
-
-    data[PlotType.DECODE]["chart"]["target_line"]["value"] = args.itl
-    data[PlotType.DECODE]["chart"]["target_line"][
-        "label"
-    ] = f"Target ITL: {args.itl} ms"
-
-    data[PlotType.COST]["chart"][
-        "title"
-    ] = f"Cost Per 1000 i{args.isl}o{args.osl} requests"
-
-    # Populate data sections
-    populate_prefill_data(data, prefill_data)
-    populate_decode_data(data, decode_data)
-    populate_cost_data(data, prefill_data, decode_data, args)
-
-    # Save JSON file
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "w") as f:
-        json.dump(data, f, indent=4)
-
-    logger.info(f"Generated WebUI config data at {output_path}")
-    return data
 
 
 def pick_config_with_webui(prefill_data, decode_data, args):
@@ -89,13 +40,18 @@ def pick_config_with_webui(prefill_data, decode_data, args):
     Returns:
         tuple[int, int]: (selected_prefill_idx, selected_decode_idx)
     """
-    # Generate JSON data file and load it
-    generate_config_data(prefill_data, decode_data, args)
+    # Note: Don't clear profiling errors here - they should be accumulated
+    # during the profiling run and displayed in the WebUI.
+    # clear_profiling_errors() should be called at the start of a new profiling run.
 
-    output_path = os.path.join(args.output_dir, "webui_data.json")
-    with open(output_path, "r") as f:
-        json_data_str = f.read()
-        data_dict = json.loads(json_data_str)
+    # Generate JSON data with GPU hours (frontend handles cost conversion)
+    data_dict = generate_config_data(
+        prefill_data,
+        decode_data,
+        args,
+        write_to_disk=True,
+    )
+    json_data_str = json.dumps(data_dict)
 
     logger.info(f"Launching WebUI on port {args.webui_port}...")
 
@@ -107,9 +63,15 @@ def pick_config_with_webui(prefill_data, decode_data, args):
     decode_selection = {"idx": None}
 
     # Create selection handler and Gradio interface
+    data_dict_ref = {"data": data_dict}
     handle_selection = create_selection_handler(
-        data_dict, selection_queue, prefill_selection, decode_selection
+        data_dict_ref, selection_queue, prefill_selection, decode_selection
     )
-    demo = create_gradio_interface(json_data_str, handle_selection)
+
+    # Note: GPU hours -> Cost conversion is handled by frontend JavaScript (gpu_cost_toggle.js)
+    demo = create_gradio_interface(
+        json_data_str,
+        handle_selection,
+    )
 
     return wait_for_selection(demo, selection_queue, args.webui_port)

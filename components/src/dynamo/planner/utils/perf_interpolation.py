@@ -20,7 +20,6 @@ import os
 from typing import Optional
 
 import numpy as np
-import scipy
 
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -79,6 +78,9 @@ class PrefillInterpolator:
 
         self.min_isl = min(self.prefill_isl)
         self.max_isl = max(self.prefill_isl)
+
+        # Lazy import scipy only when interpolation is actually needed
+        import scipy.interpolate
 
         # perform 1d interpolation
         self.ttft_interpolator = scipy.interpolate.interp1d(
@@ -150,6 +152,9 @@ class DecodeInterpolator:
         self.xi = np.linspace(0, 1, resolution)
         self.yi = np.linspace(0, max(self.y_context_length), resolution)
         self.X, self.Y = np.meshgrid(self.xi, self.yi)
+
+        # Lazy import scipy only when interpolation is actually needed
+        import scipy.interpolate
 
         # perform 2d interpolation with fallback for NaN values
         self.itl_interpolator = scipy.interpolate.griddata(
