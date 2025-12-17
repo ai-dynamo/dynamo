@@ -200,8 +200,12 @@ async fn run_watcher(
     metrics: Arc<crate::http::service::metrics::Metrics>,
     engine_factory: Option<EngineFactoryCallback>,
 ) -> anyhow::Result<()> {
-    let mut watch_obj =
-        ModelWatcher::new(runtime.clone(), model_manager, router_config, engine_factory);
+    let mut watch_obj = ModelWatcher::new(
+        runtime.clone(),
+        model_manager,
+        router_config,
+        engine_factory,
+    );
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
