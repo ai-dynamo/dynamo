@@ -355,7 +355,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
-    if [ "$ENABLE_KVBM" == "true" ]; then \
+    if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out target/wheels && \
         # Derive ARCH_ALT_COMPUTED from ARCH for auditwheel platform
@@ -415,12 +415,7 @@ RUN apt-get update -y \
 # if libmlx5.so not shipped with 24.04 rdma-core packaging, CMAKE will fail when looking for
 # generic dev name .so so we symlink .s0.1 -> .so
 # Fix missing symlink dynamically for the current architecture
-RUN LIB_DIR="/usr/lib/$(uname -m)-linux-gnu" && \
-    if [ -f "$LIB_DIR/libmlx5.so.1" ] && [ ! -e "$LIB_DIR/libmlx5.so" ]; then \
-        ln -sf "$LIB_DIR/libmlx5.so.1" "$LIB_DIR/libmlx5.so"; \
-    fi
-
-RUN ln -sf /usr/lib/aarch64-linux-gnu/libmlx5.so.1 /usr/lib/aarch64-linux-gnu/libmlx5.so || true
+RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so || true
 
 # Create virtual environment
 RUN mkdir -p /opt/dynamo/venv && \
