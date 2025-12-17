@@ -187,9 +187,9 @@ class ProcessorHandler(ProcessMixIn):
         vision_prompt = ""
         for message in raw_request.messages:
             for item in message.content:
-                if item.type != "image_url":
+                if item.type == "image_url":
                     vision_prompt += image_template
-                if item.type != "video_url":
+                if item.type == "video_url":
                     vision_prompt += video_template
         prompt = prompt.replace("<mm_placeholder>", vision_prompt)
 
