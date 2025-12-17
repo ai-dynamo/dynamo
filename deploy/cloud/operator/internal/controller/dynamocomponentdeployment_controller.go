@@ -61,6 +61,8 @@ const (
 	DefaultClusterName                                   = "default"
 	DefaultServiceAccountName                            = "default"
 	KubeAnnotationDeploymentStrategy                     = "nvidia.com/deployment-strategy"
+	KubeAnnotationDeploymentRollingUpdateMaxSurge        = "nvidia.com/deployment-rolling-update-max-surge"
+	KubeAnnotationDeploymentRollingUpdateMaxUnavailable  = "nvidia.com/deployment-rolling-update-max-unavailable"
 	KubeAnnotationEnableStealingTrafficDebugMode         = "nvidia.com/enable-stealing-traffic-debug-mode"
 	KubeAnnotationEnableDebugMode                        = "nvidia.com/enable-debug-mode"
 	KubeAnnotationEnableDebugPodReceiveProductionTraffic = "nvidia.com/enable-debug-pod-receive-production-traffic"
@@ -1060,14 +1062,13 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 		return
 	}
 
-	defaultMaxSurge := intstr.FromString("25%")
-	defaultMaxUnavailable := intstr.FromString("25%")
+	maxSurge, maxUnavailable := getDeploymentRollingUpdateMaxSurgeAndMaxUnavailable(annotations)
 
 	strategy := appsv1.DeploymentStrategy{
 		Type: appsv1.RollingUpdateDeploymentStrategyType,
 		RollingUpdate: &appsv1.RollingUpdateDeployment{
-			MaxSurge:       &defaultMaxSurge,
-			MaxUnavailable: &defaultMaxUnavailable,
+			MaxSurge:       &maxSurge,
+			MaxUnavailable: &maxUnavailable,
 		},
 	}
 
@@ -1080,29 +1081,13 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{
-					MaxSurge:       &defaultMaxSurge,
-					MaxUnavailable: &defaultMaxUnavailable,
+					MaxSurge:       &maxSurge,
+					MaxUnavailable: &maxUnavailable,
 				},
 			}
 		case common.DeploymentStrategyRecreate:
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RecreateDeploymentStrategyType,
-			}
-		case common.DeploymentStrategyRampedSlowRollout:
-			strategy = appsv1.DeploymentStrategy{
-				Type: appsv1.RollingUpdateDeploymentStrategyType,
-				RollingUpdate: &appsv1.RollingUpdateDeployment{
-					MaxSurge:       &[]intstr.IntOrString{intstr.FromInt(1)}[0],
-					MaxUnavailable: &[]intstr.IntOrString{intstr.FromInt(0)}[0],
-				},
-			}
-		case common.DeploymentStrategyBestEffortControlledRollout:
-			strategy = appsv1.DeploymentStrategy{
-				Type: appsv1.RollingUpdateDeploymentStrategyType,
-				RollingUpdate: &appsv1.RollingUpdateDeployment{
-					MaxSurge:       &[]intstr.IntOrString{intstr.FromInt(0)}[0],
-					MaxUnavailable: &[]intstr.IntOrString{intstr.FromString("20%")}[0],
-				},
 			}
 		}
 	}
@@ -1125,6 +1110,20 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 	}
 
 	return
+}
+
+func getDeploymentRollingUpdateMaxSurgeAndMaxUnavailable(annotations map[string]string) (intstr.IntOrString, intstr.IntOrString) {
+	maxSurge := intstr.FromString("25%")
+	maxUnavailable := intstr.FromString("25%")
+
+	if annotations[KubeAnnotationDeploymentRollingUpdateMaxSurge] != "" {
+		maxSurge = intstr.FromString(annotations[KubeAnnotationDeploymentRollingUpdateMaxSurge])
+	}
+	if annotations[KubeAnnotationDeploymentRollingUpdateMaxUnavailable] != "" {
+		maxUnavailable = intstr.FromString(annotations[KubeAnnotationDeploymentRollingUpdateMaxUnavailable])
+	}
+
+	return maxSurge, maxUnavailable
 }
 
 type generateResourceOption struct {
