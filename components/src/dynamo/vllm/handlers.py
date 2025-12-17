@@ -16,7 +16,6 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
-
 from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import (
