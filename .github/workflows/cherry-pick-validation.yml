@@ -1,0 +1,245 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Cherry-Pick Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - 'release/**'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  cherry-pick-validation:
+    name: Validate Cherry-Pick Compliance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history needed for cherry-pick detection
+
+      - name: Fetch main branch
+        run: |
+          git fetch origin main:main
+
+      - name: Validate cherry-pick requirements
+        id: validate
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { execSync } = require('child_process');
+
+            const baseBranch = context.payload.pull_request.base.ref;
+            const headSha = context.payload.pull_request.head.sha;
+            const prNumber = context.payload.pull_request.number;
+
+            // Guard: ensure we're targeting a release branch
+            if (!baseBranch.startsWith('release/')) {
+              console.log(`Skipping: target branch '${baseBranch}' is not a release branch`);
+              return;
+            }
+
+            console.log(`Validating cherry-pick PR #${prNumber} targeting ${baseBranch}`);
+
+            // Get commits in this PR (excluding merge commits)
+            const mergeBase = execSync(`git merge-base origin/${baseBranch} ${headSha}`).toString().trim();
+            const allCommits = execSync(`git rev-list --no-merges ${mergeBase}..${headSha}`).toString().trim().split('\n').filter(Boolean);
+
+            console.log(`Found ${allCommits.length} non-merge commit(s) to validate`);
+
+            let errors = [];
+            let warnings = [];
+            let validCommits = [];
+
+            // Helper: compute patch-id for a commit
+            function getPatchId(sha) {
+              try {
+                const result = execSync(`git show ${sha} | git patch-id --stable 2>/dev/null || true`).toString().trim();
+                return result.split(' ')[0] || null;
+              } catch (e) {
+                return null;
+              }
+            }
+
+            // Helper: find commit in main by patch-id
+            function findInMainByPatchId(patchId) {
+              if (!patchId) return null;
+              try {
+                // Search recent main commits (last 1000) for matching patch-id
+                const mainCommits = execSync(`git rev-list main -1000`).toString().trim().split('\n');
+                for (const mainSha of mainCommits) {
+                  const mainPatchId = getPatchId(mainSha);
+                  if (mainPatchId === patchId) {
+                    return mainSha;
+                  }
+                }
+              } catch (e) {
+                console.log(`Error searching main by patch-id: ${e.message}`);
+              }
+              return null;
+            }
+
+            for (const sha of allCommits) {
+              const shortSha = sha.substring(0, 8);
+              const subject = execSync(`git log -1 --format="%s" ${sha}`).toString().trim();
+              const body = execSync(`git log -1 --format="%b" ${sha}`).toString();
+
+              console.log(`\nChecking commit ${shortSha}: ${subject}`);
+
+              // Check 1: DCO Signoff (REQUIRED)
+              if (!body.includes('Signed-off-by:')) {
+                errors.push(`❌ Commit \`${shortSha}\` missing DCO sign-off. Use \`git commit --amend -s\` to add it.`);
+              }
+
+              // Check 2: GPG Signature (WARNING)
+              try {
+                const gpgStatus = execSync(`git log -1 --format="%G?" ${sha}`).toString().trim();
+                if (gpgStatus === 'N') {
+                  warnings.push(`⚠️ Commit \`${shortSha}\` is not GPG signed. Consider using \`git commit -S\` for automated test triggers.`);
+                }
+              } catch (e) {
+                // GPG check failed, skip
+              }
+
+              // Check 3: Look for cherry-pick marker (RECOMMENDED)
+              const cherryPickMatch = body.match(/\(cherry picked from commit ([a-f0-9]+)\)/);
+              let originalCommit = null;
+              let foundInMain = false;
+
+              if (cherryPickMatch) {
+                originalCommit = cherryPickMatch[1];
+                console.log(`  Found cherry-pick marker referencing ${originalCommit.substring(0, 8)}`);
+
+                // Verify original commit exists in main
+                try {
+                  const inMain = execSync(`git branch --contains ${originalCommit} 2>/dev/null | grep -w main || true`).toString().trim();
+                  if (inMain) {
+                    validCommits.push(`✅ Commit \`${shortSha}\` correctly cherry-picked from main (\`${originalCommit.substring(0, 8)}\`)`);
+                    foundInMain = true;
+                  } else {
+                    errors.push(`❌ Commit \`${shortSha}\` references \`${originalCommit.substring(0, 8)}\` which is NOT in main. Changes must be merged to main first!`);
+                  }
+                } catch (e) {
+                  errors.push(`❌ Commit \`${shortSha}\` references \`${originalCommit.substring(0, 8)}\` which was not found. Was it merged to main?`);
+                }
+              } else {
+                warnings.push(`⚠️ Commit \`${shortSha}\` has no cherry-pick marker. Consider using \`git cherry-pick -x\` for traceability.`);
+
+                // Fallback 1: Try patch-id matching
+                const patchId = getPatchId(sha);
+                const mainMatch = findInMainByPatchId(patchId);
+
+                if (mainMatch) {
+                  validCommits.push(`✅ Commit \`${shortSha}\` matches \`${mainMatch.substring(0, 8)}\` in main (by patch-id)`);
+                  foundInMain = true;
+                } else {
+                  // Fallback 2: Search by subject
+                  try {
+                    const escapedSubject = subject.replace(/"/g, '\\"').replace(/`/g, '\\`').replace(/\$/g, '\\$');
+                    const mainCommit = execSync(`git log main --format="%H" --grep="${escapedSubject}" -1 2>/dev/null || true`).toString().trim();
+
+                    if (mainCommit) {
+                      validCommits.push(`✅ Commit \`${shortSha}\` appears to match \`${mainCommit.substring(0, 8)}\` in main (by subject)`);
+                      foundInMain = true;
+                    }
+                  } catch (e) {
+                    // Subject search failed
+                  }
+                }
+
+                if (!foundInMain) {
+                  errors.push(`❌ Commit \`${shortSha}\` ("${subject.substring(0, 50)}...") has no matching commit in main. Changes must be merged to main first!`);
+                }
+              }
+            }
+
+            // Build summary
+            let summary = `## 🍒 Cherry-Pick Validation Results\n\n`;
+            summary += `**Target Branch:** \`${baseBranch}\`\n`;
+            summary += `**Commits Checked:** ${allCommits.length}\n\n`;
+
+            if (validCommits.length > 0) {
+              summary += `### ✅ Valid Commits\n${validCommits.join('\n')}\n\n`;
+            }
+
+            if (warnings.length > 0) {
+              summary += `### ⚠️ Warnings\n${warnings.join('\n')}\n\n`;
+            }
+
+            if (errors.length > 0) {
+              summary += `### ❌ Errors (Must Fix)\n${errors.join('\n')}\n\n`;
+              summary += `---\n`;
+              summary += `### 📖 Cherry-Pick Process Reminder\n\n`;
+              summary += `1. **Merge to main first** - All changes must exist in main before cherry-picking\n`;
+              summary += `2. **Use proper commands:**\n`;
+              summary += `   \`\`\`bash\n`;
+              summary += `   git checkout ${baseBranch} && git pull\n`;
+              summary += `   git checkout -b yourname/cherrypick-feature ${baseBranch}\n`;
+              summary += `   git cherry-pick -x --signoff <merge-commit-sha-from-main>\n`;
+              summary += `   \`\`\`\n`;
+              summary += `3. **Update the Cherry Pick table** in #swdl-dynamo-release\n\n`;
+              summary += `See [CONTRIBUTING.md](https://github.com/ai-dynamo/dynamo/blob/main/CONTRIBUTING.md#cherry-pick-process-for-release-branches) for details.\n`;
+            } else {
+              summary += `### ✅ All Checks Passed\n`;
+              summary += `This cherry-pick follows the required process.\n\n`;
+              summary += `**Reminder:** Ensure the Cherry Pick table in #swdl-dynamo-release is updated!\n`;
+            }
+
+            core.setOutput('summary', summary);
+            core.setOutput('has_errors', errors.length > 0);
+
+            // Post or update comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('Cherry-Pick Validation Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: summary,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: summary,
+              });
+            }
+
+            if (errors.length > 0) {
+              core.setFailed(`Cherry-pick validation failed with ${errors.length} error(s)`);
+            }
+
+      - name: Output summary
+        if: always()
+        run: |
+          echo "Cherry-pick validation complete"
+          echo "See PR comments for detailed results"
