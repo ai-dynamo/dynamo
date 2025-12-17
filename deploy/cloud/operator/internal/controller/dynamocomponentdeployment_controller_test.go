@@ -2118,6 +2118,23 @@ func Test_generateDeployment_Strategy(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "deployment-strategy RollingUpdate with integer maxSurge and maxUnavailable (not percentages)",
+			args: args{
+				annotations: map[string]string{
+					KubeAnnotationDeploymentStrategy:                    "RollingUpdate",
+					KubeAnnotationDeploymentRollingUpdateMaxSurge:       "1",
+					KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "0",
+				},
+			},
+			wantStrategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxSurge:       ptr.To(intstr.FromInt(1)),
+					MaxUnavailable: ptr.To(intstr.FromInt(0)),
+				},
+			},
+		},
 	}
 
 	// Initialize scheme & add API types

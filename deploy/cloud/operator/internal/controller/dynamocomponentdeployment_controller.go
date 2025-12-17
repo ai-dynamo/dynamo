@@ -1117,10 +1117,10 @@ func getDeploymentRollingUpdateMaxSurgeAndMaxUnavailable(annotations map[string]
 	maxUnavailable := intstr.FromString("25%")
 
 	if annotations[KubeAnnotationDeploymentRollingUpdateMaxSurge] != "" {
-		maxSurge = intstr.FromString(annotations[KubeAnnotationDeploymentRollingUpdateMaxSurge])
+		maxSurge = intstr.Parse(annotations[KubeAnnotationDeploymentRollingUpdateMaxSurge])
 	}
 	if annotations[KubeAnnotationDeploymentRollingUpdateMaxUnavailable] != "" {
-		maxUnavailable = intstr.FromString(annotations[KubeAnnotationDeploymentRollingUpdateMaxUnavailable])
+		maxUnavailable = intstr.Parse(annotations[KubeAnnotationDeploymentRollingUpdateMaxUnavailable])
 	}
 
 	return maxSurge, maxUnavailable
