@@ -250,6 +250,7 @@ class DisaggMockerProcess:
         mocker_args: Optional[Dict[str, Any]] = None,
         num_mockers: int = 1,
         store_backend: str = "etcd",
+        request_plane: str = "nats",
     ):
         if worker_type not in ("prefill", "decode"):
             raise ValueError(
@@ -278,8 +279,12 @@ class DisaggMockerProcess:
             worker_type=worker_type,
         )
 
+        env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = request_plane
+
         self._process = ManagedProcess(
             command=command,
+            env=env,
             timeout=60,
             display_output=True,
             health_check_ports=[],
@@ -307,7 +312,7 @@ class DisaggMockerProcess:
 @pytest.mark.parallel
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_mocker_kv_router(
-    request, runtime_services_session, predownload_tokenizers, request_plane
+    request, runtime_services, predownload_tokenizers, request_plane
 ):
     """
     Test KV router with multiple mocker engine instances.
@@ -315,7 +320,7 @@ def test_mocker_kv_router(
     Tests both NATS and TCP request planes.
     """
 
-    # runtime_services starts etcd and nats
+    # runtime_services starts etcd and optionally nats based on request_plane
     logger.info(f"Starting mocker KV router test with request_plane={request_plane}")
 
     # Create mocker args dictiona: FixtureRequestry: tuple[NatsServer, EtcdServer]: NoneType
@@ -450,8 +455,9 @@ def test_mocker_kv_router_overload_503(
 
 
 @pytest.mark.parallel
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_kv_push_router_bindings(
-    request, runtime_services_session, predownload_tokenizers
+    request, runtime_services, predownload_tokenizers, request_plane
 ):
     """Test KvPushRouter Python bindings with mocker engines."""
     logger.info("Starting KvPushRouter bindings test")
@@ -461,13 +467,16 @@ def test_kv_push_router_bindings(
         # Start mocker instances
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         mockers = MockerProcess(
-            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+            request,
+            mocker_args=mocker_args,
+            num_mockers=NUM_MOCKERS,
+            request_plane=request_plane,
         )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
         # Get runtime and create endpoint
-        runtime = get_runtime()
+        runtime = get_runtime(request_plane=request_plane)
         namespace = runtime.namespace(mockers.namespace)
         component = namespace.component(mockers.component_name)
         endpoint = component.endpoint("generate")
@@ -487,12 +496,14 @@ def test_kv_push_router_bindings(
 
 
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_indexers_sync(
     request,
     runtime_services_session,
     predownload_tokenizers,
     file_storage_backend,
     store_backend,
+    request_plane,
 ):
     """
     Test that two KV routers have synchronized indexer states after processing requests.
@@ -501,7 +512,9 @@ def test_indexers_sync(
     """
 
     # runtime_services starts etcd and nats
-    logger.info(f"Starting indexers sync test with {store_backend} storage backend")
+    logger.info(
+        f"Starting indexers sync test with {store_backend} storage backend, request_plane={request_plane}"
+    )
 
     # Create mocker args dictionary
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
@@ -514,6 +527,7 @@ def test_indexers_sync(
             mocker_args=mocker_args,
             num_mockers=NUM_MOCKERS,
             store_backend=store_backend,
+            request_plane=request_plane,
         )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
@@ -526,6 +540,7 @@ def test_indexers_sync(
             model_name=MODEL_NAME,
             num_workers=NUM_MOCKERS,
             store_backend=store_backend,
+            request_plane=request_plane,
         )
 
         logger.info("Indexers sync test completed successfully")
@@ -572,15 +587,24 @@ def test_query_instance_id_returns_worker_and_tokens(
 
 @pytest.mark.parallel
 @pytest.mark.parametrize("use_nats_core", [False, True], ids=["jetstream", "nats_core"])
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_router_decisions(
-    request, runtime_services_session, predownload_tokenizers, use_nats_core
+    request,
+    runtime_services_session,
+    predownload_tokenizers,
+    use_nats_core,
+    request_plane,
 ):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
 
     Parameterized to test both JetStream (default) and NATS Core (local indexer) modes.
     """
 
-    # runtime_services starts etcd and nats
+    # runtime_services_session starts etcd and nats
+    # Even when request_plane is tcp/http, KV event plane still uses NATS; ensure the runtime connects.
+    if request_plane != "nats":
+        os.environ.setdefault("NATS_SERVER", "nats://localhost:4222")
+
     mode = "NATS Core (local indexer)" if use_nats_core else "JetStream"
     logger.info(
         f"Starting test router prefix reuse and KV events synchronization ({mode})"
@@ -598,14 +622,19 @@ def test_router_decisions(
         logger.info(
             f"Starting 2 mocker instances with dp_size=4 each (8 total dp ranks), {mode}"
         )
-        mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=2)
+        mockers = MockerProcess(
+            request,
+            mocker_args=mocker_args,
+            num_mockers=2,
+            request_plane=request_plane,
+        )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
 
         # Initialize mockers
         mockers.__enter__()
 
         # Get runtime and create endpoint
-        runtime = get_runtime()
+        runtime = get_runtime(request_plane=request_plane)
         # Use the namespace from the mockers
         namespace = runtime.namespace(mockers.namespace)
         component = namespace.component("mocker")
@@ -622,8 +651,13 @@ def test_router_decisions(
 
 @pytest.mark.parallel
 @pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_router_decisions_disagg(
-    request, runtime_services_session, predownload_tokenizers, registration_order
+    request,
+    runtime_services_session,
+    predownload_tokenizers,
+    registration_order,
+    request_plane,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup.
 
@@ -638,6 +672,10 @@ def test_router_decisions_disagg(
         f"Starting disaggregated router prefix reuse test "
         f"(registration_order={registration_order})"
     )
+
+    # Disaggregated KV routing still uses NATS for KV events unless --no-kv-events is used.
+    if request_plane != "nats":
+        os.environ.setdefault("NATS_SERVER", "nats://localhost:4222")
 
     # Generate shared namespace for prefill and decode workers
     namespace_suffix = generate_random_suffix()
@@ -659,6 +697,7 @@ def test_router_decisions_disagg(
                 worker_type="prefill",
                 mocker_args=mocker_args,
                 num_mockers=4,
+                request_plane=request_plane,
             )
             prefill_workers.__enter__()
             logger.info(f"Prefill workers using endpoint: {prefill_workers.endpoint}")
@@ -671,6 +710,7 @@ def test_router_decisions_disagg(
                 worker_type="decode",
                 mocker_args=mocker_args,
                 num_mockers=4,
+                request_plane=request_plane,
             )
             decode_workers.__enter__()
             logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
@@ -683,6 +723,7 @@ def test_router_decisions_disagg(
                 worker_type="decode",
                 mocker_args=mocker_args,
                 num_mockers=4,
+                request_plane=request_plane,
             )
             decode_workers.__enter__()
             logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
@@ -695,6 +736,7 @@ def test_router_decisions_disagg(
                 worker_type="prefill",
                 mocker_args=mocker_args,
                 num_mockers=4,
+                request_plane=request_plane,
             )
             prefill_workers.__enter__()
             logger.info(f"Prefill workers using endpoint: {prefill_workers.endpoint}")
@@ -712,6 +754,7 @@ def test_router_decisions_disagg(
             request=request,
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
+            request_plane=request_plane,
         )
 
     finally:
@@ -738,6 +781,12 @@ def test_busy_threshold_endpoint(
     logger.info(
         f"Starting busy_threshold endpoint test with request_plane={request_plane}"
     )
+
+    # Busy-threshold endpoint is served by the KV router frontend. Even when the request plane
+    # is TCP, KV routing may still use NATS for KV events / replica sync; ensure the runtime
+    # can connect to NATS when available.
+    if request_plane != "nats":
+        os.environ.setdefault("NATS_SERVER", "nats://localhost:4222")
 
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
