@@ -283,7 +283,9 @@ class HandlerBase:
         if "prefill_result" in request:
             if self.disaggregation_mode == DisaggregationMode.PREFILL:
                 raise ValueError("Cannot provide disaggregated_params in prefill mode")
-            del request["prefill_result"].get("disaggregated_params", {})["worker_id"]
+            request["prefill_result"].get("disaggregated_params", {}).pop(
+                "worker_id", None
+            )
 
             disaggregated_params = DisaggregatedParamsCodec.decode(
                 DisaggregatedParams(
