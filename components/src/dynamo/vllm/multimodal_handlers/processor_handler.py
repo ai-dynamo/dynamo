@@ -23,6 +23,8 @@ from ..multimodal_utils import (
     MultiModalRequest,
     MyRequestOutput,
     ProcessMixIn,
+    SupportedModels,
+    is_model_supported,
     vLLMMultimodalRequest,
 )
 
@@ -176,8 +178,12 @@ class ProcessorHandler(ProcessMixIn):
 
         prompt = template.replace("<prompt>", user_text)
         # [gluo FIXME] only for Qwen2.5-VL-7B-Instruct
-        image_template = "<|vision_start|><|image_pad|><|vision_end|>"
-        video_template = "<|vision_start|><|video_pad|><|vision_end|>"
+        if is_model_supported(raw_request.model, SupportedModels.QWEN_2_5_VL_7B):
+            image_template = "<|vision_start|><|image_pad|><|vision_end|>"
+            video_template = "<|vision_start|><|video_pad|><|vision_end|>"
+        elif is_model_supported(raw_request.model, SupportedModels.LLAVA_1_5_7B):
+            image_template = "<image>"
+            video_template = ""
         vision_prompt = ""
         for message in raw_request.messages:
             for item in message.content:
