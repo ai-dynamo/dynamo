@@ -143,3 +143,16 @@ impl Bridge {
             .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("bridge dropped"))?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bridge_initialization() {
+        let _bridge = Bridge::global();
+    }
+
+    // Additional tests would require async runtime (tokio) and Python environment setup.
+    // especially second may be challenging.
+}
