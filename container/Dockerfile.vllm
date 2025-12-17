@@ -597,7 +597,7 @@ ARG PYTHON_VERSION
 # Install Python, build-essential and python3-dev as apt dependencies
 RUN apt-get update && \
     CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} &&\
-    CUDA_VERSION_MINOR=${CUDA_VERSION#*.} &&\
+    CUDA_VERSION_MINOR=$(echo "${CUDA_VERSION#*.}" | cut -d. -f1) && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         # Python runtime - CRITICAL for virtual environment to work
         python${PYTHON_VERSION}-dev \
