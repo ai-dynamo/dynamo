@@ -61,6 +61,8 @@ const (
 	DefaultClusterName                                   = "default"
 	DefaultServiceAccountName                            = "default"
 	KubeAnnotationDeploymentStrategy                     = "nvidia.com/deployment-strategy"
+	KubeAnnotationDeploymentRollingUpdateMaxSurge        = "nvidia.com/deployment-rolling-update-max-surge"
+	KubeAnnotationDeploymentRollingUpdateMaxUnavailable  = "nvidia.com/deployment-rolling-update-max-unavailable"
 	KubeAnnotationEnableStealingTrafficDebugMode         = "nvidia.com/enable-stealing-traffic-debug-mode"
 	KubeAnnotationEnableDebugMode                        = "nvidia.com/enable-debug-mode"
 	KubeAnnotationEnableDebugPodReceiveProductionTraffic = "nvidia.com/enable-debug-pod-receive-production-traffic"
@@ -293,7 +295,7 @@ type ComponentReconcileResult struct {
 	status               metav1.ConditionStatus
 	reason               string
 	message              string
-	serviceReplicaStatus v1alpha1.ServiceReplicaStatus
+	serviceReplicaStatus *v1alpha1.ServiceReplicaStatus
 }
 
 func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
@@ -305,7 +307,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		return ComponentReconcileResult{}, fmt.Errorf("failed to create or update the deployment: %w", err)
 	}
 
-	serviceReplicaStatus := v1alpha1.ServiceReplicaStatus{
+	serviceReplicaStatus := &v1alpha1.ServiceReplicaStatus{
 		ComponentKind:     v1alpha1.ComponentKindDeployment,
 		ComponentName:     deployment.Name,
 		Replicas:          deployment.Status.Replicas,
@@ -474,9 +476,9 @@ func getLeaderWorkerSetReplicasStatus(leaderWorkerSet *leaderworkersetv1.LeaderW
 	}
 }
 
-func combineLWSReplicaStatuses(serviceReplicaStatuses []v1alpha1.ServiceReplicaStatus) v1alpha1.ServiceReplicaStatus {
+func combineLWSReplicaStatuses(serviceReplicaStatuses []v1alpha1.ServiceReplicaStatus) *v1alpha1.ServiceReplicaStatus {
 	if len(serviceReplicaStatuses) == 0 {
-		return v1alpha1.ServiceReplicaStatus{}
+		return nil
 	}
 
 	firstServiceStatus := serviceReplicaStatuses[0]
@@ -493,7 +495,7 @@ func combineLWSReplicaStatuses(serviceReplicaStatuses []v1alpha1.ServiceReplicaS
 	}
 
 	firstServiceStatus.ReadyReplicas = &readyReplicas
-	return firstServiceStatus
+	return &firstServiceStatus
 }
 
 // IsLeaderWorkerSetReady determines if a LeaderWorkerSet is fully ready and available
@@ -1060,14 +1062,13 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 		return
 	}
 
-	defaultMaxSurge := intstr.FromString("25%")
-	defaultMaxUnavailable := intstr.FromString("25%")
+	maxSurge, maxUnavailable := getDeploymentRollingUpdateMaxSurgeAndMaxUnavailable(annotations)
 
 	strategy := appsv1.DeploymentStrategy{
 		Type: appsv1.RollingUpdateDeploymentStrategyType,
 		RollingUpdate: &appsv1.RollingUpdateDeployment{
-			MaxSurge:       &defaultMaxSurge,
-			MaxUnavailable: &defaultMaxUnavailable,
+			MaxSurge:       &maxSurge,
+			MaxUnavailable: &maxUnavailable,
 		},
 	}
 
@@ -1080,29 +1081,13 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{
-					MaxSurge:       &defaultMaxSurge,
-					MaxUnavailable: &defaultMaxUnavailable,
+					MaxSurge:       &maxSurge,
+					MaxUnavailable: &maxUnavailable,
 				},
 			}
 		case common.DeploymentStrategyRecreate:
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RecreateDeploymentStrategyType,
-			}
-		case common.DeploymentStrategyRampedSlowRollout:
-			strategy = appsv1.DeploymentStrategy{
-				Type: appsv1.RollingUpdateDeploymentStrategyType,
-				RollingUpdate: &appsv1.RollingUpdateDeployment{
-					MaxSurge:       &[]intstr.IntOrString{intstr.FromInt(1)}[0],
-					MaxUnavailable: &[]intstr.IntOrString{intstr.FromInt(0)}[0],
-				},
-			}
-		case common.DeploymentStrategyBestEffortControlledRollout:
-			strategy = appsv1.DeploymentStrategy{
-				Type: appsv1.RollingUpdateDeploymentStrategyType,
-				RollingUpdate: &appsv1.RollingUpdateDeployment{
-					MaxSurge:       &[]intstr.IntOrString{intstr.FromInt(0)}[0],
-					MaxUnavailable: &[]intstr.IntOrString{intstr.FromString("20%")}[0],
-				},
 			}
 		}
 	}
@@ -1125,6 +1110,20 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 	}
 
 	return
+}
+
+func getDeploymentRollingUpdateMaxSurgeAndMaxUnavailable(annotations map[string]string) (intstr.IntOrString, intstr.IntOrString) {
+	maxSurge := intstr.FromString("25%")
+	maxUnavailable := intstr.FromString("25%")
+
+	if annotations[KubeAnnotationDeploymentRollingUpdateMaxSurge] != "" {
+		maxSurge = intstr.Parse(annotations[KubeAnnotationDeploymentRollingUpdateMaxSurge])
+	}
+	if annotations[KubeAnnotationDeploymentRollingUpdateMaxUnavailable] != "" {
+		maxUnavailable = intstr.Parse(annotations[KubeAnnotationDeploymentRollingUpdateMaxUnavailable])
+	}
+
+	return maxSurge, maxUnavailable
 }
 
 type generateResourceOption struct {
