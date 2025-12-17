@@ -24,6 +24,7 @@ use crate::{
     protocols::common::preprocessor::PrefillResult,
     protocols::openai::nvext::WorkerIdInfo,
 };
+
 /// Errors that can occur during prefill routing
 #[derive(Debug, thiserror::Error)]
 pub enum PrefillError {
@@ -41,6 +42,14 @@ pub enum PrefillError {
     NoDisaggregatedParams(String),
 }
 
+/// Result from call_prefill that handles both query-only and execution modes
+enum PrefillCallResult {
+    /// GAIE Stage 1: Only worker ID was returned (query-only mode)
+    WorkerIdOnly(u64),
+    /// Normal execution: Full prefill result with disaggregated params
+    FullResult(PrefillResult),
+}
+
 /// The inner router used by PrefillRouter
 enum InnerPrefillRouter {
     /// KV-aware routing using KvPushRouter
@@ -49,9 +58,32 @@ enum InnerPrefillRouter {
     SimpleRouter(Arc<PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>>),
 }
 
+impl InnerPrefillRouter {
+    /// Generate a response from the appropriate router type
+    async fn generate(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, PrefillError> {
+        match self {
+            InnerPrefillRouter::KvRouter(router) => router
+                .generate(request)
+                .await
+                .map_err(|e| PrefillError::PrefillError(e.to_string())),
+            InnerPrefillRouter::SimpleRouter(router) => router
+                .generate(request)
+                .await
+                .map_err(|e| PrefillError::PrefillError(e.to_string())),
+        }
+    }
+}
+
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
 /// from the prefill response and injecting them into the decode request.
+///
+/// Supports two GAIE modes via query_instance_id state machine:
+/// - GAIE Stage 1: query_instance_id transitions "" → "prefill" → "decode", returns only worker IDs
+/// - GAIE Stage 2: target_prefill_worker_id/target_decode_worker_id are set, full execution with specified workers
 pub struct PrefillRouter {
     prefill_router: OnceLock<InnerPrefillRouter>,
     cancel_token: CancellationToken,
@@ -176,27 +208,22 @@ impl PrefillRouter {
         Ok(())
     }
 
-    /// Call the prefill router and extract structured prefill result
+    /// Call the prefill router and extract result.
+    ///
+    /// Handles two modes based on response type:
+    /// - Query-only mode (GAIE Stage 1): Response has worker_id annotation, returns WorkerIdOnly
+    /// - Execution mode (normal/GAIE Stage 2): Response has disaggregated_params, returns FullResult
     async fn call_prefill(
         &self,
         request: SingleIn<PreprocessedRequest>,
-    ) -> Result<PrefillResult, PrefillError> {
+    ) -> Result<PrefillCallResult, PrefillError> {
         // Get the prefill router, error if not activated
         let Some(prefill_router) = self.prefill_router.get() else {
             return Err(PrefillError::NotActivated);
         };
 
-        // Call the appropriate router based on the type
-        let mut prefill_response = match prefill_router {
-            InnerPrefillRouter::KvRouter(router) => router
-                .generate(request)
-                .await
-                .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
-            InnerPrefillRouter::SimpleRouter(router) => router
-                .generate(request)
-                .await
-                .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
-        };
+        // Call the router
+        let mut prefill_response = prefill_router.generate(request).await?;
 
         let Some(first_output) = prefill_response.next().await else {
             return Err(PrefillError::PrefillError(
@@ -204,6 +231,45 @@ impl PrefillRouter {
             ));
         };
 
+        // Check if this is a query-only response (GAIE Stage 1)
+        // In query mode, KvRouter returns worker_id annotation instead of actual data
+        if let Some(event) = first_output.event.as_ref()
+            && event == "worker_id"
+        {
+            // Extract worker_id from annotation
+            let comments = first_output.comment.as_ref().ok_or_else(|| {
+                PrefillError::PrefillError("worker_id event missing comments field".to_string())
+            })?;
+
+            let first_comment = comments.first().ok_or_else(|| {
+                PrefillError::PrefillError("worker_id event has empty comments".to_string())
+            })?;
+
+            let worker_info: WorkerIdInfo = serde_json::from_str(first_comment).map_err(|e| {
+                PrefillError::PrefillError(format!(
+                    "Failed to parse WorkerIdInfo from '{}': {}",
+                    first_comment, e
+                ))
+            })?;
+
+            let prefill_worker_id = worker_info.prefill_worker_id.ok_or_else(|| {
+                PrefillError::PrefillError(
+                    "prefill_worker_id not set in WorkerIdInfo response".to_string(),
+                )
+            })?;
+
+            tracing::debug!(
+                prefill_worker_id = prefill_worker_id,
+                "GAIE Stage 1: Extracted prefill worker ID from query response"
+            );
+
+            // Drain remaining items (token_data annotation)
+            while prefill_response.next().await.is_some() {}
+
+            return Ok(PrefillCallResult::WorkerIdOnly(prefill_worker_id));
+        }
+
+        // Normal execution mode - extract full prefill result
         let mut prompt_tokens_details = first_output
             .data
             .as_ref()
@@ -239,142 +305,10 @@ impl PrefillRouter {
             ));
         };
 
-        Ok(PrefillResult {
+        Ok(PrefillCallResult::FullResult(PrefillResult {
             disaggregated_params,
             prompt_tokens_details,
-        })
-    }
-
-    /// Query the prefill router for worker selection only (no actual prefill execution).
-    /// Used for GAIE disaggregated flow where we need prefill worker ID before decode selection.
-    async fn query_prefill_worker(
-        &self,
-        request: SingleIn<PreprocessedRequest>,
-    ) -> Result<u64, PrefillError> {
-        // Get the prefill router, error if not activated
-        let Some(prefill_router) = self.prefill_router.get() else {
-            return Err(PrefillError::NotActivated);
-        };
-
-        // Call the appropriate router based on the type
-        let mut response = match prefill_router {
-            InnerPrefillRouter::KvRouter(router) => router
-                .generate(request)
-                .await
-                .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
-            InnerPrefillRouter::SimpleRouter(router) => router
-                .generate(request)
-                .await
-                .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
-        };
-
-        // Extract worker_id from the response annotations
-        while let Some(item) = response.next().await {
-            if let Some(event) = item.event.as_ref()
-                && event == "worker_id"
-                && let Some(comments) = item.comment.as_ref()
-                && let Some(first_comment) = comments.first()
-                && let Ok(worker_info) = serde_json::from_str::<WorkerIdInfo>(first_comment)
-                && let Some(prefill_worker_id) = worker_info.prefill_worker_id
-            {
-                tracing::debug!(
-                    prefill_worker_id = prefill_worker_id,
-                    "Extracted prefill worker ID from query response"
-                );
-                return Ok(prefill_worker_id);
-            }
-        }
-
-        Err(PrefillError::PrefillError(
-            "No prefill_worker_id found in query response".to_string(),
-        ))
-    }
-
-    /// Handle GAIE disaggregated worker selection flow.
-    /// When query_instance_id is present with empty value (query_instance_id:), this function:
-    /// 1. Queries the prefill router to get prefill worker selection
-    /// 2. Queries the decode router to get decode worker selection (with prefill_worker_id attached)
-    /// 3. Returns the combined worker selection response
-    async fn get_prefill_and_decode_worker_ids(
-        &self,
-        req: PreprocessedRequest,
-        context: Context<()>,
-        request_id: String,
-        next: &ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
-        tracing::info!(
-            request_id = %request_id,
-            "GAIE disagg flow: Starting prefill and decode worker selection"
-        );
-
-        let engine_ctx = context.context();
-
-        // Step 1: Query prefill router with query_instance_id:prefill
-        let mut prefill_query_req = req.clone();
-        // Remove existing query_instance_id annotation and add prefill type
-        prefill_query_req
-            .annotations
-            .retain(|a| !a.starts_with("query_instance_id"));
-        prefill_query_req
-            .annotations
-            .push(format!("query_instance_id:{}", QueryInstanceType::Prefill));
-
-        tracing::debug!(
-            request_id = %request_id,
-            "GAIE disagg flow: Querying prefill router for worker selection"
-        );
-
-        let prefill_query_context = Context::with_id(prefill_query_req, request_id.clone());
-        engine_ctx.link_child(prefill_query_context.context());
-
-        // Query for prefill worker selection
-        let prefill_worker_id = self.query_prefill_worker(prefill_query_context).await?;
-
-        tracing::info!(
-            request_id = %request_id,
-            prefill_worker_id = prefill_worker_id,
-            "GAIE disagg flow: Selected prefill worker"
-        );
-
-        // Step 2: Prepare decode query with query_instance_id:decode and prefill_worker_id
-        let mut decode_query_req = req;
-        // Remove existing query_instance_id annotation and add decode type
-        decode_query_req
-            .annotations
-            .retain(|a| !a.starts_with("query_instance_id"));
-        decode_query_req
-            .annotations
-            .push(format!("query_instance_id:{}", QueryInstanceType::Decode));
-        // Add prefill_worker_id annotation for decode router
-        decode_query_req
-            .annotations
-            .push(format!("prefill_worker_id:{}", prefill_worker_id));
-
-        // Set overlap_score_weight = 0 for decode (load-based only)
-        let existing_override = decode_query_req.router_config_override.take();
-        decode_query_req.router_config_override = Some(RouterConfigOverride {
-            overlap_score_weight: Some(0.0),
-            ..existing_override.unwrap_or_default()
-        });
-
-        tracing::debug!(
-            request_id = %request_id,
-            prefill_worker_id = prefill_worker_id,
-            "GAIE disagg flow: Querying decode router for worker selection"
-        );
-
-        // Step 3: Forward to decode router (next) which will return decode worker selection
-        let decode_request = context.map(|_| decode_query_req);
-        let response = next.generate(decode_request).await;
-
-        tracing::info!(
-            request_id = %request_id,
-            prefill_worker_id = prefill_worker_id,
-            success = response.is_ok(),
-            "GAIE disagg flow: Completed worker selection (decode worker ID in response stream)"
-        );
-
-        response
+        }))
     }
 }
 
@@ -400,21 +334,28 @@ impl
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         // Extract request data while preserving context
-        let (req, context) = request.into_parts();
+        let (mut req, context) = request.into_parts();
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
 
-        // Check for GAIE disaggregated worker selection (query_instance_id:)
-        // Empty value signals the full disagg flow: get prefill worker, then decode worker
-        if let Some(query_type_str) = req.get_annotation_value("query_instance_id")
-            && query_type_str.is_empty()
-        {
-            return self
-                .get_prefill_and_decode_worker_ids(req, context, request_id, &next)
-                .await;
+        // Check for GAIE Stage 1: empty query_instance_id signals query-only mode
+        // State machine: "" → "prefill" → "decode"
+        let is_gaie_stage1 = req
+            .get_annotation_value("query_instance_id")
+            .is_some_and(|s| s.is_empty());
+
+        if is_gaie_stage1 {
+            tracing::info!(
+                request_id = %request_id,
+                "GAIE Stage 1: Starting query-only disaggregated flow"
+            );
+            // Transition state: "" → "prefill"
+            req.annotations
+                .retain(|a| !a.starts_with("query_instance_id"));
+            req.annotations
+                .push(format!("query_instance_id:{}", QueryInstanceType::Prefill));
         }
 
-        // Standard disaggregated serving flow (also used by GAIE Stage 2)
         // Check for GAIE Stage 2: pre-selected worker IDs
         let target_prefill_worker = req.target_prefill_worker_id;
         let target_decode_worker = req.target_decode_worker_id;
@@ -450,10 +391,8 @@ impl
         // Link the prefill context as a child so that kill signals propagate
         engine_ctx.link_child(prefill_context.context());
 
-        let prefill_request = prefill_context;
-
-        // Attempt prefill
-        let prefill_result = self.call_prefill(prefill_request).await;
+        // Attempt prefill (or query for worker ID in GAIE Stage 1)
+        let prefill_result = self.call_prefill(prefill_context).await;
 
         // Abort if cancelled during prefill
         if engine_ctx.is_stopped() || engine_ctx.is_killed() {
@@ -466,8 +405,50 @@ impl
 
         // Handle prefill result
         match prefill_result {
-            Ok(prefill_result) => {
-                tracing::debug!("Prefill succeeded, using disaggregated params for decode");
+            Ok(PrefillCallResult::WorkerIdOnly(prefill_worker_id)) => {
+                // GAIE Stage 1: Got prefill worker ID, now query for decode worker
+                tracing::debug!(
+                    request_id = %request_id,
+                    prefill_worker_id = prefill_worker_id,
+                    "GAIE Stage 1: Prefill worker selected, querying decode worker"
+                );
+
+                // Prepare decode query request
+                let mut decode_req = req;
+                // Restore original max_tokens (though not used in query mode)
+                decode_req.stop_conditions.max_tokens = original_max_tokens;
+
+                // Transition state: "prefill" → "decode"
+                decode_req
+                    .annotations
+                    .retain(|a| !a.starts_with("query_instance_id"));
+                decode_req
+                    .annotations
+                    .push(format!("query_instance_id:{}", QueryInstanceType::Decode));
+
+                // Add prefill_worker_id annotation for decode router to include in response
+                decode_req
+                    .annotations
+                    .push(format!("prefill_worker_id:{}", prefill_worker_id));
+
+                // Set overlap_score_weight = 0 for decode (load-based only)
+                let existing_override = decode_req.router_config_override.take();
+                decode_req.router_config_override = Some(RouterConfigOverride {
+                    overlap_score_weight: Some(0.0),
+                    ..existing_override.unwrap_or_default()
+                });
+
+                // Forward to decode router
+                let decode_request = context.map(|_| decode_req);
+                next.generate(decode_request).await
+            }
+
+            Ok(PrefillCallResult::FullResult(prefill_result)) => {
+                // Normal/GAIE Stage 2: Full prefill completed, proceed to decode
+                tracing::debug!(
+                    request_id = %request_id,
+                    "Prefill succeeded, using disaggregated params for decode"
+                );
 
                 let mut decode_req = req;
                 // Update request with prefill result
@@ -496,7 +477,17 @@ impl
                 let decode_request = context.map(|_| decode_req);
                 next.generate(decode_request).await
             }
+
             Err(PrefillError::NotActivated) => {
+                if is_gaie_stage1 {
+                    // GAIE Stage 1 requires prefill router to be activated
+                    tracing::error!(
+                        request_id = %request_id,
+                        "GAIE Stage 1 failed: Prefill router not activated"
+                    );
+                    return Err(anyhow::anyhow!(PrefillError::NotActivated));
+                }
+
                 if self.enforce_disagg {
                     tracing::error!(
                         "Prefill router not activated, but disaggregated mode is enforced. Failing request."
@@ -506,7 +497,18 @@ impl
                 tracing::debug!("Prefill router not activated, falling back to decode-only");
                 next.generate(context.map(|_| req)).await
             }
+
             Err(e) => {
+                if is_gaie_stage1 {
+                    // GAIE Stage 1 errors should propagate
+                    tracing::error!(
+                        request_id = %request_id,
+                        error = %e,
+                        "GAIE Stage 1 failed during prefill worker query"
+                    );
+                    return Err(anyhow::anyhow!(e));
+                }
+
                 if self.enforce_disagg {
                     tracing::error!(
                         error = %e,
