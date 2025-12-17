@@ -225,6 +225,12 @@ def parse_args() -> Config:
     args.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
+    if hasattr(engine_args, "stream_interval") and engine_args.stream_interval != 1:
+        logger.warning(
+            "--stream-interval is currently not respected in Dynamo. "
+            "Dynamo uses its own post-processing implementation on the frontend, "
+            "bypassing vLLM's OutputProcessor buffering. "
+        )
     # Workaround for vLLM GIL contention bug with NIXL connector when using UniProcExecutor.
     # With TP=1, vLLM defaults to UniProcExecutor which runs scheduler and worker in the same
     # process. This causes a hot loop in _process_engine_step that doesn't release the GIL,

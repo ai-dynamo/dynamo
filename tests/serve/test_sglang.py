@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
+from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload,
@@ -54,7 +56,7 @@ sglang_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
-        models_port=8000,
+        frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -68,7 +70,7 @@ sglang_configs = {
         marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         env={},
-        models_port=8000,
+        frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -76,7 +78,8 @@ sglang_configs = {
     ),
     "disaggregated_same_gpu": SGLangConfig(
         # Uses disagg_same_gpu.sh for single-GPU disaggregated testing
-        # Validates metrics from both prefill (port 8081) and decode (port 8082) workers
+        # Validates metrics from both prefill (DefaultPort.SYSTEM1) and decode
+        # (DefaultPort.SYSTEM2) workers
         name="disaggregated_same_gpu",
         directory=sglang_dir,
         script_name="disagg_same_gpu.sh",
@@ -87,14 +90,24 @@ sglang_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
-        models_port=8000,
+        frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
-            # Validate dynamo_component_* and sglang:* metrics from prefill worker (port 8081)
-            metric_payload_default(min_num_requests=6, backend="sglang", port=8081),
-            # Validate dynamo_component_* and sglang:* metrics from decode worker (port 8082)
-            metric_payload_default(min_num_requests=6, backend="sglang", port=8082),
+            # Validate dynamo_component_* and sglang:* metrics from prefill worker
+            # (DefaultPort.SYSTEM1)
+            metric_payload_default(
+                min_num_requests=6,
+                backend="sglang",
+                port=DefaultPort.SYSTEM1.value,
+            ),
+            # Validate dynamo_component_* and sglang:* metrics from decode worker
+            # (DefaultPort.SYSTEM2)
+            metric_payload_default(
+                min_num_requests=6,
+                backend="sglang",
+                port=DefaultPort.SYSTEM2.value,
+            ),
         ],
     ),
     "kv_events": SGLangConfig(
@@ -106,7 +119,7 @@ sglang_configs = {
         env={
             "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
         },
-        models_port=8000,
+        frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(
                 expected_log=[
@@ -135,7 +148,7 @@ sglang_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
-        models_port=8000,
+        frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(
                 expected_response=["Successfully Applied Chat Template"]
@@ -150,7 +163,7 @@ sglang_configs = {
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,
         timeout=360,
-        models_port=8000,
+        frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(
                 [
@@ -183,7 +196,7 @@ sglang_configs = {
         ],
         model="Qwen/Qwen3-Embedding-4B",
         delayed_start=0,
-        models_port=8000,
+        frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             # Test default payload with multiple inputs
             embedding_payload_default(
@@ -241,11 +254,17 @@ def sglang_config_test(request):
 @pytest.mark.e2e
 @pytest.mark.sglang
 def test_sglang_deployment(
-    sglang_config_test, request, runtime_services, predownload_models
+    sglang_config_test,
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_models,
 ):
     """Test SGLang deployment scenarios using common helpers"""
-    config = sglang_config_test
-    run_serve_deployment(config, request)
+    config = dataclasses.replace(
+        sglang_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
 @pytest.mark.e2e
@@ -255,7 +274,9 @@ def test_sglang_deployment(
 @pytest.mark.skip(
     reason="Requires 4 GPUs - enable when hardware is consistently available"
 )
-def test_sglang_disagg_dp_attention(request, runtime_services, predownload_models):
+def test_sglang_disagg_dp_attention(
+    request, runtime_services_dynamic_ports, dynamo_dynamic_ports, predownload_models
+):
     """Test sglang disaggregated with DP attention (requires 4 GPUs)"""
 
     # Kept for reference; this test uses a different launch path and is skipped
