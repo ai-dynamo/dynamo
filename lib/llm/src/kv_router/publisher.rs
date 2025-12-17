@@ -21,7 +21,7 @@ use dynamo_runtime::traits::{
 };
 use dynamo_runtime::{
     component::{Component, Namespace},
-    transports::nats::{NatsQueue, QUEUE_NAME, Slug},
+    transports::nats::{NatsQueue, Slug},
 };
 use futures::StreamExt;
 
@@ -29,12 +29,18 @@ use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
     WORKER_KV_INDEXER_QUERY_SUBJECT,
     indexer::{
-        KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer, RouterEvent, WorkerKvQueryRequest,
-        WorkerKvQueryResponse, compute_block_hash_for_seq,
+        KvIndexerMetrics, LocalKvIndexer, RouterEvent, WorkerKvQueryRequest,
+        compute_block_hash_for_seq,
     },
     protocols::*,
 };
 use dynamo_runtime::config::environment_names::nats as env_nats;
+
+// Error handling configuration for ZMQ operations
+const INITIAL_BACKOFF_MS: u64 = 10;
+const MAX_BACKOFF_MS: u64 = 5000;
+const MAX_CONSECUTIVE_ERRORS: u32 = 10;
+const MAX_BACKOFF_EXPONENT: u32 = 8; // Cap at 2^8 = 256x multiplier to prevent overflow
 
 // -------------------------------------------------------------------------
 // KV Event Publishers -----------------------------------------------------
@@ -125,15 +131,14 @@ impl KvEventPublisher {
         // Infer worker_id from component's connection
         let worker_id = component.drt().connection_id();
 
+        let component_name = component.name();
         tracing::info!(
-            worker_id,
-            component = component.name(),
-            "Initializing KvEventPublisher for worker {worker_id} in component {component}"
+            "Initializing KvEventPublisher for worker {worker_id} in component {component_name}"
         );
 
         if enable_local_indexer {
             tracing::info!(
-                "LocalKvIndexer enabled for worker {worker_id} in component {component}"
+                "LocalKvIndexer enabled for worker {worker_id} in component {component_name}"
             );
         }
 
@@ -179,35 +184,55 @@ impl KvEventPublisher {
                 ))
         });
 
-        let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
-            .to_string()
-            .replace("_", "-");
-        let nats_server = std::env::var(env_nats::NATS_SERVER)
-            .unwrap_or_else(|_| "nats://localhost:4222".to_string());
-        // Create NatsQueue without consumer since we're only publishing
-        let mut nats_queue = NatsQueue::new_without_consumer(
-            stream_name,
-            nats_server,
-            std::time::Duration::from_secs(60), // 1 minute timeout
-        );
-
         // Connect the NatsQueue before passing it to the event processor
         let cancellation_token_clone = cancellation_token.clone();
         let local_indexer_clone = local_indexer.clone();
-        component.drt().runtime().secondary().spawn(async move {
-            if let Err(e) = nats_queue.connect().await {
-                tracing::error!("Failed to connect NatsQueue: {}", e);
-                return;
-            }
-            start_event_processor(
-                nats_queue,
-                worker_id,
-                cancellation_token_clone,
-                rx,
-                local_indexer_clone,
-            )
-            .await
-        });
+
+        if enable_local_indexer {
+            // When local indexer is enabled, use NATS Core (Component) for publishing.
+            // This is simpler and doesn't require JetStream durability since recovery
+            // is handled via the local indexer's event buffer.
+            tracing::info!("Using NATS Core for KV event publishing (local_indexer mode)");
+            let component_clone = component.clone();
+            component.drt().runtime().secondary().spawn(async move {
+                start_event_processor(
+                    component_clone,
+                    worker_id,
+                    cancellation_token_clone,
+                    rx,
+                    local_indexer_clone,
+                )
+                .await
+            });
+        } else {
+            // When local indexer is disabled, use JetStream (NatsQueue) for durability.
+            let stream_name =
+                Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
+                    .to_string()
+                    .replace("_", "-");
+            let nats_server = std::env::var(env_nats::NATS_SERVER)
+                .unwrap_or_else(|_| "nats://localhost:4222".to_string());
+            let mut nats_queue = NatsQueue::new_without_consumer(
+                stream_name,
+                nats_server,
+                std::time::Duration::from_secs(60), // 1 minute timeout
+            );
+
+            component.drt().runtime().secondary().spawn(async move {
+                if let Err(e) = nats_queue.connect().await {
+                    tracing::error!("Failed to connect NatsQueue: {e}");
+                    return;
+                }
+                start_event_processor(
+                    nats_queue,
+                    worker_id,
+                    cancellation_token_clone,
+                    rx,
+                    local_indexer_clone,
+                )
+                .await
+            });
+        }
 
         Ok(Self {
             kv_block_size,
@@ -278,7 +303,9 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
                 }
 
                 // Then publish to NATS for global distribution
-                if let Err(e) = publisher.publish(QUEUE_NAME, &router_event).await {
+                // Use KV_EVENT_SUBJECT so both JetStream and NATS Core subscribers
+                // can receive events on the expected subject.
+                if let Err(e) = publisher.publish(KV_EVENT_SUBJECT, &router_event).await {
                     tracing::error!("Failed to publish event to NATS: {}", e);
                 }
 
@@ -299,27 +326,25 @@ async fn start_worker_kv_query_service(
     let mut subscriber = match component.subscribe(&subject).await {
         Ok(sub) => sub,
         Err(e) => {
-            tracing::error!("Failed to subscribe to {}: {}", subject, e);
-            return; // No ? because function doesn't return Result
+            tracing::error!(
+                "Query service failed to subscribe for worker {worker_id} on subject {subject}: {e}"
+            );
+            return;
         }
     };
-    tracing::debug!(
-        "Query service on worker {} listening on NATS subject: {}",
-        worker_id,
-        subject
-    );
+    tracing::info!("Query service listening on NATS for worker {worker_id} on subject {subject}");
 
     // Receive query request from router, retrieve event(s) from LocalKvIndexer, return response
     loop {
         tokio::select! {
             _ = cancellation_token.cancelled() => {
-                tracing::info!("Router-Worker communication channel received cancellation signal");
+                tracing::info!("Query service received cancellation signal for worker {worker_id}");
                 break;
             }
 
             msg = subscriber.next() => {
                 let Some(msg) = msg else {
-                    tracing::debug!("Router-Worker stream ended.");
+                    tracing::warn!("Query service NATS stream ended for worker {worker_id}");
                     break;
                 };
 
@@ -327,43 +352,24 @@ async fn start_worker_kv_query_service(
                 let request: WorkerKvQueryRequest = match serde_json::from_slice(&msg.payload) {
                     Ok(request) => request,
                     Err(e) => {
-                        tracing::error!("Failed to deserialize WorkerKvQueryRequest: {}", e);
+                        tracing::error!("Failed to deserialize WorkerKvQueryRequest for worker {worker_id}: {e}");
                         continue;
                     }
                 };
 
-                // TODO extract request event id range. For now, just debug print
-                tracing::debug!("Received WorkerKvQueryRequest: {:?}", request);
+                tracing::debug!("Received query request for worker {worker_id}: {request:?}");
 
-                // Resolve which events to return based on optional start/end ids
-                let events = match (request.start_event_id, request.end_event_id) {
-                    (None, None) => {
-                        match local_indexer.dump_events().await {
-                            Ok(events) => events,
-                            Err(err) => {
-                                tracing::error!(
-                                    error = %err,
-                                    worker_id,
-                                    "Failed to dump events for WorkerKvQueryRequest; returning buffered events instead"
-                                );
-                                local_indexer.get_all_events_in_buffer()
-                            }
-                        }
-                    }
-                    _ => {
-                            local_indexer.get_events_in_id_range(request.start_event_id, request.end_event_id).await
-                    }
-                };
-
-                // Build WorkerKvQueryResponse
-                let response = WorkerKvQueryResponse { events };
+                // Query events based on optional start/end ids
+                let response = local_indexer
+                    .get_events_in_id_range(request.start_event_id, request.end_event_id)
+                    .await;
 
                 // Send reply back (if reply subject exists)
                 if let Some(reply_subject) = msg.reply {
                     let payload = match serde_json::to_vec(&response) {
                         Ok(p) => p,
                         Err(e) => {
-                            tracing::error!("Failed to serialize response: {}", e);
+                            tracing::error!("Failed to serialize response for worker {worker_id}: {e}");
                             continue;
                         }
                     };
@@ -374,21 +380,13 @@ async fn start_worker_kv_query_service(
                         .kv_router_nats_publish(reply_subject.to_string(), payload.into())
                         .await
                     {
-                        tracing::error!("Failed to send reply: {}", e);
+                        tracing::error!("Failed to send reply for worker {worker_id}: {e}");
                     }
                 }
-
             }
-
         }
     }
 }
-
-// Error handling configuration for ZMQ operations
-const INITIAL_BACKOFF_MS: u64 = 10;
-const MAX_BACKOFF_MS: u64 = 5000;
-const MAX_CONSECUTIVE_ERRORS: u32 = 10;
-const MAX_BACKOFF_EXPONENT: u32 = 8; // Cap at 2^8 = 256x multiplier to prevent overflow
 
 /// Calculate exponential backoff duration based on consecutive error count
 fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
@@ -478,7 +476,7 @@ pub async fn start_zmq_listener(
                 let mut frames: Vec<Vec<u8>> = msg.into_vec().into_iter().map(|frame| frame.to_vec()).collect();
 
                 if frames.len() != 3 {
-                    tracing::warn!(expected=3, actual=%frames.len(), "Received unexpected ZMQ frame count");
+                    tracing::warn!("Received unexpected ZMQ frame count: expected 3, actual {}", frames.len());
                     continue;
                 }
 
@@ -487,7 +485,7 @@ pub async fn start_zmq_listener(
                 let seq_bytes = frames.pop().unwrap();
 
                 if seq_bytes.len() != 8 {
-                    tracing::warn!(expected=8, actual=%seq_bytes.len(), "Invalid sequence number byte length");
+                    tracing::warn!("Invalid sequence number byte length: expected 8, actual {}", seq_bytes.len());
                     continue;
                 }
 
@@ -497,7 +495,7 @@ pub async fn start_zmq_listener(
                 let batch_result = rmps::from_slice::<KvEventBatch>(&payload);
                 let Ok(batch) = batch_result else {
                     let e = batch_result.unwrap_err();
-                    tracing::warn!(error=%e, "Failed to decode KVEventBatch msgpack");
+                    tracing::warn!("Failed to decode KVEventBatch msgpack: {e}");
                     continue;
                 };
 
@@ -1281,7 +1279,7 @@ mod tests_startup_helpers {
         let published = published.lock().unwrap();
         assert_eq!(published.len(), 1);
         let (subject, _) = &published[0];
-        assert_eq!(subject, QUEUE_NAME);
+        assert_eq!(subject, KV_EVENT_SUBJECT);
     }
 
     //--------------------------------------------------------------------
@@ -1339,7 +1337,7 @@ mod tests_startup_helpers {
             let published_events = published.lock().unwrap();
             assert_eq!(published_events.len(), 1);
             let (subject, _) = &published_events[0];
-            assert_eq!(subject, QUEUE_NAME);
+            assert_eq!(subject, KV_EVENT_SUBJECT);
         } // drop lock
 
         // Verify event was applied to local indexer
@@ -1726,7 +1724,7 @@ mod tests_startup_helpers {
             assert_eq!(published.len(), 1, "Worker should have published 1 event");
             (published[0].0.clone(), published[0].1.clone())
         }; // drop worker_published before await
-        assert_eq!(subject, QUEUE_NAME);
+        assert_eq!(subject, KV_EVENT_SUBJECT);
 
         let router_event: RouterEvent = rmp_serde::from_slice(&bytes).unwrap();
         router_indexer
@@ -1818,19 +1816,18 @@ mod tests_startup_helpers {
             "Router should only see 1 shared block (not the new block from event_2)"
         );
 
-        // === STEP 4 & 5: Recovery - Query last received event IDs and fetch missed events ===
-        // Step 4a: Router queries its last received event ID per worker
-        let last_ids = router_indexer.get_last_received_event_ids().await.unwrap();
-        let last_known_id = last_ids.get(&worker_1_id).copied().unwrap_or(0);
-        assert_eq!(
-            last_known_id, 1,
-            "Router should have last_received_event_id = 1 for worker (only event_1 was forwarded)"
-        );
-
-        // Step 4b: Query worker's local indexer for events after last_known_id
-        let missed_events = local_indexer_1
+        // === STEP 4 & 5: Recovery - Query worker's local indexer for missed events ===
+        // In practice, the subscriber detects gaps and triggers recovery automatically.
+        // Here we simulate that by querying for events after event_id=1.
+        let last_known_id = 1u64; // Router only received event_1
+        let response = local_indexer_1
             .get_events_in_id_range(Some(last_known_id + 1), None)
             .await;
+        let missed_events = match response {
+            crate::kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
+            crate::kv_router::indexer::WorkerKvQueryResponse::TreeDump(e) => e,
+            other => panic!("Unexpected response: {:?}", other),
+        };
         assert_eq!(
             missed_events.len(),
             1,
@@ -1858,14 +1855,6 @@ mod tests_startup_helpers {
         assert_eq!(
             router_overlap_after, 2,
             "Router should now see both blocks after recovery"
-        );
-
-        // assert: Router's last_received_event_id is updated after recovery
-        let last_ids_after = router_indexer.get_last_received_event_ids().await.unwrap();
-        assert_eq!(
-            last_ids_after.get(&worker_1_id),
-            Some(&2),
-            "Router should have last_received_event_id = 2 after recovery"
         );
 
         token.cancel();
@@ -2035,8 +2024,6 @@ mod test_integration_publisher {
     #[tokio::test]
     #[ignore] // Mark as ignored as requested, because CI's integrations still don't have NATS
     async fn test_kvstats_prometheus_gauge_updates() {
-        use crate::kv_router::publisher::kvstats;
-
         // Test that publish() updates Prometheus gauges correctly using real Component
         let publisher = WorkerMetricsPublisher::new().unwrap();
 
@@ -2293,11 +2280,16 @@ mod test_integration_publisher_with_kvindexer {
             let response = kv_router
                 .query_worker_local_kv(worker_id, None, None)
                 .await?;
-            if response.events.is_empty() {
+            let events = match response {
+                crate::kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
+                crate::kv_router::indexer::WorkerKvQueryResponse::TreeDump(e) => e,
+                _ => vec![],
+            };
+            if events.is_empty() {
                 continue;
             }
 
-            let event_count = response.events.len();
+            let event_count = events.len();
             tracing::info!(
                 worker_id,
                 events = event_count,
@@ -2323,8 +2315,13 @@ mod test_integration_publisher_with_kvindexer {
             let response = kv_router
                 .query_worker_local_kv(worker_id, None, None)
                 .await?;
+            let events = match response {
+                crate::kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
+                crate::kv_router::indexer::WorkerKvQueryResponse::TreeDump(e) => e,
+                _ => vec![],
+            };
             assert!(
-                response.events.is_empty(),
+                events.is_empty(),
                 "Worker {worker_id} should not report buffered KV events; best worker {best_worker_id} reported {best_worker_event_count}"
             );
         }
@@ -2437,6 +2434,24 @@ mod test_integration_publisher_with_kvindexer {
             .endpoint("generate");
         let pre_client = pre_backend_endpoint.client().await?;
 
+        // Wait for the client to discover both workers
+        let discovery_timeout = Duration::from_secs(5);
+        let discovery_start = std::time::Instant::now();
+        loop {
+            let instances = pre_client.instance_source.as_ref().borrow().clone();
+            if instances.len() >= 2 {
+                tracing::info!("Discovered {} workers", instances.len());
+                break;
+            }
+            if discovery_start.elapsed() > discovery_timeout {
+                anyhow::bail!(
+                    "Timed out waiting for worker discovery: expected 2, found {}",
+                    instances.len()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
         // Create a PushRouter to send requests directly to a specific worker
         let pre_push_router =
             PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
@@ -2495,13 +2510,32 @@ mod test_integration_publisher_with_kvindexer {
             .await?,
         );
 
-        // At this point kvrouter's indexer should already have the
-        // events stored in the workers, due to the catch-up built into KvRouter::new.
+        // The KvRouter now starts its subscriber asynchronously in a background task
+        // that waits for runtime_configs. Poll until events appear or timeout.
         // Each request generates 2 events: input block (parent_hash: None) + output block (parent_hash: Some)
         // With 2 workers, that's 4 events total.
-        let global_kv_events = kv_router.indexer.dump_events().await?;
-        tracing::debug!("Global KV events: {:?}", global_kv_events);
-        assert_eq!(global_kv_events.len(), 4); // 2 workers × 2 events per request (input + output)
+        let expected_events = 4;
+        let max_wait = Duration::from_secs(10);
+        let poll_interval = Duration::from_millis(100);
+        let start = std::time::Instant::now();
+
+        let global_kv_events = loop {
+            let events = kv_router.indexer.dump_events().await?;
+            tracing::debug!("Global KV events ({}): {:?}", events.len(), events);
+            if events.len() >= expected_events {
+                break events;
+            }
+            if start.elapsed() > max_wait {
+                anyhow::bail!(
+                    "Timed out waiting for KV events: expected {}, got {}",
+                    expected_events,
+                    events.len()
+                );
+            }
+            tokio::time::sleep(poll_interval).await;
+        };
+
+        assert_eq!(global_kv_events.len(), expected_events); // 2 workers × 2 events per request (input + output)
 
         // === Cleanup ===
         for handle in server_handles {
