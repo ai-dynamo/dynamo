@@ -73,7 +73,7 @@ runs:
           -e "MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}" \
           quay.io/minio/minio server /data --console-address ':9001'
 
-        # Wait for MinIO to be ready with exponential backoff
+        # Wait for MinIO to be ready
         echo "⏳ Waiting for MinIO to be ready..."
         MAX_ATTEMPTS=30
         ATTEMPT=0
@@ -84,7 +84,7 @@ runs:
           fi
           ATTEMPT=$((ATTEMPT + 1))
           if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-            echo "❌ MinIO failed to start within ${MAX_ATTEMPTS} seconds"
+            echo "❌ MinIO failed to start within ${MAX_ATTEMPTS}s"
             echo "📋 Container logs:"
             docker logs "${MINIO_CONTAINER_NAME}" 2>&1 || true
             exit 1
