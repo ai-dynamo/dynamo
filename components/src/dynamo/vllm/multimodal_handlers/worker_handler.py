@@ -202,12 +202,19 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                         if multi_modal_data["image"] == []:
                             multi_modal_data["image"] = mm_data["image"]
                         else:
+                            # [gluo FIXME] need to understand how Qwen consumes multi-image embeddings
                             # Merging tensors
-                            multi_modal_data["image"]["image_embeds"].cat(
-                                mm_data["image"]["image_embeds"]
+                            multi_modal_data["image"]["image_embeds"] = torch.cat(
+                                (
+                                    multi_modal_data["image"]["image_embeds"],
+                                    mm_data["image"]["image_embeds"],
+                                )
                             )
-                            multi_modal_data["image"]["image_grid_thw"].cat(
-                                mm_data["image"]["image_grid_thw"]
+                            multi_modal_data["image"]["image_grid_thw"] = torch.cat(
+                                (
+                                    multi_modal_data["image"]["image_grid_thw"],
+                                    mm_data["image"]["image_grid_thw"],
+                                )
                             )
                     else:
                         multi_modal_data["image"].append(mm_data["image"])

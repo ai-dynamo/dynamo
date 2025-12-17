@@ -57,11 +57,11 @@ done
 if [[ -n "$PROVIDED_PROMPT_TEMPLATE" ]]; then
     PROMPT_TEMPLATE="$PROVIDED_PROMPT_TEMPLATE"
 elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
-    PROMPT_TEMPLATE="USER: <image>\n<prompt> ASSISTANT:"
+    PROMPT_TEMPLATE="USER: <mm_placeholder>\n<prompt> ASSISTANT:"
 elif [[ "$MODEL_NAME" == "microsoft/Phi-3.5-vision-instruct" ]]; then
     PROMPT_TEMPLATE="<|user|>\n<|image_1|>\n<prompt><|end|>\n<|assistant|>\n"
-elif [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]] || [[ "$MODEL_NAME" == "Qwen/Qwen2-VL-2B-Instruct" ]]; then
-    PROMPT_TEMPLATE="<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><prompt><|im_end|>\n<|im_start|>assistant\n"
+elif [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
+    PROMPT_TEMPLATE="<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<mm_placeholder><prompt><|im_end|>\n<|im_start|>assistant\n"
 else
     echo "No multi-modal prompt template is defined for the model: $MODEL_NAME"
     echo "Please provide a prompt template using --prompt-template option."
