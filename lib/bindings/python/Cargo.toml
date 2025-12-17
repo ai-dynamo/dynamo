@@ -23,6 +23,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
+media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 
 [dependencies]
 dynamo-llm = { path = "../../llm" }

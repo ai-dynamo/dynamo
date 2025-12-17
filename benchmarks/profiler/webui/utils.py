@@ -6,11 +6,13 @@ import logging
 import os
 import queue
 import threading
+import time
 from enum import Enum
 from pathlib import Path
 
 import gradio as gr
 import numpy as np
+import yaml
 from aiconfigurator.webapp.components.profiling import (
     create_performance_results_section,
     create_profiling_ui_components,
@@ -18,10 +20,185 @@ from aiconfigurator.webapp.components.profiling import (
     load_profiling_javascript,
 )
 
-from benchmarks.profiler.utils.defaults import DEFAULT_GPU_COST_PER_HOUR
 from benchmarks.profiler.utils.pareto import compute_pareto
 
 logger = logging.getLogger(__name__)
+
+
+# Global variable to track selection completion for graceful shutdown
+_selection_complete = threading.Event()
+
+# Global error state for propagating profiling errors to WebUI
+_profiling_errors: list[str] = []
+
+
+def add_profiling_error(error_message: str) -> None:
+    """Add an error message to be displayed in the WebUI.
+
+    Args:
+        error_message: The error message to display
+    """
+    _profiling_errors.append(error_message)
+    logger.error(f"Profiling error: {error_message}")
+
+
+def get_profiling_errors() -> list[str]:
+    """Get all profiling errors.
+
+    Returns:
+        List of error messages
+    """
+    return _profiling_errors.copy()
+
+
+def clear_profiling_errors() -> None:
+    """Clear all profiling errors."""
+    _profiling_errors.clear()
+
+
+def generate_dgd_worker_config_yaml(
+    parallel_mapping,
+    engine_type: str,
+    model: str | None = None,
+    backend: str | None = None,
+    ttft_or_itl: float | None = None,
+    thpt_per_gpu: float | None = None,
+) -> str:
+    """
+    Generate a DGD worker service config snippet for display in the WebUI.
+
+    Uses ParallelizationMapping.label() for display and shows the service structure
+    that would be used in the final DynamoGraphDeployment.
+
+    Args:
+        parallel_mapping: ParallelizationMapping instance
+        engine_type: "prefill" or "decode"
+        model: Model name/path
+        backend: Backend name (sglang, vllm, trtllm)
+        ttft_or_itl: TTFT (prefill) or ITL (decode) in ms
+        thpt_per_gpu: Throughput per GPU in tokens/s/GPU
+
+    Returns:
+        YAML string representation of the DGD worker config
+    """
+    num_gpus = parallel_mapping.get_num_gpus()
+
+    # Build the worker config in DGD style
+    # Note: Actual args vary by backend; this shows the structure
+    worker_config = {
+        "componentType": "worker",
+        "subComponentType": engine_type,
+        "replicas": 1,
+        "resources": {
+            "limits": {
+                "gpu": str(num_gpus),
+            }
+        },
+    }
+
+    # Build header comments with profiling metadata
+    header_lines = [
+        "# DynamoGraphDeployment Worker Config",
+        f"# Engine: {engine_type}",
+        f"# Num GPUs: {num_gpus}",
+        f"# Parallelization: {parallel_mapping.label()}",
+    ]
+
+    if engine_type == "prefill" and ttft_or_itl is not None:
+        header_lines.append(f"# Profiled TTFT: {round(ttft_or_itl, 2)} ms")
+    elif engine_type == "decode" and ttft_or_itl is not None:
+        header_lines.append(f"# Profiled ITL: {round(ttft_or_itl, 2)} ms")
+
+    if thpt_per_gpu is not None:
+        header_lines.append(
+            f"# Profiled Throughput: {round(thpt_per_gpu, 2)} tokens/s/GPU"
+        )
+
+    if model:
+        header_lines.append(f"# Model: {model}")
+    if backend:
+        header_lines.append(f"# Backend: {backend}")
+
+    header_lines.append("#")
+    header_lines.append("# Note: Final config generated after selection includes")
+    header_lines.append("# backend-specific args and planner configuration.")
+
+    # Add the actual config
+    service_name = f"{engine_type.capitalize()}Worker"
+    body = yaml.dump(
+        {service_name: worker_config}, default_flow_style=False, sort_keys=False
+    )
+
+    return "\n".join(header_lines) + "\n" + body
+
+
+def generate_dgd_config_yaml_for_display(
+    prefill_mapping,
+    decode_mapping,
+    model: str | None = None,
+    backend: str | None = None,
+) -> str:
+    """
+    Generate a DGD config snippet for display in the WebUI.
+
+    This shows the combined prefill + decode DynamoGraphDeployment structure.
+    Uses ParallelizationMapping.label() for parallelization info.
+
+    Args:
+        prefill_mapping: ParallelizationMapping for prefill
+        decode_mapping: ParallelizationMapping for decode
+        model: Model name/path
+        backend: Backend name
+
+    Returns:
+        YAML string representation of the DGD configuration
+    """
+    prefill_gpus = prefill_mapping.get_num_gpus()
+    decode_gpus = decode_mapping.get_num_gpus()
+
+    # Build DGD-style config showing the service structure
+    config = {
+        "apiVersion": "nvidia.com/v1alpha1",
+        "kind": "DynamoGraphDeployment",
+        "spec": {
+            "services": {
+                "PrefillWorker": {
+                    "componentType": "worker",
+                    "subComponentType": "prefill",
+                    "replicas": 1,
+                    "resources": {
+                        "limits": {"gpu": str(prefill_gpus)},
+                    },
+                },
+                "DecodeWorker": {
+                    "componentType": "worker",
+                    "subComponentType": "decode",
+                    "replicas": 1,
+                    "resources": {
+                        "limits": {"gpu": str(decode_gpus)},
+                    },
+                },
+            }
+        },
+    }
+
+    # Build header comments with parallelization and model info
+    header_lines = [
+        "# DynamoGraphDeployment Configuration Preview",
+        f"# Prefill: {prefill_gpus} GPU(s), {prefill_mapping.label()}",
+        f"# Decode: {decode_gpus} GPU(s), {decode_mapping.label()}",
+    ]
+    if model:
+        header_lines.append(f"# Model: {model}")
+    if backend:
+        header_lines.append(f"# Backend: {backend}")
+    header_lines.append("#")
+    header_lines.append("# Full config with planner saved to: config_with_planner.yaml")
+
+    header = "\n".join(header_lines)
+    body = yaml.dump(config, default_flow_style=False, sort_keys=False)
+
+    return f"{header}\n{body}"
 
 
 class PlotType(str, Enum):
@@ -53,17 +230,18 @@ def generate_config_data(
     prefill_data,
     decode_data,
     args,
-    gpu_cost_per_hour: float = DEFAULT_GPU_COST_PER_HOUR,
     write_to_disk: bool = True,
 ):
     """
     Generate JSON data file for WebUI from profiling results.
 
+    Note: This function computes GPU hours (not cost). The frontend handles
+    cost calculation when the user provides a GPU cost per hour value.
+
     Args:
         prefill_data: PrefillProfileData instance
         decode_data: DecodeProfileData instance
         args: Arguments containing SLA targets (ttft, itl, isl, osl) and output_dir
-        gpu_cost_per_hour: GPU cost in $/GPU/hour used for cost plot/table
         write_to_disk: Whether to write the generated JSON to args.output_dir/webui_data.json
 
     Returns:
@@ -90,14 +268,12 @@ def generate_config_data(
 
     data[PlotType.COST]["chart"][
         "title"
-    ] = f"Cost Per 1000 i{args.isl}o{args.osl} requests"
+    ] = f"GPU Hours Per 1000 i{args.isl}o{args.osl} requests"
 
     # Populate data sections
-    populate_prefill_data(data, prefill_data)
-    populate_decode_data(data, decode_data)
-    populate_cost_data(
-        data, prefill_data, decode_data, args, gpu_cost_per_hour=gpu_cost_per_hour
-    )
+    populate_prefill_data(data, prefill_data, args)
+    populate_decode_data(data, decode_data, args)
+    populate_cost_data(data, prefill_data, decode_data, args)
 
     # Save JSON file (optional)
     if write_to_disk:
@@ -109,36 +285,7 @@ def generate_config_data(
     return data
 
 
-def create_gpu_cost_update_handler(
-    *,
-    prefill_data,
-    decode_data,
-    args,
-    data_dict_ref,
-    default_gpu_cost_per_hour: float = DEFAULT_GPU_COST_PER_HOUR,
-):
-    """Create a Gradio change-handler that regenerates profiling JSON when GPU cost changes."""
-
-    def update_gpu_cost_per_hour(gpu_cost_per_hour):
-        try:
-            gpu_cost = float(gpu_cost_per_hour)
-        except Exception:
-            gpu_cost = default_gpu_cost_per_hour
-
-        new_data = generate_config_data(
-            prefill_data,
-            decode_data,
-            args,
-            gpu_cost_per_hour=gpu_cost,
-            write_to_disk=False,
-        )
-        data_dict_ref["data"] = new_data
-        return json.dumps(new_data)
-
-    return update_gpu_cost_per_hour
-
-
-def populate_prefill_data(data, prefill_data):
+def populate_prefill_data(data, prefill_data, args):
     """Populate prefill chart and table data."""
     if not prefill_data.num_gpus:
         return
@@ -170,21 +317,29 @@ def populate_prefill_data(data, prefill_data):
 
     # Populate table data
     table_data = []
-    for i, (gpu, ttft, thpt, label) in enumerate(
+    for i, (gpu, ttft, thpt, label, mapping) in enumerate(
         zip(
             prefill_data.num_gpus,
             prefill_data.ttft,
             prefill_data.thpt_per_gpu,
             prefill_data.parallel_mapping_labels,
+            prefill_data.parallel_mappings,
         )
     ):
-        # TODO: Add actual config YAML data
-        config_yaml = f"prefill_config_{i}.yaml"
+        # Generate DGD worker config YAML for display
+        config_yaml = generate_dgd_worker_config_yaml(
+            parallel_mapping=mapping,
+            engine_type="prefill",
+            model=getattr(args, "model", None),
+            backend=getattr(args, "backend", None),
+            ttft_or_itl=ttft,
+            thpt_per_gpu=thpt,
+        )
         table_data.append([gpu, round(ttft, 2), round(thpt, 2), config_yaml])
     data[PlotType.PREFILL]["table"]["data"] = table_data
 
 
-def populate_decode_data(data, decode_data):
+def populate_decode_data(data, decode_data, args):
     """Populate decode chart and table data."""
     if not decode_data.num_gpus:
         return
@@ -219,15 +374,24 @@ def populate_decode_data(data, decode_data):
 
     # Populate table data
     table_data = []
-    for i, (gpu, itl, thpt, label) in enumerate(
+    for i, (gpu, itl, thpt, label, mapping) in enumerate(
         zip(
             decode_data.num_gpus,
             decode_data.itl,
             decode_data.thpt_per_gpu,
             decode_data.parallel_mapping_labels,
+            decode_data.parallel_mappings,
         )
     ):
-        config_yaml = f"decode_config_{i}.yaml"
+        # Generate DGD worker config YAML for display
+        config_yaml = generate_dgd_worker_config_yaml(
+            parallel_mapping=mapping,
+            engine_type="decode",
+            model=getattr(args, "model", None),
+            backend=getattr(args, "backend", None),
+            ttft_or_itl=itl,
+            thpt_per_gpu=thpt,
+        )
         table_data.append([gpu, round(itl, 2), round(thpt, 2), config_yaml])
     data[PlotType.DECODE]["table"]["data"] = table_data
 
@@ -237,9 +401,12 @@ def populate_cost_data(
     prefill_data,
     decode_data,
     args,
-    gpu_cost_per_hour: float = DEFAULT_GPU_COST_PER_HOUR,
 ):
-    """Populate cost chart and table data with pareto-optimal configurations."""
+    """Populate cost chart and table data with pareto-optimal configurations.
+
+    Note: This function computes GPU hours (not cost). The frontend handles
+    cost calculation when the user provides a GPU cost per hour value.
+    """
     if not prefill_data.num_gpus or not decode_data.num_gpus:
         return
 
@@ -266,15 +433,26 @@ def populate_cost_data(
     table_idx = 0
 
     for p_idx, (_p_ttft, _p_thpt) in enumerate(zip(p_ttft, p_thpt)):
-        # Calculate prefill cost (fixed for this line)
-        prefill_cost = args.isl * 1000 / _p_thpt * gpu_cost_per_hour / 3600
+        # Get prefill config details for this pareto point
+        orig_prefill_idx = prefill_pareto_indices[p_idx]
+        prefill_mapping = prefill_data.parallel_mappings[orig_prefill_idx]
+        prefill_num_gpus = prefill_mapping.get_num_gpus()
 
-        # For each decode config, calculate total cost
+        # Calculate prefill GPU hours per 1000 requests
+        # GPU hours = (tokens_per_request * num_requests) / (tokens_per_second_per_gpu * 3600) * num_gpus
+        prefill_gpu_hours = args.isl * 1000 / _p_thpt / 3600 * prefill_num_gpus
+
+        # For each decode config, calculate total GPU hours
         line_data = []
         for d_idx, (_d_itl, _d_thpt) in enumerate(zip(d_itl, d_thpt)):
-            # Calculate decode cost
-            decode_cost = args.osl * 1000 / _d_thpt * gpu_cost_per_hour / 3600
-            total_cost = prefill_cost + decode_cost
+            # Get decode config details for this pareto point
+            orig_decode_idx = decode_pareto_indices[d_idx]
+            decode_mapping = decode_data.parallel_mappings[orig_decode_idx]
+            decode_num_gpus = decode_mapping.get_num_gpus()
+
+            # Calculate decode GPU hours per 1000 requests (scaled by num_gpus)
+            decode_gpu_hours = args.osl * 1000 / _d_thpt / 3600 * decode_num_gpus
+            total_gpu_hours = prefill_gpu_hours + decode_gpu_hours
 
             # X-axis: tokens per user (based on ITL)
             tokens_per_user = 1000 / _d_itl
@@ -282,17 +460,23 @@ def populate_cost_data(
             line_data.append(
                 {
                     "x": round(tokens_per_user, 2),
-                    "y": round(total_cost, 2),
+                    "y": round(total_gpu_hours, 4),
                     "tableIdx": table_idx,
                 }
             )
 
             # Store mapping from cost table row to original indices
-            orig_prefill_idx = prefill_pareto_indices[p_idx]
-            orig_decode_idx = decode_pareto_indices[d_idx]
             cost_index_mapping[table_idx] = (orig_prefill_idx, orig_decode_idx)
 
-            # Add to table data
+            # Generate DGD config YAML for display
+            config_yaml = generate_dgd_config_yaml_for_display(
+                prefill_mapping=prefill_mapping,
+                decode_mapping=decode_mapping,
+                model=getattr(args, "model", None),
+                backend=getattr(args, "backend", None),
+            )
+
+            # Add to table data (GPU hours, not cost - frontend handles cost conversion)
             table_data.append(
                 [
                     round(_p_ttft, 2),
@@ -300,8 +484,8 @@ def populate_cost_data(
                     round(_d_itl, 2),
                     round(_d_thpt, 2),
                     round(tokens_per_user, 2),
-                    round(total_cost, 2),
-                    f"cost_config_{table_idx}.yaml",  # TODO: Add actual config
+                    round(total_gpu_hours, 4),
+                    config_yaml,
                 ]
             )
             table_idx += 1
@@ -338,13 +522,17 @@ def create_selection_handler(
         decode_selection: Dict tracking decode selection state
 
     Returns:
-        Callable: Selection handler function for Gradio
+        Callable: Selection handler function for Gradio that returns a status message
     """
 
     def handle_selection(selection_json):
-        """Handle datapoint selection from table."""
+        """Handle datapoint selection from table.
+
+        Returns:
+            str: Status message to display in the UI
+        """
         if not selection_json or selection_json.strip() == "":
-            return
+            return ""
 
         try:
             data_dict = data_dict_ref["data"]
@@ -366,8 +554,10 @@ def create_selection_handler(
                         logger.info(
                             f"Cost selection determines: Prefill={prefill_idx}, Decode={decode_idx}"
                         )
-                        # Auto-submit for cost selection
+                        # Signal selection complete and put in queue
+                        _selection_complete.set()
                         selection_queue.put((prefill_idx, decode_idx))
+                        return f"✅ Configuration selected! Prefill config #{prefill_idx}, Decode config #{decode_idx}. Processing..."
             elif plot_type == PlotType.PREFILL:
                 prefill_selection["idx"] = row_idx
                 logger.info(f"Prefill selected: {row_idx}")
@@ -376,9 +566,11 @@ def create_selection_handler(
                     logger.info(
                         f"Both selections complete: Prefill={row_idx}, Decode={decode_selection['idx']}"
                     )
+                    _selection_complete.set()
                     selection_queue.put((row_idx, decode_selection["idx"]))
+                    return f"✅  Configuration selected! Prefill config #{row_idx}, Decode config #{decode_selection['idx']}. Processing..."
                 else:
-                    logger.info("Waiting for decode selection...")
+                    return f"ℹ️  Prefill config #{row_idx} selected. Please select a Decode configuration."
             elif plot_type == PlotType.DECODE:
                 decode_selection["idx"] = row_idx
                 logger.info(f"Decode selected: {row_idx}")
@@ -387,12 +579,17 @@ def create_selection_handler(
                     logger.info(
                         f"Both selections complete: Prefill={prefill_selection['idx']}, Decode={row_idx}"
                     )
+                    _selection_complete.set()
                     selection_queue.put((prefill_selection["idx"], row_idx))
+                    return f"✅  Configuration selected! Prefill config #{prefill_selection['idx']}, Decode config #{row_idx}. Processing..."
                 else:
-                    logger.info("Waiting for prefill selection...")
+                    return f"ℹ️  Decode config #{row_idx} selected. Please select a Prefill configuration."
+
+            return ""
 
         except Exception as e:
             logger.error(f"Error handling selection: {e}")
+            return f"❌  Error: {str(e)}"
 
     return handle_selection
 
@@ -400,16 +597,12 @@ def create_selection_handler(
 def create_gradio_interface(
     json_data_str,
     handle_selection,
-    update_json_data_fn=None,
-    default_gpu_cost_per_hour: float = DEFAULT_GPU_COST_PER_HOUR,
 ):
     """Create the Gradio interface for configuration selection.
 
     Args:
         json_data_str: JSON string containing profiling data
         handle_selection: Selection handler function
-        update_json_data_fn: Optional function that takes (gpu_cost_per_hour) and returns updated JSON string.
-        default_gpu_cost_per_hour: Default GPU cost per hour used to initialize the input box.
 
     Returns:
         gr.Blocks: Configured Gradio demo
@@ -426,41 +619,49 @@ def create_gradio_interface(
 
         gr.Markdown("# 📊 Profiling Results - Select Configuration")
 
+        # Display any profiling errors/warnings at the top
+        profiling_errors = get_profiling_errors()
+        if profiling_errors:
+            error_text = "\n".join(f"- {err}" for err in profiling_errors)
+            gr.Markdown(
+                f"""
+                <div style="background-color: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 10px; margin-bottom: 10px;">
+                <strong>⚠️ Profiling Warnings/Errors:</strong>
+
+{error_text}
+                </div>
+                """
+            )
+
         gr.Markdown(
             """
             **Two ways to select prefill and decode configs:**
-            1. **Cost Analysis** (recommended): Click any row in the Cost Analysis table - automatically determines both prefill and decode
-            2. **Individual**: Click one row in the Prefill table AND one row in the Decode table
+            1. **GPU Hours Analysis** (recommended): Select any row in the GPU Hours table - automatically determines both prefill and decode
+            2. **Individual**: Select one row in the Prefill table AND one row in the Decode table
             The selection will be processed automatically once complete.
 
             > 📝 **Note:** The dotted red line in the prefill and decode charts are default TTFT and ITL SLAs if not specified.
 
-            > ⚠️ **Warning:** The TTFT values here represent the ideal case when requests arrive uniformly, minimizing queueing. Real-world TTFT may be higher than profiling results. To mitigate the issue, planner uses ][correction factors](https://github.com/ai-dynamo/dynamo/blob/main/docs/planner/sla_planner.md#2-correction-factor-calculation) to adjust dynamically at runtime.
+            > ⚠️ **Warning:** The TTFT values here represent the ideal case when requests arrive uniformly, minimizing queueing. Real-world TTFT may be higher than profiling results. To mitigate the issue, planner uses [correction factors](https://github.com/ai-dynamo/dynamo/blob/main/docs/planner/sla_planner.md#2-correction-factor-calculation) to adjust dynamically at runtime.
+
+            > 💡 **Tip:** Use the GPU cost checkbox and input in the charts section to convert GPU hours to cost.
             """
         )
 
-        with gr.Row():
-            gpu_cost_per_hour = gr.Number(
-                label="GPU cost per hour ($/GPU/hour)",
-                value=default_gpu_cost_per_hour,
-                minimum=0,
-                precision=4,
-            )
-        if update_json_data_fn is not None:
-            gpu_cost_per_hour.change(
-                fn=update_json_data_fn,
-                inputs=[gpu_cost_per_hour],
-                outputs=[json_data],
-            )
+        # Status message display for selection feedback
+        selection_status = gr.Markdown(
+            value="",
+            elem_id="selection_status",
+        )
 
         # Performance Results Section (reused from AIC profiling module)
         create_performance_results_section()
 
-        # Handle selection button
+        # Handle selection button - now returns status message
         selection_button.click(
             fn=handle_selection,
             inputs=[selection_input],
-            outputs=[],
+            outputs=[selection_status],
         )
 
         # Trigger visualization when JSON data changes
@@ -513,6 +714,9 @@ def wait_for_selection(demo, selection_queue, port):
     logger.info(f"WebUI launched. Waiting for user selection on http://0.0.0.0:{port}")
     logger.info("Please select a row from the Cost Analysis table")
 
+    # Reset the selection complete event
+    _selection_complete.clear()
+
     # Block and wait for selection
     try:
         selected_prefill_idx, selected_decode_idx = selection_queue.get(
@@ -522,7 +726,12 @@ def wait_for_selection(demo, selection_queue, port):
             f"User selected: Prefill={selected_prefill_idx}, Decode={selected_decode_idx}"
         )
 
-        # Close the demo
+        # Wait for the selection handler to complete and give UI time to show success message
+        if _selection_complete.wait(timeout=2.0):
+            # Give extra time for the UI to display the success message
+            time.sleep(1.0)
+
+        # Close the demo gracefully
         demo.close()
 
         return selected_prefill_idx, selected_decode_idx

@@ -27,6 +27,9 @@ from typing import Any, List, Optional
 import psutil
 import requests
 
+from tests.utils.constants import DefaultPort
+from tests.utils.port_utils import allocate_port, deallocate_port
+
 
 def terminate_process(process, logger=logging.getLogger(), immediate_kill=False):
     try:
@@ -584,12 +587,54 @@ class DynamoFrontendProcess(ManagedProcess):
 
     _logger = logging.getLogger()
 
-    def __init__(self, request):
-        command = ["python", "-m", "dynamo.frontend", "--router-mode", "round-robin"]
+    def __init__(
+        self,
+        request: Any,
+        *,
+        frontend_port: Optional[int] = None,
+        router_mode: str = "round-robin",
+        extra_args: Optional[list[str]] = None,
+        extra_env: Optional[dict[str, str]] = None,
+    ):
+        # TODO: Refactor remaining duplicate "DynamoFrontendProcess" helpers in tests to
+        # use this shared implementation (and delete the copies):
+        # - tests/frontend/test_vllm.py
+        # - tests/frontend/test_completion_mocker_engine.py
+        # - tests/frontend/grpc/test_tensor_parameters.py
+        # - tests/frontend/grpc/test_tensor_mocker_engine.py
+        # - tests/router/common.py
+        # - tests/router/test_router_e2e_with_vllm.py
+        # - tests/router/test_router_e2e_with_sglang.py
+        # - tests/router/test_router_e2e_with_trtllm.py
+        # - tests/fault_tolerance/cancellation/utils.py
+        # - tests/fault_tolerance/migration/utils.py
+        # - tests/fault_tolerance/etcd_ha/utils.py
+        # - tests/fault_tolerance/test_vllm_health_check.py
+        self._allocated_http_port: Optional[int] = None
+        if frontend_port == 0:
+            # Treat `0` as "allocate a random free port" for xdist-safe tests.
+            # We allocate within the i16-safe range required by the Rust side.
+            frontend_port = allocate_port(DefaultPort.FRONTEND.value)
+            self._allocated_http_port = frontend_port
+
+        # If frontend_port is unset, dynamo.frontend defaults to DefaultPort.FRONTEND.
+        self.http_port = (
+            DefaultPort.FRONTEND.value if frontend_port is None else int(frontend_port)
+        )
+
+        command = ["python", "-m", "dynamo.frontend", "--router-mode", router_mode]
+
+        # dynamo.frontend defaults to 8000 when neither env nor flag is provided.
+        if frontend_port is not None:
+            command.extend(["--http-port", str(frontend_port)])
+        if extra_args:
+            command.extend(extra_args)
 
         # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
         env = os.environ.copy()
         env.pop("DYN_SYSTEM_PORT", None)
+        if extra_env:
+            env.update(extra_env)
 
         log_dir = f"{request.node.name}_frontend"
 
@@ -609,16 +654,20 @@ class DynamoFrontendProcess(ManagedProcess):
             log_dir=log_dir,
         )
 
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            return super().__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            if self._allocated_http_port is not None:
+                deallocate_port(self._allocated_http_port)
+                self._allocated_http_port = None
+
 
 def main():
+    # NOTE: This entrypoint is for manual testing/debugging of `ManagedProcess` only.
+    # It is not used by the pytest suite.
     with ManagedProcess(
-        command=[
-            "dynamo",
-            "run",
-            "in=http",
-            "out=vllm",
-            "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        ],
+        command=["python", "-m", "dynamo.frontend"],
         display_output=True,
         terminate_existing=True,
         health_check_ports=[8000],

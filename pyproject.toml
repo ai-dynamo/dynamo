@@ -140,7 +140,6 @@ known_first_party = ["dynamo"]
 [tool.pytest.ini_options]
 minversion = "8.0"
 tmp_path_retention_policy = "failed"
-timeout_func_only = true
 
 # NOTE
 # We ignore model.py explicitly here to avoid mypy errors with duplicate modules
