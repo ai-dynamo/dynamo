@@ -137,22 +137,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         "Registered engine routes: /engine/start_profile, /engine/stop_profile"
     )
 
-    prefill_client = None
-    prefill_router_client = None
-    if config.serving_mode == DisaggregationMode.DECODE:
-        prefill_router_client = (
-            await runtime.namespace(dynamo_args.namespace)
-            .component("router")
-            .endpoint("best_worker_id")
-            .client()
-        )
-        prefill_client = (
-            await runtime.namespace(dynamo_args.namespace)
-            .component("prefill")
-            .endpoint("generate")
-            .client()
-        )
-
     # publisher instantiates the metrics and kv event publishers
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
@@ -165,9 +149,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    handler = DecodeWorkerHandler(
-        component, engine, config, publisher, prefill_client, prefill_router_client
-    )
+    handler = DecodeWorkerHandler(component, engine, config, publisher)
     print(f"Config: {config}")
     health_check_payload = SglangHealthCheckPayload(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
