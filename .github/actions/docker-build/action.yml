@@ -139,7 +139,7 @@ runs:
           EXTRA_ARGS+=" --build-arg ENABLE_KVBM=${{ inputs.enable_kvbm }}"
         fi
 
-        if [ -n "${{ inputs.use_ci_registry }}" ]; then
+        if [ "${{ inputs.use_ci_registry }}" == "true" ]; then
           REGISTRY="${ECR_HOSTNAME}"
         else
           REGISTRY="nvcr.io"
