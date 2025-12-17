@@ -486,7 +486,7 @@ def test_kv_push_router_bindings(
         # ("etcd", True, "tcp"),  # ignored, needs unconditional nats_client
         ("file", False, "nats"),  # File backend
     ],
-    ids=["jetstream", "nats_core", "file"],
+    ids=["jetstream", "file"],  # "nats_core" commented out to match commented test case
 )
 def test_indexers_sync(
     request,
