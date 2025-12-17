@@ -37,16 +37,21 @@ The request plane is the transport layer that handles communication between Dyna
 | **TCP** | Low-latency direct communication | Direct connections, minimal overhead |
 | **HTTP** | Standard deployments, debugging | HTTP/2 protocol, easier observability with standard tools, widely compatible |
 
-## KV Routing and NATS
+## Request Plane vs KV Event Plane
 
-Dynamo's Key-Value (KV) cache based routing optimizes large language model inference by intelligently directing requests to workers with the most relevant KV cache data. KV-aware routing improves both Time To First Token (TTFT) through better cache locality and Inter-Token Latency (ITL) through intelligent load balancing.
+Dynamo has **two independent communication planes**:
 
-Please refer to the [KV Cache Routing documentation](../router/kv_cache_routing.md) for more details.
+- **Request plane** (**`DYN_REQUEST_PLANE`**): how **RPC requests** flow between components (frontend → router → worker), via `tcp`, `http`, or `nats`.
+- **KV event plane** (currently only **NATS** is supported): how **KV cache events** (and optional router replica sync) are distributed/persisted for KV-aware routing.
 
-There are two modes of KV based routing:
-- Exact KV routing (needs NATS):  KV routing is based KV events indexing in a radix tree scoring the best match for the request. *This requires NATS* to persist and distribute KV events across routers.
+**Note:** if you are using `tcp` or `http` request plane and choose to use NATS for KV events, you must still configure NATS server using `NATS_SERVER` environment variable, e.g. `NATS_SERVER=nats://nats-hostname:port`.
 
-- Approximate KV routing (does not need NATS): KV routing is based on approximate load heuristics. *This does not require NATS*.
+Because they are independent, you can mix them.
+
+For example, a deployment with TCP request plane can use different KV event planes:
+- **JetStream KV events**: requests use TCP, KV routing still uses NATS JetStream + object store for persistence.
+- **NATS Core KV events (local indexer)**: requests use TCP, KV events use NATS Core pub/sub and persistence lives on workers.
+- **no KV events**: requests use TCP and KV routing runs without events (no NATS required, but no event-backed persistence).
 
 ## Configuration
 
@@ -95,7 +100,7 @@ DYN_REQUEST_PLANE=tcp python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 
 **When to use TCP:**
 - Simple deployments with direct service-to-service communication (e.g. frontend to backend)
-- Minimal infrastructure requirements (no NATS needed)
+- Minimal infrastructure requirements (**no NATS needed unless you enable KV-event-backed routing/replica sync**)
 - Low-latency requirements
 
 **TCP Configuration Options:**
@@ -150,7 +155,7 @@ Additional HTTP-specific environment variables:
 
 ### Using NATS
 
-NATS provides the most flexibility for complex deployments with advanced routing.
+NATS provides durable jetstream messaging for request plane and can be used for KV events (and router replica sync).
 
 **Prerequisites:**
 - NATS server must be running and accessible
@@ -167,8 +172,7 @@ DYN_REQUEST_PLANE=nats python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 
 **When to use NATS:**
 - Production deployments with service discovery
-- Currently (HA) highly available routers require durable messages persisted in NATS message broker. If you want to completely disable NATS, KV based routing won't be available
-- Multiple frontends and backends
+- Currently KV based routing require NATS. If you want to completely disable NATS, KV based routing won't be available
 - Need for message replay and persistence features
 
 Limitations:
