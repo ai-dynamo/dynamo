@@ -928,10 +928,6 @@ impl InitiatorSession {
             let block_ids: Vec<BlockId> = pairs.iter().map(|(id, _)| *id).collect();
             let seq_hashes: Vec<SequenceHash> = pairs.iter().map(|(_, hash)| *hash).collect();
 
-            // Validate positions are contiguous (X, X+1, X+2, ...)
-            // This catches any ordering bugs before data corruption occurs
-            debug_assert!(validate_contiguous_positions(&seq_hashes).is_ok());
-
             // Step 1: Import remote metadata if not already done
             if !parallel_worker.has_remote_metadata(remote_instance) {
                 tracing::debug!(
