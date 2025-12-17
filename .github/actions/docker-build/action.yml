@@ -43,6 +43,9 @@ inputs:
   cuda_version:
     description: 'Optional override for CUDA_VERSION build-arg'
     required: false
+  cuda_version_test:
+    description: 'TODO: remove this before merging'
+    required: false
   torch_backend:
     description: 'Optional override for TORCH_BACKEND build-arg (e.g., cu129)'
     required: false
@@ -138,7 +141,8 @@ runs:
         fi
 
         # Execute build and capture output (show on console AND save to file)
-        ./container/build.sh --tag "$IMAGE_TAG" \
+        # TODO: remove cuda_version_test before merging
+        ./container/build.sh --tag "$IMAGE_TAG" --cuda-version ${{ inputs.cuda_version_test }} \
           --target ${{ inputs.target }} \
           --vllm-max-jobs 10 \
           --framework ${{ inputs.framework }} \
