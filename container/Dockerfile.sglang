@@ -21,7 +21,7 @@
 # DEVELOPMENT PATHS THAT MUST BE GROUP-WRITABLE (for virtualenv containers):
 #   /workspace            - Users create/modify project files
 #   /home/dynamo          - Users create config/cache files
-#   /opt/dynamo/venv      - TensorRT-LLM uses venv, so entire venv must be writable for pip install
+#   /home/dynamo/.local   - SGLang uses $HOME/.local/lib/python3.10/site-packages for pip install
 #
 # HOW TO ACHIEVE GROUP-WRITABLE PERMISSIONS:
 # 1. SHELL + /etc/profile.d - Login shell sources umask 002 globally for all RUN commands (775/664)
@@ -308,7 +308,6 @@ COPY components/ /opt/dynamo/components/
 
 # Build dynamo wheels
 ARG ENABLE_KVBM
-ARG USE_SCCACHE
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
@@ -353,19 +352,12 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 
 ENV PATH=/usr/local/bin/etcd:$PATH
 
-# Copy uv to system /bin
-COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
-
-ARG PYTHON_VERSION
-RUN uv venv ${VIRTUAL_ENV} --python ${PYTHON_VERSION}
-
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-RUN . ${VIRTUAL_ENV}/bin/activate && \
-    uv pip install \
-      /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-      /opt/dynamo/wheelhouse/ai_dynamo*any.whl
+RUN --mount=type=bind,source=.,target=/mnt/local_src
+    pip install --no-cache-dir --break-system-packages \
+            /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+            /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+    pip install --no-cache-dir --break-system-packages --requirement /mnt/local_src/container/deps/requirements.txt ;
 
 # Enable forceful shutdown of inflight requests
 ENV SGLANG_FORCE_SHUTDOWN=1
