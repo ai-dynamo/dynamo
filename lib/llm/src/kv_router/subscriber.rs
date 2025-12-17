@@ -32,6 +32,10 @@ const MAX_SNAPSHOT_STABILITY_ATTEMPTS: usize = 10;
 const CHECK_INTERVAL_BASE: Duration = Duration::from_secs(1);
 const CHECK_INTERVAL_JITTER_MS: i64 = 100;
 
+// Worker query retry configuration
+const WORKER_QUERY_MAX_RETRIES: u32 = 8;
+const WORKER_QUERY_INITIAL_BACKOFF_MS: u64 = 200;
+
 // ============================================================================
 // Local KvIndexer-based Recovery
 // ============================================================================
@@ -146,10 +150,43 @@ pub async fn recover_from_worker(
         return Ok(0);
     }
 
-    // Query worker for events in range
-    let response = worker_query_client
-        .query_worker(worker_id, start_event_id, end_event_id)
-        .await?;
+    // Query worker for events in range, with retry logic for transient failures
+    // (e.g., worker's query service not yet re-subscribed after NATS restart)
+    let mut response = None;
+    let mut last_error = None;
+
+    for attempt in 0..WORKER_QUERY_MAX_RETRIES {
+        match worker_query_client
+            .query_worker(worker_id, start_event_id, end_event_id)
+            .await
+        {
+            Ok(resp) => {
+                if attempt > 0 {
+                    tracing::info!(worker_id, attempt, "Worker query succeeded after retry");
+                }
+                response = Some(resp);
+                break;
+            }
+            Err(e) => {
+                last_error = Some(e);
+                if attempt < WORKER_QUERY_MAX_RETRIES - 1 {
+                    let backoff_ms = WORKER_QUERY_INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
+                    tracing::warn!(
+                        worker_id,
+                        attempt,
+                        backoff_ms,
+                        "Worker query failed, retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                }
+            }
+        }
+    }
+
+    let response = match response {
+        Some(r) => r,
+        None => return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No response"))),
+    };
 
     // Handle response variants
     let events = match response {
@@ -653,11 +690,11 @@ pub async fn start_kv_router_background_nats_core(
 ) -> Result<()> {
     // Subscribe to KV events using NATS Core
     let mut subscriber = component.subscribe(KV_EVENT_SUBJECT).await?;
+    let kv_event_subject = format!("{}.{}", component.subject(), KV_EVENT_SUBJECT);
 
     tracing::info!(
-        "KV Router using NATS Core subscription on subject: {}.{} (local_indexer mode)",
-        component.subject(),
-        KV_EVENT_SUBJECT
+        subject = %kv_event_subject,
+        "KV Router using NATS Core subscription (local_indexer mode)"
     );
 
     // Get the generate endpoint and watch for instance events (add/remove)

@@ -814,13 +814,6 @@ pub struct GetWorkersRequest {
     pub resp: oneshot::Sender<Vec<WorkerId>>,
 }
 
-/// A request to get the last received event ID per worker.
-/// Used for fault tolerance recovery to determine which events to request from workers.
-pub struct GetLastReceivedEventIdsRequest {
-    /// Channel to send the last received event IDs per worker
-    pub resp: oneshot::Sender<HashMap<WorkerId, u64>>,
-}
-
 #[async_trait]
 pub trait KvIndexerInterface {
     /// Find matches for a given sequence of `LocalBlockHash`es.
@@ -926,8 +919,6 @@ pub struct KvIndexer {
     dump_tx: mpsc::Sender<DumpRequest>,
     /// A sender for routing decision requests.
     routing_tx: mpsc::Sender<RoutingDecisionRequest>,
-    /// A sender for getting last received event IDs (for fault tolerance recovery).
-    last_event_ids_tx: mpsc::Sender<GetLastReceivedEventIdsRequest>,
     /// The size of the KV block this indexer can handle.
     kv_block_size: u32,
     /// Reference counter for Clone-aware Drop.
@@ -962,8 +953,6 @@ impl KvIndexer {
         let (dump_tx, dump_rx) = mpsc::channel::<DumpRequest>(16);
         let (routing_tx, mut routing_rx) = mpsc::channel::<RoutingDecisionRequest>(2048);
         let (prune_tx, mut prune_rx) = mpsc::channel::<()>(1);
-        let (last_event_ids_tx, mut last_event_ids_rx) =
-            mpsc::channel::<GetLastReceivedEventIdsRequest>(16);
 
         let cancel_clone = token.clone();
 
@@ -988,10 +977,6 @@ impl KvIndexer {
                     PruneManager::<BlockEntry>::new(50, config)
                 });
                 let mut event_id_counter = 0u64;
-
-                // Track last received event ID per worker (for fault tolerance recovery)
-                // Only used when enable_event_tracking is true
-                let mut last_received_event_id: HashMap<WorkerId, u64> = HashMap::new();
 
                 loop {
                     // Create a future that sleeps until the next expiration time
@@ -1019,10 +1004,6 @@ impl KvIndexer {
                             let _ = get_workers_req.resp.send(workers);
                         }
 
-                        Some(req) = last_event_ids_rx.recv() => {
-                            let _ = req.resp.send(last_received_event_id.clone());
-                        }
-
                         Some(_) = prune_rx.recv() => {
                             // Tree size-based pruning triggered
                             let Some(ref mut pm) = prune_manager else { continue };
@@ -1045,33 +1026,6 @@ impl KvIndexer {
                         }
 
                         Some(event) = event_rx.recv() => {
-                            // Track last received event ID per worker
-                            // Check for gaps before updating the last received ID
-                            // TODO should this trigger a recovery event?
-                            let last_id = *last_received_event_id.get(&event.worker_id).unwrap_or(&0);
-                            let incoming_id = event.event.event_id;
-
-                            // Detect gap: if incoming ID is more than 1 greater than last received
-                            if incoming_id > last_id + 1 && last_id > 0 {
-                                let gap_start = last_id + 1;
-                                let gap_end = incoming_id - 1;
-                                tracing::warn!(
-                                    worker_id = event.worker_id,
-                                    gap_start,
-                                    gap_end,
-                                    gap_size = gap_end - gap_start + 1,
-                                    "Event ID gap detected! Missed events [{}, {}]. \
-                                     If this is a global KvIndexer, within a KvRouter context,
-                                     consider calling KvRouter::query_worker_local_kv() to potentially recover worker-stored events.",
-                                    gap_start,
-                                    gap_end,
-                                );
-                            }
-
-                            // Update last received event ID (use max to handle out-of-order events)
-                            let entry = last_received_event_id.entry(event.worker_id).or_insert(0);
-                            *entry = (*entry).max(event.event.event_id);
-
                             let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
                             let result = trie.apply_event(event.clone());
                             let result_is_ok = result.is_ok();
@@ -1200,7 +1154,6 @@ impl KvIndexer {
             get_workers_tx,
             dump_tx,
             routing_tx,
-            last_event_ids_tx,
             kv_block_size,
             _ref_count: Arc::new(()),
         }
@@ -1252,48 +1205,6 @@ impl KvIndexer {
     /// A `mpsc::Sender` for `GetWorkersRequest`s.
     pub fn get_workers_sender(&self) -> mpsc::Sender<GetWorkersRequest> {
         self.get_workers_tx.clone()
-    }
-
-    /// Get a sender for last received event IDs requests.
-    ///
-    /// ### Returns
-    ///
-    /// A `mpsc::Sender` for `GetLastReceivedEventIdsRequest`s.
-    pub fn last_event_ids_sender(&self) -> mpsc::Sender<GetLastReceivedEventIdsRequest> {
-        self.last_event_ids_tx.clone()
-    }
-
-    /// Get the last received event ID for each worker.
-    ///
-    /// This method is used for **fault tolerance recovery** when the router needs to
-    /// catch up on missed events after a disconnect. By tracking the last event ID
-    /// received from each worker, the router can query workers for events starting
-    /// from `last_id + 1` to recover missed state.
-    ///
-    /// **Note**: This method is intdned for the global `KvIndexer` used by routers,
-    /// not on `LocalKvIndexer` (worker-side) or `KvIndexerSharded`.
-    ///
-    /// ### Returns
-    ///
-    /// A `HashMap` mapping worker IDs to their last received event ID.
-    ///
-    pub async fn get_last_received_event_ids(
-        &self,
-    ) -> Result<HashMap<WorkerId, u64>, KvRouterError> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        let req = GetLastReceivedEventIdsRequest { resp: resp_tx };
-
-        if let Err(e) = self.last_event_ids_tx.send(req).await {
-            tracing::error!(
-                "Failed to send last event IDs request: {:?}; the indexer maybe offline",
-                e
-            );
-            return Err(KvRouterError::IndexerOffline);
-        }
-
-        resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)
     }
 }
 
@@ -1571,7 +1482,7 @@ impl LocalKvIndexer {
                 "Non-consecutive KV event id; buffer may have gaps"
             );
         }
-        tracing::info!(
+        tracing::debug!(
             "Recorded event {:?} in buffer, now size is {}",
             event,
             buffer.len()
@@ -3646,42 +3557,7 @@ mod tests {
 mod tests_local_indexer {
     use super::*;
     use crate::kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
-    use tokio::time;
     use tokio_util::sync::CancellationToken;
-
-    fn setup() {
-        dynamo_runtime::logging::init();
-    }
-
-    fn make_blocks(hashes: Vec<u64>) -> Vec<KvCacheStoredBlockData> {
-        hashes
-            .iter()
-            .map(|i| KvCacheStoredBlockData {
-                tokens_hash: LocalBlockHash(*i),
-                block_hash: ExternalSequenceBlockHash(*i * 100),
-            })
-            .collect()
-    }
-
-    fn create_store_event(
-        worker_id: WorkerId,
-        event_id: u64,
-        hashes: Vec<u64>,
-        parent: Option<ExternalSequenceBlockHash>,
-    ) -> RouterEvent {
-        RouterEvent {
-            worker_id,
-            event: KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: parent,
-                    blocks: make_blocks(hashes),
-                }),
-                dp_rank: 0,
-            },
-        }
-    }
-
     #[tokio::test]
     async fn test_local_indexer_buffer_and_serialization() {
         // Tests components of the LocalKvIndexer query without using nats
@@ -3751,50 +3627,5 @@ mod tests_local_indexer {
             }
             _ => panic!("Expected Stored event"),
         }
-    }
-
-    #[tokio::test]
-    async fn test_gap_detection_per_worker() {
-        setup();
-
-        let token = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let indexer = KvIndexer::new(token.clone(), 4, metrics);
-
-        let worker_a: WorkerId = 100;
-        let worker_b: WorkerId = 200;
-        let event_tx = indexer.event_sender();
-
-        // Worker A: events 1, 2, 3 (no gap)
-        for id in 1..=3 {
-            let event = create_store_event(worker_a, id, vec![id], None);
-            event_tx.send(event).await.unwrap();
-        }
-
-        // Worker B: events 1, then 5 (gap of 2, 3, 4)
-        let event_b1 = create_store_event(worker_b, 1, vec![10], None);
-        event_tx.send(event_b1).await.unwrap();
-
-        let event_b5 = create_store_event(worker_b, 5, vec![50], None);
-        event_tx.send(event_b5).await.unwrap();
-
-        // Give time for events to be processed
-        time::sleep(Duration::from_millis(20)).await;
-
-        // Verify each worker has correct last_received_event_id
-        let last_ids = indexer.get_last_received_event_ids().await.unwrap();
-        assert_eq!(
-            last_ids.get(&worker_a),
-            Some(&3),
-            "Worker A should have last_id = 3 (no gap)"
-        );
-        assert_eq!(
-            last_ids.get(&worker_b),
-            Some(&5),
-            "Worker B should have last_id = 5 (despite gap)"
-        );
-
-        // Cleanup
-        token.cancel();
     }
 }
