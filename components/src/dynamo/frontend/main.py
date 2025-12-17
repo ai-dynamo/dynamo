@@ -30,12 +30,15 @@ from dynamo.llm import (
     EngineType,
     EntrypointArgs,
     KvRouterConfig,
+    ModelDeploymentCard,
+    PythonAsyncEngine,
     RouterConfig,
     RouterMode,
     make_engine,
     run_input,
 )
 from dynamo.runtime import DistributedRuntime
+from dynamo.runtime.logging import configure_dynamo_logging
 
 from . import __version__
 
@@ -45,7 +48,25 @@ CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR = (
 )
 CUSTOM_BACKEND_ENDPOINT_ENV_VAR = "CUSTOM_BACKEND_ENDPOINT"
 
+configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+async def _dummy_generator(request):
+    """Minimal generator that yields nothing. Work in progress."""
+    return
+    yield  # Makes this an async generator
+
+
+async def engine_factory(mdc: ModelDeploymentCard) -> PythonAsyncEngine:
+    """
+    Called by Rust when a model is discovered.
+    """
+    import asyncio
+
+    loop = asyncio.get_event_loop()
+    logger.info(f"Engine_factory called with MDC: {mdc.to_json_str()[:100]}...")
+    return PythonAsyncEngine(_dummy_generator, loop)
 
 
 def validate_model_name(value):
@@ -355,6 +376,10 @@ async def async_main():
         kwargs[
             "custom_backend_metrics_polling_interval"
         ] = flags.custom_backend_metrics_polling_interval
+
+    # Soon we will be able to customise the engine from Python
+    # Pass the engine factory callback to Rust
+    # kwargs["engine_factory"] = engine_factory
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
