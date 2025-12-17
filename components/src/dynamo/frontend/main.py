@@ -62,9 +62,7 @@ async def engine_factory(mdc: ModelDeploymentCard) -> PythonAsyncEngine:
     """
     Called by Rust when a model is discovered.
     """
-    import asyncio
-
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     logger.info(f"Engine_factory called with MDC: {mdc.to_json_str()[:100]}...")
     return PythonAsyncEngine(_dummy_generator, loop)
 
