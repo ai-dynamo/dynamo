@@ -2018,7 +2018,7 @@ def _test_router_decisions(
             )
 
             # Wait a bit between requests
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(2)
 
         # Wait for final synchronization (especially important for DP)
         if test_dp_rank:
