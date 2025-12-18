@@ -456,10 +456,10 @@ def test_router_decisions_vllm_dp(
     "store_backend,use_nats_core,request_plane",
     [
         ("etcd", False, "nats"),  # JetStream mode
-        # ("etcd", True, "tcp"),  # ignored, needs unconditional nats_client
-        # ("file", False, "nats"),  # File backend - TODO: investigate file backend support for vLLM
+        ("etcd", True, "tcp"),  # nats_core mode
+        # ("file", False, "nats"),  # File backend
     ],
-    ids=["jetstream"],  # "nats_core" and "file" commented out
+    ids=["jetstream", "tcp_nats_core"],
 )
 def test_vllm_indexers_sync(
     request,
