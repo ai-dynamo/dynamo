@@ -74,7 +74,7 @@ pub struct BackendOutput {
 ///
 /// This is the minimal raw output from the LLM engine. The Backend may then apply multiple
 /// levels of post-processing before the BackendOutput is returns
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct LLMEngineOutput {
     // new token_ids
     pub token_ids: Vec<TokenIdType>,

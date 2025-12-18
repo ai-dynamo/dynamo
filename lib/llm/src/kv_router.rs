@@ -132,8 +132,7 @@ impl std::str::FromStr for QueryInstanceType {
             "prefill" => Ok(QueryInstanceType::Prefill),
             "decode" => Ok(QueryInstanceType::Decode),
             _ => Err(format!(
-                "Invalid QueryInstanceType: '{}'. Expected 'prefill' or 'decode'",
-                s
+                "Invalid QueryInstanceType: '{s}'. Expected 'prefill' or 'decode'"
             )),
         }
     }
@@ -780,7 +779,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         None
                     }
                     Err(e) => {
-                        tracing::warn!("Invalid query_instance_id type '{}': {}", type_str, e);
+                        tracing::warn!("Invalid query_instance_id type '{type_str}': {e}");
                         None
                     }
                 }
@@ -815,7 +814,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             (id, dp_rank, overlap_blocks)
         } else {
             // Otherwise, find the best match
-            // Don't update states if this is a query-only request (any query_instance_id annotation, empty or not)
+            // Don't update states if this is a query-only request (any query_instance_id annotation)
             let should_update_states = query_instance_annotation.is_none();
             let (best_worker, overlap_amount) = self
                 .chooser
@@ -881,21 +880,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
             // Return as LLMEngineOutput with disaggregated_params (same structure as normal execution)
             let output = LLMEngineOutput {
-                token_ids: vec![],
-                tokens: None,
-                text: None,
-                cum_log_probs: None,
-                log_probs: None,
-                top_logprobs: None,
-                finish_reason: None,
-                stop_reason: None,
-                index: None,
                 disaggregated_params: Some(json!({
                     "worker_id": worker_id_info,
                     "token_ids": request.token_ids
                 })),
-                extra_args: None,
-                completion_usage: None,
+                ..Default::default()
             };
             let response = Annotated::from_data(output);
             let stream = stream::iter(vec![response]);
