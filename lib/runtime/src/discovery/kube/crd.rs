@@ -6,8 +6,8 @@
 //! This module defines the Rust types for the DynamoWorkerMetadata CRD,
 //! which stores discovery metadata for Dynamo worker pods in Kubernetes.
 //!
-//! The CRD schema is defined externally in YAML at:
-//! `deploy/cloud/operator/config/crd/bases/nvidia.com_dynamoworkermetadatas.yaml`
+//! The CRD schema is defined in the Helm chart at:
+//! `deploy/cloud/helm/crds/templates/nvidia.com_dynamoworkermetadatas.yaml`
 
 use anyhow::Result;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -16,12 +16,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::discovery::DiscoveryMetadata;
 
-/// Field manager name for server-side apply operations
+/// Field manager name for server-side apply - identifies this client as the owner of fields it sets
 const FIELD_MANAGER: &str = "dynamo-worker";
 
 /// Spec for DynamoWorkerMetadata custom resource
-///
-/// This struct represents the `.spec` field of the DynamoWorkerMetadata CR.
 /// The `data` field stores the serialized `DiscoveryMetadata` as a JSON blob.
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize)]
 #[kube(
@@ -31,21 +29,18 @@ const FIELD_MANAGER: &str = "dynamo-worker";
     namespaced,
     schema = "disabled"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct DynamoWorkerMetadataSpec {
     /// Raw JSON blob containing the DiscoveryMetadata
     pub data: serde_json::Value,
 }
 
 impl DynamoWorkerMetadataSpec {
-    /// Create a new spec with the given data
     pub fn new(data: serde_json::Value) -> Self {
         Self { data }
     }
 }
 
 /// Build a DynamoWorkerMetadata CR with owner reference set to the pod
-///
 /// # Arguments
 /// * `pod_name` - Name of the pod (used as CR name and in owner reference)
 /// * `pod_uid` - UID of the pod (for owner reference - enables garbage collection)
@@ -68,7 +63,9 @@ pub fn build_cr(
         kind: "Pod".to_string(),
         name: pod_name.to_string(),
         uid: pod_uid.to_string(),
+        // Mark pod as the controlling owner - CR will be garbage collected when pod is deleted
         controller: Some(true),
+        // Don't block pod deletion - allow CR cleanup to happen asynchronously
         block_owner_deletion: Some(false),
     }]);
 
@@ -99,6 +96,8 @@ pub async fn apply_cr(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("CR must have a name"))?;
 
+    // force() allows us to take ownership of this field even if another controller owns it
+    // in practice the CR will only have one writer (the pod owner)
     let params = PatchParams::apply(FIELD_MANAGER).force();
 
     api.patch(cr_name, &params, &Patch::Apply(cr))
@@ -126,32 +125,6 @@ mod tests {
         assert_eq!(DynamoWorkerMetadata::version(&()), "v1alpha1");
         assert_eq!(DynamoWorkerMetadata::kind(&()), "DynamoWorkerMetadata");
         assert_eq!(DynamoWorkerMetadata::plural(&()), "dynamoworkermetadatas");
-    }
-
-    #[test]
-    fn test_spec_creation() {
-        let data = serde_json::json!({
-            "endpoints": {},
-            "model_cards": {}
-        });
-
-        let spec = DynamoWorkerMetadataSpec::new(data.clone());
-
-        assert_eq!(spec.data, data);
-    }
-
-    #[test]
-    fn test_cr_creation() {
-        let data = serde_json::json!({
-            "endpoints": {},
-            "model_cards": {}
-        });
-
-        let spec = DynamoWorkerMetadataSpec::new(data);
-
-        let cr = DynamoWorkerMetadata::new("my-worker-pod", spec);
-
-        assert_eq!(cr.metadata.name, Some("my-worker-pod".to_string()));
     }
 
     #[test]

@@ -23,11 +23,9 @@ const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
 /// Discovers and aggregates metadata from DynamoWorkerMetadata CRs in the cluster
 #[derive(Clone)]
 pub(super) struct DiscoveryDaemon {
-    /// Kubernetes client
     kube_client: KubeClient,
-    /// This pod's info
+    // This pod's info
     pod_info: PodInfo,
-    /// Cancellation token for shutdown
     cancel_token: CancellationToken,
 }
 
@@ -92,6 +90,7 @@ impl DiscoveryDaemon {
                         notify_ep.notify_one();
                     }
                 }
+                // for_each expects a Future; ready(()) is an immediately-complete one
                 futures::future::ready(())
             });
 
@@ -129,6 +128,7 @@ impl DiscoveryDaemon {
                         notify_cr.notify_one();
                     }
                 }
+                // for_each expects a Future; ready(()) is an immediately-complete one
                 futures::future::ready(())
             });
 
@@ -140,9 +140,9 @@ impl DiscoveryDaemon {
 
         loop {
             tokio::select! {
-                // Wait for notification from either reflector
                 _ = notify.notified() => {
-                    // Debounce: wait fixed duration to batch rapid events
+                    // Debounce: K8s can emit many events in quick succession
+                    // Wait briefly to batch them into a single snapshot update.
                     tokio::time::sleep(DEBOUNCE_DURATION).await;
 
                     // Drain any permit that accumulated during the sleep
@@ -243,7 +243,7 @@ impl DiscoveryDaemon {
             .iter()
             .filter_map(|arc_cr| {
                 let cr_name = arc_cr.metadata.name.as_ref()?;
-                
+
                 // Deserialize the data field to DiscoveryMetadata
                 match serde_json::from_value::<DiscoveryMetadata>(arc_cr.spec.data.clone()) {
                     Ok(metadata) => {

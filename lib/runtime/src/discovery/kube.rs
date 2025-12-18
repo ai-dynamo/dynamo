@@ -30,9 +30,7 @@ pub struct KubeDiscoveryClient {
     instance_id: u64,
     metadata: Arc<RwLock<DiscoveryMetadata>>,
     metadata_watch: tokio::sync::watch::Receiver<Arc<MetadataSnapshot>>,
-    /// Kubernetes client for CR operations
     kube_client: KubeClient,
-    /// Pod information (name, namespace, uid)
     pod_info: PodInfo,
 }
 
@@ -64,7 +62,7 @@ impl KubeDiscoveryClient {
         // Create watch channel with initial empty snapshot
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(Arc::new(MetadataSnapshot::empty()));
 
-        // Create and spawn daemon (clone kube_client and pod_info since daemon takes ownership)
+        // Create and spawn daemon
         let daemon = DiscoveryDaemon::new(kube_client.clone(), pod_info.clone(), cancel_token)?;
 
         tokio::spawn(async move {
