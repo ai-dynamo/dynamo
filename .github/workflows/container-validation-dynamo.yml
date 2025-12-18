@@ -33,8 +33,9 @@ jobs:
         uses: docker/setup-buildx-action@v3
       - name: Login to NGC
         if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
-        run: |
-          echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
       - name: Define Image Tag
         id: define_image_tag
         run: |
@@ -43,20 +44,20 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
-          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target dev --framework none
+          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target dev --framework none --enable-kvbm --enable-media-ffmpeg
       - name: Start services with docker-compose
         working-directory: ./deploy
         run: |
           docker compose up -d nats-server etcd-server
-      - name: Run Rust checks (block-manager + media-nixl + integration tests)
+      - name: Run Rust checks (block-manager + media-nixl + media-ffmpeg + integration tests)
         run: |
           docker run --rm -w /workspace/lib/llm \
             --name ${{ env.CONTAINER_ID }}_rust_checks \
             ${{ steps.define_image_tag.outputs.image_tag }} \
             bash -ec 'rustup component add rustfmt clippy && \
                       cargo fmt -- --check && \
-                      cargo clippy --features block-manager,media-nixl --no-deps --all-targets -- -D warnings && \
-                      cargo test --locked --all-targets --features=block-manager,media-nixl && \
+                      cargo clippy --features block-manager,media-nixl,media-ffmpeg --no-deps --all-targets -- -D warnings && \
+                      cargo test --locked --all-targets --features=block-manager,media-nixl,media-ffmpeg && \
                       cargo test --locked --features integration -- --nocapture'
       - name: Cleanup services
         if: always()
@@ -65,7 +66,7 @@ jobs:
           docker compose down
       - name: Run pytest (parallel tests with xdist)
         env:
-          PYTEST_MARKS: "pre_merge and parallel and not (vllm or sglang or trtllm)"
+          PYTEST_MARKS: "pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0 or gpu_1)"
         run: |
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest_parallel \
@@ -77,7 +78,7 @@ jobs:
           docker cp ${{ env.CONTAINER_ID }}_pytest_parallel:/workspace/${{ env.PYTEST_PARALLEL_XML_FILE }} . || echo "No parallel test report found"
       - name: Run pytest (sequential tests)
         env:
-          PYTEST_MARKS: "((pre_merge and not parallel) or mypy) and not (vllm or sglang or trtllm)"
+          PYTEST_MARKS: "((pre_merge and not parallel) or mypy) and not (vllm or sglang or trtllm) and (gpu_0 or gpu_1)"
         run: |
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest \

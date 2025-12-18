@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-import os
-import shutil
 import threading
 import time
 
@@ -11,44 +9,39 @@ import pytest
 import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
-from tests.utils.engine_process import FRONTEND_PORT
+from tests.utils.managed_process import (
+    DynamoFrontendProcess as BaseDynamoFrontendProcess,
+)
 from tests.utils.managed_process import ManagedProcess
 
 logger = logging.getLogger(__name__)
 
 
-class DynamoFrontendProcess(ManagedProcess):
-    """Process manager for Dynamo frontend"""
+class DynamoFrontendProcess(BaseDynamoFrontendProcess):
+    """Fault-tolerance frontend wrapper (keeps env settings from the historical helper)."""
 
     def __init__(self, request):
-        command = ["python", "-m", "dynamo.frontend", "--router-mode", "round-robin"]
-
-        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
-        env = os.environ.copy()
-        env.pop("DYN_SYSTEM_PORT", None)
-
-        log_dir = f"{request.node.name}_frontend"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
-
+        extra_env = {
+            "DYN_REQUEST_PLANE": request.getfixturevalue("request_plane"),
+            # These tests expect full control over requests sent to workers. The canary
+            # health check can inject extra requests and cause intermittent failures.
+            "DYN_HEALTH_CHECK_ENABLED": "false",
+        }
         super().__init__(
-            command=command,
-            env=env,
-            display_output=True,
-            terminate_existing=True,
-            log_dir=log_dir,
+            request,
+            frontend_port=0,  # allocate a free port (xdist-safe)
+            router_mode="round-robin",
+            extra_env=extra_env,
+            terminate_existing=False,
         )
 
 
-def start_completion_request() -> tuple:
+def start_completion_request(frontend_port: int) -> tuple:
     """
     Start a long-running completion request in a separate thread.
+
+    Args:
+        frontend_port: Port where the frontend is running
 
     Returns:
         tuple: (request_thread, response_list)
@@ -74,7 +67,7 @@ def start_completion_request() -> tuple:
 
         try:
             response = requests.post(
-                f"http://localhost:{FRONTEND_PORT}/v1/completions",
+                f"http://localhost:{frontend_port}/v1/completions",
                 headers=headers,
                 json=payload,
                 timeout=timeout,

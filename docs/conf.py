@@ -86,6 +86,15 @@ redirects = {
     "dynamo_glossary": "../reference/glossary.html",
     "support_matrix": "../reference/support-matrix.html",
     "components/router/README": "../router/README.html",
+    # Multimodal documentation consolidation
+    "backends/vllm/multimodal": "../../multimodal/vllm.html",
+    "backends/vllm/multimodal_vllm_guide": "../../multimodal/vllm.html",
+    "backends/trtllm/multimodal_support": "../../multimodal/trtllm.html",
+    "backends/trtllm/multimodal_trtllm_guide": "../../multimodal/trtllm.html",
+    "backends/trtllm/multinode/multinode-multimodal-example": "../../../multimodal/trtllm.html",
+    "backends/sglang/multimodal_epd": "../../multimodal/sglang.html",
+    "backends/sglang/multimodal_sglang_guide": "../../multimodal/sglang.html",
+    "multimodal/multimodal_intro": "index.html",
 }
 
 # Custom extensions
@@ -115,7 +124,7 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "build"]
 # -- Options for HTML output -------------------------------------------------
 html_theme = "nvidia_sphinx_theme"
 html_static_path = ["_static"]
-html_extra_path = ["project.json", "versions1.json"]
+html_extra_path = ["project.json"]
 html_theme_options = {
     "collapse_navigation": False,
     "icon_links": [
@@ -126,7 +135,9 @@ html_theme_options = {
         }
     ],
     "switcher": {
-        "json_url": "versions1.json",
+        # Use single shared URL so all versions see the same switcher list
+        # When a new version is added, all old docs automatically see it
+        "json_url": "https://docs.nvidia.com/dynamo/versions1.json",
         "version_match": release,
     },
     "extra_head": {
