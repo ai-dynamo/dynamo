@@ -223,8 +223,9 @@ fn filter_instances(
 pub struct MetadataSnapshot {
     /// Map of instance_id -> metadata
     pub instances: HashMap<u64, Arc<DiscoveryMetadata>>,
-    /// CR name -> generation for change detection
-    pub generations: HashMap<String, i64>,
+    /// Map of instance_id -> CR generation for change detection
+    /// Keys match `instances` keys exactly - only ready pods with CRs are included
+    pub generations: HashMap<u64, i64>,
     /// Sequence number for debugging
     pub sequence: u64,
     /// Timestamp for observability
@@ -243,24 +244,9 @@ impl MetadataSnapshot {
 
     /// Compare with previous snapshot and return true if changed.
     /// Logs diagnostic info about what changed.
-    ///
-    /// We check both:
-    /// - `instances` keys: Which pods are ready AND have metadata
-    /// - `generations`: CR metadata versions
-    ///
-    /// This is important because when a pod goes into Terminating, it's removed
-    /// from the EndpointSlice (so not in `instances`) but the CR may still exist
-    /// with the same generation until garbage-collected.
+    /// This is done on the basis of the generation of the DynamoWorkerMetadata CRs that are owned by ready workers
     pub fn has_changes_from(&self, prev: &MetadataSnapshot) -> bool {
-        // Check if instance IDs changed (pods added/removed from ready state)
-        let curr_instance_ids: HashSet<u64> = self.instances.keys().copied().collect();
-        let prev_instance_ids: HashSet<u64> = prev.instances.keys().copied().collect();
-        let instances_changed = curr_instance_ids != prev_instance_ids;
-
-        // Check if CR generations changed (metadata updated)
-        let generations_changed = self.generations != prev.generations;
-
-        if !instances_changed && !generations_changed {
+        if self.generations == prev.generations {
             tracing::trace!(
                 "Snapshot (seq={}): no changes, {} instances",
                 self.sequence,
@@ -270,41 +256,31 @@ impl MetadataSnapshot {
         }
 
         // Compute diff for logging
-        let instances_added: Vec<_> = curr_instance_ids
-            .difference(&prev_instance_ids)
-            .map(|id| format!("{:x}", id))
-            .collect();
-        let instances_removed: Vec<_> = prev_instance_ids
-            .difference(&curr_instance_ids)
-            .map(|id| format!("{:x}", id))
-            .collect();
+        let curr_ids: HashSet<u64> = self.generations.keys().copied().collect();
+        let prev_ids: HashSet<u64> = prev.generations.keys().copied().collect();
 
-        let crs_added: Vec<_> = self
-            .generations
-            .keys()
-            .filter(|k| !prev.generations.contains_key(*k))
+        let added: Vec<_> = curr_ids
+            .difference(&prev_ids)
+            .map(|id| format!("{:x}", id))
             .collect();
-        let crs_removed: Vec<_> = prev
-            .generations
-            .keys()
-            .filter(|k| !self.generations.contains_key(*k))
+        let removed: Vec<_> = prev_ids
+            .difference(&curr_ids)
+            .map(|id| format!("{:x}", id))
             .collect();
-        let crs_updated: Vec<_> = self
+        let updated: Vec<_> = self
             .generations
             .iter()
             .filter(|(k, v)| prev.generations.get(*k).is_some_and(|pv| pv != *v))
-            .map(|(k, _)| k)
+            .map(|(k, _)| format!("{:x}", k))
             .collect();
 
         tracing::info!(
-            "Snapshot (seq={}): {} instances, instances_added={:?}, instances_removed={:?}, crs_added={:?}, crs_removed={:?}, crs_updated={:?}",
+            "Snapshot (seq={}): {} instances, added={:?}, removed={:?}, updated={:?}",
             self.sequence,
             self.instances.len(),
-            instances_added,
-            instances_removed,
-            crs_added,
-            crs_removed,
-            crs_updated
+            added,
+            removed,
+            updated
         );
 
         true

@@ -205,26 +205,23 @@ impl DiscoveryDaemon {
             ready_pods.len()
         );
 
-        // Single read of CR state to extract both metadata and generations atomically
+        // Single read of CR state to extract metadata and generations atomically
+        // We store (metadata, generation) tuples keyed by CR name (= pod name)
         let cr_state = cr_reader.state();
-        let mut cr_map: HashMap<String, Arc<DiscoveryMetadata>> = HashMap::new();
-        let mut generations: HashMap<String, i64> = HashMap::new();
+        let mut cr_map: HashMap<String, (Arc<DiscoveryMetadata>, i64)> = HashMap::new();
 
         for arc_cr in cr_state.iter() {
             let Some(cr_name) = arc_cr.metadata.name.as_ref() else {
                 continue;
             };
 
-            // Track generation for change detection
-            if let Some(generation) = arc_cr.metadata.generation {
-                generations.insert(cr_name.clone(), generation);
-            }
+            let generation = arc_cr.metadata.generation.unwrap_or(0);
 
             // Deserialize the data field to DiscoveryMetadata
             match serde_json::from_value::<DiscoveryMetadata>(arc_cr.spec.data.clone()) {
                 Ok(metadata) => {
                     tracing::trace!("Loaded metadata from CR '{}'", cr_name);
-                    cr_map.insert(cr_name.clone(), Arc::new(metadata));
+                    cr_map.insert(cr_name.clone(), (Arc::new(metadata), generation));
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -242,16 +239,20 @@ impl DiscoveryDaemon {
         );
 
         // Correlate: ready pod + CR exists = include in snapshot
+        // Both instances and generations are keyed by instance_id with matching keys
         let mut instances: HashMap<u64, Arc<DiscoveryMetadata>> = HashMap::new();
+        let mut generations: HashMap<u64, i64> = HashMap::new();
 
         for (instance_id, pod_name, _pod_ip, _system_port) in ready_pods {
             // CR name is the pod name
-            if let Some(metadata) = cr_map.get(&pod_name) {
+            if let Some((metadata, generation)) = cr_map.get(&pod_name) {
                 instances.insert(instance_id, metadata.clone());
+                generations.insert(instance_id, *generation);
                 tracing::trace!(
-                    "Included pod '{}' (instance_id={:x}) in snapshot",
+                    "Included pod '{}' (instance_id={:x}, generation={}) in snapshot",
                     pod_name,
-                    instance_id
+                    instance_id,
+                    generation
                 );
             } else {
                 tracing::trace!(
