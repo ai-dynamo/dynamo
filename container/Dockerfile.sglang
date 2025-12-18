@@ -449,7 +449,11 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         --requirement /mnt/local_src/container/deps/requirements.txt \
-        --requirement /mnt/local_src/container/deps/requirements.test.txt
+        --requirement /mnt/local_src/container/deps/requirements.test.txt && \
+    cd /workspace/benchmarks && \
+    pip install --no-cache . && \
+    # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
+    chmod -R g+w /workspace/benchmarks
 
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
@@ -462,4 +466,81 @@ COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
 # Enable forceful shutdown of inflight requests
 ENV SGLANG_FORCE_SHUTDOWN=1
 
+USER dynamo
 WORKDIR /sgl-workspace
+
+###########################################################
+########## Development (run.sh, runs as root user) ########
+###########################################################
+#
+# PURPOSE: Local development environment for use with run.sh (not Dev Container plug-in)
+#
+# This stage runs as root and provides:
+# - Development tools and utilities for local debugging
+# - Support for vscode/cursor development outside the Dev Container plug-in
+#
+# Use this stage if you need a full-featured development environment with extra tools,
+# but do not use it with the Dev Container plug-in.
+
+FROM runtime AS dev
+
+# Don't want ubuntu to be editable, just change uid and gid.
+ARG WORKSPACE_DIR=/workspace
+
+USER root
+# Install utilities as root
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends  \
+    # Install utilities
+    nvtop \
+    wget \
+    tmux \
+    vim \
+    git \
+    openssh-client \
+    iproute2 \
+    rsync \
+    zip \
+    unzip \
+    htop \
+    # Build Dependencies
+    autoconf \
+    automake \
+    cmake \
+    libtool \
+    meson \
+    net-tools \
+    pybind11-dev \
+    # Rust build dependencies
+    clang \
+    libclang-dev \
+    protobuf-compiler \
+    pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set umask for group-writable files in dev stage (runs as root)
+RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
+SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
+
+# Set workspace directory variable
+ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
+    DYNAMO_HOME=${WORKSPACE_DIR} \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/workspace/target \
+    PATH=/usr/local/cargo/bin:$PATH
+
+# Copy rust installation from dynamo_base to avoid duplication efforts
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --from=dynamo_base --chmod=775 /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base --chmod=775 /usr/local/cargo /usr/local/cargo
+RUN chmod g+w /usr/local/rustup /usr/local/cargo
+
+# Install maturin, for maturin develop
+# Editable install of dynamo
+COPY pyproject.toml README.md hatch_build.py /workspace/
+RUN pip install maturin[patchelf] && \
+    pip install --no-deps -e .
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
