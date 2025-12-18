@@ -604,14 +604,6 @@ func checkMainContainer(spec *corev1.PodSpec) error {
 			continue
 		}
 
-		if len(container.Command) == 0 {
-			return errors.New("container Command cannot be nil for LWS pod")
-		}
-
-		if len(container.Args) == 0 {
-			return errors.New("container Args cannot be empty for LWS pod")
-		}
-
 		mainContainerFound = true
 		break
 	}
