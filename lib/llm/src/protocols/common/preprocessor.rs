@@ -85,10 +85,6 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     pub annotations: Vec<String>,
 
-    /// Estimated number of prefix hit tokens (only used in kv aware routing)
-    #[builder(default)]
-    pub estimated_prefix_hit_num_blocks: Option<u32>,
-
     /// Targeted backend instance ID for the request
     #[builder(default)]
     pub backend_instance_id: Option<u64>,
