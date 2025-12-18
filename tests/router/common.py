@@ -1378,16 +1378,6 @@ def _test_router_indexers_sync(
 
     # Use async to manage the test flow
     async def test_sync():
-        # KV indexer sync uses JetStream + object store; even when request plane is TCP,
-        # the runtime must still connect to NATS for KV events + snapshots.
-        #
-        # In tests we run a local NATS on the default port, so ensure NATS_SERVER is set
-        # for non-NATS request planes (the runtime connects to NATS if this env is present).
-        import os
-
-        if request_plane != "nats":
-            os.environ.setdefault("NATS_SERVER", "nats://localhost:4222")
-
         # Create KvRouterConfig with lower snapshot threshold for testing
         kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
 
