@@ -407,18 +407,8 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             tracker.record_first_token();
         }
 
-        // Get worker_id info from tracker (set by KvPushRouter), fallback to disaggregated_params
-        let worker_id_info = self
-            .tracker
-            .as_ref()
-            .and_then(|t| t.get_worker_info())
-            .or_else(|| {
-                delta
-                    .disaggregated_params
-                    .as_ref()
-                    .and_then(|params| params.get("worker_id"))
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-            });
+        // Get worker_id info from tracker (set by KvPushRouter based on phase)
+        let worker_id_info = self.tracker.as_ref().and_then(|t| t.get_worker_info());
 
         let token_ids = delta
             .disaggregated_params

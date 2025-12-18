@@ -12,6 +12,30 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::protocols::openai::nvext::WorkerIdInfo;
 
+/// Phase of the request in disaggregated serving.
+///
+/// Used to determine which worker ID field to record when routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RequestPhase {
+    /// Prefill-only phase (disaggregated serving)
+    Prefill,
+    /// Decode phase (disaggregated serving)
+    Decode,
+    /// Aggregated mode - same worker handles both prefill and decode
+    #[default]
+    Aggregated,
+}
+
+impl std::fmt::Display for RequestPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RequestPhase::Prefill => write!(f, "prefill"),
+            RequestPhase::Decode => write!(f, "decode"),
+            RequestPhase::Aggregated => write!(f, "aggregated"),
+        }
+    }
+}
+
 /// Per-request tracker for timing and routing metrics.
 ///
 /// Captures information throughout the request lifecycle:
@@ -52,6 +76,9 @@ pub struct RequestTracker {
 
     /// Decode worker ID - set once via OnceLock
     decode_worker_id: OnceLock<u64>,
+
+    /// Request phase (Prefill/Decode/Aggregated) - set once via OnceLock
+    phase: OnceLock<RequestPhase>,
 }
 
 impl RequestTracker {
@@ -73,6 +100,7 @@ impl RequestTracker {
             isl_blocks: OnceLock::new(),
             prefill_worker_id: OnceLock::new(),
             decode_worker_id: OnceLock::new(),
+            phase: OnceLock::new(),
         }
     }
 
@@ -144,6 +172,39 @@ impl RequestTracker {
     /// Record the decode worker ID. Returns true if this was the first call.
     pub fn record_decode_worker(&self, id: u64) -> bool {
         self.decode_worker_id.set(id).is_ok()
+    }
+
+    /// Set the request phase. Returns true if this was the first call.
+    pub fn set_phase(&self, phase: RequestPhase) -> bool {
+        self.phase.set(phase).is_ok()
+    }
+
+    /// Get the request phase. Returns Aggregated if not set.
+    pub fn phase(&self) -> RequestPhase {
+        self.phase
+            .get()
+            .copied()
+            .unwrap_or(RequestPhase::Aggregated)
+    }
+
+    /// Record worker ID based on the current phase.
+    ///
+    /// - Prefill phase: records as prefill_worker_id
+    /// - Decode phase: records as decode_worker_id
+    /// - Aggregated phase: records as both prefill and decode worker
+    pub fn record_worker(&self, instance_id: u64) {
+        match self.phase() {
+            RequestPhase::Prefill => {
+                self.record_prefill_worker(instance_id);
+            }
+            RequestPhase::Decode => {
+                self.record_decode_worker(instance_id);
+            }
+            RequestPhase::Aggregated => {
+                self.record_prefill_worker(instance_id);
+                self.record_decode_worker(instance_id);
+            }
+        }
     }
 
     /// Get worker ID information if any worker IDs have been recorded.
