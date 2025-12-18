@@ -270,34 +270,22 @@ impl PrefillRouter {
     /// Prepare prefill request for GAIE flows
     /// - Stage 1: Sets query_instance_id:prefill annotation
     /// - Stage 2: Sets backend_instance_id to target prefill worker
-    fn prepare_prefill_for_gaie(
-        prefill_req: &mut PreprocessedRequest,
-        is_gaie_stage1: bool,
-        target_prefill_worker: Option<u64>,
-        request_id: &str,
-    ) {
-        // GAIE Stage 1: Set query_instance_id to "prefill" for prefill worker selection
+    fn prepare_prefill_for_gaie(prefill_req: &mut PreprocessedRequest, is_gaie_stage1: bool) {
         if is_gaie_stage1 {
+            // GAIE Stage 1: Set query_instance_id to "prefill" for prefill worker selection
             prefill_req
                 .annotations
                 .retain(|a| !a.starts_with("query_instance_id"));
             prefill_req
                 .annotations
                 .push(format!("query_instance_id:{}", QueryInstanceType::Prefill));
+        } else if let Some(prefill_worker_id) = prefill_req.target_prefill_worker_id {
+            // GAIE Stage 2: Route to pre-selected prefill worker
             tracing::debug!(
-                request_id = %request_id,
-                "GAIE Stage 1: Querying prefill worker"
-            );
-        }
-
-        // GAIE Stage 2: Route to pre-selected prefill worker
-        if let Some(prefill_worker_id) = target_prefill_worker {
-            prefill_req.backend_instance_id = Some(prefill_worker_id);
-            tracing::debug!(
-                request_id = %request_id,
-                prefill_worker_id = prefill_worker_id,
+                target_prefill_worker_id = prefill_worker_id,
                 "GAIE Stage 2: Routing prefill to pre-selected worker"
             );
+            prefill_req.backend_instance_id = Some(prefill_worker_id);
         }
     }
 
@@ -306,7 +294,6 @@ impl PrefillRouter {
     fn prepare_decode_for_gaie_stage1(
         decode_req: &mut PreprocessedRequest,
         prefill_result: &PrefillResult,
-        request_id: &str,
     ) {
         let prefill_worker_id = prefill_result
             .disaggregated_params
@@ -315,11 +302,6 @@ impl PrefillRouter {
             .and_then(|info| info.prefill_worker_id);
 
         if let Some(worker_id) = prefill_worker_id {
-            tracing::debug!(
-                request_id = %request_id,
-                prefill_worker_id = worker_id,
-                "GAIE Stage 1: Prefill worker selected, querying decode worker"
-            );
             decode_req
                 .annotations
                 .retain(|a| !a.starts_with("query_instance_id"));
@@ -365,26 +347,6 @@ impl
             .get_annotation_value("query_instance_id")
             .is_some_and(|s| s.is_empty());
 
-        if is_gaie_stage1 {
-            tracing::info!(
-                request_id = %request_id,
-                "GAIE Stage 1: Starting query-only flow"
-            );
-        }
-
-        // GAIE Stage 2: pre-selected worker IDs from Stage 1.
-        let target_prefill_worker = req.target_prefill_worker_id;
-        let target_decode_worker = req.target_decode_worker_id;
-
-        if target_prefill_worker.is_some() || target_decode_worker.is_some() {
-            tracing::info!(
-                request_id = %request_id,
-                target_prefill_worker = ?target_prefill_worker,
-                target_decode_worker = ?target_decode_worker,
-                "GAIE Stage 2: Using pre-selected worker IDs"
-            );
-        }
-
         // Check if prefill router is active BEFORE attempting prefill
         // This determines whether we use disaggregated or aggregated flow
         let prefill_is_active = self.prefill_router.get().is_some();
@@ -416,12 +378,7 @@ impl
         prefill_req.stop_conditions.max_tokens = Some(1);
 
         // Prepare prefill request for GAIE flows (Stage 1 or Stage 2)
-        Self::prepare_prefill_for_gaie(
-            &mut prefill_req,
-            is_gaie_stage1,
-            target_prefill_worker,
-            &request_id,
-        );
+        Self::prepare_prefill_for_gaie(&mut prefill_req, is_gaie_stage1);
 
         let prefill_context = Context::with_id(prefill_req, request_id.clone());
 
@@ -460,21 +417,16 @@ impl
 
                 // GAIE Stage 1: Extract prefill_worker_id and transition query_instance_id state
                 if is_gaie_stage1 {
-                    Self::prepare_decode_for_gaie_stage1(
-                        &mut decode_req,
-                        &prefill_result,
-                        &request_id,
-                    );
+                    Self::prepare_decode_for_gaie_stage1(&mut decode_req, &prefill_result);
                 } else {
                     // Normal/GAIE Stage 2: Set prefill_result for decode
                     decode_req.prefill_result = Some(prefill_result);
                 }
 
                 // GAIE Stage 2: Route to pre-selected decode worker if specified
-                if let Some(decode_worker_id) = target_decode_worker {
+                if let Some(decode_worker_id) = decode_req.target_decode_worker_id {
                     decode_req.backend_instance_id = Some(decode_worker_id);
                     tracing::debug!(
-                        request_id = %request_id,
                         decode_worker_id = decode_worker_id,
                         "GAIE Stage 2: Routing decode to pre-selected worker"
                     );
