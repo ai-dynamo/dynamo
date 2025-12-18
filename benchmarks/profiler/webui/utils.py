@@ -13,7 +13,6 @@ from pathlib import Path
 import gradio as gr
 import numpy as np
 import yaml
-
 from aiconfigurator.webapp.components.profiling import (
     create_performance_results_section,
     create_profiling_ui_components,
