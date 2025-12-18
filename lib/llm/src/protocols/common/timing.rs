@@ -7,8 +7,7 @@
 //! that can be returned to clients via the `nvext` response field.
 
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::protocols::openai::nvext::WorkerIdInfo;
@@ -25,28 +24,6 @@ pub enum RequestPhase {
     /// Aggregated mode - same worker handles both prefill and decode
     #[default]
     Aggregated,
-}
-
-impl RequestPhase {
-    const PREFILL: u8 = 0;
-    const DECODE: u8 = 1;
-    const AGGREGATED: u8 = 2;
-
-    fn to_u8(self) -> u8 {
-        match self {
-            RequestPhase::Prefill => Self::PREFILL,
-            RequestPhase::Decode => Self::DECODE,
-            RequestPhase::Aggregated => Self::AGGREGATED,
-        }
-    }
-
-    fn from_u8(v: u8) -> Self {
-        match v {
-            Self::PREFILL => RequestPhase::Prefill,
-            Self::DECODE => RequestPhase::Decode,
-            _ => RequestPhase::Aggregated,
-        }
-    }
 }
 
 impl std::fmt::Display for RequestPhase {
@@ -100,8 +77,8 @@ pub struct RequestTracker {
     /// Decode worker ID - set once via OnceLock
     decode_worker_id: OnceLock<u64>,
 
-    /// Request phase (Prefill/Decode/Aggregated) - mutable via AtomicU8
-    phase: AtomicU8,
+    /// Request phase (Prefill/Decode/Aggregated)
+    phase: Mutex<RequestPhase>,
 }
 
 impl RequestTracker {
@@ -123,7 +100,7 @@ impl RequestTracker {
             isl_blocks: OnceLock::new(),
             prefill_worker_id: OnceLock::new(),
             decode_worker_id: OnceLock::new(),
-            phase: AtomicU8::new(RequestPhase::Aggregated.to_u8()),
+            phase: Mutex::new(RequestPhase::Aggregated),
         }
     }
 
@@ -199,12 +176,12 @@ impl RequestTracker {
 
     /// Set the request phase. Can be called multiple times to update the phase.
     pub fn set_phase(&self, phase: RequestPhase) {
-        self.phase.store(phase.to_u8(), Ordering::Release);
+        *self.phase.lock().unwrap() = phase;
     }
 
     /// Get the current request phase.
     pub fn phase(&self) -> RequestPhase {
-        RequestPhase::from_u8(self.phase.load(Ordering::Acquire))
+        *self.phase.lock().unwrap()
     }
 
     /// Record worker ID based on the current phase.
