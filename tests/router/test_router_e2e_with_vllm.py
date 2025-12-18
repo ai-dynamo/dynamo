@@ -524,9 +524,7 @@ def test_vllm_indexers_sync(
             request_plane=request_plane,
             store_backend=store_backend,
         )
-        logger.info(
-            f"All vLLM workers using namespace: {vllm_workers.namespace}"
-        )
+        logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
         vllm_workers.__enter__()
 
         # Use the common test implementation (creates its own runtimes for each router)

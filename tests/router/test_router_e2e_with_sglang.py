@@ -509,9 +509,7 @@ def test_sglang_indexers_sync(
             request_plane=request_plane,
             store_backend=store_backend,
         )
-        logger.info(
-            f"All SGLang workers using namespace: {sglang_workers.namespace}"
-        )
+        logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
         sglang_workers.__enter__()
 
         # Use the common test implementation (creates its own runtimes for each router)

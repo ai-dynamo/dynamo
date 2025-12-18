@@ -439,9 +439,7 @@ def test_trtllm_indexers_sync(
             request_plane=request_plane,
             store_backend=store_backend,
         )
-        logger.info(
-            f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}"
-        )
+        logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
         trtllm_workers.__enter__()
 
         # Use the common test implementation (creates its own runtimes for each router)
