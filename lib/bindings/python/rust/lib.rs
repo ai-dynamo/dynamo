@@ -573,8 +573,15 @@ impl DistributedRuntime {
 
         let runtime_config = DistributedConfig {
             store_backend: selected_kv_store,
-            // We only need NATS here to monitor it's metrics, so only if it's our request plane.
-            nats_config: if request_plane.is_nats() {
+            // NATS is used for more than just the NATS request-plane:
+            // - KV router events (JetStream or NATS core + local indexer)
+            // - inter-router replica sync (NATS core)
+            //
+            // If a NATS server is configured via env, enable the client regardless of request plane.
+            nats_config: if request_plane.is_nats()
+                || std::env::var(dynamo_runtime::config::environment_names::nats::NATS_SERVER)
+                    .is_ok()
+            {
                 Some(dynamo_runtime::transports::nats::ClientOptions::default())
             } else {
                 None
