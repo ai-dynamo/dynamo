@@ -118,11 +118,33 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_fields: Option<Vec<String>>,
+
+    /// Targeted prefill worker ID for disaggregated serving (GAIE Stage 2)
+    /// When set, the prefill request will be routed to this specific worker.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_prefill_worker_id: Option<u64>,
+
+    /// Targeted decode worker ID for disaggregated serving (GAIE Stage 2)
+    /// When set, the decode request will be routed to this specific worker.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_decode_worker_id: Option<u64>,
 }
 
 impl PreprocessedRequest {
     pub fn has_annotation(&self, annotation: &str) -> bool {
         self.annotations.contains(&annotation.to_string())
+    }
+
+    /// Get the value of an annotation in the format "key:value"
+    /// Returns None if the annotation is not found or has no value
+    pub fn get_annotation_value(&self, key: &str) -> Option<String> {
+        let prefix = format!("{}:", key);
+        self.annotations
+            .iter()
+            .find(|a| a.starts_with(&prefix))
+            .map(|a| a[prefix.len()..].to_string())
     }
 }
 

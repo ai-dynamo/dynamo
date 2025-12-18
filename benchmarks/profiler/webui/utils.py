@@ -640,6 +640,8 @@ def create_gradio_interface(
             2. **Individual**: Select one row in the Prefill table AND one row in the Decode table
             The selection will be processed automatically once complete.
 
+            **Chart Reference Points:** 🔴 Max Throughput Under SLA · 🟡 Max Throughput Overall · 🟢 Latency-Optimized (lowest latency under SLA)
+
             > 📝 **Note:** The dotted red line in the prefill and decode charts are default TTFT and ITL SLAs if not specified.
 
             > ⚠️ **Warning:** The TTFT values here represent the ideal case when requests arrive uniformly, minimizing queueing. Real-world TTFT may be higher than profiling results. To mitigate the issue, planner uses [correction factors](https://github.com/ai-dynamo/dynamo/blob/main/docs/planner/sla_planner.md#2-correction-factor-calculation) to adjust dynamically at runtime.

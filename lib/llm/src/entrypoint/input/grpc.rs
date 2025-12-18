@@ -26,11 +26,11 @@ pub async fn run(
         .with_request_template(engine_config.local_model().request_template());
 
     let grpc_service = match engine_config {
-        EngineConfig::Dynamic(_) => {
+        EngineConfig::Dynamic { ref model, .. } => {
             let grpc_service = grpc_service_builder.build()?;
-            let router_config = engine_config.local_model().router_config();
+            let router_config = model.router_config();
             // Listen for models registering themselves, add them to gRPC service
-            let namespace = engine_config.local_model().namespace().unwrap_or("");
+            let namespace = model.namespace().unwrap_or("");
             let target_namespace = if is_global_namespace(namespace) {
                 None
             } else {
@@ -105,7 +105,7 @@ async fn run_watcher(
     router_config: RouterConfig,
     target_namespace: Option<String>,
 ) -> anyhow::Result<()> {
-    let watch_obj = ModelWatcher::new(runtime.clone(), model_manager, router_config);
+    let watch_obj = ModelWatcher::new(runtime.clone(), model_manager, router_config, None);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
