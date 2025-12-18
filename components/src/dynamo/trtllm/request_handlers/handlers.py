@@ -83,15 +83,9 @@ class EncodeHandler(HandlerBase):
             ):
                 yield response
             return
-        else:
-            logging.error("encode handler: no Dynamo NIXL connector found")
-            raise RuntimeError("encode handler: no Dynamo NIXL connector found")
 
-        if not request.get("streaming", False):
-            yield request
-            return
-
-        yield request
+        logging.error("encode handler: no Dynamo NIXL connector found")
+        raise RuntimeError("encode handler: no Dynamo NIXL connector found")
 
 
 class PrefillHandler(HandlerBase):

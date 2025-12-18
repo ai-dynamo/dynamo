@@ -210,6 +210,10 @@ class EncodeHelper:
         """
         # Load embeddings first to get the actual shape
         # Extract messages from extra_args (set by Rust preprocessor for multimodal) or fall back to direct field
+        if multimodal_processor is None:
+            yield {"error": "No multimodal_processor configured on encode worker"}
+            return
+
         messages = request.get("extra_args", {}).get(
             "messages", request.get("messages", [])
         )
@@ -313,6 +317,10 @@ class EncodeHelper:
                     processed_prompt = getattr(first_input, "prompt", None)
                 # Tokenize the processed prompt for prefill worker
                 if processed_prompt and tokenizer is not None:
+                    # NOTE: processed_prompt already contains template/placeholder tokens
+                    # (e.g. <image>, [INST], etc.). Adding special tokens here can change
+                    # token alignment across EPD stages (prefill/decode), so we explicitly
+                    # avoid adding them.
                     prompt_token_ids = tokenizer.encode(
                         processed_prompt, add_special_tokens=False
                     )
@@ -323,5 +331,13 @@ class EncodeHelper:
                 "ep_disaggregated_params": params_dict,
                 "processed_prompt": processed_prompt,  # Prompt with <image> tokens
                 "prompt_token_ids": prompt_token_ids,  # Token IDs for consistency
+            }
+            return
+        else:
+            yield {
+                "error": (
+                    "Unsupported encode request: expected embedding_paths (.pt/.bin) "
+                    "or (image_urls and text_prompt) for full EPD"
+                )
             }
             return

@@ -12,6 +12,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
+from tests.serve.conftest import MULTIMODAL_IMG_URL
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload_default,
@@ -117,6 +118,25 @@ trtllm_configs = {
         delayed_start=60,
         request_payloads=[multimodal_payload_default()],
     ),
+    "epd_multimodal": TRTLLMConfig(
+        name="epd_multimodal",
+        directory=trtllm_dir,
+        script_name="epd_multimodal.sh",
+        marks=[pytest.mark.gpu_4, pytest.mark.trtllm_marker, pytest.mark.multimodal],
+        model="llava-hf/llava-v1.6-mistral-7b-hf",
+        models_port=8000,
+        timeout=1200,
+        delayed_start=120,
+        request_payloads=[
+            multimodal_payload_default(
+                image_url=MULTIMODAL_IMG_URL,
+                text="What colors are in the image? Respond only with the colors.",
+                expected_response=["purple"],
+                temperature=0.0,
+                max_tokens=120,
+            )
+        ],
+    ),
 }
 
 
@@ -128,7 +148,9 @@ def trtllm_config_test(request):
 
 @pytest.mark.trtllm_marker
 @pytest.mark.e2e
-def test_deployment(trtllm_config_test, request, runtime_services, predownload_models):
+def test_deployment(
+    trtllm_config_test, request, runtime_services, predownload_models, image_server
+):
     """
     Test dynamo deployments with different configurations.
     """
