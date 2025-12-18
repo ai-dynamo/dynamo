@@ -569,7 +569,9 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
     import os
 
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
-    if request_plane == "nats" and store_kv == "etcd":
+    # TODO: workaround - always start NATS when etcd is needed since DistributedRuntime
+    # unconditionally connects. Original: if request_plane == "nats" and store_kv == "etcd":
+    if store_kv == "etcd":
         with NatsServer(request, port=0) as nats_process:
             with EtcdServer(request, port=0) as etcd_process:
                 # Set environment variables for Rust/Python runtime to use. Note that xdist (parallel execution)
@@ -582,7 +584,10 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
                 # No test should rely on these variables after the test, but clean up just in case.
                 os.environ.pop("NATS_SERVER", None)
                 os.environ.pop("ETCD_ENDPOINTS", None)
-    elif request_plane == "nats":
+    # TODO: workaround - NATS is now started unconditionally via the first branch.
+    # Restore this once we add an event_plane config option.
+    # elif request_plane == "nats":
+    elif request_plane:
         with NatsServer(request, port=0) as nats_process:
             os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
             yield nats_process, None

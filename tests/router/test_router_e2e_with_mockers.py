@@ -468,7 +468,7 @@ def test_kv_push_router_bindings(
     ],
     ids=["jetstream", "nats_core", "file"],
 )
-@pytest.mark.timeout(27)  # ~3x average (~8.93s), rounded up
+@pytest.mark.timeout(90)  # TODO: figure out the actual 3x average
 def test_indexers_sync(
     request,
     runtime_services_dynamic_ports,

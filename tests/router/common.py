@@ -1579,6 +1579,14 @@ def _test_router_indexers_sync(
         state1 = json.loads(state1_json)
         state2 = json.loads(state2_json)
 
+        # Verify final tree dumps are non-zero length
+        assert (
+            len(state1) > 0
+        ), f"Expected non-zero tree dump from Router 1, got {len(state1)} events"
+        assert (
+            len(state2) > 0
+        ), f"Expected non-zero tree dump from Router 2, got {len(state2)} events"
+
         # Sort both states for comparison (order might differ due to HashMap iteration and sharding)
         def sort_key(event):
             data = event["event"]["data"]["stored"]
