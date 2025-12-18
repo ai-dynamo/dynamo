@@ -16,6 +16,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import (
     ModelInput,
@@ -739,6 +740,20 @@ class BaseWorkerHandler(ABC):
 
         return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
+    def _build_trace_headers(self, context: Context) -> dict[str, str] | None:
+        """
+        Build trace headers from context for propagation to vLLM engine.
+        """
+        trace_id = context.trace_id
+        span_id = context.span_id
+        if not trace_id or not span_id:
+            return None
+
+        # W3C Trace Context format: {version}-{trace_id}-{parent_id}-{trace_flags}
+        # version: 00, trace_flags: 01 (sampled)
+        # TODO: properly propagate the trace-flags from current span.
+        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
+
     async def generate_tokens(
         self,
         prompt,
@@ -746,6 +761,7 @@ class BaseWorkerHandler(ABC):
         request_id,
         data_parallel_rank=None,
         lora_request=None,
+        trace_headers=None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -764,6 +780,7 @@ class BaseWorkerHandler(ABC):
                 request_id,
                 lora_request=lora_request,
                 data_parallel_rank=data_parallel_rank,
+                trace_headers=trace_headers,
             )
 
             num_output_tokens_so_far = 0
@@ -923,6 +940,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         dp_rank = request.get("dp_rank", None)
 
+        trace_headers = self._build_trace_headers(context)
+
         async with self._abort_monitor(context, request_id):
             try:
                 async for tok in self.generate_tokens(
@@ -931,6 +950,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request_id,
                     data_parallel_rank=dp_rank,
                     lora_request=lora_request,
+                    trace_headers=trace_headers,
                 ):
                     if prefill_result is not None and "completion_usage" in tok:
                         tok["completion_usage"][
@@ -965,6 +985,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
 
+        trace_headers = self._build_trace_headers(context)
+
         async with self._abort_monitor(context, request_id):
             try:
                 gen = self.engine_client.generate(
@@ -972,6 +994,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     sampling_params,
                     request_id,
                     data_parallel_rank=dp_rank,
+                    trace_headers=trace_headers,
                 )
 
                 async for res in gen:
@@ -1114,6 +1137,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         dp_rank = request.get("dp_rank", None)
 
+        trace_headers = self._build_trace_headers(context)
+
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
                 gen = self.engine_client.generate(
@@ -1122,6 +1147,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     request_id,
                     data_parallel_rank=dp_rank,
                     lora_request=lora_request,
+                    trace_headers=trace_headers,
                 )
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
