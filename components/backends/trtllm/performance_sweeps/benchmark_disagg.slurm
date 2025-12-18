@@ -44,11 +44,12 @@ echo "trying to submit job"
 
 config=$(realpath "$config")
 
-sub_dir=$LOG_DIR/$(python3 -c "import yaml, uuid; print(yaml.safe_load(open('${config}')).get('name', 'benchmark-' + uuid.uuid4().hex))")
+config_filename="${config##*/}"
+sub_dir="${config_filename%.*}"
 
 echo "concurrency_list: ${concurrency_list}"
 
-full_logdir=${sub_dir}
+full_logdir=$LOG_DIR/${sub_dir}
 mkdir -p ${full_logdir}
 
 container_mounts=${MOUNT_DIR}:${MOUNT_DIR},${MODEL_PATH}:${MODEL_PATH},${config}:${config}
