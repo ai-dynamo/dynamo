@@ -7,8 +7,10 @@
 use std::collections::HashMap;
 
 use regex::Regex;
+use serde_json::Value;
 use uuid::Uuid;
 
+use super::super::ToolDefinition;
 use super::super::config::XmlParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
@@ -51,8 +53,9 @@ pub fn find_tool_call_end_position_xml(chunk: &str, config: &XmlParserConfig) ->
 pub fn try_tool_call_parse_xml(
     message: &str,
     config: &XmlParserConfig,
+    tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
-    let (normal_text, tool_calls) = extract_tool_calls(message, config)?;
+    let (normal_text, tool_calls) = extract_tool_calls(message, config, tools)?;
 
     let normal_content = if normal_text.is_empty() {
         Some("".to_string())
@@ -67,6 +70,7 @@ pub fn try_tool_call_parse_xml(
 fn extract_tool_calls(
     text: &str,
     config: &XmlParserConfig,
+    tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(String, Vec<ToolCallResponse>)> {
     let mut normal_parts = Vec::new();
     let mut calls = Vec::new();
@@ -89,7 +93,7 @@ fn extract_tool_calls(
                 let block = &text[abs_start..abs_end];
 
                 // Parse this tool call block.
-                if let Ok(mut parsed_calls) = parse_tool_call_block(block, config) {
+                if let Ok(mut parsed_calls) = parse_tool_call_block(block, config, tools) {
                     calls.append(&mut parsed_calls);
                 }
 
@@ -115,6 +119,7 @@ fn extract_tool_calls(
 fn parse_tool_call_block(
     block: &str,
     config: &XmlParserConfig,
+    tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<Vec<ToolCallResponse>> {
     // Build regex patterns based on config
     let function_start = regex::escape(&config.function_start_token);
@@ -142,6 +147,9 @@ fn parse_tool_call_block(
             continue;
         }
 
+        // Get parameter config for this function
+        let param_config = get_arguments_config(function_name, tools);
+
         // Parse parameters from the function body.
         let mut parameters: HashMap<String, serde_json::Value> = HashMap::new();
 
@@ -150,7 +158,8 @@ fn parse_tool_call_block(
             let param_value = param_cap.get(2).map(|m| m.as_str()).unwrap_or("");
 
             if !param_name.is_empty() {
-                let parsed_value = safe_parse_value(param_value);
+                let parsed_value =
+                    convert_param_value(param_value, param_name, &param_config, function_name);
                 parameters.insert(param_name.to_string(), parsed_value);
             }
         }
@@ -173,8 +182,316 @@ fn parse_tool_call_block(
     Ok(results)
 }
 
+/// Extract argument configuration for a function from the tool definitions.
+/// Returns a HashMap of parameter names to their schema definitions.
+fn get_arguments_config(
+    func_name: &str,
+    tools: Option<&[ToolDefinition]>,
+) -> HashMap<String, Value> {
+    let Some(tools) = tools else {
+        return HashMap::new();
+    };
+
+    for tool in tools {
+        if tool.name == func_name {
+            if let Some(params) = &tool.parameters {
+                // Try to extract "properties" from the parameters schema
+                if let Some(properties) = params.get("properties") {
+                    if let Some(props_obj) = properties.as_object() {
+                        return props_obj
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                    }
+                } else if let Some(params_obj) = params.as_object() {
+                    // If no "properties" field, treat the whole thing as the config
+                    return params_obj
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                }
+            }
+            return HashMap::new();
+        }
+    }
+
+    tracing::warn!("Tool '{}' is not defined in the tools list.", func_name);
+    HashMap::new()
+}
+
+/// Convert parameter value based on its type in the schema.
+/// This matches the behavior of the Python implementation.
+/// Converts a string parameter value from XML into a typed JSON Value.
+///
+/// # Examples
+///
+/// **String types:**
+/// ```text
+/// Input:  param_value="hello world", param_type="string"
+/// Output: Value::String("hello world")
+/// ```
+///
+/// ```text
+/// Input:  param_value="42", param_type="string"
+/// Output: Value::String("42")
+/// ```
+///
+/// **Integer types:**
+/// ```text
+/// Input:  param_value="42", param_type="integer"
+/// Output: Value::Number(42)
+///
+/// Input:  param_value="not_a_number", param_type="int"
+/// Output: Value::String("not_a_number")  // Falls back to string with warning
+/// ```
+///
+/// **Float/Number types:**
+/// ```text
+/// Input:  param_value="3.14", param_type="number"
+/// Output: Value::Number(3.14)
+///
+/// Input:  param_value="42.0", param_type="float"
+/// Output: Value::Number(42)  // Whole numbers stored as integers
+/// ```
+///
+/// **Boolean types:**
+/// ```text
+/// Input:  param_value="true", param_type="boolean"
+/// Output: Value::Bool(true)
+///
+/// Input:  param_value="yes", param_type="bool"
+/// Output: Value::Bool(false)  // Falls back to false with warning
+/// ```
+///
+/// **Complex types (objects/arrays):**
+/// ```text
+/// Input:  param_value='{"key": "value"}', param_type="object"
+/// Output: Value::Object({"key": "value"})
+///
+/// Input:  param_value="[1, 2, 3]", param_type="array"
+/// Output: Value::Array([1, 2, 3])
+///
+/// Input:  param_value="{'key': 'value'}", param_type="dict"
+/// Output: Value::Object({"key": "value"})  // Uses ast.literal_eval-style parsing
+/// ```
+///
+/// **Special cases:**
+/// ```text
+/// Input:  param_value="null", param_type=<any>
+/// Output: Value::Null  // Handled before type checking
+///
+/// Input:  param_value="&lt;tag&gt;", param_type="string"
+/// Output: Value::String("<tag>")  // HTML entities are unescaped
+///
+/// Input:  param_value="123", param_type=<undefined/not in schema>
+/// Output: Value::String("123")  // Unknown params returned as strings
+/// ```
+///
+/// # Arguments
+///
+/// * `param_value` - The raw string value from XML parameter
+/// * `param_name` - The parameter name (used for schema lookup and error messages)
+/// * `param_config` - Schema defining expected types for each parameter
+/// * `func_name` - The function/tool name (used for error messages)
+///
+/// # Type Aliases
+///
+/// The function recognizes various type name aliases:
+/// - Strings: "string", "str", "text", "varchar", "char", "enum"
+/// - Integers: "int", "integer", "int32", "int64", "uint", "long", "short", "unsigned"
+/// - Numbers: "number", "num", "float", "float32", "float64", "double"
+/// - Booleans: "boolean", "bool", "binary"
+/// - Objects: "object", "dict", "dictionary"
+/// - Arrays: "array", "arr", "list"
+fn convert_param_value(
+    param_value: &str,
+    param_name: &str,
+    param_config: &HashMap<String, Value>,
+    func_name: &str,
+) -> Value {
+    // HTML unescape and trim
+    let param_value = html_unescape(param_value.trim());
+
+    // Handle null
+    if param_value.to_lowercase() == "null" {
+        return Value::Null;
+    }
+
+    // Check if parameter is in config
+    if !param_config.contains_key(param_name) {
+        tracing::debug!(
+            "Parsed parameter '{}' is not defined in the tool parameters for tool '{}', directly returning the string value.",
+            param_name,
+            func_name
+        );
+        return Value::String(param_value);
+    }
+
+    // Get the type from schema
+    let param_type = param_config
+        .get(param_name)
+        .and_then(|v| v.get("type"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("string")
+        .to_lowercase();
+
+    // The follow `match` block follows this rough pattern for each block:
+    // 1. Match `param_type` against predefined string representations of each type,
+    // 2. Parse the string value and convert it to the appropriate Rust JSON Value type.
+    // Each branch handles a category of type aliases (e.g., "int"/"integer"/"int32" all map to i64).
+    // If parsing fails, we log a warning and fall back to returning the value as a string.
+    match param_type.as_str() {
+        // String types: Return value as-is (already HTML-unescaped above)
+        "string" | "str" | "text" | "varchar" | "char" | "enum" => Value::String(param_value),
+
+        // Integer types: Parse as i64, fall back to string on error.
+        // Matches: "int", "integer", "int32", "uint", "unsigned", "long", "short", etc.
+        t if t.starts_with("int")
+            || t.starts_with("uint")
+            || t.starts_with("long")
+            || t.starts_with("short")
+            || t.starts_with("unsigned") =>
+        {
+            match param_value.parse::<i64>() {
+                Ok(int_val) => Value::Number(int_val.into()),
+                Err(_) => {
+                    tracing::warn!(
+                        "Parsed value '{}' of parameter '{}' is not an integer in tool '{}', degenerating to string.",
+                        param_value,
+                        param_name,
+                        func_name
+                    );
+                    Value::String(param_value)
+                }
+            }
+        }
+
+        // Float/Number types: Parse as f64.
+        // Matches: "number", "num", "float", "float32", "float64", "double", etc.
+        // Note: Whole numbers (e.g., 42.0) are stored as integers for better JSON compatibility.
+        t if t.starts_with("num") || t.starts_with("float") => {
+            match param_value.parse::<f64>() {
+                Ok(float_val) => {
+                    // Return int if it's a whole number, otherwise float.
+                    if float_val.fract() == 0.0 && float_val.is_finite() {
+                        Value::Number((float_val as i64).into())
+                    } else if let Some(num) = serde_json::Number::from_f64(float_val) {
+                        Value::Number(num)
+                    } else {
+                        tracing::warn!(
+                            "Parsed value '{}' of parameter '{}' is not a valid float in tool '{}', degenerating to string.",
+                            param_value,
+                            param_name,
+                            func_name
+                        );
+                        Value::String(param_value)
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "Parsed value '{}' of parameter '{}' is not a float in tool '{}', degenerating to string.",
+                        param_value,
+                        param_name,
+                        func_name
+                    );
+                    Value::String(param_value)
+                }
+            }
+        }
+
+        // Boolean types: Only "true" or "false" (case-insensitive) are valid.
+        // Any other value defaults to false with a warning.
+        "boolean" | "bool" | "binary" => {
+            let lower_val = param_value.to_lowercase();
+            if lower_val != "true" && lower_val != "false" {
+                tracing::warn!(
+                    "Parsed value '{}' of parameter '{}' is not a boolean (`true` or `false`) in tool '{}', degenerating to false.",
+                    param_value,
+                    param_name,
+                    func_name
+                );
+            }
+            Value::Bool(lower_val == "true")
+        }
+
+        // Complex types (objects/arrays): Try JSON parsing, then fall back to Python-style
+        // `ast.literal_eval` (or our own barebones version of it for the purposes of this
+        // parser).
+        // Matches: "object", "array", "arr", "dict", "dictionary", "list", etc.
+        // This handles both JSON syntax ({"a": 1}) and Python syntax ({'a': 1}).
+        t if t == "object"
+            || t == "array"
+            || t == "arr"
+            || t.starts_with("dict")
+            || t.starts_with("list") =>
+        {
+            // Try JSON parsing first (standard JSON with double quotes).
+            if let Ok(json_val) = serde_json::from_str::<Value>(&param_value) {
+                return json_val;
+            }
+
+            tracing::warn!(
+                "Parsed value '{}' of parameter '{}' cannot be parsed with json.loads in tool '{}', will try other methods to parse it.",
+                param_value,
+                param_name,
+                func_name
+            );
+
+            // Try `ast.literal_eval` equivalent (handles Python-style single quotes, etc.).
+            if let Ok(json_val) = try_literal_eval(&param_value) {
+                return json_val;
+            }
+
+            tracing::warn!(
+                "Parsed value '{}' of parameter '{}' cannot be converted via Python `ast.literal_eval()` in tool '{}', degenerating to string.",
+                param_value,
+                param_name,
+                func_name
+            );
+            Value::String(param_value)
+        }
+
+        // Unknown/custom types: Attempt best-effort parsing via `literal_eval`.
+        // This allows for flexible type names while still trying to parse structured data
+        _ => {
+            // Unknown type, try `literal_eval`.
+            if let Ok(json_val) = try_literal_eval(&param_value) {
+                return json_val;
+            }
+
+            tracing::warn!(
+                "Parsed value '{}' of parameter '{}' cannot be converted via Python `ast.literal_eval()` in tool '{}', degenerating to string.",
+                param_value,
+                param_name,
+                func_name
+            );
+            Value::String(param_value)
+        }
+    }
+}
+
+/// Try to parse a value similar to Python's ast.literal_eval.
+/// This is a simplified version that handles common cases.
+fn try_literal_eval(s: &str) -> Result<Value, ()> {
+    // First try standard JSON
+    if let Ok(val) = serde_json::from_str::<Value>(s) {
+        return Ok(val);
+    }
+
+    // Try to handle Python-style literals (single quotes, True/False/None)
+    let normalized = s
+        .replace('\'', "\"") // Replace single quotes with double quotes
+        .replace("True", "true")
+        .replace("False", "false")
+        .replace("None", "null");
+
+    serde_json::from_str::<Value>(&normalized).map_err(|_| ())
+}
+
 /// Safely parse a value - tries JSON, then falls back to string.
 /// Mimics SGLang's `_safe_val` function in spirit.
+/// NOTE: This function is deprecated and kept for reference. Use convert_param_value instead.
+#[allow(dead_code)]
 fn safe_parse_value(raw: &str) -> serde_json::Value {
     // HTML unescape
     let unescaped = html_unescape(raw.trim());
@@ -279,7 +596,8 @@ pwd && ls
 </function>
 </tool_call>"#;
 
-        let (calls, normal) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
+        let (calls, normal) =
+            try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "execute_bash");
         assert_eq!(normal, Some("".to_string()));
@@ -304,7 +622,7 @@ fahrenheit
 </function>
 </tool_call>"#;
 
-        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
 
@@ -324,7 +642,8 @@ Dallas
 </function>
 </tool_call> Let me check that for you."#;
 
-        let (calls, normal) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
+        let (calls, normal) =
+            try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(
@@ -350,7 +669,7 @@ Orlando
 </function>
 </tool_call>"#;
 
-        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(calls[1].function.name, "get_weather");
@@ -363,6 +682,17 @@ Orlando
 
     #[test]
     fn test_parse_json_parameter_value() {
+        // With schema-aware parsing, we need to provide a schema to parse JSON objects
+        let tools = vec![ToolDefinition {
+            name: "process_data".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "config": {"type": "object"}
+                }
+            })),
+        }];
+
         let input = r#"<tool_call>
 <function=process_data>
 <parameter=config>
@@ -371,7 +701,8 @@ Orlando
 </function>
 </tool_call>"#;
 
-        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
+        let (calls, _) =
+            try_tool_call_parse_xml(input, &XmlParserConfig::default(), Some(&tools)).unwrap();
         assert_eq!(calls.len(), 1);
 
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
@@ -383,7 +714,8 @@ Orlando
     #[test]
     fn test_parse_no_tool_calls() {
         let input = "This is just normal text without any tool calls.";
-        let (calls, normal) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
+        let (calls, normal) =
+            try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
         assert_eq!(calls.len(), 0);
         assert_eq!(normal, Some(input.to_string()));
     }
@@ -397,7 +729,7 @@ value
 </tool_call>"#;
 
         // Should handle gracefully - might parse or return empty
-        let result = try_tool_call_parse_xml(input, &XmlParserConfig::default());
+        let result = try_tool_call_parse_xml(input, &XmlParserConfig::default(), None);
         assert!(result.is_ok());
     }
 
@@ -410,7 +742,7 @@ ls -la
 </function>
 </tool_call>"#;
 
-        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "execute_bash");
 
@@ -427,7 +759,7 @@ Boston
 </parameter>
 </tool_call>"#;
 
-        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
 
@@ -443,7 +775,7 @@ Boston
 SELECT * FROM users
 </tool_call>"#;
 
-        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "run_query");
 
@@ -463,12 +795,140 @@ rust programming
 </function>
 </tool_call>"#;
 
-        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default()).unwrap();
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "search");
 
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
         // This matches the original SGLang python implementation.
         assert_eq!(args["query"], "rust programming\n<parameter=limit>\n10");
+    }
+
+    #[test]
+    fn test_schema_aware_type_conversion() {
+        // This test matches the Python test_parse_streaming_increment_multiple_parameters
+        // from the diff, showing schema-aware type conversion
+        let tools = vec![ToolDefinition {
+            name: "multi_param_func".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "param1": {"type": "string"},
+                    "param2": {"type": "float"},
+                    "param3": {"type": "integer"},
+                    "param4": {"type": "boolean"},
+                    "param5": {"type": "object"},
+                    "param6": {"type": "array"},
+                    "param7": {"type": "null"},
+                    "param8": {"type": "other_type"}
+                },
+                "required": ["param1", "param2", "param3", "param4", "param5", "param6", "param7", "param8"]
+            })),
+        }];
+
+        let input = r#"<tool_call>
+<function=multi_param_func>
+<parameter=param1>42</parameter>
+<parameter=param2>41.9</parameter>
+<parameter=param3>42</parameter>
+<parameter=param4>true</parameter>
+<parameter=param5>{"key": "value"}</parameter>
+<parameter=param6>[1, 2, 3]</parameter>
+<parameter=param7>null</parameter>
+<parameter=param8>{'arg1': 3, 'arg2': [1, 2]}</parameter>
+</function>
+</tool_call>"#;
+
+        let (calls, _) =
+            try_tool_call_parse_xml(input, &XmlParserConfig::default(), Some(&tools)).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "multi_param_func");
+
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+
+        // param1 is type "string" so "42" stays as string
+        assert_eq!(args["param1"], "42");
+
+        // param2 is type "float" so 41.9 is parsed as float
+        assert_eq!(args["param2"], 41.9);
+
+        // param3 is type "integer" so 42 is parsed as integer
+        assert_eq!(args["param3"], 42);
+
+        // param4 is type "boolean" so "true" is parsed as bool
+        assert_eq!(args["param4"], true);
+
+        // param5 is type "object" so JSON is parsed
+        assert_eq!(args["param5"], serde_json::json!({"key": "value"}));
+
+        // param6 is type "array" so JSON array is parsed
+        assert_eq!(args["param6"], serde_json::json!([1, 2, 3]));
+
+        // param7 is type "null" so "null" is parsed as null
+        assert_eq!(args["param7"], serde_json::Value::Null);
+
+        // param8 is other_type, uses literal_eval which converts Python-style dict
+        assert_eq!(
+            args["param8"],
+            serde_json::json!({"arg1": 3, "arg2": [1, 2]})
+        );
+    }
+
+    #[test]
+    fn test_schema_aware_type_conversion_fallback() {
+        // Test that invalid values fall back to strings with warnings
+        let tools = vec![ToolDefinition {
+            name: "test_func".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "int_param": {"type": "integer"},
+                    "float_param": {"type": "float"},
+                    "bool_param": {"type": "boolean"}
+                }
+            })),
+        }];
+
+        let input = r#"<tool_call>
+<function=test_func>
+<parameter=int_param>not_an_int</parameter>
+<parameter=float_param>not_a_float</parameter>
+<parameter=bool_param>not_a_bool</parameter>
+</function>
+</tool_call>"#;
+
+        let (calls, _) =
+            try_tool_call_parse_xml(input, &XmlParserConfig::default(), Some(&tools)).unwrap();
+        assert_eq!(calls.len(), 1);
+
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+
+        // All should fall back to strings
+        assert_eq!(args["int_param"], "not_an_int");
+        assert_eq!(args["float_param"], "not_a_float");
+        // bool_param with invalid value defaults to false
+        assert_eq!(args["bool_param"], false);
+    }
+
+    #[test]
+    fn test_no_schema_fallback_behavior() {
+        // Without schema, behavior should match old safe_parse_value logic
+        let input = r#"<tool_call>
+<function=unknown_func>
+<parameter=param1>42</parameter>
+<parameter=param2>true</parameter>
+<parameter=param3>hello</parameter>
+</function>
+</tool_call>"#;
+
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
+        assert_eq!(calls.len(), 1);
+
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+
+        // Without schema, all values are returned as strings (no type inference)
+        assert_eq!(args["param1"], "42");
+        assert_eq!(args["param2"], "true");
+        assert_eq!(args["param3"], "hello");
     }
 }

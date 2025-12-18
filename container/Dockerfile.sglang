@@ -36,6 +36,7 @@ ARG BASE_IMAGE_TAG
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_MEDIA_NIXL
+ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
 
 ARG RUNTIME_IMAGE="lmsysorg/sglang"
@@ -50,6 +51,7 @@ ARG SCCACHE_REGION=""
 ARG NIXL_UCX_REF
 ARG NIXL_REF
 ARG NIXL_GDRCOPY_REF
+ARG NIXL_LIBFABRIC_REF
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -167,7 +169,11 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         libibumad \
         libibumad-devel \
         librdmacm-devel \
-        numactl-devel
+        numactl-devel \
+        # Libfabric support
+        hwloc \
+        hwloc-devel
+
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
@@ -223,6 +229,43 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
+# Build FFmpeg from source
+ARG FFMPEG_VERSION=7.1
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export RUSTC_WRAPPER="sccache"; \
+    fi && \
+    dnf install -y pkg-config && \
+    cd /tmp && \
+    curl -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    cd ffmpeg-${FFMPEG_VERSION} && \
+    ./configure \
+        --prefix=/usr/local \
+        --disable-programs \
+        --disable-doc \
+        --disable-static \
+        --disable-x86asm \
+        --disable-postproc \
+        --disable-network \
+        --disable-encoders \
+        --disable-muxers \
+        --disable-bsfs \
+        --disable-devices \
+        --disable-libdrm \
+        --enable-shared && \
+    make -j$(nproc) && \
+    make install && \
+    /tmp/use-sccache.sh show-stats "FFMPEG" && \
+    ldconfig && \
+    rm -rf /tmp/ffmpeg-${FFMPEG_VERSION}*; \
+fi
+
 # Build and install UCX
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
@@ -258,6 +301,37 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
      echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
      ldconfig
 
+ARG NIXL_LIBFABRIC_REF
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
+    cd /usr/local/src && \
+    git clone https://github.com/ofiwg/libfabric.git && \
+    cd libfabric && \
+    git checkout $NIXL_LIBFABRIC_REF && \
+    ./autogen.sh && \
+    ./configure --prefix="/usr/local/libfabric" \
+                --disable-verbs \
+                --disable-psm3 \
+                --disable-opx \
+                --disable-usnic \
+                --disable-rstream \
+                --enable-efa \
+                --with-cuda=/usr/local/cuda \
+                --enable-cuda-dlopen \
+                --with-gdrcopy \
+                --enable-gdrcopy-dlopen && \
+    make -j$(nproc) && \
+    make install && \
+    /tmp/use-sccache.sh show-stats "LIBFABRIC" && \
+    echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
+    ldconfig
+
 # build and install nixl
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
@@ -274,7 +348,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
     -Dcudapath_lib="/usr/local/cuda/lib64" \
     -Dcudapath_inc="/usr/local/cuda/include" \
-    -Ducx_path="/usr/local/ucx" && \
+    -Ducx_path="/usr/local/ucx" \
+    -Dlibfabric_path="/usr/local/libfabric" && \
     cd build && \
     ninja && \
     ninja install && \
@@ -320,8 +395,15 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
+    FEATURES=""; \
     if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
-        maturin build --release --features dynamo-llm/media-nixl --out /opt/dynamo/dist; \
+        FEATURES="$FEATURES dynamo-llm/media-nixl"; \
+    fi; \
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+        FEATURES="$FEATURES media-ffmpeg"; \
+    fi; \
+    if [ -n "$FEATURES" ]; then \
+        maturin build --release --features "$FEATURES" --out /opt/dynamo/dist; \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \

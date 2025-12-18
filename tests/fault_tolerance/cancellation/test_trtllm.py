@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Test Execution Times (Last Run: 2025-12-09):
+Test Execution Times (Last Run: 2025-12-13):
 - test_request_cancellation_trtllm_aggregated: ~45s (gpu_1)
-- test_request_cancellation_trtllm_decode_cancel: ~115s (gpu_1)
-- test_request_cancellation_trtllm_prefill_cancel: ~115s (gpu_1)
-- test_request_cancellation_trtllm_kv_transfer_cancel: ~115s (gpu_1, xfail)
-- Total: ~390s (0:06:30)
+- test_request_cancellation_trtllm_decode_cancel: ~65s (gpu_1)
+- test_request_cancellation_trtllm_prefill_cancel: ~65s (gpu_1)
+- test_request_cancellation_trtllm_kv_transfer_cancel: ~65s (gpu_1)
+- Total: ~240s x2 request planes = ~480s (0:08:00)
 """
 
 import logging
@@ -72,8 +72,6 @@ class DynamoWorkerProcess(ManagedProcess):
             FAULT_TOLERANCE_MODEL_NAME,
             "--disaggregation-mode",
             mode,
-            "--free-gpu-memory-fraction",
-            "0.45",
             "--max-seq-len",
             "16384",
             "--max-num-tokens",
@@ -83,8 +81,11 @@ class DynamoWorkerProcess(ManagedProcess):
         ]
         if mode != "prefill_and_decode":
             with open("test_request_cancellation_trtllm_config.yaml", "w") as f:
-                f.write("cache_transceiver_config:\n  backend: DEFAULT\n")
+                f.write(
+                    "cache_transceiver_config:\n  backend: DEFAULT\n  max_tokens_in_buffer: 16384\n"
+                )
                 f.write("disable_overlap_scheduler: true\n")
+                f.write("kv_cache_config:\n  max_tokens: 16384\n")
             command += [
                 "--extra-engine-args",
                 "test_request_cancellation_trtllm_config.yaml",
@@ -164,7 +165,7 @@ class DynamoWorkerProcess(ManagedProcess):
         return super().__exit__(exc_type, exc_val, exc_tb)
 
 
-@pytest.mark.timeout(140)  # 3x average
+@pytest.mark.timeout(135)  # 3x average
 def test_request_cancellation_trtllm_aggregated(
     request, runtime_services_dynamic_ports, predownload_models
 ):
@@ -251,7 +252,7 @@ def test_request_cancellation_trtllm_aggregated(
                 logger.info(f"{description} detected successfully")
 
 
-@pytest.mark.timeout(350)  # 3x average
+@pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_decode_cancel(
     request, runtime_services_dynamic_ports, predownload_models
 ):
@@ -335,7 +336,7 @@ def test_request_cancellation_trtllm_decode_cancel(
                 )
 
 
-@pytest.mark.timeout(350)  # 3x average
+@pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_prefill_cancel(
     request, runtime_services_dynamic_ports, predownload_models
 ):
@@ -427,11 +428,8 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 )
 
 
-@pytest.mark.timeout(350)  # 3x average
-@pytest.mark.xfail(
-    reason="May fail due to unknown reason with TRT-LLM or backend implementation",
-    strict=False,
-)
+@pytest.mark.xfail(reason="Test fails only on CI", strict=False)
+@pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_kv_transfer_cancel(
     request, runtime_services_dynamic_ports, predownload_models
 ):
