@@ -9,6 +9,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::http::Response;
+
 use super::Metrics;
 use super::RouteDoc;
 use super::metrics;
@@ -427,7 +430,37 @@ impl HttpServiceConfigBuilder {
         all_docs.extend(openapi_docs);
 
         // Add span for tracing
-        router = router.layer(TraceLayer::new_for_http().make_span_with(make_request_span));
+        // Add on_response callback for logging response status code
+        router = router.layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_request_span)
+                .on_response(
+                    |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
+                        let status = response.status();
+                        let latency_ms = latency.as_millis();
+
+                        if status.is_server_error() {
+                            tracing::error!(
+                                status = %status.as_u16(),
+                                latency_ms = %latency_ms,
+                                "request completed with server error"
+                            );
+                        } else if status.is_client_error() {
+                            tracing::warn!(
+                                status = %status.as_u16(),
+                                latency_ms = %latency_ms,
+                                "request completed with client request error"
+                            );
+                        } else {
+                            tracing::debug!(
+                                status = %status.as_u16(),
+                                latency_ms = %latency_ms,
+                                "request completed"
+                            );
+                        }
+                    },
+                ),
+        );
 
         Ok(HttpService {
             state,

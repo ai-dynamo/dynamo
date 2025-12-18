@@ -221,6 +221,7 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
 
 # Build FFmpeg from source
+# Do not delete the source tarball for legal reasons
 ARG FFMPEG_VERSION=7.1
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
@@ -238,6 +239,8 @@ if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     cd ffmpeg-${FFMPEG_VERSION} && \
     ./configure \
         --prefix=/usr/local \
+        --disable-gpl \
+        --disable-nonfree \
         --disable-programs \
         --disable-doc \
         --disable-static \
@@ -254,7 +257,8 @@ if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     make install && \
     /tmp/use-sccache.sh show-stats "FFMPEG" && \
     ldconfig && \
-    rm -rf /tmp/ffmpeg-${FFMPEG_VERSION}*; \
+    mkdir -p /usr/local/src/ffmpeg && \
+    mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/; \
 fi
 
 # Build and install UCX
@@ -715,6 +719,7 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/; \
     cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/; \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/lib/pkgconfig/; \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/; \
     true # in case ffmpeg not enabled
 
 # Install Dynamo wheels from dynamo_base wheelhouse
