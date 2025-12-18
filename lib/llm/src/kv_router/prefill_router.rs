@@ -202,10 +202,13 @@ impl PrefillRouter {
         rand::rng().random()
     }
 
-    /// Query best worker upfront, build bootstrap_info, and spawn prefill in background
+    /// Build bootstrap_info for disaggregated serving
+    /// If preselected_worker is provided (GAIE Stage 2), use it directly.
+    /// Otherwise, query for the best worker.
     async fn build_bootstrap_info(
         &self,
         req: &PreprocessedRequest,
+        preselected_worker: Option<u64>,
     ) -> Option<(u64, u32, BootstrapInfo)> {
         let prefill_router = self.prefill_router.get()?;
 
@@ -215,14 +218,24 @@ impl PrefillRouter {
             InnerPrefillRouter::SimpleRouter(_) => return None,
         };
 
-        // Query best worker without routing
-        let (worker_id, dp_rank) = match kv_router
-            .chooser
-            .find_best_match(None, &req.token_ids, None, false)
-            .await
-        {
-            Ok((worker, _overlap)) => (worker.worker_id, worker.dp_rank),
-            Err(_) => return None,
+        // Use pre-selected worker (GAIE Stage 2) or query for best worker
+        let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
+            let dp_rank = req.dp_rank.unwrap_or(0);
+            tracing::debug!(
+                worker_id = id,
+                dp_rank = dp_rank,
+                "Using pre-selected prefill worker for bootstrap"
+            );
+            (id, dp_rank)
+        } else {
+            match kv_router
+                .chooser
+                .find_best_match(None, &req.token_ids, None, false)
+                .await
+            {
+                Ok((worker, _overlap)) => (worker.worker_id, worker.dp_rank),
+                Err(_) => return None,
+            }
         };
 
         // Look up bootstrap endpoint from discovery
@@ -442,9 +455,12 @@ impl
         Self::prepare_prefill_for_gaie(&mut prefill_req, is_gaie_stage1);
 
         // Try build_bootstrap_info optimization (skip for GAIE Stage 1 which needs query-only flow)
+        // For GAIE Stage 2, use target_prefill_worker_id if provided
+        let preselected_worker = prefill_req.target_prefill_worker_id;
         let prefill_result = if !is_gaie_stage1 {
-            if let Some((worker_id, dp_rank, bootstrap_info)) =
-                self.build_bootstrap_info(&prefill_req).await
+            if let Some((worker_id, dp_rank, bootstrap_info)) = self
+                .build_bootstrap_info(&prefill_req, preselected_worker)
+                .await
             {
                 let bootstrap_room = bootstrap_info.bootstrap_room;
 
