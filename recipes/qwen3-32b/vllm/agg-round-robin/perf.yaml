@@ -46,7 +46,7 @@ spec:
 
         # Run Benchmark so its easy to attach and watch
         tmux new-session -d -s benchmark -c "${ARTIFACT_DIR}"
-        tmux send-keys -t benchmark "aiperf profile -m ${MODEL_NAME} --input-file ${INPUT_FILE} --custom-dataset-type mooncake_trace --fixed-schedule --url http://${FRONTEND}:8000 --streaming --artifact-dir ${ARTIFACT_DIR} --goodput \"time_to_first_token:1000 inter_token_latency:30\"" C-m
+        tmux send-keys -t benchmark "aiperf profile -m ${MODEL_NAME} --input-file ${INPUT_FILE} --custom-dataset-type mooncake_trace --fixed-schedule --url http://${FRONTEND}:8000 --streaming --artifact-dir ${ARTIFACT_DIR} --goodput \"time_to_first_token:2000 inter_token_latency:25\"" C-m
         sleep 7200
     env:
       - name: MODEL_NAME
