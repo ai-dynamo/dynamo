@@ -177,6 +177,8 @@ class MockerProcess:
         self.num_workers = num_mockers
 
         mocker_args = mocker_args or {}
+        # Store dp_size for DP-aware test functions
+        self.dp_size = mocker_args.get("dp_size")
 
         command = _build_mocker_command(
             endpoint=self.endpoint,

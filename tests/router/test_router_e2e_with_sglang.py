@@ -110,6 +110,7 @@ class SGLangProcess:
         self.component_name = "backend"
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_workers
+        self.data_parallel_size = data_parallel_size
         self.worker_processes = []
         self.store_backend = store_backend
 

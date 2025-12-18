@@ -1954,11 +1954,36 @@ def _test_router_decisions(
 
     # Use async to manage the test flow
     async def test_sync():
+        # Calculate expected number of instances
+        # With data parallelism, each DP rank registers as a separate instance
+        # Mockers use dp_size, vLLM/SGLang use data_parallel_size
+        if test_dp_rank:
+            if (
+                hasattr(engine_workers, "data_parallel_size")
+                and engine_workers.data_parallel_size is not None
+            ):
+                # vLLM/SGLang: data_parallel_size DP ranks per worker process
+                expected_num_instances = (
+                    engine_workers.num_workers * engine_workers.data_parallel_size
+                )
+            elif (
+                hasattr(engine_workers, "dp_size")
+                and engine_workers.dp_size is not None
+            ):
+                # Mockers: dp_size DP ranks per worker process
+                expected_num_instances = (
+                    engine_workers.num_workers * engine_workers.dp_size
+                )
+            else:
+                expected_num_instances = engine_workers.num_workers
+        else:
+            expected_num_instances = engine_workers.num_workers
+
         # Wait for workers to be ready and get their instance IDs
         worker_ids = await wait_for_workers_ready(
             endpoint,
             kv_push_router,
-            expected_num_workers=engine_workers.num_workers,
+            expected_num_workers=expected_num_instances,
             model_name=model_name,
         )
         logger.info(f"Workers ready: {worker_ids}")
