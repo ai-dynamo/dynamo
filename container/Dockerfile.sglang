@@ -353,7 +353,7 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 ENV PATH=/usr/local/bin/etcd:$PATH
 
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-RUN --mount=type=bind,source=.,target=/mnt/local_src
+RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
             /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
             /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
