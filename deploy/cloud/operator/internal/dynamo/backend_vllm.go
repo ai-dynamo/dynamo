@@ -74,7 +74,7 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources, numberOfNodes int32) {
 	expandedArgs := getExpandedArgs(container)
 	if needsRayDistributedLaunch(expandedArgs, resources) {
-		injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer, numberOfNodes)
+		injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer)
 	} else if needsDataParallelLaunch(expandedArgs, resources) {
 		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, resources, numberOfNodes)
 	} else {
@@ -93,7 +93,7 @@ func getExpandedArgs(container *corev1.Container) []string {
 	return expandedArgs
 }
 
-func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, numberOfNodes int32) {
+func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
 	switch role {
 	case RoleLeader:
 		fullCommand := strings.Join(container.Command, " ")
