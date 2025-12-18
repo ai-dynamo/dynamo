@@ -235,27 +235,6 @@ When processing multimodal requests:
    - RadixTree matches blocks including MM hash
    - Same image content = same hash = cache hit on same worker
 
-## Troubleshooting
-
-**Issue**: Workers fail to initialize
-- Check GPU availability and memory
-- Ensure CUDA is properly installed
-- Try a smaller model if memory is limited
-
-**Issue**: Router not receiving events
-- Verify ZMQ ports are not in use
-- Check firewall settings
-- Review worker logs for event publishing errors
-
-**Issue**: Multimodal requests failing
-- Ensure model supports vision (e.g., Qwen2-VL)
-- Check image URLs are accessible
-- Verify `transformers` and `qwen_vl_utils` are installed
-
-**Issue**: First request hangs after code changes
-- Kill the process and restart
-- This may be due to TRTLLM initialization state
-
 ## Notes
 
 - This is a standalone implementation for pedagogical purposes
@@ -266,5 +245,4 @@ When processing multimodal requests:
 ## See Also
 
 - [vLLM Router Standalone](../router_standalone/) - Original vLLM version
-- [TensorRT-LLM Documentation](https://github.com/NVIDIA/TensorRT-LLM)
-- [Dynamo Documentation](../../../docs/)
+- [TensorRT-LLM KV Event Documentation](https://nvidia.github.io/TensorRT-LLM/0.21.0/examples/llm_inference_kv_events.html)
