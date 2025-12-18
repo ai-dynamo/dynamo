@@ -430,7 +430,6 @@ aiperf profile \
     --num-dataset-entries 8000 \
     --random-seed 100 \
     --artifact-dir /tmp/benchmark-results \
-    -v \
     -H 'Authorization: Bearer NOT USED' \
     -H 'Accept: text/event-stream'
 ```

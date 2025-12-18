@@ -234,6 +234,7 @@ impl DeltaGenerator {
     /// * `text` - The text content for the response.
     /// * `finish_reason` - The reason why the response finished (e.g., stop, length, etc.).
     /// * `logprobs` - Optional log probabilities of the generated tokens.
+    /// * `stop_reason` - Optional stop string or token that triggered the stop.
     ///
     /// # Returns
     /// * An [`dynamo_async_openai::types::CreateChatCompletionStreamResponse`] instance representing the choice.
@@ -244,6 +245,7 @@ impl DeltaGenerator {
         text: Option<String>,
         finish_reason: Option<dynamo_async_openai::types::FinishReason>,
         logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
+        stop_reason: Option<dynamo_async_openai::types::StopReason>,
     ) -> NvCreateChatCompletionStreamResponse {
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
             content: text,
@@ -262,6 +264,7 @@ impl DeltaGenerator {
             index,
             delta,
             finish_reason,
+            stop_reason,
             logprobs,
         };
 
@@ -384,19 +387,31 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Create the streaming response.
         let index = 0;
-        let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
+        let mut stream_response = self.create_choice(
+            index,
+            delta.text,
+            finish_reason,
+            logprobs,
+            delta.stop_reason,
+        );
 
         // Record first token time (only succeeds on first call due to OnceLock)
         if let Some(ref tracker) = self.timing_tracker {
             tracker.record_first_token();
         }
 
-        // Extract worker_id from disaggregated_params
+        // Extract worker_id and token_ids from disaggregated_params
         let worker_id_info = delta
             .disaggregated_params
             .as_ref()
             .and_then(|params| params.get("worker_id"))
             .and_then(|v| serde_json::from_value::<WorkerIdInfo>(v.clone()).ok());
+
+        let token_ids = delta
+            .disaggregated_params
+            .as_ref()
+            .and_then(|params| params.get("token_ids"))
+            .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok());
 
         // Get timing info if this is the final response (has finish_reason)
         let timing_info: Option<TimingInfo> = if finish_reason.is_some() {
@@ -408,11 +423,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             None
         };
 
-        // Inject nvext if we have worker_id or timing
-        if worker_id_info.is_some() || timing_info.is_some() {
+        // Inject nvext if we have worker_id, token_ids, or timing
+        if worker_id_info.is_some() || token_ids.is_some() || timing_info.is_some() {
             let nvext_response = NvExtResponse {
                 worker_id: worker_id_info.clone(),
                 timing: timing_info,
+                token_ids: token_ids.clone(),
             };
 
             if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
@@ -422,6 +438,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                         "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
                         info.prefill_worker_id,
                         info.decode_worker_id
+                    );
+                }
+                if let Some(ref tokens) = token_ids {
+                    tracing::debug!(
+                        "Injected token_ids into chat completion nvext: {} tokens",
+                        tokens.len()
                     );
                 }
             }

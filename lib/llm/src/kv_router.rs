@@ -31,11 +31,13 @@ pub mod protocols;
 pub mod publisher;
 pub mod recorder;
 pub mod scheduler;
-pub mod scoring;
 pub mod sequence;
 pub mod subscriber;
+pub mod worker_query;
 
+use indexer::WorkerKvQueryResponse;
 pub use prefill_router::PrefillRouter;
+use worker_query::WorkerQueryClient;
 
 use crate::{
     kv_router::{
@@ -45,11 +47,12 @@ use crate::{
             compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         protocols::{
-            LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult, WorkerWithDpRank,
+            LocalBlockHash, RouterRequest, RouterResponse, WorkerId, WorkerSelectionResult,
+            WorkerWithDpRank,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         sequence::SequenceError,
-        subscriber::start_kv_router_background,
+        subscriber::{start_kv_router_background, start_kv_router_background_nats_core},
     },
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
@@ -65,7 +68,7 @@ use crate::{
 pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
 // for metric publishing (push-based)
-pub const KV_EVENT_SUBJECT: &str = "kv_events";
+pub const KV_EVENT_SUBJECT: &str = "kv-events";
 pub const KV_HIT_RATE_SUBJECT: &str = "kv-hit-rate";
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
 
@@ -77,6 +80,10 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
 
+// for worker-local kvindexer query
+pub const WORKER_KV_INDEXER_QUERY_SUBJECT: &str = "worker_kv_indexer_query";
+pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
+
 // for router discovery registration
 pub const KV_ROUTER_COMPONENT: &str = "kv-router";
 pub const KV_ROUTER_ENDPOINT: &str = "generate";
@@ -87,6 +94,46 @@ pub fn router_endpoint_id(namespace: String) -> EndpointId {
         namespace,
         component: KV_ROUTER_COMPONENT.to_string(),
         name: KV_ROUTER_ENDPOINT.to_string(),
+    }
+}
+
+/// Specifies the type of worker being queried when using the `query_instance_id` annotation.
+/// This tells the router which worker pool to select from and what type of operation is intended.
+///
+/// Query instance types for worker selection
+/// - "prefill" → select a prefill worker (disaggregated serving)
+/// - "decode" → select a decode worker (disaggregated serving)
+///
+/// Note: Empty value ("query_instance_id:") is handled by PrefillRouter for disagg orchestration
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QueryInstanceType {
+    /// Query for a prefill worker (disaggregated serving)
+    Prefill,
+    /// Query for a decode worker (disaggregated serving)
+    Decode,
+}
+
+impl std::fmt::Display for QueryInstanceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueryInstanceType::Prefill => write!(f, "prefill"),
+            QueryInstanceType::Decode => write!(f, "decode"),
+        }
+    }
+}
+
+impl std::str::FromStr for QueryInstanceType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "prefill" => Ok(QueryInstanceType::Prefill),
+            "decode" => Ok(QueryInstanceType::Decode),
+            _ => Err(format!(
+                "Invalid QueryInstanceType: '{s}'. Expected 'prefill' or 'decode'"
+            )),
+        }
     }
 }
 
@@ -270,6 +317,8 @@ pub struct KvRouter {
     cancellation_token: tokio_util::sync::CancellationToken,
 
     client: Client,
+
+    worker_query_client: Option<WorkerQueryClient>,
 }
 
 impl KvRouter {
@@ -296,7 +345,7 @@ impl KvRouter {
             endpoint: endpoint_id.name.clone(),
         };
         let discovery_stream = discovery
-            .list_and_watch(discovery_key, Some(cancellation_token.clone()))
+            .list_and_watch(discovery_key.clone(), Some(cancellation_token.clone()))
             .await?;
         let runtime_configs_rx =
             watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
@@ -333,33 +382,104 @@ impl KvRouter {
             component.clone(),
             block_size,
             instance_ids_rx,
-            runtime_configs_rx,
+            runtime_configs_rx.clone(),
             selector,
             kv_router_config.router_replica_sync,
             consumer_id.clone(),
         )
         .await?;
 
+        // Initialize worker query client using namespace abstraction
+        // (created before background task so we can use it for startup recovery)
+        let worker_query_client =
+            worker_query::WorkerQueryClient::new(component.clone(), runtime_configs_rx.clone());
+        tracing::info!("Worker query client initialized");
+
         // Start KV event subscriber background process (only when use_kv_events is enabled)
+        // This is spawned as a background task to avoid blocking router startup.
+        // The task waits for runtime_configs to determine whether to use NATS Core or JetStream.
         if kv_router_config.use_kv_events
             && let Indexer::KvIndexer(ref kv_indexer) = indexer
         {
-            start_kv_router_background(
-                component.clone(),
-                consumer_id,
-                kv_indexer.event_sender(),
-                kv_indexer.remove_worker_sender(),
-                kv_router_config
-                    .router_snapshot_threshold
-                    .map(|_| kv_indexer.get_workers_sender()),
-                kv_router_config
-                    .router_snapshot_threshold
-                    .map(|_| kv_indexer.snapshot_event_sender()),
-                cancellation_token.clone(),
-                kv_router_config.router_snapshot_threshold,
-                kv_router_config.router_reset_states,
-            )
-            .await?;
+            // Clone everything needed for the background task
+            let component_clone = component.clone();
+            let kv_indexer_clone = kv_indexer.clone();
+            let cancellation_token_clone = cancellation_token.clone();
+            let mut runtime_configs_rx_clone = runtime_configs_rx.clone();
+            let worker_query_client_clone =
+                worker_query::WorkerQueryClient::new(component.clone(), runtime_configs_rx.clone());
+
+            tokio::spawn(async move {
+                // Wait for runtime_configs to have at least one entry
+                let (all_local_indexer, count) = loop {
+                    {
+                        let configs = runtime_configs_rx_clone.borrow();
+                        if !configs.is_empty() {
+                            let all_local_indexer =
+                                configs.values().all(|c| c.enable_local_indexer);
+                            break (all_local_indexer, configs.len());
+                        }
+                    }
+
+                    // Wait for changes to runtime_configs
+                    tokio::select! {
+                        _ = cancellation_token_clone.cancelled() => {
+                            tracing::debug!("Subscriber selection task cancelled");
+                            return;
+                        }
+                        result = runtime_configs_rx_clone.changed() => {
+                            if result.is_err() {
+                                tracing::debug!("Runtime configs channel closed");
+                                return;
+                            }
+                        }
+                    }
+                };
+
+                if all_local_indexer {
+                    // All workers have local_indexer enabled - use NATS Core
+                    tracing::info!(
+                        "All {count} workers have local_indexer enabled, using NATS Core subscription"
+                    );
+
+                    if let Err(e) = start_kv_router_background_nats_core(
+                        component_clone.clone(),
+                        kv_indexer_clone.event_sender(),
+                        kv_indexer_clone.remove_worker_sender(),
+                        cancellation_token_clone.clone(),
+                        worker_query_client_clone,
+                    )
+                    .await
+                    {
+                        tracing::error!("Failed to start NATS Core subscriber: {e}");
+                    }
+                } else {
+                    // Not all workers have local_indexer - use JetStream
+                    tracing::info!(
+                        "Not all workers have local_indexer enabled, using JetStream subscription"
+                    );
+
+                    if let Err(e) = start_kv_router_background(
+                        component_clone.clone(),
+                        consumer_id,
+                        kv_indexer_clone.event_sender(),
+                        kv_indexer_clone.remove_worker_sender(),
+                        kv_router_config
+                            .router_snapshot_threshold
+                            .map(|_| kv_indexer_clone.get_workers_sender()),
+                        kv_router_config
+                            .router_snapshot_threshold
+                            .map(|_| kv_indexer_clone.snapshot_event_sender()),
+                        cancellation_token_clone.clone(),
+                        kv_router_config.router_snapshot_threshold,
+                        kv_router_config.router_reset_states,
+                    )
+                    .await
+                    {
+                        tracing::error!("Failed to start JetStream subscriber: {e}");
+                    }
+                }
+            });
         }
 
         tracing::info!("KV Routing initialized");
@@ -370,6 +490,7 @@ impl KvRouter {
             kv_router_config,
             cancellation_token,
             client,
+            worker_query_client: Some(worker_query_client),
         })
     }
 
@@ -481,6 +602,15 @@ impl KvRouter {
         self.block_size
     }
 
+    /// Get the disaggregated endpoint for a worker, if available.
+    /// Used to look up bootstrap host/port for prefill workers.
+    pub async fn get_disaggregated_endpoint(
+        &self,
+        worker_id: u64,
+    ) -> Option<crate::local_model::runtime_config::DisaggregatedEndpoint> {
+        self.scheduler.get_disaggregated_endpoint(worker_id).await
+    }
+
     /// Get potential prefill and decode loads for all workers
     pub async fn get_potential_loads(&self, tokens: &[u32]) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
@@ -501,6 +631,62 @@ impl KvRouter {
     /// Dump all events from the indexer
     pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         self.indexer.dump_events().await
+    }
+
+    /// Query a specific worker's local KV indexer for its events
+    /// (See docstring for `WorkerQueryClient.query_worker()`)
+    pub async fn query_worker_local_kv(
+        &self,
+        worker_id: WorkerId,
+        start_event_id: Option<u64>,
+        end_event_id: Option<u64>,
+    ) -> Result<WorkerKvQueryResponse> {
+        let query_client = self
+            .worker_query_client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Worker query client not available (NATS required)"))?;
+
+        query_client
+            .query_worker(worker_id, start_event_id, end_event_id)
+            .await
+    }
+
+    /// Recover missed KV events from a specific worker.
+    ///
+    /// Queries the worker's local KV indexer for events starting from
+    /// `start_event_id` and applies them to the router's indexer.
+    ///
+    /// # Arguments
+    ///
+    /// * `worker_id` - The worker to recover from
+    /// * `start_event_id` - First event ID to fetch (inclusive), or None to start from beginning
+    /// * `end_event_id` - Last event ID to fetch (inclusive), or None for all
+    pub async fn recover_from_worker(
+        &self,
+        worker_id: WorkerId,
+        start_event_id: Option<u64>,
+        end_event_id: Option<u64>,
+    ) -> Result<usize> {
+        let query_client = self
+            .worker_query_client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Worker query client not available"))?;
+
+        let event_tx = match &self.indexer {
+            Indexer::KvIndexer(kv_indexer) => kv_indexer.event_sender(),
+            Indexer::None => {
+                anyhow::bail!("Cannot recover: indexer is disabled (--overlap_score_weight is 0)")
+            }
+        };
+
+        subscriber::recover_from_worker(
+            query_client,
+            worker_id,
+            start_event_id,
+            end_event_id,
+            &event_tx,
+        )
+        .await
     }
 }
 
@@ -585,13 +771,34 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Extract context ID for request tracking
         let context_id = request.context().id().to_string();
 
-        // Check if this is a query_instance_id request first
-        let query_instance_id = request.has_annotation("query_instance_id");
+        // Check if this is a query_instance_id request and parse its type
+        // Format: "query_instance_id:type" where type is "prefill", "decode", or "" (empty for aggregated)
+        // Empty value ("query_instance_id:") means GAIE Aggregated mode - return same worker as both prefill and decode
+        let query_instance_annotation = request.get_annotation_value("query_instance_id");
+        let is_gaie_agg_query = query_instance_annotation
+            .as_ref()
+            .is_some_and(|s| s.is_empty());
+        let query_instance_type: Option<QueryInstanceType> =
+            if let Some(type_str) = &query_instance_annotation {
+                match type_str.parse::<QueryInstanceType>() {
+                    Ok(t) => Some(t),
+                    Err(_) if type_str.is_empty() => {
+                        // Empty value is valid for aggregated mode, not a warning
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!("Invalid query_instance_id type '{type_str}': {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
 
         let (instance_id, dp_rank, overlap_amount) = if let Some(id) = request.backend_instance_id {
             // If instance_id is set, use it and compute actual overlap
             let dp_rank = request.dp_rank.unwrap_or(0);
-            if query_instance_id {
+            if query_instance_type.is_some() {
                 tracing::debug!(
                     "backend_instance_id is set, routing to instance {id} with dp_rank {dp_rank} and ignoring query_instance_id annotation"
                 );
@@ -615,33 +822,80 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             (id, dp_rank, overlap_blocks)
         } else {
             // Otherwise, find the best match
+            // Don't update states if this is a query-only request (any query_instance_id annotation)
+            let should_update_states = query_instance_annotation.is_none();
             let (best_worker, overlap_amount) = self
                 .chooser
                 .find_best_match(
                     Some(&context_id),
                     &request.token_ids,
                     request.router_config_override.as_ref(),
-                    !query_instance_id, // Don't update states if query_instance_id
+                    should_update_states,
                 )
                 .await?;
             (best_worker.worker_id, best_worker.dp_rank, overlap_amount)
         };
 
-        // if request has the annotation "query_instance_id",
-        // then the request will not be routed to the worker,
-        // and instead the worker_instance_id will be returned.
+        // If request has a query_instance_id annotation, return worker selection info
+        // without routing to the actual worker. Returns LLMEngineOutput with disaggregated_params
+        // containing worker_id info, same structure as normal execution for uniform extraction.
         let stream_context = request.context().clone();
-        if query_instance_id {
-            let instance_id_str = instance_id.to_string();
-            let response = Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
 
-            // Return the tokens in nvext.token_data format
-            let response_tokens = Annotated::from_annotation("token_data", &request.token_ids)?;
-            tracing::trace!(
-                "Tokens requested in the response through the query_instance_id annotation: {:?}",
-                response_tokens
-            );
-            let stream = stream::iter(vec![response, response_tokens]);
+        // Handle query-only requests (GAIE Stage 1)
+        if query_instance_type.is_some() || is_gaie_agg_query {
+            let worker_id_info = if is_gaie_agg_query {
+                // GAIE Aggregated mode: same worker serves both prefill and decode
+                tracing::trace!(
+                    query_type = "aggregated",
+                    worker_id = instance_id,
+                    "Returning aggregated worker selection (same worker for prefill and decode)"
+                );
+                WorkerIdInfo {
+                    prefill_worker_id: Some(instance_id),
+                    decode_worker_id: Some(instance_id),
+                }
+            } else {
+                match query_instance_type.unwrap() {
+                    QueryInstanceType::Prefill => {
+                        tracing::trace!(
+                            query_type = "prefill",
+                            prefill_worker_id = instance_id,
+                            "Returning prefill worker selection"
+                        );
+                        WorkerIdInfo {
+                            prefill_worker_id: Some(instance_id),
+                            decode_worker_id: None,
+                        }
+                    }
+                    QueryInstanceType::Decode => {
+                        // Get prefill_worker_id from annotation (set by caller after prefill selection)
+                        let prefill_worker_id = request
+                            .get_annotation_value("prefill_worker_id")
+                            .and_then(|s| s.parse::<u64>().ok());
+                        tracing::trace!(
+                            query_type = "decode",
+                            prefill_worker_id = ?prefill_worker_id,
+                            decode_worker_id = instance_id,
+                            "Returning decode worker selection"
+                        );
+                        WorkerIdInfo {
+                            prefill_worker_id,
+                            decode_worker_id: Some(instance_id),
+                        }
+                    }
+                }
+            };
+
+            // Return as LLMEngineOutput with disaggregated_params (same structure as normal execution)
+            let output = LLMEngineOutput {
+                disaggregated_params: Some(json!({
+                    "worker_id": worker_id_info,
+                    "token_ids": request.token_ids
+                })),
+                ..Default::default()
+            };
+            let response = Annotated::from_data(output);
+            let stream = stream::iter(vec![response]);
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
         let (mut backend_input, context) = request.into_parts();

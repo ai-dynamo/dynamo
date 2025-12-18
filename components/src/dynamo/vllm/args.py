@@ -40,6 +40,7 @@ class Config:
     custom_jinja_template: Optional[str] = None
     store_kv: str
     request_plane: str
+    enable_local_indexer: bool = False
 
     # mirror vLLM
     model: str
@@ -201,8 +202,15 @@ def parse_args() -> Config:
         "--request-plane",
         type=str,
         choices=["nats", "http", "tcp"],
-        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    )
+    parser.add_argument(
+        "--enable-local-indexer",
+        type=str,
+        choices=["true", "false"],
+        default=os.environ.get("DYN_LOCAL_INDEXER", "false"),
+        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     )
     parser.add_argument(
         "--use-vllm-tokenizer",
@@ -214,8 +222,15 @@ def parse_args() -> Config:
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
+    args.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
+    if hasattr(engine_args, "stream_interval") and engine_args.stream_interval != 1:
+        logger.warning(
+            "--stream-interval is currently not respected in Dynamo. "
+            "Dynamo uses its own post-processing implementation on the frontend, "
+            "bypassing vLLM's OutputProcessor buffering. "
+        )
     # Workaround for vLLM GIL contention bug with NIXL connector when using UniProcExecutor.
     # With TP=1, vLLM defaults to UniProcExecutor which runs scheduler and worker in the same
     # process. This causes a hot loop in _process_engine_step that doesn't release the GIL,
@@ -312,6 +327,7 @@ def parse_args() -> Config:
     config.mm_prompt_template = args.mm_prompt_template
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
+    config.enable_local_indexer = args.enable_local_indexer
     config.use_vllm_tokenizer = args.use_vllm_tokenizer
 
     # Validate custom Jinja template file exists if provided

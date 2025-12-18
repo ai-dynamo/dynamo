@@ -5,7 +5,6 @@ import logging
 import os
 import shutil
 import tempfile
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -223,26 +222,6 @@ def pytest_collection_modifyitems(config, items):
         config.models_to_download = models_to_download
 
 
-def pytest_runtestloop(session):
-    """Download models after collection but before any tests run.
-
-    This hook runs after pytest_collection_modifyitems (so models are collected)
-    but before any test execution, ensuring model downloads don't count against test timeouts.
-    """
-    models = getattr(session.config, "models_to_download", None)
-
-    if models:
-        logging.info(
-            f"Downloading {len(models)} models before test execution\nModels: {models}"
-        )
-        start_time = time.time()
-
-        download_models(model_list=list(models))
-
-        download_duration = time.time() - start_time
-        logging.info(f"Model download completed in {download_duration:.1f}s")
-
-
 class EtcdServer(ManagedProcess):
     def __init__(self, request, port=2379, timeout=300):
         # Allocate free ports if port is 0
@@ -326,6 +305,8 @@ class NatsServer(ManagedProcess):
 
         self.port = port
         self.use_random_port = use_random_port  # Track if we allocated the port
+        self._request = request  # Store for restart
+        self._timeout = timeout
         data_dir = tempfile.mkdtemp(prefix="nats_")
         command = [
             "nats-server",
@@ -356,6 +337,39 @@ class NatsServer(ManagedProcess):
             logging.warning(f"Failed to release NatsServer port: {e}")
 
         return super().__exit__(exc_type, exc_val, exc_tb)
+
+    def stop(self):
+        """Stop the NATS server for restart. Does not release port or clean up fully."""
+        _logger.info(f"Stopping NATS server on port {self.port}")
+        self._terminate_process_group()
+        if self.proc:
+            try:
+                self.proc.wait(timeout=10)
+            except Exception as e:
+                _logger.warning(f"Error waiting for NATS process to stop: {e}")
+            self.proc = None
+
+    def start(self):
+        """Restart a stopped NATS server with fresh state."""
+        _logger.info(f"Starting NATS server on port {self.port} with fresh state")
+        # Clean up old data directory and create fresh one
+        if self.data_dir:
+            shutil.rmtree(self.data_dir, ignore_errors=True)
+        self.data_dir = tempfile.mkdtemp(prefix="nats_")
+
+        # Rebuild command with new data_dir
+        self.command = [
+            "nats-server",
+            "-js",
+            "--trace",
+            "--store_dir",
+            self.data_dir,
+            "-p",
+            str(self.port),
+        ]
+
+        self._start_process()
+        self._check_ports(self._timeout)
 
 
 class SharedManagedProcess:
@@ -542,15 +556,22 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
     It also sets the NATS_SERVER and ETCD_ENDPOINTS environment variables so that
     Dynamo processes can find the services on the dynamic ports.
 
+    xdist/parallel safety:
+    - Function-scoped: each test gets its own NATS/etcd instances and ports.
+    - Each pytest-xdist worker runs tests in a separate process, so env vars do not
+      leak across workers.
+
     - If store_kv != "etcd", etcd is not started (returns None)
-    - If request_plane != "nats", NATS is not started (returns None)
+    - NATS is always started when etcd is used, because KV events require NATS
+      regardless of the request_plane (tcp/nats only affects request transport)
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
     import os
 
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
-    if request_plane == "nats" and store_kv == "etcd":
+    # Always start NATS when etcd is used - KV events require NATS regardless of request_plane
+    if store_kv == "etcd":
         with NatsServer(request, port=0) as nats_process:
             with EtcdServer(request, port=0) as etcd_process:
                 # Set environment variables for Rust/Python runtime to use. Note that xdist (parallel execution)
@@ -568,11 +589,6 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
             os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
             yield nats_process, None
             os.environ.pop("NATS_SERVER", None)
-    elif store_kv == "etcd":
-        with EtcdServer(request, port=0) as etcd_process:
-            os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
-            yield None, etcd_process
-            os.environ.pop("ETCD_ENDPOINTS", None)
     else:
         yield None, None
 
@@ -584,7 +600,14 @@ def runtime_services_session(request, tmp_path_factory):
     Uses file-based reference counting to coordinate between pytest-xdist worker processes.
     Only the first worker starts services, and only the last worker tears them down.
 
-    Test isolation is achieved through unique namespaces (test-namespace-{random-suffix}).
+    WARNING: may not be parallel/xdist safe.
+    - This fixture shares one NATS + one etcd across many tests (and across xdist workers).
+    - It is only safe if tests fully isolate state (e.g. unique namespaces) and do not
+      assume exclusive access to global streams/keys/ports.
+    - Prefer `runtime_services_dynamic_ports` for true per-test isolation in parallel runs.
+
+    TODO: once nothing uses `runtime_services_session`, make the per-test dynamic ports
+    behavior the default for router/frontend integration tests.
     """
     with SharedNatsServer(request, tmp_path_factory) as nats:
         with SharedEtcdServer(request, tmp_path_factory) as etcd:

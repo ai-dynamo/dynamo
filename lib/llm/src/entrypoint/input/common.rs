@@ -58,12 +58,15 @@ pub async fn prepare_engine(
     engine_config: EngineConfig,
 ) -> anyhow::Result<PreparedEngine> {
     match engine_config {
-        EngineConfig::Dynamic(local_model) => {
+        EngineConfig::Dynamic {
+            model: local_model, ..
+        } => {
             let model_manager = Arc::new(ModelManager::new());
             let watch_obj = Arc::new(ModelWatcher::new(
                 distributed_runtime.clone(),
                 model_manager.clone(),
                 RouterConfig::default(),
+                None,
             ));
             let discovery = distributed_runtime.discovery();
             let discovery_stream = discovery
@@ -237,7 +240,10 @@ where
     };
 
     // Get threshold value and wrap monitor for PushRouter
-    let threshold_value = worker_monitor.as_ref().map(|m| m.threshold());
+    // Note: PushRouter uses active_decode_blocks_threshold for its internal logic
+    let threshold_value = worker_monitor
+        .as_ref()
+        .map(|m| m.active_decode_blocks_threshold());
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
