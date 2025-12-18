@@ -16,10 +16,10 @@ pub use crate::types::{
 use derive_builder::Builder;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
+use utoipa::ToSchema;
 
 /// Role of messages in the API.
 #[derive(ToSchema, Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]

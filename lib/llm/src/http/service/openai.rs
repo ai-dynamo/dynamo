@@ -1424,7 +1424,7 @@ async fn list_models_openai(
     for model_name in models {
         data.push(ModelListing {
             id: model_name.clone(),
-            object: "model",  // Per OpenAI spec, this should be "model"
+            object: "model", // Per OpenAI spec, this should be "model"
             created,
             owned_by: "nvidia".to_string(),
         });

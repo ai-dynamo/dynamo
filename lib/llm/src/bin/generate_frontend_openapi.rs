@@ -77,5 +77,3 @@ fn generate_openapi() -> anyhow::Result<()> {
 
     Ok(())
 }
-
-
