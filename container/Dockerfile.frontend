@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
-ARG EPP_IMAGE="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1-dirty"
+ARG EPP_IMAGE="nvcr.io/nvstaging/ai-dynamo/gaie-epp-dynamo:v0.6.0-1"
 ARG PYTHON_VERSION=3.12
 
 FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
