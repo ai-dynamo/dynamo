@@ -142,7 +142,7 @@ kubectl delete pod -l app=benchmark -n ${NAMESPACE}
 
 # Delete deployments
 kubectl delete dynamographdeployment agg-8xtp2 -n ${NAMESPACE}
-kubectl delete dynamographdeployment disagg-router -n ${NAMESPACE}
+kubectl delete dynamographdeployment disagg-router-6p-2d-n ${NAMESPACE}
 ```
 
 ## References

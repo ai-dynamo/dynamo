@@ -9,8 +9,6 @@ spec:
   - create: false
     name: model-cache
   - create: false
-    name: dynamo-pvc
-  - create: false
     name: compilation-cache
   services:
     Frontend:
