@@ -400,28 +400,26 @@ impl
         // Handle prefill result
         match prefill_result {
             Ok(prefill_result) => {
-                tracing::debug!(
-                    request_id = %request_id,
-                    "Prefill succeeded, using disaggregated params for decode"
-                );
+                tracing::debug!("Prefill succeeded, using disaggregated params for decode");
 
                 let mut decode_req = req;
+                // Update request with prefill result
+                if is_gaie_stage1 {
+                    Self::prepare_decode_for_gaie_stage1(&mut decode_req, &prefill_result);
+                } else {
+                    // Normal no GAIE or GAIE Stage 2: Set prefill_result for decode
+                    decode_req.prefill_result = Some(prefill_result);
+                }
+
                 // Restore original max_tokens for decode
                 decode_req.stop_conditions.max_tokens = original_max_tokens;
+
                 // Set router_config_override for decode: overlap_score_weight = 0
                 let existing_override = decode_req.router_config_override.take();
                 decode_req.router_config_override = Some(RouterConfigOverride {
                     overlap_score_weight: Some(0.0),
                     ..existing_override.unwrap_or_default()
                 });
-
-                // GAIE Stage 1: Extract prefill_worker_id and transition query_instance_id state
-                if is_gaie_stage1 {
-                    Self::prepare_decode_for_gaie_stage1(&mut decode_req, &prefill_result);
-                } else {
-                    // Normal/GAIE Stage 2: Set prefill_result for decode
-                    decode_req.prefill_result = Some(prefill_result);
-                }
 
                 // GAIE Stage 2: Route to pre-selected decode worker if specified
                 if let Some(decode_worker_id) = decode_req.target_decode_worker_id {
