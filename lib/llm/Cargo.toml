@@ -40,7 +40,7 @@ required-features = ["block-manager", "testing-cuda"]
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true }
-dynamo-memory = { path = "../memory", version = "0.7.0", optional = true }
+dynamo-memory = { path = "../memory", optional = true }
 
 # workspace
 aho-corasick = "1.1"
