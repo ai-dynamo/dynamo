@@ -2852,6 +2852,7 @@ dependencies = [
  "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
+ "dynamo-config",
  "educe",
  "either",
  "env_logger",

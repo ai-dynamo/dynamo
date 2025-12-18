@@ -20,7 +20,7 @@ This guide covers single GPU demo setup using Docker Compose. For Kubernetes dep
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
 | `DYN_LOGGING_JSONL` | Enable JSONL logging format (required for tracing) | `false` | `true` |
-| `OTEL_EXPORT_ENABLED` | Enable OTLP trace export is set to 1 | false | `1` |
+| `OTEL_EXPORT_ENABLED` | Enable OTLP trace export | `false` | `true` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for Tempo | `http://localhost:4317` | `http://tempo:4317` |
 | `OTEL_SERVICE_NAME` | Service name for identifying components | `dynamo` | `dynamo-frontend` |
 
@@ -81,7 +81,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 
 # Enable tracing
 export DYN_LOGGING_JSONL=true
-export OTEL_EXPORT_ENABLED=1
+export OTEL_EXPORT_ENABLED=true
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
 
 # Run frontend (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
