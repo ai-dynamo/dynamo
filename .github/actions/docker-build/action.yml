@@ -127,7 +127,7 @@ runs:
         else
           CACHE_PLATFORM="${PLATFORM##*/}"
         fi
-        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${CACHE_PLATFORM}-cache "
+        EXTRA_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${CACHE_PLATFORM}-cache "
         EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-${CACHE_PLATFORM} "
         if [[ "$GITHUB_REF_NAME" == "main" ]]; then
           EXTRA_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${CACHE_PLATFORM}-cache,mode=max "
