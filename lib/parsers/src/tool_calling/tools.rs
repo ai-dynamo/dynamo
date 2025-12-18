@@ -10,6 +10,7 @@ pub use super::parsers::detect_and_parse_tool_call;
 pub async fn try_tool_call_parse_aggregate(
     message: &str,
     parser_str: Option<&str>,
+    tools: Option<&[super::ToolDefinition]>,
 ) -> anyhow::Result<(
     Vec<dynamo_async_openai::types::ChatCompletionMessageToolCall>,
     Option<String>,
@@ -19,7 +20,7 @@ pub async fn try_tool_call_parse_aggregate(
     } else {
         tracing::info!("Using tool parser: {:?}", parser_str);
     }
-    let (parsed, content) = detect_and_parse_tool_call(message, parser_str).await?;
+    let (parsed, content) = detect_and_parse_tool_call(message, parser_str, tools).await?;
     if parsed.is_empty() {
         return Ok((vec![], content));
     }
@@ -47,11 +48,12 @@ pub async fn try_tool_call_parse_aggregate(
 pub async fn try_tool_call_parse_stream(
     message: &str,
     parser_str: Option<&str>,
+    tools: Option<&[super::ToolDefinition]>,
 ) -> anyhow::Result<(
     Vec<dynamo_async_openai::types::ChatCompletionMessageToolCallChunk>,
     Option<String>,
 )> {
-    let (parsed, content) = detect_and_parse_tool_call(message, parser_str).await?;
+    let (parsed, content) = detect_and_parse_tool_call(message, parser_str, tools).await?;
     if parsed.is_empty() {
         return Ok((vec![], content));
     }
