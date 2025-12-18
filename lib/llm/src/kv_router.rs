@@ -97,6 +97,46 @@ pub fn router_endpoint_id(namespace: String) -> EndpointId {
     }
 }
 
+/// Specifies the type of worker being queried when using the `query_instance_id` annotation.
+/// This tells the router which worker pool to select from and what type of operation is intended.
+///
+/// Query instance types for worker selection
+/// - "prefill" → select a prefill worker (disaggregated serving)
+/// - "decode" → select a decode worker (disaggregated serving)
+///
+/// Note: Empty value ("query_instance_id:") is handled by PrefillRouter for disagg orchestration
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QueryInstanceType {
+    /// Query for a prefill worker (disaggregated serving)
+    Prefill,
+    /// Query for a decode worker (disaggregated serving)
+    Decode,
+}
+
+impl std::fmt::Display for QueryInstanceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueryInstanceType::Prefill => write!(f, "prefill"),
+            QueryInstanceType::Decode => write!(f, "decode"),
+        }
+    }
+}
+
+impl std::str::FromStr for QueryInstanceType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "prefill" => Ok(QueryInstanceType::Prefill),
+            "decode" => Ok(QueryInstanceType::Decode),
+            _ => Err(format!(
+                "Invalid QueryInstanceType: '{s}'. Expected 'prefill' or 'decode'"
+            )),
+        }
+    }
+}
+
 /// Creates a DiscoveryQuery for the KV router in the given namespace.
 pub fn router_discovery_query(namespace: String) -> DiscoveryQuery {
     DiscoveryQuery::Endpoint {
@@ -731,13 +771,34 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Extract context ID for request tracking
         let context_id = request.context().id().to_string();
 
-        // Check if this is a query_instance_id request first
-        let query_instance_id = request.has_annotation("query_instance_id");
+        // Check if this is a query_instance_id request and parse its type
+        // Format: "query_instance_id:type" where type is "prefill", "decode", or "" (empty for aggregated)
+        // Empty value ("query_instance_id:") means GAIE Aggregated mode - return same worker as both prefill and decode
+        let query_instance_annotation = request.get_annotation_value("query_instance_id");
+        let is_gaie_agg_query = query_instance_annotation
+            .as_ref()
+            .is_some_and(|s| s.is_empty());
+        let query_instance_type: Option<QueryInstanceType> =
+            if let Some(type_str) = &query_instance_annotation {
+                match type_str.parse::<QueryInstanceType>() {
+                    Ok(t) => Some(t),
+                    Err(_) if type_str.is_empty() => {
+                        // Empty value is valid for aggregated mode, not a warning
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!("Invalid query_instance_id type '{type_str}': {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
 
         let (instance_id, dp_rank, overlap_amount) = if let Some(id) = request.backend_instance_id {
             // If instance_id is set, use it and compute actual overlap
             let dp_rank = request.dp_rank.unwrap_or(0);
-            if query_instance_id {
+            if query_instance_type.is_some() {
                 tracing::debug!(
                     "backend_instance_id is set, routing to instance {id} with dp_rank {dp_rank} and ignoring query_instance_id annotation"
                 );
@@ -761,33 +822,80 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             (id, dp_rank, overlap_blocks)
         } else {
             // Otherwise, find the best match
+            // Don't update states if this is a query-only request (any query_instance_id annotation)
+            let should_update_states = query_instance_annotation.is_none();
             let (best_worker, overlap_amount) = self
                 .chooser
                 .find_best_match(
                     Some(&context_id),
                     &request.token_ids,
                     request.router_config_override.as_ref(),
-                    !query_instance_id, // Don't update states if query_instance_id
+                    should_update_states,
                 )
                 .await?;
             (best_worker.worker_id, best_worker.dp_rank, overlap_amount)
         };
 
-        // if request has the annotation "query_instance_id",
-        // then the request will not be routed to the worker,
-        // and instead the worker_instance_id will be returned.
+        // If request has a query_instance_id annotation, return worker selection info
+        // without routing to the actual worker. Returns LLMEngineOutput with disaggregated_params
+        // containing worker_id info, same structure as normal execution for uniform extraction.
         let stream_context = request.context().clone();
-        if query_instance_id {
-            let instance_id_str = instance_id.to_string();
-            let response = Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
 
-            // Return the tokens in nvext.token_data format
-            let response_tokens = Annotated::from_annotation("token_data", &request.token_ids)?;
-            tracing::trace!(
-                "Tokens requested in the response through the query_instance_id annotation: {:?}",
-                response_tokens
-            );
-            let stream = stream::iter(vec![response, response_tokens]);
+        // Handle query-only requests (GAIE Stage 1)
+        if query_instance_type.is_some() || is_gaie_agg_query {
+            let worker_id_info = if is_gaie_agg_query {
+                // GAIE Aggregated mode: same worker serves both prefill and decode
+                tracing::trace!(
+                    query_type = "aggregated",
+                    worker_id = instance_id,
+                    "Returning aggregated worker selection (same worker for prefill and decode)"
+                );
+                WorkerIdInfo {
+                    prefill_worker_id: Some(instance_id),
+                    decode_worker_id: Some(instance_id),
+                }
+            } else {
+                match query_instance_type.unwrap() {
+                    QueryInstanceType::Prefill => {
+                        tracing::trace!(
+                            query_type = "prefill",
+                            prefill_worker_id = instance_id,
+                            "Returning prefill worker selection"
+                        );
+                        WorkerIdInfo {
+                            prefill_worker_id: Some(instance_id),
+                            decode_worker_id: None,
+                        }
+                    }
+                    QueryInstanceType::Decode => {
+                        // Get prefill_worker_id from annotation (set by caller after prefill selection)
+                        let prefill_worker_id = request
+                            .get_annotation_value("prefill_worker_id")
+                            .and_then(|s| s.parse::<u64>().ok());
+                        tracing::trace!(
+                            query_type = "decode",
+                            prefill_worker_id = ?prefill_worker_id,
+                            decode_worker_id = instance_id,
+                            "Returning decode worker selection"
+                        );
+                        WorkerIdInfo {
+                            prefill_worker_id,
+                            decode_worker_id: Some(instance_id),
+                        }
+                    }
+                }
+            };
+
+            // Return as LLMEngineOutput with disaggregated_params (same structure as normal execution)
+            let output = LLMEngineOutput {
+                disaggregated_params: Some(json!({
+                    "worker_id": worker_id_info,
+                    "token_ids": request.token_ids
+                })),
+                ..Default::default()
+            };
+            let response = Annotated::from_data(output);
+            let stream = stream::iter(vec![response]);
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
         let (mut backend_input, context) = request.into_parts();

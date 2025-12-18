@@ -20,7 +20,7 @@ use dynamo_runtime::{
 
 use crate::{
     backend::Backend,
-    entrypoint::{self, RouterConfig},
+    entrypoint::{self, EngineFactoryCallback, RouterConfig},
     kv_router::PrefillRouter,
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
@@ -53,6 +53,7 @@ pub struct ModelWatcher {
     router_config: RouterConfig,
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
+    engine_factory: Option<EngineFactoryCallback>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -68,6 +69,7 @@ impl ModelWatcher {
         runtime: DistributedRuntime,
         model_manager: Arc<ModelManager>,
         router_config: RouterConfig,
+        engine_factory: Option<EngineFactoryCallback>,
     ) -> ModelWatcher {
         Self {
             manager: model_manager,
@@ -75,6 +77,7 @@ impl ModelWatcher {
             router_config,
             notify_on_model: Notify::new(),
             model_update_tx: None,
+            engine_factory,
         }
     }
 
@@ -355,6 +358,7 @@ impl ModelWatcher {
         if let Some(tx) = &self.model_update_tx {
             tx.send(ModelUpdate::Added(card.clone())).await.ok();
         }
+
         let checksum = card.mdcsum();
 
         if card.model_input == ModelInput::Tokens
@@ -429,21 +433,28 @@ impl ModelWatcher {
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
-                let chat_engine = entrypoint::build_routed_pipeline::<
-                    NvCreateChatCompletionRequest,
-                    NvCreateChatCompletionStreamResponse,
-                >(
-                    card,
-                    &client,
-                    self.router_config.router_mode,
-                    worker_monitor.clone(),
-                    kv_chooser.clone(),
-                    tokenizer_hf.clone(),
-                    prefill_chooser.clone(),
-                    self.router_config.enforce_disagg,
-                )
-                .await
-                .context("build_routed_pipeline")?;
+                // Work in progress. This will allow creating  a chat_engine from Python.
+                let chat_engine = if let Some(ref factory) = self.engine_factory {
+                    factory(card.clone())
+                        .await
+                        .context("python engine_factory")?
+                } else {
+                    entrypoint::build_routed_pipeline::<
+                        NvCreateChatCompletionRequest,
+                        NvCreateChatCompletionStreamResponse,
+                    >(
+                        card,
+                        &client,
+                        self.router_config.router_mode,
+                        worker_monitor.clone(),
+                        kv_chooser.clone(),
+                        tokenizer_hf.clone(),
+                        prefill_chooser.clone(),
+                        self.router_config.enforce_disagg,
+                    )
+                    .await
+                    .context("build_routed_pipeline")?
+                };
                 self.manager
                     .add_chat_completions_model(card.name(), checksum, chat_engine)
                     .context("add_chat_completions_model")?;
