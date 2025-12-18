@@ -325,8 +325,9 @@ def test_trtllm_kv_router_basic(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_router_decisions_trtllm_multiple_workers(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, predownload_models, set_ucx_tls_no_mm, request_plane
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting TRT-LLM router prefix reuse test with two workers")
@@ -342,6 +343,7 @@ def test_router_decisions_trtllm_multiple_workers(
             trtllm_args=TRTLLM_ARGS,
             num_workers=N_WORKERS,
             single_gpu=True,  # Worker uses GPU 0
+            request_plane=request_plane,
         )
         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
 
@@ -349,7 +351,7 @@ def test_router_decisions_trtllm_multiple_workers(
         trtllm_workers.__enter__()
 
         # Get runtime and create endpoint
-        runtime = get_runtime()
+        runtime = get_runtime(request_plane=request_plane)
         namespace = runtime.namespace(trtllm_workers.namespace)
         component = namespace.component("tensorrt_llm")
         endpoint = component.endpoint("generate")

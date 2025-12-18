@@ -353,8 +353,9 @@ def test_sglang_kv_router_basic(
 @pytest.mark.gpu_1
 @pytest.mark.skip(reason="Broken by sglang changes")
 # TODO: Re-enable this test once https://github.com/sgl-project/sglang/pull/14934 is merged
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_router_decisions_sglang_multiple_workers(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, predownload_models, set_ucx_tls_no_mm, request_plane
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting SGLang router prefix reuse test with two workers")
@@ -368,6 +369,7 @@ def test_router_decisions_sglang_multiple_workers(
             sglang_args=SGLANG_ARGS,
             num_workers=N_WORKERS,
             single_gpu=True,  # Worker uses GPU 0
+            request_plane=request_plane,
         )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
 
@@ -375,7 +377,7 @@ def test_router_decisions_sglang_multiple_workers(
         sglang_workers.__enter__()
 
         # Get runtime and create endpoint
-        runtime = get_runtime()
+        runtime = get_runtime(request_plane=request_plane)
         namespace = runtime.namespace(sglang_workers.namespace)
         component = namespace.component("backend")
         endpoint = component.endpoint("generate")
@@ -391,8 +393,9 @@ def test_router_decisions_sglang_multiple_workers(
 
 
 @pytest.mark.gpu_2
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_router_decisions_sglang_dp(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services, predownload_models, set_ucx_tls_no_mm, request_plane
 ):
     """Validate KV cache prefix reuse with SGLang by sending progressive requests with overlapping prefixes.
     Same flow as test_router_decisions_sglang_multiple_workers; force first request to (worker_id, dp_rank=1).
@@ -412,12 +415,13 @@ def test_router_decisions_sglang_dp(
             num_workers=N_WORKERS,  # Ignored when data_parallel_size is set
             single_gpu=False,
             data_parallel_size=DP_SIZE,  # Creates DP_SIZE processes (one per rank)
+            request_plane=request_plane,
         )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
         sglang_workers.__enter__()
 
         # Get runtime and create endpoint
-        runtime = get_runtime()
+        runtime = get_runtime(request_plane=request_plane)
         # Use the namespace from the SGLang workers
         namespace = runtime.namespace(sglang_workers.namespace)
         component = namespace.component("backend")  # endpoint is backend.generate
