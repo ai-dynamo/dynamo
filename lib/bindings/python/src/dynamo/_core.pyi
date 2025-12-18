@@ -268,15 +268,6 @@ def compute_block_hash_for_seq_py(
         ...     }]
         ... }
         >>> hashes = compute_block_hash_for_seq_py(tokens, 32, [mm_info])
-
-    Compute block hashes for a sequence of tokens
-
-    Args:
-        tokens: List of token IDs
-        kv_block_size: Size of each KV cache block
-
-    Returns:
-        List of block hashes as integers
     """
 
     ...

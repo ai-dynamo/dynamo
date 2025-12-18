@@ -19,12 +19,13 @@ Test Strategy:
 """
 
 import json
+from typing import Any, Dict, List, Optional
 
 import pytest
 
 from dynamo.llm import RadixTree, compute_block_hash_for_seq_py
 
-# pytestmark = pytest.mark.pre_merge
+pytestmark = pytest.mark.pre_merge
 
 # Constants for testing
 DEFAULT_BLOCK_SIZE = 32
@@ -64,7 +65,7 @@ def make_block(
     mm_info: dict | None = None,
 ) -> dict:
     """Create a block structure for store events."""
-    block = {
+    block: dict[str, Any] = {
         "block_hash": block_hash,
         "tokens_hash": tokens_hash if tokens_hash is not None else block_hash,
     }

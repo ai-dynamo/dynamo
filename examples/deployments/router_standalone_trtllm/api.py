@@ -319,18 +319,31 @@ class ServiceAPI:
 
     def _build_block_mm_infos(
         self, num_tokens: int, mm_hash: int | None, image_offsets: list[int] | None
-    ) -> list[dict] | None:
-        """Build block_mm_infos for routing hash computation."""
+    ) -> list[dict | None] | None:
+        """Build block_mm_infos for routing hash computation.
+
+        Only blocks that overlap with the image token range get mm_info set.
+        """
         if mm_hash is None or image_offsets is None:
             return None
 
-        num_blocks = (
-            num_tokens + self.init_params.block_size - 1
-        ) // self.init_params.block_size
-        return [
-            {"mm_objects": [{"mm_hash": mm_hash, "offsets": [image_offsets]}]}
-            for _ in range(num_blocks)
-        ]
+        block_size = self.init_params.block_size
+        num_blocks = (num_tokens + block_size - 1) // block_size
+        img_start, img_end = image_offsets
+        mm_info = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [image_offsets]}]}
+
+        result: list[dict | None] = []
+        for block_idx in range(num_blocks):
+            block_start = block_idx * block_size
+            block_end = block_start + block_size
+
+            # Only set mm_info for blocks that overlap with the image token range
+            if block_end > img_start and block_start < img_end:
+                result.append(mm_info)
+            else:
+                result.append(None)
+
+        return result
 
     async def _route_request(
         self, local_hashes: list[int], num_tokens: int
