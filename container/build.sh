@@ -89,7 +89,7 @@ DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="v1.2.0rc6" # 1.2.0rc6
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="v1.2.0rc5" # Use rc5 for install_tensorrt.sh since rc6 isn't public yet
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
