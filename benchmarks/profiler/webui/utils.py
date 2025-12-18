@@ -19,6 +19,7 @@ from aiconfigurator.webapp.components.profiling import (
     inject_profiling_assets,
     load_profiling_javascript,
 )
+
 from benchmarks.profiler.utils.pareto import compute_pareto
 
 logger = logging.getLogger(__name__)
