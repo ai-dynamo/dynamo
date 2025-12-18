@@ -8,13 +8,16 @@ import os
 import random
 import string
 import time
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import aiohttp
 import nats
 
 from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
 from tests.utils.managed_process import ManagedProcess
+
+if TYPE_CHECKING:
+    from tests.conftest import NatsServer
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +223,7 @@ async def wait_for_frontend_ready(
             logger.debug(f"Error checking models endpoint: {e}")
 
         # Wait before next poll
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
     # Phase 2: Wait for chat completions pipeline to be ready
     logger.info("Waiting for chat completions pipeline to be built...")
@@ -253,7 +256,7 @@ async def wait_for_frontend_ready(
             logger.debug(f"Error testing chat completions: {e}")
 
         # Wait before next poll
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
 
 async def wait_for_workers_ready(
@@ -1321,6 +1324,9 @@ def _test_router_indexers_sync(
     model_name: str,
     num_workers: int,
     store_backend: str = "etcd",
+    request_plane: str = "nats",
+    test_nats_interruption: bool = False,
+    nats_server: Optional["NatsServer"] = None,
 ):
     """Test that two KV routers have synchronized indexer states after processing requests.
 
@@ -1333,16 +1339,30 @@ def _test_router_indexers_sync(
 
     This validates that the snapshot mechanism works and routers can sync state from NATS.
 
+    When test_nats_interruption=True (requires nats_server and request_plane="tcp"):
+    - After first router sends 25 requests, NATS is stopped
+    - 10 more requests sent while NATS is down (stored locally by local indexer)
+    - NATS restarted (fresh state), recovery mechanism re-syncs
+    - Second router starts and sends 25 requests
+    - NATS stopped again, 10 more requests sent
+    - NATS restarted, 5 more requests sent
+    - Verify both routers converge to same state
+
     Args:
         engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
         block_size: Block size for KV cache
         model_name: Model name to use for requests
         num_workers: Expected number of workers
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        request_plane: Request plane to use ("nats" or "tcp"). Defaults to "nats".
+        test_nats_interruption: If True, test NATS interruption recovery. Defaults to False.
+        nats_server: NatsServer instance for stop/start (required if test_nats_interruption=True).
 
     Raises:
         AssertionError: If router states don't synchronize correctly or snapshot is missing
     """
+    if test_nats_interruption and nats_server is None:
+        raise ValueError("nats_server is required when test_nats_interruption=True")
 
     # Use async to manage the test flow
     async def test_sync():
@@ -1386,7 +1406,7 @@ def _test_router_indexers_sync(
 
         # Create first runtime and endpoint for router 1
         logger.info("Creating first KV router with its own runtime")
-        runtime1 = get_runtime(store_backend)
+        runtime1 = get_runtime(store_backend, request_plane)
         namespace1 = runtime1.namespace(engine_workers.namespace)
         component1 = namespace1.component(engine_workers.component_name)
         endpoint1 = component1.endpoint("generate")
@@ -1413,13 +1433,35 @@ def _test_router_indexers_sync(
             successful1 == 25
         ), f"Expected 25 successful requests to router 1, got {successful1}"
 
+        # NATS interruption test: stop NATS, send requests, restart
+        if test_nats_interruption:
+            await asyncio.sleep(1)
+
+            assert nats_server is not None  # Validated at function entry
+            logger.info("=== NATS INTERRUPTION TEST: Phase 1 ===")
+            logger.info("Stopping NATS server")
+            nats_server.stop()
+
+            logger.info("Sending 10 requests while NATS is down (via TCP)")
+            successful_offline1 = await send_requests_to_router(
+                kv_push_router1, 10, "Router 1 (NATS down)", endpoint1
+            )
+            assert (
+                successful_offline1 == 10
+            ), f"Expected 10 successful requests while NATS down, got {successful_offline1}"
+
+            logger.info("Restarting NATS server (fresh state)")
+            nats_server.start()
+
+            await asyncio.sleep(5)
+
         # Wait for a second before creating the second router
         logger.info("Waiting for 1 second before creating second router")
         await asyncio.sleep(1)
 
         # Create second runtime and endpoint for router 2
         logger.info("Creating second KV router with its own runtime")
-        runtime2 = get_runtime(store_backend)
+        runtime2 = get_runtime(store_backend, request_plane)
         namespace2 = runtime2.namespace(engine_workers.namespace)
         component2 = namespace2.component(engine_workers.component_name)
         endpoint2 = component2.endpoint("generate")
@@ -1439,51 +1481,87 @@ def _test_router_indexers_sync(
             successful2 == 25
         ), f"Expected 25 successful requests to router 2, got {successful2}"
 
+        # NATS interruption test: stop NATS again, send requests, restart, send more
+        if test_nats_interruption:
+            await asyncio.sleep(1)
+
+            assert nats_server is not None  # Validated at function entry
+            logger.info("=== NATS INTERRUPTION TEST: Phase 2 ===")
+            logger.info("Stopping NATS server")
+            nats_server.stop()
+
+            logger.info("Sending 10 requests while NATS is down (via TCP)")
+            successful_offline2 = await send_requests_to_router(
+                kv_push_router2, 10, "Router 2 (NATS down)", endpoint2
+            )
+            assert (
+                successful_offline2 == 10
+            ), f"Expected 10 successful requests while NATS down, got {successful_offline2}"
+
+            logger.info("Restarting NATS server (fresh state)")
+            nats_server.start()
+            await asyncio.sleep(5)
+
+            logger.info("Sending 5 more requests after NATS recovery")
+            successful_recovery = await send_requests_to_router(
+                kv_push_router1, 5, "Router 1 (post-recovery)", endpoint1
+            )
+            assert (
+                successful_recovery == 5
+            ), f"Expected 5 successful requests post-recovery, got {successful_recovery}"
+
         # Wait for all requests to complete (they should already be complete from gather)
         # Wait another 1 second for internal synchronization
         logger.info("Waiting for final synchronization")
         await asyncio.sleep(1)
 
         # Verify NATS object store bucket was created with snapshot
-        # Mirror the Rust bucket naming logic from subscriber.rs:
-        # component.subject() -> "namespace.{ns}.component.{comp}"
-        # then slugify (convert dots to dashes, lowercase, etc) and append "-radix-bucket"
-        component_subject = f"namespace.{engine_workers.namespace}.component.{engine_workers.component_name}"
-        slugified = component_subject.lower().replace(".", "-").replace("_", "-")
-        expected_bucket = f"{slugified}-radix-bucket"
-        expected_file = "radix-state"
+        # Skip this verification for NATS interruption test since NATS restarts fresh
+        # (local indexer recovery doesn't rely on NATS persistence)
+        if not test_nats_interruption:
+            # Mirror the Rust bucket naming logic from subscriber.rs:
+            # component.subject() -> "namespace.{ns}.component.{comp}"
+            # then slugify (convert dots to dashes, lowercase, etc) and append "-radix-bucket"
+            component_subject = f"namespace.{engine_workers.namespace}.component.{engine_workers.component_name}"
+            slugified = component_subject.lower().replace(".", "-").replace("_", "-")
+            expected_bucket = f"{slugified}-radix-bucket"
+            expected_file = "radix-state"
 
-        logger.info(f"Verifying NATS object store bucket exists: {expected_bucket}")
-        snapshot_verified = False
-        try:
-            # Connect to NATS and check object store
-            nc = await nats.connect("nats://localhost:4222")
+            logger.info(f"Verifying NATS object store bucket exists: {expected_bucket}")
+            snapshot_verified = False
             try:
-                js = nc.jetstream()
-                obj_store = await js.object_store(expected_bucket)
-
-                # Try to get the expected file
+                # Connect to NATS and check object store
+                nc = await nats.connect("nats://localhost:4222")
                 try:
-                    result = await obj_store.get(expected_file)
-                    logger.info(
-                        f"✓ Snapshot file '{expected_file}' found in bucket '{expected_bucket}' "
-                        f"(size: {len(result.data) if result.data else 0} bytes)"
-                    )
-                    snapshot_verified = True
-                except Exception as e:
-                    logger.error(
-                        f"Snapshot file '{expected_file}' not found in bucket '{expected_bucket}': {e}"
-                    )
-            finally:
-                await nc.close()
-        except Exception as e:
-            logger.error(f"Error checking NATS object store: {e}")
+                    js = nc.jetstream()
+                    obj_store = await js.object_store(expected_bucket)
 
-        # Assert that snapshot was created (threshold=20, sent 25 requests)
-        if not snapshot_verified:
-            assert False, (
-                f"Expected snapshot to be created in bucket '{expected_bucket}' with file '{expected_file}'. "
-                f"Router sent 25 requests with snapshot_threshold=20, so snapshot should have been triggered."
+                    # Try to get the expected file
+                    try:
+                        result = await obj_store.get(expected_file)
+                        logger.info(
+                            f"✓ Snapshot file '{expected_file}' found in bucket '{expected_bucket}' "
+                            f"(size: {len(result.data) if result.data else 0} bytes)"
+                        )
+                        snapshot_verified = True
+                    except Exception as e:
+                        logger.error(
+                            f"Snapshot file '{expected_file}' not found in bucket '{expected_bucket}': {e}"
+                        )
+                finally:
+                    await nc.close()
+            except Exception as e:
+                logger.error(f"Error checking NATS object store: {e}")
+
+            # Assert that snapshot was created (threshold=20, sent 25 requests)
+            if not snapshot_verified:
+                assert False, (
+                    f"Expected snapshot to be created in bucket '{expected_bucket}' with file '{expected_file}'. "
+                    f"Router sent 25 requests with snapshot_threshold=20, so snapshot should have been triggered."
+                )
+        else:
+            logger.info(
+                "Skipping NATS object store verification (NATS was restarted fresh for interruption test)"
             )
 
         # Dump states from both routers
@@ -1562,25 +1640,31 @@ def _test_router_indexers_sync(
         logger.info("Successfully verified that both router states are equal")
 
         # Verify NATS consumers are created (while routers are still alive)
-        logger.info("Verifying NATS consumers exist for both routers")
-        component_subject = f"namespace.{engine_workers.namespace}.component.{engine_workers.component_name}"
-        slugified = component_subject.lower().replace(".", "-").replace("_", "-")
-        stream_name = f"{slugified}-kv-events"
+        # Skip this for NATS interruption test since it uses local indexer (NATS Core, not JetStream)
+        if not test_nats_interruption:
+            logger.info("Verifying NATS consumers exist for both routers")
+            component_subject = f"namespace.{engine_workers.namespace}.component.{engine_workers.component_name}"
+            slugified = component_subject.lower().replace(".", "-").replace("_", "-")
+            stream_name = f"{slugified}-kv-events"
 
-        nc = await nats.connect("nats://localhost:4222")
-        try:
-            js = nc.jetstream()
-            consumer_infos = await js.consumers_info(stream_name)
-            consumer_names = [info.name for info in consumer_infos]
-            logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
+            nc = await nats.connect("nats://localhost:4222")
+            try:
+                js = nc.jetstream()
+                consumer_infos = await js.consumers_info(stream_name)
+                consumer_names = [info.name for info in consumer_infos]
+                logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
 
-            assert len(consumer_names) == 2, (
-                f"Expected 2 durable consumers (one per router), "
-                f"found {len(consumer_names)}: {consumer_names}"
+                assert len(consumer_names) == 2, (
+                    f"Expected 2 durable consumers (one per router), "
+                    f"found {len(consumer_names)}: {consumer_names}"
+                )
+                logger.info("✓ Verified 2 durable consumers exist (one per router)")
+            finally:
+                await nc.close()
+        else:
+            logger.info(
+                "Skipping NATS consumers verification (local indexer uses NATS Core, not JetStream)"
             )
-            logger.info("✓ Verified 2 durable consumers exist (one per router)")
-        finally:
-            await nc.close()
 
     # Run the async test
     asyncio.run(test_sync())

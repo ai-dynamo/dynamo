@@ -801,6 +801,7 @@ impl OpenAIPreprocessor {
     pub fn apply_tool_calling_jail<S>(
         tool_call_parser: Option<String>,
         tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
+        tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
@@ -809,6 +810,13 @@ impl OpenAIPreprocessor {
         use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
 
         let mut builder = JailedStream::builder();
+
+        // Set tool definitions if provided
+        if let Some(tool_definitions) = tool_definitions
+            && !tool_definitions.is_empty()
+        {
+            builder = builder.tool_definitions(tool_definitions);
+        }
 
         // Configure jail based on tool_choice
         match tool_choice {
@@ -991,11 +999,23 @@ impl
             has_tools,
         )?;
 
+        // Convert OpenAI tools to parser ToolDefinition format before applying jail
+        let tool_definitions = request.inner.tools.as_ref().map(|tools| {
+            tools
+                .iter()
+                .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
+                    name: tool.function.name.clone(),
+                    parameters: tool.function.parameters.clone(),
+                })
+                .collect()
+        });
+
         // Apply jail conditionally
         let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
             Box::pin(Self::apply_tool_calling_jail(
                 self.tool_call_parser.clone(),
                 request.inner.tool_choice.clone(),
+                tool_definitions,
                 stream,
             ))
         } else {

@@ -3,6 +3,7 @@
 
 use std::{
     collections::HashSet,
+    fmt::Display,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -58,6 +59,8 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
+
+const VALIDATION_PREFIX: &str = "Validation: ";
 
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
@@ -138,7 +141,7 @@ impl ErrorMessage {
     /// Not Implemented Error
     /// Return this error when the client requests a feature that is not yet implemented.
     /// This should be used for features that are planned but not available.
-    pub fn not_implemented_error(msg: &str) -> ErrorResponse {
+    pub fn not_implemented_error<T: Display>(msg: T) -> ErrorResponse {
         tracing::error!("Not Implemented error: {msg}");
         let code = StatusCode::NOT_IMPLEMENTED;
         let error_type = map_error_code_to_error_type(code);
@@ -1028,13 +1031,15 @@ pub fn validate_chat_completion_unsupported_fields(
 
     if inner.function_call.is_some() {
         return Err(ErrorMessage::not_implemented_error(
-            "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
+            VALIDATION_PREFIX.to_string()
+                + "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
         ));
     }
 
     if inner.functions.is_some() {
         return Err(ErrorMessage::not_implemented_error(
-            "`functions` is deprecated. Please migrate to use `tools` instead.",
+            VALIDATION_PREFIX.to_string()
+                + "`functions` is deprecated. Please migrate to use `tools` instead.",
         ));
     }
 
@@ -1050,8 +1055,8 @@ pub fn validate_chat_completion_required_fields(
     if inner.messages.is_empty() {
         return Err(ErrorMessage::from_http_error(HttpError {
             code: 400,
-            message: "The 'messages' field cannot be empty. At least one message is required."
-                .to_string(),
+            message: VALIDATION_PREFIX.to_string()
+                + "The 'messages' field cannot be empty. At least one message is required.",
         }));
     }
 
@@ -1068,7 +1073,7 @@ pub fn validate_chat_completion_fields_generic(
     request.validate().map_err(|e| {
         ErrorMessage::from_http_error(HttpError {
             code: 400,
-            message: e.to_string(),
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
         })
     })
 }
@@ -1083,7 +1088,7 @@ pub fn validate_completion_fields_generic(
     request.validate().map_err(|e| {
         ErrorMessage::from_http_error(HttpError {
             code: 400,
-            message: e.to_string(),
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
         })
     })
 }
@@ -1169,17 +1174,19 @@ async fn responses(
     let request_id = request.id().to_string();
     let (request, context) = request.into_parts();
 
-    let mut request: NvCreateChatCompletionRequest = request.try_into().map_err(|e| {
-        tracing::error!(
-            request_id,
-            "Failed to convert NvCreateResponse to NvCreateChatCompletionRequest: {:?}",
-            e
-        );
-        ErrorMessage::not_implemented_error(&format!(
-            "Only Input::Text(_) is currently supported: {}",
-            e
-        ))
-    })?;
+    let mut request: NvCreateChatCompletionRequest =
+        request.try_into().map_err(|e: anyhow::Error| {
+            tracing::error!(
+                request_id,
+                error = %e,
+                "Failed to convert NvCreateResponse to NvCreateChatCompletionRequest",
+            );
+            ErrorMessage::not_implemented_error(
+                VALIDATION_PREFIX.to_string()
+                    + "Only Input::Text(_) is currently supported: "
+                    + &e.to_string(),
+            )
+        })?;
 
     let request = context.map(|mut _req| {
         request.inner.stream = Some(false);
@@ -1259,7 +1266,8 @@ pub fn validate_response_input_is_text_only(
     match &request.inner.input {
         dynamo_async_openai::types::responses::Input::Text(_) => None,
         _ => Some(ErrorMessage::not_implemented_error(
-            "Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.",
+            VALIDATION_PREFIX.to_string()
+                + "Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.",
         )),
     }
 }
@@ -1273,77 +1281,77 @@ pub fn validate_response_unsupported_fields(
 
     if inner.background == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
-            "`background: true` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`background: true` is not supported.",
         ));
     }
     if inner.include.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            "`include` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`include` is not supported.",
         ));
     }
     if inner.instructions.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            "`instructions` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`instructions` is not supported.",
         ));
     }
     if inner.max_tool_calls.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            "`max_tool_calls` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`max_tool_calls` is not supported.",
         ));
     }
     if inner.previous_response_id.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            "`previous_response_id` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`previous_response_id` is not supported.",
         ));
     }
     if inner.prompt.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            "`prompt` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`prompt` is not supported.",
         ));
     }
     if inner.reasoning.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            "`reasoning` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`reasoning` is not supported.",
         ));
     }
     if inner.service_tier.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            "`service_tier` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`service_tier` is not supported.",
         ));
     }
     if inner.store == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
-            "`store: true` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`store: true` is not supported.",
         ));
     }
     if inner.stream == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
-            "`stream: true` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`stream: true` is not supported.",
         ));
     }
     if inner.text.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            "`text` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`text` is not supported.",
         ));
     }
     if inner.tool_choice.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            "`tool_choice` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`tool_choice` is not supported.",
         ));
     }
     if inner.tools.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            "`tools` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`tools` is not supported.",
         ));
     }
     if inner.truncation.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            "`truncation` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`truncation` is not supported.",
         ));
     }
     if inner.user.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            "`user` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`user` is not supported.",
         ));
     }
 
@@ -1735,7 +1743,9 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "The 'messages' field cannot be empty. At least one message is required."
+                format!(
+                    "{VALIDATION_PREFIX}The 'messages' field cannot be empty. At least one message is required."
+                )
             );
         }
     }
@@ -1802,7 +1812,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Frequency penalty must be between -2 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Frequency penalty must be between -2 and 2, got -3")
             );
         }
 
@@ -1825,7 +1835,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Presence penalty must be between -2 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Presence penalty must be between -2 and 2, got -3")
             );
         }
 
@@ -1848,7 +1858,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Temperature must be between 0 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Temperature must be between 0 and 2, got -3")
             );
         }
 
@@ -1871,7 +1881,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Top_p must be between 0 and 1, got -3"
+                format!("{VALIDATION_PREFIX}Top_p must be between 0 and 1, got -3")
             );
         }
 
@@ -1896,7 +1906,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Repetition penalty must be between 0 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Repetition penalty must be between 0 and 2, got -3")
             );
         }
 
@@ -1919,7 +1929,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Logprobs must be between 0 and 5, got 6"
+                format!("{VALIDATION_PREFIX}Logprobs must be between 0 and 5, got 6")
             );
         }
     }
@@ -1980,7 +1990,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Frequency penalty must be between -2 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Frequency penalty must be between -2 and 2, got -3")
             );
         }
 
@@ -2008,7 +2018,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Presence penalty must be between -2 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Presence penalty must be between -2 and 2, got -3")
             );
         }
 
@@ -2036,7 +2046,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Temperature must be between 0 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Temperature must be between 0 and 2, got -3")
             );
         }
 
@@ -2064,7 +2074,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Top_p must be between 0 and 1, got -3"
+                format!("{VALIDATION_PREFIX}Top_p must be between 0 and 1, got -3")
             );
         }
 
@@ -2094,7 +2104,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Repetition penalty must be between 0 and 2, got -3"
+                format!("{VALIDATION_PREFIX}Repetition penalty must be between 0 and 2, got -3")
             );
         }
 
@@ -2122,7 +2132,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                "Top_logprobs must be between 0 and 20, got 25"
+                format!("{VALIDATION_PREFIX}Top_logprobs must be between 0 and 20, got 25")
             );
         }
     }
