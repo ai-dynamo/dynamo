@@ -117,10 +117,18 @@ impl DistributedRuntime {
             kv::Selector::Memory => kv::Manager::memory(),
         };
 
-        let nats_client = match nats_config {
-            Some(nc) => Some(nc.connect().await?),
-            None => None,
+        // TODO: Add an event_plane config option to control whether to attempt NATS connection.
+        // Always try to connect to NATS. If it fails, continue without it.
+        // async_nats has a default 5s connection timeout.
+        let nats_client = match nats::ClientOptions::default().connect().await {
+            Ok(client) => Some(client),
+            Err(e) => {
+                tracing::warn!(%e, "Failed to connect to NATS, continuing without it");
+                None
+            }
         };
+        // nats_config is no longer used but kept for API compatibility
+        let _ = nats_config;
 
         // Start system status server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
