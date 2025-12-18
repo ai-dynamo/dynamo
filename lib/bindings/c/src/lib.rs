@@ -975,6 +975,7 @@ pub async fn create_worker_selection_pipeline_chat(
         component.drt().clone(),
         model_manager.clone(),
         router_config,
+        None,
     );
     let cards = watcher
         .cards_for_model(model_name, Some(namespace), false)
