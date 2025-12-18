@@ -456,17 +456,29 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-        /opt/dynamo/wheelhouse/ai_dynamo*any.whl
+        /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        sglang==0.5.6.post2
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         --requirement /mnt/local_src/container/deps/requirements.txt \
-        --requirement /mnt/local_src/container/deps/requirements.test.txt && \
+        --requirement /mnt/local_src/container/deps/requirements.test.txt \
+        sglang==0.5.6.post2 && \
     cd /sgl-workspace/benchmarks && \
-    pip install --no-cache . && \
+    pip install --break-system-packages --no-cache . sglang==0.5.6.post2 && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /sgl-workspace/benchmarks
+
+# Patching packages for CUDA 12/13 compatibility
+# TODO: Remove when torch version covers these packages
+# TODO: Move cutlass-dsl to pyproject.toml after drivers on CI runners are updated
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "${CUDA_VERSION%%.*}" = "12" ]; then \
+        python3 -m pip install nvidia-nccl-cu12==2.28.3 sglang==0.5.6.post2 --break-system-packages --force-reinstall --no-deps ; \
+        python3 -m pip install nvidia-cudnn-cu12==9.16.0.29 sglang==0.5.6.post2 --break-system-packages --force-reinstall --no-deps ; \
+        python3 -m pip install nvidia-cutlass-dsl==4.3.0 sglang==0.5.6.post2 --break-system-packages --force-reinstall --no-deps ; \
+    fi
 
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
