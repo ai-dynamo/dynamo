@@ -12,7 +12,7 @@
 //! cargo run -p dynamo-llm --bin generate-frontend-openapi
 //! ```
 //! The generated spec will be written to:
-//!   `openapi/frontend_openapi.json`
+//!   `docs/frontends/openapi.json`
 
 use std::fs;
 use std::path::PathBuf;
@@ -58,8 +58,8 @@ fn generate_openapi() -> anyhow::Result<()> {
     let openapi = openapi_docs::generate_openapi_spec(&route_docs);
 
     // Write the spec to a stable location relative to the repository root.
-    let out_dir = PathBuf::from("openapi");
-    let out_path = out_dir.join("frontend_openapi.json");
+    let out_dir = PathBuf::from("docs/frontends");
+    let out_path = out_dir.join("openapi.json");
 
     fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create OpenAPI output directory: {out_dir:?}"))?;

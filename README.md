@@ -190,7 +190,7 @@ To generate and persist the same specification without running the server (for e
 cargo run -p dynamo-llm --bin generate-frontend-openapi
 ```
 
-This writes the current frontend spec to `openapi/frontend_openapi.json` at the repository root.
+This writes the current frontend spec to `docs/frontends/openapi.json` at the repository root.
 
 # Engines
 
