@@ -160,8 +160,8 @@ where
                 if let Some(py_err) = e.downcast_ref::<PyErr>() {
                     Python::with_gil(|py| {
                         // With the Stable ABI, we can't subclass Python's built-in exceptions in PyO3, so instead we
-                        // implement the exception in Python and use duck typing / assume that it's an HttpError if
-                        // the code and message are present.
+                        // implement the exception in Python and assume that it's an HttpError if the code and message
+                        // are present.
                         if let Ok(HttpError { code, message }) = py_err.value(py).extract() {
                             // SSE panics if there are carriage returns or newlines
                             let message = message.replace(['\r', '\n'], "");
