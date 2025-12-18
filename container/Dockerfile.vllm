@@ -243,6 +243,7 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
 # Build FFmpeg from source
+# Do not delete the source tarball for legal reasons
 ARG FFMPEG_VERSION=7.1
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
@@ -260,6 +261,8 @@ if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     cd ffmpeg-${FFMPEG_VERSION} && \
     ./configure \
         --prefix=/usr/local \
+        --disable-gpl \
+        --disable-nonfree \
         --disable-programs \
         --disable-doc \
         --disable-static \
@@ -276,7 +279,8 @@ if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     make install && \
     /tmp/use-sccache.sh show-stats "FFMPEG" && \
     ldconfig && \
-    rm -rf /tmp/ffmpeg-${FFMPEG_VERSION}*; \
+    mkdir -p /usr/local/src/ffmpeg && \
+    mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/; \
 fi
 
 # Build and install UCX
@@ -506,7 +510,15 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
     chmod +x /tmp/install_vllm.sh && \
-    /tmp/install_vllm.sh --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} ${LMCACHE_REF:+--lmcache-ref "$LMCACHE_REF"} --cuda-version $CUDA_VERSION
+    /tmp/install_vllm.sh \
+        --vllm-ref $VLLM_REF \
+        --max-jobs $MAX_JOBS \
+        --arch $ARCH \
+        --installation-dir /opt \
+        ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} \
+        ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} \
+        ${LMCACHE_REF:+--lmcache-ref "$LMCACHE_REF"} \
+        --cuda-version $CUDA_VERSION
 
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
@@ -549,8 +561,9 @@ COPY --from=dynamo_base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbin
 COPY --from=dynamo_base /usr/local/cuda/include/ /usr/local/cuda/include/
 COPY --from=dynamo_base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
 COPY --from=dynamo_base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
-RUN ln -s /usr/local/cuda/lib64/libcublas.so.12 /usr/local/cuda/lib64/libcublas.so
-RUN ln -s /usr/local/cuda/lib64/libcublasLt.so.12 /usr/local/cuda/lib64/libcublasLt.so
+RUN CUDA_VERSION_MAJOR="${CUDA_VERSION%%.*}" &&\
+    ln -s /usr/local/cuda/lib64/libcublas.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublas.so &&\
+    ln -s /usr/local/cuda/lib64/libcublasLt.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublasLt.so
 
 # DeepGemm runs nvcc for JIT kernel compilation, however the CUDA include path
 # is not properly set for complilation. Set CPATH to help nvcc find the headers.
@@ -583,6 +596,8 @@ ARG PYTHON_VERSION
 
 # Install Python, build-essential and python3-dev as apt dependencies
 RUN apt-get update && \
+    CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} &&\
+    CUDA_VERSION_MINOR=$(echo "${CUDA_VERSION#*.}" | cut -d. -f1) && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         # Python runtime - CRITICAL for virtual environment to work
         python${PYTHON_VERSION}-dev \
@@ -601,7 +616,7 @@ RUN apt-get update && \
         # prometheus dependencies
         ca-certificates \
         # DeepGemm uses 'cuobjdump' which does not come with CUDA image
-        cuda-command-line-tools-12-9 && \
+        cuda-command-line-tools-${CUDA_VERSION_MAJOR}-${CUDA_VERSION_MINOR} && \
     rm -rf /var/lib/apt/lists/*
 
 USER dynamo
@@ -634,6 +649,7 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/; \
     cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/; \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/lib/pkgconfig/; \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/; \
     true # in case ffmpeg not enabled
 
 ENV LD_LIBRARY_PATH=\

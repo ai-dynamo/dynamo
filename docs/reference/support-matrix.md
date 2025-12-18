@@ -52,8 +52,8 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Python Package** | **Version** | glibc version                         | CUDA Version |
 | :----------------- | :---------- | :------------------------------------ | :----------- |
-| ai-dynamo          | 0.7.0       | >=2.28                                |              |
-| ai-dynamo-runtime  | 0.7.0       | >=2.28 (Python 3.12 has known issues) |              |
+| ai-dynamo          | 0.7.1       | >=2.28                                |              |
+| ai-dynamo-runtime  | 0.7.1       | >=2.28 (Python 3.12 has known issues) |              |
 | NIXL               | 0.7.1       | >=2.27                                | >=11.8       |
 
 ### Build Dependency
@@ -77,7 +77,7 @@ The following table shows the dependency versions included with each Dynamo rele
 ### CUDA Support by Framework
 | **Dynamo Version**   | **SGLang**              | **TensorRT-LLM**        | **vLLM**                |
 | :------------------- | :-----------------------| :-----------------------| :-----------------------|
-| **Dynamo 0.7.0**     | CUDA 12.8               | CUDA 13.0               | CUDA 12.8               |
+| **Dynamo 0.7.1**     | CUDA 12.8               | CUDA 13.0               | CUDA 12.8               |
 
 ## Cloud Service Provider Compatibility
 

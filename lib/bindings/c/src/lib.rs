@@ -393,6 +393,10 @@ pub struct WorkerSelectionPipeline {
 ///
 /// # Errors
 /// Returns `DynamoLlmResult::ERR` on failure and does not write to `pipeline_out`.
+/// # Safety
+/// See detailed safety docs above. Additional parameter:
+/// - `enforce_disagg`: If true, requests fail when disaggregated serving is unavailable.
+///   If false, falls back to aggregated serving.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     namespace_c_str: *const c_char,
@@ -404,6 +408,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     router_temperature: f64,
     use_kv_events: bool,
     router_replica_sync: bool,
+    enforce_disagg: bool,
     pipeline_out: *mut *mut WorkerSelectionPipeline,
 ) -> DynamoLlmResult {
     if pipeline_out.is_null() {
@@ -472,6 +477,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
             router_mode,
             (busy_threshold >= 0.0).then_some(busy_threshold),
             kv_router_config,
+            enforce_disagg,
         )
         .await
     };
@@ -492,7 +498,8 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
 }
 
 /// Query worker selection on an existing pipeline and return:
-/// - `worker_instance_id_out` (`i64`)
+/// - `decode_worker_id_out` (`i64`): The decode worker ID (primary worker)
+/// - `prefill_worker_id_out` (`i64`): The prefill worker ID (-1 if not in disaggregated mode)
 /// - `token_ids_out` (heap-allocated `*mut u32`; caller must free via
 ///   `dynamo_free_worker_selection_result`)
 /// - `token_count_out` (`usize`)
@@ -513,10 +520,10 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
 ///     function returns `DynamoLlmResult::ERR`.
 ///   - Must remain valid for the duration of this call.
 /// - Output pointers:
-///   - `worker_instance_id_out`, `token_ids_out`, `token_count_out`,
+///   - `decode_worker_id_out`, `prefill_worker_id_out`, `token_ids_out`, `token_count_out`,
 ///     and `annotated_request_json_out` must each be **non-null** and point to
 ///     writable memory for their respective types. On success, this function
-///     writes to all four outputs exactly once.
+///     writes to all five outputs exactly once.
 ///   - On **error**, outputs are left unmodified.
 /// - Ownership & deallocation:
 ///   - On success, if there are zero tokens, `*token_ids_out` may be set to `NULL`
@@ -540,11 +547,18 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
 /// Returns `DynamoLlmResult::ERR` if any precondition fails (null/invalid pointers,
 /// malformed UTF-8/JSON, pipeline errors, allocation failures, etc.). On error, no
 /// output pointer is written.
+///
+/// # Output values
+/// - `decode_worker_id_out`: The decode worker ID (primary worker in aggregated mode)
+/// - `prefill_worker_id_out`: The prefill worker ID (only set in disaggregated mode, -1 if not present)
+/// - `token_ids_out`, `token_count_out`: Token IDs and count
+/// - `annotated_request_json_out`: The annotated request JSON
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     pipeline: *mut WorkerSelectionPipeline,
     request_json_c_str: *const c_char,
-    worker_instance_id_out: *mut i64,
+    decode_worker_id_out: *mut i64,
+    prefill_worker_id_out: *mut i64,
     token_ids_out: *mut *mut u32,
     token_count_out: *mut usize,
     annotated_request_json_out: *mut *mut c_char,
@@ -553,7 +567,8 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         tracing::error!("Pipeline pointer is null");
         return DynamoLlmResult::ERR;
     }
-    if worker_instance_id_out.is_null()
+    if decode_worker_id_out.is_null()
+        || prefill_worker_id_out.is_null()
         || token_ids_out.is_null()
         || token_count_out.is_null()
         || annotated_request_json_out.is_null()
@@ -579,7 +594,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
 
     let pl = unsafe { &*pipeline };
     let fut = async { query_worker_selection_and_annotate(&pl.engine, request).await };
-    let (worker_id, tokens, annotated_req) = match pl.wk.runtime().secondary().block_on(fut) {
+    let (result, annotated_req) = match pl.wk.runtime().secondary().block_on(fut) {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = ?e, "query_worker_selection_and_annotate failed");
@@ -587,10 +602,10 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         }
     };
 
-    let tokens_ptr = if tokens.is_empty() {
+    let tokens_ptr = if result.tokens.is_empty() {
         std::ptr::null_mut()
     } else {
-        let len = tokens.len();
+        let len = result.tokens.len();
         let layout = std::alloc::Layout::array::<u32>(len).unwrap();
         let ptr = unsafe { std::alloc::alloc(layout) as *mut u32 };
         if ptr.is_null() {
@@ -598,7 +613,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
             return DynamoLlmResult::ERR;
         }
         unsafe {
-            std::ptr::copy_nonoverlapping(tokens.as_ptr(), ptr, len);
+            std::ptr::copy_nonoverlapping(result.tokens.as_ptr(), ptr, len);
         }
         ptr
     };
@@ -606,11 +621,11 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     let annotated_json = match serde_json::to_string(&annotated_req) {
         Ok(s) => s,
         Err(e) => {
-            let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
-            unsafe {
-                std::alloc::dealloc(tokens_ptr as *mut u8, layout);
-            }
             if !tokens_ptr.is_null() {
+                let layout = std::alloc::Layout::array::<u32>(result.tokens.len()).unwrap();
+                unsafe {
+                    std::alloc::dealloc(tokens_ptr as *mut u8, layout);
+                }
                 tracing::error!(error = ?e, "serialize annotated request failed");
             }
             return DynamoLlmResult::ERR;
@@ -621,7 +636,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         Err(e) => {
             tracing::error!(error = ?e, "CString::new for annotated JSON failed");
             if !tokens_ptr.is_null() {
-                let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
+                let layout = std::alloc::Layout::array::<u32>(result.tokens.len()).unwrap();
                 unsafe {
                     std::alloc::dealloc(tokens_ptr as *mut u8, layout);
                 }
@@ -630,9 +645,10 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         }
     };
     unsafe {
-        *worker_instance_id_out = worker_id;
+        *decode_worker_id_out = result.decode_worker_id.unwrap_or(0);
+        *prefill_worker_id_out = result.prefill_worker_id.unwrap_or(-1);
         *token_ids_out = tokens_ptr;
-        *token_count_out = tokens.len();
+        *token_count_out = result.tokens.len();
         *annotated_request_json_out = cjson.into_raw();
     }
     DynamoLlmResult::OK
@@ -724,96 +740,77 @@ pub unsafe extern "C" fn dynamo_free_worker_selection_result(
     DynamoLlmResult::OK
 }
 
+/// Result of worker selection extraction
+#[derive(Debug, Clone, Default)]
+pub struct WorkerSelectionResult {
+    /// Decode worker ID (primary worker for aggregated, decode-only for disaggregated)
+    pub decode_worker_id: Option<i64>,
+    /// Prefill worker ID (only present in disaggregated mode)
+    pub prefill_worker_id: Option<i64>,
+    /// Token IDs from tokenization
+    pub tokens: Vec<u32>,
+}
+
 /// Helper function to extract worker selection information from the annotation stream
+///
+/// The response format (from disaggregated_params in nvext):
+/// - worker_id: {"prefill_worker_id": 123, "decode_worker_id": 456}
+/// - token_ids: [1, 2, 3, ...]
 pub async fn extract_worker_selection_from_stream(
     mut stream: Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
-) -> anyhow::Result<(i64, Vec<u32>)> {
+) -> anyhow::Result<WorkerSelectionResult> {
+    use dynamo_llm::protocols::openai::nvext::WorkerIdInfo;
     use futures::StreamExt;
 
-    let mut worker_id: i64 = 0;
-    let mut tokens: Vec<u32> = Vec::new();
+    let mut result = WorkerSelectionResult::default();
 
     while let Some(response) = stream.next().await {
-        let Some(event) = &response.event else {
-            tracing::error!("Response has no event field");
-            continue;
-        };
-
-        match event.as_str() {
-            "worker_instance_id" => {
-                tracing::debug!("Found worker_instance_id event");
-
-                let Some(first_comment) = response.comment.as_ref().and_then(|v| v.first()) else {
-                    tracing::debug!("worker_instance_id event without comments");
-                    continue;
-                };
-
-                // Try JSON string first (e.g. `"1732646935200805498"`), then plain integer.
-                if let Ok(id_string) = serde_json::from_str::<String>(first_comment) {
-                    match id_string.parse::<i64>() {
-                        Ok(parsed_id) => {
-                            worker_id = parsed_id;
-                            tracing::debug!("parsed worker_id from JSON string: {}", worker_id);
-                        }
-                        Err(_) => {
-                            tracing::error!(
-                                "failed to parse number from JSON string: '{}'",
-                                id_string
-                            );
-                        }
-                    }
-                    continue;
-                }
-
-                match first_comment.parse::<i64>() {
-                    Ok(parsed_id) => {
-                        worker_id = parsed_id;
-                        tracing::debug!("parsed worker_id directly: {}", worker_id);
-                    }
-                    Err(_) => {
-                        tracing::error!("failed to parse worker_id from: '{}'", first_comment);
-                    }
-                }
+        // Check for data in nvext (worker_id and token_ids are direct fields)
+        // nvext is a serde_json::Value, so we access it as a JSON object
+        if let Some(data) = &response.data
+            && let Some(nvext) = &data.nvext
+        {
+            // Extract worker_id
+            if let Some(worker_id_value) = nvext.get("worker_id")
+                && let Ok(worker_info) =
+                    serde_json::from_value::<WorkerIdInfo>(worker_id_value.clone())
+            {
+                result.decode_worker_id = worker_info.decode_worker_id.map(|id| id as i64);
+                result.prefill_worker_id = worker_info.prefill_worker_id.map(|id| id as i64);
+                tracing::debug!(
+                    decode_worker_id = ?result.decode_worker_id,
+                    prefill_worker_id = ?result.prefill_worker_id,
+                    "Parsed worker_id from nvext"
+                );
             }
 
-            "token_data" => {
-                tracing::debug!("Found token_data event");
-
-                let Some(first_comment) = response.comment.as_ref().and_then(|v| v.first()) else {
-                    tracing::debug!("token_data event without comments");
-                    continue;
-                };
-
-                tracing::debug!("Token comment: '{}'", first_comment);
-                match serde_json::from_str::<Vec<u32>>(first_comment) {
-                    Ok(parsed_tokens) => {
-                        tokens = parsed_tokens;
-                        tracing::debug!("Successfully parsed {} tokens", tokens.len());
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to parse tokens from '{}': {}", first_comment, e);
-                    }
-                }
-            }
-
-            other => {
-                tracing::debug!("Unknown event type: '{}'", other);
+            // Extract token_ids
+            if let Some(token_ids_value) = nvext.get("token_ids")
+                && let Ok(parsed_tokens) =
+                    serde_json::from_value::<Vec<u32>>(token_ids_value.clone())
+            {
+                result.tokens = parsed_tokens;
+                tracing::debug!(
+                    "Successfully parsed {} tokens from nvext",
+                    result.tokens.len()
+                );
             }
         }
     }
 
     tracing::info!(
-        "Final worker_id={}, tokens.len()={}",
-        worker_id,
-        tokens.len()
+        decode_worker_id = ?result.decode_worker_id,
+        prefill_worker_id = ?result.prefill_worker_id,
+        token_count = result.tokens.len(),
+        "Worker selection extraction complete"
     );
-    Ok((worker_id, tokens))
+    Ok(result)
 }
 
 /// Utility function to add the "query_instance_id" annotation to an OpenAI request
 ///
 /// This function modifies the request to include the annotation that signals the KV router
-/// to return worker selection information (worker_instance_id and token_data) instead of
+/// to return worker selection information (worker_fid and token_data) instead of
 /// performing actual inference.
 ///
 /// # Parameters
@@ -824,28 +821,73 @@ pub async fn extract_worker_selection_from_stream(
 pub fn add_query_instance_id(
     request: &mut NvCreateChatCompletionRequest,
 ) -> &mut NvCreateChatCompletionRequest {
-    add_annotation_unique(request, "query_instance_id")
+    // Send empty value - router treats empty as aggregated / aggregated worker selection
+    set_kv_annotation(request, "query_instance_id".to_string(), "")
 }
 
-/// Utility function to add worker_instance_id annotation to an OpenAI request
-pub fn add_worker_instance_id_annotation(
+/// Set worker IDs directly on the NvExt fields for GAIE Stage 2
+///
+/// For disaggregated mode: sets `prefill_worker_id` and `decode_worker_id`
+/// For aggregated mode: sets `backend_instance_id` (when both IDs are the same)
+pub fn set_worker_ids_for_stage2(
     request: &mut NvCreateChatCompletionRequest,
-    worker_id: i64,
+    decode_worker_id: Option<i64>,
+    prefill_worker_id: Option<i64>,
 ) -> &mut NvCreateChatCompletionRequest {
-    set_kv_annotation(
-        request,
-        "worker_instance_id".to_string(),
-        worker_id.to_string(),
-    )
+    let nvext = request.nvext.get_or_insert_with(|| {
+        NvExt::builder()
+            .build()
+            .expect("NvExt builder should not fail")
+    });
+
+    // Check if this is aggregated mode (same worker for both)
+    let is_aggregated = prefill_worker_id == decode_worker_id;
+
+    if is_aggregated {
+        // Aggregated: use backend_instance_id for direct routing
+        if let Some(id) = decode_worker_id {
+            nvext.backend_instance_id = Some(id as u64);
+            tracing::debug!(
+                backend_instance_id = id,
+                "GAIE Stage 2 Aggregated: Setting backend_instance_id"
+            );
+        }
+    } else {
+        // Disaggregated: use separate prefill and decode worker IDs
+        if let Some(id) = prefill_worker_id {
+            nvext.prefill_worker_id = Some(id as u64);
+        }
+        if let Some(id) = decode_worker_id {
+            nvext.decode_worker_id = Some(id as u64);
+        }
+        tracing::debug!(
+            prefill_worker_id = ?prefill_worker_id,
+            decode_worker_id = ?decode_worker_id,
+            "GAIE Stage 2 Disaggregated: Setting prefill and decode worker IDs"
+        );
+    }
+
+    request
 }
 
-/// Utility function to add token_data annotation to an OpenAI request
-pub fn add_token_data_annotation<'a>(
+/// Set token_data directly on the NvExt field for GAIE Stage 2
+pub fn set_token_data_for_stage2<'a>(
     request: &'a mut NvCreateChatCompletionRequest,
     tokens: &[u32],
 ) -> &'a mut NvCreateChatCompletionRequest {
-    let tokens_json = serde_json::to_string(tokens).unwrap_or_default();
-    set_kv_annotation(request, "token_data".to_string(), tokens_json)
+    let nvext = request.nvext.get_or_insert_with(|| {
+        NvExt::builder()
+            .build()
+            .expect("NvExt builder should not fail")
+    });
+
+    nvext.token_data = Some(tokens.to_vec());
+    tracing::debug!(
+        token_count = tokens.len(),
+        "GAIE Stage 2: Setting token_data"
+    );
+
+    request
 }
 
 /// Ensure `nvext` exists and return a mutable slice of annotations.
@@ -856,19 +898,6 @@ fn ensure_annotations(request: &mut NvCreateChatCompletionRequest) -> &mut Vec<S
             .expect("NvExt builder should not fail")
     });
     nvext.annotations.get_or_insert_with(Vec::new)
-}
-
-/// Add a plain annotation once.
-fn add_annotation_unique(
-    request: &mut NvCreateChatCompletionRequest,
-    annotation: impl Into<String>,
-) -> &mut NvCreateChatCompletionRequest {
-    let ann = annotation.into();
-    let annotations = ensure_annotations(request);
-    if !annotations.iter().any(|a| a == &ann) {
-        annotations.push(ann);
-    }
-    request
 }
 
 /// Set a `key:value` annotation.
@@ -885,38 +914,153 @@ fn set_kv_annotation(
     request
 }
 
-/// Wrapper function that queries worker selection and annotates the original request
+/// Wrapper function that queries worker selection and prepares the request for GAIE Stage 2
 ///
-/// This function performs the complete flow:
-/// 1. Clones the original request and adds "query_instance_id" annotation
+/// This function performs the complete GAIE Stage 1 flow:
+/// 1. Clones the original request and adds "query_instance_id:" (empty) annotation
 /// 2. Calls engine.generate() with the modified request
-/// 3. Extracts worker_instance_id and tokens from the response stream
-/// 4. Adds worker_instance_id and token_data annotations to the original request
-/// 5. Returns (worker_id, tokens, annotated_original_request)
+/// 3. Extracts worker_id info and tokens from the response stream
+/// 4. Sets the appropriate NvExt fields on the original request for Stage 2:
+///    - Disaggregated: prefill_worker_id, decode_worker_id, token_data
+///    - Aggregated: backend_instance_id, token_data
+/// 5. Returns WorkerSelectionResult and the modified request ready for Stage 2
 ///
 /// # Parameters
 /// - `engine`: The worker selection pipeline engine
 /// - `original_request`: The original OpenAI request to process
 ///
 /// # Returns
-/// A tuple containing (worker_instance_id, tokens, modified_original_request)
-/// where the modified_original_request has worker_instance_id and token_data annotations added
+/// A tuple containing (WorkerSelectionResult, modified_original_request)
+/// where the modified_original_request is ready for GAIE Stage 2 execution
 pub async fn query_worker_selection_and_annotate(
     engine: &ServiceEngine<
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >,
     mut original_request: NvCreateChatCompletionRequest,
-) -> anyhow::Result<(i64, Vec<u32>, NvCreateChatCompletionRequest)> {
+) -> anyhow::Result<(WorkerSelectionResult, NvCreateChatCompletionRequest)> {
+    // GAIE Stage 1: Query for worker selection
     let mut query_request = original_request.clone();
     add_query_instance_id(&mut query_request);
     let single_in = SingleIn::new(query_request);
     let response_stream = engine.generate(single_in).await?;
-    let (worker_id, tokens) = extract_worker_selection_from_stream(response_stream).await?;
-    add_worker_instance_id_annotation(&mut original_request, worker_id);
-    add_token_data_annotation(&mut original_request, &tokens);
+    let result = extract_worker_selection_from_stream(response_stream).await?;
 
-    Ok((worker_id, tokens, original_request))
+    // Prepare request for GAIE Stage 2: Set NvExt fields directly
+    set_worker_ids_for_stage2(
+        &mut original_request,
+        result.decode_worker_id,
+        result.prefill_worker_id,
+    );
+    set_token_data_for_stage2(&mut original_request, &result.tokens);
+
+    Ok((result, original_request))
+}
+
+/// Spawn a background task to watch for prefill models and activate prefill routers.
+/// This is a lightweight watcher that only handles prefill model discovery.
+fn spawn_prefill_watcher(
+    drt: DistributedRuntime,
+    model_manager: Arc<ModelManager>,
+    target_namespace: String,
+) {
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
+    use dynamo_runtime::protocols::EndpointId;
+    use futures::StreamExt;
+
+    tokio::spawn(async move {
+        let discovery = drt.discovery();
+        let mut stream = match discovery
+            .list_and_watch(DiscoveryQuery::AllModels, None)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to start prefill discovery stream");
+                return;
+            }
+        };
+
+        while let Some(result) = stream.next().await {
+            let event = match result {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::error!(error = %e, "Error in prefill discovery stream");
+                    continue;
+                }
+            };
+
+            match event {
+                DiscoveryEvent::Added(instance) => {
+                    let (endpoint_id, card) = match &instance {
+                        DiscoveryInstance::Model {
+                            namespace,
+                            component,
+                            endpoint,
+                            ..
+                        } => {
+                            // Filter by namespace
+                            if namespace != &target_namespace {
+                                continue;
+                            }
+
+                            let eid = EndpointId {
+                                namespace: namespace.clone(),
+                                component: component.clone(),
+                                name: endpoint.clone(),
+                            };
+
+                            match instance.deserialize_model::<ModelDeploymentCard>() {
+                                Ok(card) => (eid, card),
+                                Err(_) => continue,
+                            }
+                        }
+                        _ => continue,
+                    };
+
+                    // Only handle prefill models
+                    if !card.model_type.supports_prefill() {
+                        continue;
+                    }
+
+                    tracing::info!(
+                        model_name = card.name(),
+                        "Prefill model discovered, activating prefill router"
+                    );
+
+                    // Get the endpoint and activate the prefill router
+                    if let Ok(ns) = drt.namespace(&endpoint_id.namespace)
+                        && let Ok(comp) = ns.component(&endpoint_id.component)
+                    {
+                        let endpoint = comp.endpoint(&endpoint_id.name);
+                        if let Err(e) = model_manager.activate_prefill_router(card.name(), endpoint)
+                        {
+                            tracing::warn!(
+                                model_name = card.name(),
+                                error = %e,
+                                "Failed to activate prefill router"
+                            );
+                        } else {
+                            tracing::info!(
+                                model_name = card.name(),
+                                "Prefill router activated successfully"
+                            );
+                        }
+                    }
+                }
+                DiscoveryEvent::Removed(instance_id) => {
+                    // Log removal for observability
+                    // Note: The PrefillRouter remains active - worker availability
+                    // is handled dynamically by the underlying Client's instance tracking
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        "Prefill worker instance removed from discovery"
+                    );
+                }
+            }
+        }
+    });
 }
 
 /// Create a worker selection pipeline for OpenAI Chat Completion requests
@@ -931,6 +1075,7 @@ pub async fn query_worker_selection_and_annotate(
 /// - `router_mode`: How to route requests (KV, RoundRobin, etc.)
 /// - `busy_threshold`: Optional threshold for busy worker detection
 /// - `kv_router_config`: Optional KV router configuration (only used when router_mode is KV)
+/// - `enforce_disagg`: If true, fail requests when disaggregated serving is unavailable
 ///
 /// # Returns
 /// A configured worker selection pipeline ready to use
@@ -941,12 +1086,15 @@ pub async fn create_worker_selection_pipeline_chat(
     router_mode: RouterMode,
     busy_threshold: Option<f64>,
     kv_router_config: Option<KvRouterConfig>,
+    enforce_disagg: bool,
 ) -> anyhow::Result<
     ServiceEngine<
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >,
 > {
+    use dynamo_llm::kv_router::PrefillRouter;
+
     let runtime = Runtime::from_settings()?;
     let dst_config = DistributedConfig::from_settings();
     let drt_owned = DistributedRuntime::new(runtime, dst_config).await?;
@@ -966,10 +1114,9 @@ pub async fn create_worker_selection_pipeline_chat(
     let router_config = dynamo_llm::entrypoint::RouterConfig {
         router_mode,
         kv_router_config: kv_router_config.unwrap_or_default(),
-        // C bindings only support active_decode_blocks_threshold for now (via busy_threshold param)
         active_decode_blocks_threshold: busy_threshold,
         active_prefill_tokens_threshold: None,
-        enforce_disagg: false,
+        enforce_disagg,
     };
     let watcher = ModelWatcher::new(
         component.drt().clone(),
@@ -998,6 +1145,34 @@ pub async fn create_worker_selection_pipeline_chat(
     } else {
         None
     };
+
+    // Create prefill chooser for dynamic disaggregation support
+    // This registers the model and returns a receiver that will be activated
+    // when a prefill worker is discovered
+    let prefill_chooser = model_manager
+        .register_prefill_router(model_name.to_string())
+        .map(|rx| {
+            // Create prefill-specific config with track_active_blocks disabled
+            let mut prefill_config = kv_router_config.unwrap_or_default();
+            prefill_config.router_track_active_blocks = false;
+
+            PrefillRouter::new(
+                rx,
+                model_manager.clone(),
+                router_mode,
+                card.kv_cache_block_size,
+                Some(prefill_config),
+                enforce_disagg,
+            )
+        });
+
+    // Start background watcher for prefill model discovery
+    // This will activate the prefill router when prefill workers join
+    spawn_prefill_watcher(
+        component.drt().clone(),
+        model_manager.clone(),
+        namespace.to_string(),
+    );
 
     // Download model config files from HuggingFace for EPP
     // The backend's card has NATS URLs which aren't accessible from EPP
@@ -1034,7 +1209,6 @@ pub async fn create_worker_selection_pipeline_chat(
 
     // Create worker monitor if busy_threshold is set
     // Note: C bindings don't register with ModelManager, so HTTP endpoint won't see this
-    // C bindings only support active_decode_blocks_threshold for now (active_prefill_tokens_threshold defaults to 1000000 tokens = effectively disabled)
     let worker_monitor = busy_threshold.map(|t| KvWorkerMonitor::new(client.clone(), t, 1000000));
 
     let engine = build_routed_pipeline::<
@@ -1047,8 +1221,8 @@ pub async fn create_worker_selection_pipeline_chat(
         worker_monitor,
         chooser,
         hf_tokenizer,
-        None,  // prefill_chooser
-        false, // enforce_disagg
+        prefill_chooser,
+        enforce_disagg,
     )
     .await?;
 
