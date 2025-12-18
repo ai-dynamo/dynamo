@@ -5,8 +5,8 @@
 # Setup cleanup trap
 cleanup() {
     echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID $PREFILL_ROUTER_PID 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID $PREFILL_ROUTER_PID 2>/dev/null || true
+    kill $DYNAMO_PID $PREFILL_PID1 $PREFILL_PID2 $DECODE_PID1 2>/dev/null || true
+    wait $DYNAMO_PID $PREFILL_PID1 $PREFILL_PID2 $DECODE_PID1 2>/dev/null || true
     echo "Cleanup complete."
 }
 trap cleanup EXIT INT TERM
@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Note: System metrics are enabled by default on ports:"
-            echo "  8081 (router), 8082-8083 (prefill workers), 8084-8085 (decode workers)"
+            echo "  8082-8083 (prefill workers), 8084-8085 (decode workers)"
             exit 0
             ;;
         *)
@@ -46,13 +46,13 @@ if [ "$ENABLE_OTEL" = true ]; then
     TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
 
-# run ingress
+# Start frontend with KV routing
+# The frontend will automatically detect prefill workers and activate an internal prefill router
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend \
- --router-mode kv \
- --kv-overlap-score-weight 0 \
- --router-reset-states &
+    --router-mode kv \
+    --router-reset-states &
 DYNAMO_PID=$!
 
 # run prefill router

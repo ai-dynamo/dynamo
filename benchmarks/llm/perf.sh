@@ -236,7 +236,6 @@ for concurrency in "${concurrency_array[@]}"; do
     --random-seed 100 \
     --artifact-dir ${artifact_dir} \
     --ui simple \
-    -v \
     -H 'Authorization: Bearer NOT USED' \
     -H 'Accept: text/event-stream'
 

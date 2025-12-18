@@ -706,7 +706,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 								Status: metav1.ConditionTrue,
 							},
 						},
-						Service: v1alpha1.ServiceReplicaStatus{
+						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-frontend-deployment",
 							Replicas:          2,
@@ -766,7 +766,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 								Status: metav1.ConditionFalse,
 							},
 						},
-						Service: v1alpha1.ServiceReplicaStatus{
+						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-frontend-deployment",
 							Replicas:          2,
@@ -838,7 +838,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 								Status: metav1.ConditionTrue,
 							},
 						},
-						Service: v1alpha1.ServiceReplicaStatus{
+						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-frontend-deployment",
 							Replicas:          1,
@@ -867,7 +867,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 								Status: metav1.ConditionTrue,
 							},
 						},
-						Service: v1alpha1.ServiceReplicaStatus{
+						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-decode-deployment",
 							Replicas:          2,
@@ -896,7 +896,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 								Status: metav1.ConditionTrue,
 							},
 						},
-						Service: v1alpha1.ServiceReplicaStatus{
+						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-prefill-deployment",
 							Replicas:          3,
@@ -984,7 +984,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 								Status: metav1.ConditionTrue,
 							},
 						},
-						Service: v1alpha1.ServiceReplicaStatus{
+						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-frontend-deployment",
 							Replicas:          1,
@@ -1013,7 +1013,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 								Status: metav1.ConditionFalse,
 							},
 						},
-						Service: v1alpha1.ServiceReplicaStatus{
+						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-decode-deployment",
 							Replicas:          2,
@@ -1042,7 +1042,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 								Status: metav1.ConditionTrue,
 							},
 						},
-						Service: v1alpha1.ServiceReplicaStatus{
+						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-prefill-deployment",
 							Replicas:          3,
@@ -1124,7 +1124,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 								Status: metav1.ConditionFalse,
 							},
 						},
-						Service: v1alpha1.ServiceReplicaStatus{
+						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-frontend-deployment",
 							Replicas:          1,
@@ -1153,7 +1153,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 								Status: metav1.ConditionFalse,
 							},
 						},
-						Service: v1alpha1.ServiceReplicaStatus{
+						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
 							ComponentName:     "test-dgd-decode-deployment",
 							Replicas:          2,
