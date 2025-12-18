@@ -434,6 +434,18 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 
 ENV PATH=/usr/local/bin/etcd:$PATH
 
+# Create dynamo user with group 0 for OpenShift compatibility
+RUN userdel -r ubuntu > /dev/null 2>&1 || true \
+    && useradd -m -s /bin/bash -g 0 dynamo \
+    && [ `id -u dynamo` -eq 1000 ] \
+    && mkdir -p /home/dynamo/.cache /opt/dynamo \
+    # Non-recursive chown - only the directories themselves, not contents
+    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
+    # No chmod needed: umask 002 handles new files, COPY --chmod handles copied content
+    # Set umask globally for all subsequent RUN commands (must be done as root before USER dynamo)
+    # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
+    && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
+
 # Copy attribution files
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
