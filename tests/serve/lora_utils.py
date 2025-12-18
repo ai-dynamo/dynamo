@@ -9,13 +9,9 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
-import boto3
 import requests
-from botocore.client import Config
-from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +54,7 @@ class MinioLoraConfig:
 
 
 class MinioService:
-    """Connects to MinIO service for tests.
-
-    In CI, MinIO is pre-started by the workflow (no Docker access needed).
-    For local development, MinIO can be started manually or via docker-compose.
-    """
+    """Manages MinIO Docker container lifecycle for tests"""
 
     CONTAINER_NAME = "dynamo-minio-test"
 
@@ -70,71 +62,20 @@ class MinioService:
         self.config = config
         self._logger = logging.getLogger(self.__class__.__name__)
         self._temp_download_dir: Optional[str] = None
-        self._s3_client = None
-
-    def _get_s3_client(self):
-        """Get or create boto3 S3 client for MinIO"""
-        if self._s3_client is None:
-            self._s3_client = boto3.client(
-                "s3",
-                endpoint_url=self.config.endpoint,
-                aws_access_key_id=self.config.access_key,
-                aws_secret_access_key=self.config.secret_key,
-                config=Config(signature_version="s3v4"),
-                region_name="us-east-1",
-            )
-        return self._s3_client
 
     def start(self) -> None:
-        """Connect to MinIO service (started by CI workflow or manually)"""
-        self._logger.info("Connecting to MinIO service...")
-
-        # Check if MinIO is available (pre-started by CI or running locally)
-        if not self._is_minio_ready():
-            # For local development, try to start MinIO if docker is available
-            if self._can_use_docker():
-                self._start_local_minio()
-            else:
-                raise RuntimeError(
-                    "MinIO is not available. In CI, it should be pre-started by the workflow. "
-                    "For local development, start MinIO manually: "
-                    "docker run -d -p 9000:9000 -p 9001:9001 "
-                    "-e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin "
-                    "quay.io/minio/minio server /data --console-address ':9001'"
-                )
-
-        self._logger.info("MinIO service is ready")
-
-    def _is_minio_ready(self) -> bool:
-        """Check if MinIO is already running and ready"""
-        health_url = f"{self.config.endpoint}/minio/health/live"
-        try:
-            response = requests.get(health_url, timeout=2)
-            return response.status_code == 200
-        except requests.RequestException:
-            return False
-
-    def _can_use_docker(self) -> bool:
-        """Check if docker is available (for local development)"""
-        try:
-            result = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
-            return result.returncode == 0
-        except (subprocess.SubprocessError, FileNotFoundError):
-            return False
-
-    def _start_local_minio(self) -> None:
-        """Start MinIO locally for development (not used in CI)"""
-        self._logger.info("Starting local MinIO container for development...")
+        """Start MinIO container"""
+        self._logger.info("Starting MinIO container...")
 
         # Create data directory
-        if not self.config.data_dir:
-            self.config.data_dir = tempfile.mkdtemp(prefix="minio_test_")
+        if self.config.data_dir:
+            data_dir = self.config.data_dir
+        else:
+            data_dir = tempfile.mkdtemp(prefix="minio_test_")
+        self.config.data_dir = data_dir
 
         # Stop existing container if running
-        subprocess.run(
-            ["docker", "rm", "-f", self.CONTAINER_NAME],
-            capture_output=True,
-        )
+        self.stop()
 
         # Start MinIO container
         cmd = [
@@ -148,7 +89,7 @@ class MinioService:
             "-p",
             "9001:9001",
             "-v",
-            f"{self.config.data_dir}:/data",
+            f"{data_dir}:/data",
             "quay.io/minio/minio",
             "server",
             "/data",
@@ -162,6 +103,7 @@ class MinioService:
 
         # Wait for MinIO to be ready
         self._wait_for_ready()
+        self._logger.info("MinIO started successfully")
 
     def _wait_for_ready(self, timeout: int = 30) -> None:
         """Wait for MinIO to be ready"""
@@ -180,40 +122,64 @@ class MinioService:
         raise RuntimeError(f"MinIO did not become ready within {timeout}s")
 
     def stop(self) -> None:
-        """Stop MinIO container (only if started locally for development)"""
-        # In CI, MinIO is managed by the workflow - don't try to stop it
-        if os.environ.get("MINIO_AVAILABLE") == "true":
-            self._logger.info("MinIO is managed by CI workflow, skipping stop")
-            return
+        """Stop and remove MinIO container"""
+        self._logger.info("Stopping MinIO container...")
 
-        self._logger.info("Stopping local MinIO container...")
+        # Stop container
         subprocess.run(
-            ["docker", "rm", "-f", self.CONTAINER_NAME],
+            ["docker", "stop", self.CONTAINER_NAME],
+            capture_output=True,
+        )
+
+        # Remove container
+        subprocess.run(
+            ["docker", "rm", self.CONTAINER_NAME],
             capture_output=True,
         )
 
     def create_bucket(self) -> None:
-        """Create the S3 bucket using boto3"""
-        s3_client = self._get_s3_client()
+        """Create the S3 bucket using AWS CLI"""
+        env = os.environ.copy()
+        env.update(
+            {
+                "AWS_ACCESS_KEY_ID": self.config.access_key,
+                "AWS_SECRET_ACCESS_KEY": self.config.secret_key,
+            }
+        )
 
         # Check if bucket exists
-        try:
-            s3_client.head_bucket(Bucket=self.config.bucket)
-            self._logger.info(f"Bucket already exists: {self.config.bucket}")
-        except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code", "")
-            if error_code in ("404", "NoSuchBucket"):
-                # Create bucket
-                self._logger.info(f"Creating bucket: {self.config.bucket}")
-                try:
-                    s3_client.create_bucket(Bucket=self.config.bucket)
-                    self._logger.info(f"Bucket created: {self.config.bucket}")
-                except ClientError as create_error:
-                    raise RuntimeError(
-                        f"Failed to create bucket: {create_error}"
-                    ) from create_error
-            else:
-                raise RuntimeError(f"Failed to check bucket: {e}") from e
+        result = subprocess.run(
+            [
+                "aws",
+                "--endpoint-url",
+                self.config.endpoint,
+                "s3",
+                "ls",
+                f"s3://{self.config.bucket}",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        if result.returncode != 0:
+            # Create bucket
+            self._logger.info(f"Creating bucket: {self.config.bucket}")
+            result = subprocess.run(
+                [
+                    "aws",
+                    "--endpoint-url",
+                    self.config.endpoint,
+                    "s3",
+                    "mb",
+                    f"s3://{self.config.bucket}",
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to create bucket: {result.stderr}")
 
     def download_lora(self) -> str:
         """Download LoRA from Hugging Face Hub, returns temp directory path"""
@@ -247,33 +213,38 @@ class MinioService:
         return self._temp_download_dir
 
     def upload_lora(self, local_path: str) -> None:
-        """Upload LoRA to MinIO using boto3"""
+        """Upload LoRA to MinIO"""
         self._logger.info(
             f"Uploading LoRA to s3://{self.config.bucket}/{self.config.lora_name}"
         )
 
-        s3_client = self._get_s3_client()
-        local_path = Path(local_path)
+        env = os.environ.copy()
+        env.update(
+            {
+                "AWS_ACCESS_KEY_ID": self.config.access_key,
+                "AWS_SECRET_ACCESS_KEY": self.config.secret_key,
+            }
+        )
 
-        # Walk through the directory and upload all files
-        for file_path in local_path.rglob("*"):
-            if file_path.is_file():
-                # Skip git files
-                if ".git" in str(file_path):
-                    continue
+        result = subprocess.run(
+            [
+                "aws",
+                "--endpoint-url",
+                self.config.endpoint,
+                "s3",
+                "sync",
+                local_path,
+                f"s3://{self.config.bucket}/{self.config.lora_name}",
+                "--exclude",
+                "*.git*",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
 
-                # Calculate the S3 key (relative path from local_path)
-                # Use as_posix() to ensure forward slashes in S3 key
-                relative_path = file_path.relative_to(local_path).as_posix()
-                s3_key = f"{self.config.lora_name}/{relative_path}"
-
-                self._logger.debug(f"Uploading {file_path} to {s3_key}")
-                try:
-                    s3_client.upload_file(str(file_path), self.config.bucket, s3_key)
-                except ClientError as e:
-                    raise RuntimeError(f"Failed to upload {file_path}: {e}") from e
-
-        self._logger.info("LoRA upload completed")
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to upload LoRA: {result.stderr}")
 
     def cleanup_download(self) -> None:
         """Clean up temporary download directory only"""

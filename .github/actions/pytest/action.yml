@@ -82,30 +82,11 @@ runs:
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
-        # Start MinIO service on the runner for S3-dependent tests (e.g., LoRA)
-        echo "🗄️  Starting MinIO service..."
-        docker rm -f dynamo-minio-test 2>/dev/null || true
-        docker run -d --name dynamo-minio-test \
-          -p 9000:9000 -p 9001:9001 \
-          -e MINIO_ROOT_USER=minioadmin \
-          -e MINIO_ROOT_PASSWORD=minioadmin \
-          quay.io/minio/minio server /data --console-address ":9001"
-
-        # Wait for MinIO to be ready
-        for i in {1..30}; do
-          if curl -sf http://localhost:9000/minio/health/live >/dev/null 2>&1; then
-            echo "✅ MinIO is ready"
-            break
-          fi
-          sleep 1
-        done
-
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
-          -e MINIO_AVAILABLE=true \
           ${{ inputs.image_tag }} \
           bash -c "${PYTEST_CMD}"
 
@@ -121,10 +102,6 @@ runs:
             echo "⚠️  Test results file not found: ${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}"
           fi
         fi
-
-        # Cleanup MinIO service
-        echo "🧹 Cleaning up MinIO service..."
-        docker rm -f dynamo-minio-test 2>/dev/null || true
 
         # Always continue to results processing
         exit 0

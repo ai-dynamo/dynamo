@@ -8,8 +8,6 @@
 #   create non-reproducible builds, and cause dependency conflicts. Every installed version
 #   should be explicitly tested, not an unknown future release.
 
-# For S3/MinIO operations in LoRA tests
-boto3==1.35.99
 # For IFEval dataset loading in kvbm tests
 datasets==4.4.1
 # For NATS object store verification in router tests
