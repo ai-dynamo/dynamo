@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::{DiscoveryInstance, DiscoveryQuery};
@@ -243,8 +243,24 @@ impl MetadataSnapshot {
 
     /// Compare with previous snapshot and return true if changed.
     /// Logs diagnostic info about what changed.
+    ///
+    /// We check both:
+    /// - `instances` keys: Which pods are ready AND have metadata
+    /// - `generations`: CR metadata versions
+    ///
+    /// This is important because when a pod goes into Terminating, it's removed
+    /// from the EndpointSlice (so not in `instances`) but the CR may still exist
+    /// with the same generation until garbage-collected.
     pub fn has_changes_from(&self, prev: &MetadataSnapshot) -> bool {
-        if self.generations == prev.generations {
+        // Check if instance IDs changed (pods added/removed from ready state)
+        let curr_instance_ids: HashSet<u64> = self.instances.keys().copied().collect();
+        let prev_instance_ids: HashSet<u64> = prev.instances.keys().copied().collect();
+        let instances_changed = curr_instance_ids != prev_instance_ids;
+
+        // Check if CR generations changed (metadata updated)
+        let generations_changed = self.generations != prev.generations;
+
+        if !instances_changed && !generations_changed {
             tracing::trace!(
                 "Snapshot (seq={}): no changes, {} instances",
                 self.sequence,
@@ -254,17 +270,26 @@ impl MetadataSnapshot {
         }
 
         // Compute diff for logging
-        let added: Vec<_> = self
+        let instances_added: Vec<_> = curr_instance_ids
+            .difference(&prev_instance_ids)
+            .map(|id| format!("{:x}", id))
+            .collect();
+        let instances_removed: Vec<_> = prev_instance_ids
+            .difference(&curr_instance_ids)
+            .map(|id| format!("{:x}", id))
+            .collect();
+
+        let crs_added: Vec<_> = self
             .generations
             .keys()
             .filter(|k| !prev.generations.contains_key(*k))
             .collect();
-        let removed: Vec<_> = prev
+        let crs_removed: Vec<_> = prev
             .generations
             .keys()
             .filter(|k| !self.generations.contains_key(*k))
             .collect();
-        let updated: Vec<_> = self
+        let crs_updated: Vec<_> = self
             .generations
             .iter()
             .filter(|(k, v)| prev.generations.get(*k).is_some_and(|pv| pv != *v))
@@ -272,12 +297,14 @@ impl MetadataSnapshot {
             .collect();
 
         tracing::info!(
-            "Snapshot (seq={}): {} instances, added={:?}, removed={:?}, updated={:?}",
+            "Snapshot (seq={}): {} instances, instances_added={:?}, instances_removed={:?}, crs_added={:?}, crs_removed={:?}, crs_updated={:?}",
             self.sequence,
             self.instances.len(),
-            added,
-            removed,
-            updated
+            instances_added,
+            instances_removed,
+            crs_added,
+            crs_removed,
+            crs_updated
         );
 
         true

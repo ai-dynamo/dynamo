@@ -241,15 +241,59 @@ impl Discovery for KubeDiscoveryClient {
 
         // Spawn task to process snapshots
         tokio::spawn(async move {
-            let mut known_instances = HashSet::<u64>::new();
+            // Initialize known_instances from current snapshot state
+            // This is critical: watch_rx.changed() only fires on FUTURE changes,
+            // so we must capture the current state first to detect removals correctly
+            let initial_snapshot = watch_rx.borrow_and_update().clone();
+
+            let mut known_instances: HashSet<u64> = initial_snapshot
+                .instances
+                .iter()
+                .filter_map(|(&instance_id, metadata)| {
+                    let filtered = metadata.filter(&query);
+                    if !filtered.is_empty() {
+                        Some(instance_id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
             tracing::debug!(
                 stream_id = %stream_id,
+                initial_instances = known_instances.len(),
                 "Watch started for query={:?}",
                 query
             );
 
+            // Emit initial Added events for all existing instances (the "list" part of list_and_watch)
+            for &instance_id in &known_instances {
+                if let Some(metadata) = initial_snapshot.instances.get(&instance_id) {
+                    let instances = metadata.filter(&query);
+                    for instance in instances {
+                        tracing::info!(
+                            stream_id = %stream_id,
+                            instance_id = format!("{:x}", instance.instance_id()),
+                            "Emitting initial Added event"
+                        );
+                        if event_tx.send(Ok(DiscoveryEvent::Added(instance))).is_err() {
+                            tracing::debug!(
+                                stream_id = %stream_id,
+                                "Watch receiver dropped during initial sync"
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+
             loop {
+                tracing::trace!(
+                    stream_id = %stream_id,
+                    known_count = known_instances.len(),
+                    "Watch loop waiting for changes"
+                );
+
                 // Wait for next snapshot or cancellation
                 let watch_result = if let Some(ref token) = cancel_token {
                     tokio::select! {
@@ -271,6 +315,14 @@ impl Discovery for KubeDiscoveryClient {
                         // Get latest snapshot
                         let snapshot = watch_rx.borrow_and_update().clone();
 
+                        tracing::debug!(
+                            stream_id = %stream_id,
+                            seq = snapshot.sequence,
+                            snapshot_instances = snapshot.instances.len(),
+                            known_instances = known_instances.len(),
+                            "Watch received snapshot update"
+                        );
+
                         // Filter snapshot by query
                         let current_instances: HashSet<u64> = snapshot
                             .instances
@@ -285,6 +337,13 @@ impl Discovery for KubeDiscoveryClient {
                             })
                             .collect();
 
+                        tracing::trace!(
+                            stream_id = %stream_id,
+                            current_ids = ?current_instances.iter().map(|id| format!("{:x}", id)).collect::<Vec<_>>(),
+                            known_ids = ?known_instances.iter().map(|id| format!("{:x}", id)).collect::<Vec<_>>(),
+                            "Comparing instance sets"
+                        );
+
                         // Compute diff
                         let added: Vec<u64> = current_instances
                             .difference(&known_instances)
@@ -296,8 +355,16 @@ impl Discovery for KubeDiscoveryClient {
                             .copied()
                             .collect();
 
-                        // Only log if there are changes
-                        if !added.is_empty() || !removed.is_empty() {
+                        // Log diff results (even if empty, for debugging)
+                        if added.is_empty() && removed.is_empty() {
+                            tracing::debug!(
+                                stream_id = %stream_id,
+                                seq = snapshot.sequence,
+                                current_count = current_instances.len(),
+                                known_count = known_instances.len(),
+                                "Watch snapshot received but no diff detected"
+                            );
+                        } else {
                             tracing::debug!(
                                 stream_id = %stream_id,
                                 seq = snapshot.sequence,
