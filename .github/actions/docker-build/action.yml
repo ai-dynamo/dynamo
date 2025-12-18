@@ -121,10 +121,16 @@ runs:
         # Set base cache args and set --cache-to if this is a main commit
         EXTRA_ARGS=""
         EXTRA_ARGS="--cache-to type=inline "
-        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache "
-        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-${PLATFORM##*/} "
+        if [ "$MULTI_ARCH_BUILD" = "true" ]; then
+          CACHE_PLATFORM="multi-arch"
+          EXTRA_ARGS+=" --multi-arch"
+        else
+          CACHE_PLATFORM="${PLATFORM##*/}"
+        fi
+        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${CACHE_PLATFORM}-cache "
+        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-${CACHE_PLATFORM} "
         if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-          EXTRA_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache,mode=max "
+          EXTRA_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${CACHE_PLATFORM}-cache,mode=max "
         fi
 
         echo "$EXTRA_ARGS"
@@ -146,9 +152,6 @@ runs:
         fi
         if [ -n "${{ inputs.enable_kvbm }}" ]; then
           EXTRA_ARGS+=" --build-arg ENABLE_KVBM=${{ inputs.enable_kvbm }}"
-        fi
-        if [ "$MULTI_ARCH_BUILD" = "true" ]; then
-          EXTRA_ARGS+=" --multi-arch"
         fi
         if [ "$MULTI_ARCH_PUSH" = "true" ]; then
           EXTRA_ARGS+=" --push"
