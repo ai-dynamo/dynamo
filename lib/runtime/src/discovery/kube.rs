@@ -132,11 +132,7 @@ impl Discovery for KubeDiscoveryClient {
 
         // Build and apply the CR with the updated metadata
         // This persists the metadata to Kubernetes for other pods to discover
-        let cr = build_cr(
-            &self.pod_info.pod_name,
-            &self.pod_info.pod_uid,
-            &*metadata,
-        )?;
+        let cr = build_cr(&self.pod_info.pod_name, &self.pod_info.pod_uid, &metadata)?;
 
         apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await?;
 
@@ -181,11 +177,7 @@ impl Discovery for KubeDiscoveryClient {
 
         // Build and apply the CR with the updated metadata
         // This persists the removal to Kubernetes for other pods to see
-        let cr = build_cr(
-            &self.pod_info.pod_name,
-            &self.pod_info.pod_uid,
-            &*metadata,
-        )?;
+        let cr = build_cr(&self.pod_info.pod_name, &self.pod_info.pod_uid, &metadata)?;
 
         apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await?;
 

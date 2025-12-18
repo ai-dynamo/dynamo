@@ -13,7 +13,7 @@ use kube::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Notify;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 use super::crd::DynamoWorkerMetadata;
 use super::utils::{PodInfo, extract_endpoint_info};
@@ -233,10 +233,7 @@ impl DiscoveryDaemon {
             }
         }
 
-        tracing::trace!(
-            "Daemon loaded {} DynamoWorkerMetadata CRs",
-            cr_map.len()
-        );
+        tracing::trace!("Daemon loaded {} DynamoWorkerMetadata CRs", cr_map.len());
 
         // Correlate: ready pod + CR exists = include in snapshot
         // Both instances and generations are keyed by instance_id with matching keys

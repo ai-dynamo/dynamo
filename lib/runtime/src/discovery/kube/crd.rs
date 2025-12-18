@@ -11,7 +11,10 @@
 
 use anyhow::Result;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::{Api, Client as KubeClient, CustomResource, api::{Patch, PatchParams}};
+use kube::{
+    Api, Client as KubeClient, CustomResource,
+    api::{Patch, PatchParams},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::discovery::DiscoveryMetadata;
@@ -155,4 +158,3 @@ mod tests {
         assert_eq!(deserialized.spec.data, data);
     }
 }
-
