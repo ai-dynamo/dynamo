@@ -19,7 +19,7 @@ Test Strategy:
 """
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pytest
 

@@ -201,7 +201,7 @@ Workers use sequential ports:
 ┌─────────────────┐
 │     Router      │──┐
 │   (router.py)   │  │ ZMQ (KV Events)
-└────────┬────────┘  │ 
+└────────┬────────┘  │
          │           │
          │ Select    │
          │ Worker    │
