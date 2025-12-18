@@ -602,12 +602,7 @@ def test_router_decisions(
 
     Parameterized to test both JetStream (default) and NATS Core (local indexer) modes.
     """
-
-    # runtime_services_session starts etcd and nats
-    # Even when request_plane is tcp/http, KV event plane still uses NATS; ensure the runtime connects.
-    if request_plane != "nats":
-        os.environ.setdefault("NATS_SERVER", "nats://localhost:4222")
-
+    # runtime_services_dynamic_ports handles NATS and etcd startup
     mode = "NATS Core (local indexer)" if use_nats_core else "JetStream"
     logger.info(
         f"Starting test router prefix reuse and KV events synchronization ({mode})"
@@ -671,14 +666,11 @@ def test_router_decisions_disagg(
     - prefill_first: prefill workers register before decode workers
     - decode_first: decode workers register before prefill workers
     """
+    # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
         f"Starting disaggregated router prefix reuse test "
         f"(registration_order={registration_order})"
     )
-
-    # Disaggregated KV routing still uses NATS for KV events unless --no-kv-events is used.
-    if request_plane != "nats":
-        os.environ.setdefault("NATS_SERVER", "nats://localhost:4222")
 
     # Generate shared namespace for prefill and decode workers
     namespace_suffix = generate_random_suffix()
@@ -781,15 +773,10 @@ def test_busy_threshold_endpoint(
 
     For now, this test only verifies the endpoint is accessible and returns valid responses.
     """
+    # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
         f"Starting busy_threshold endpoint test with request_plane={request_plane}"
     )
-
-    # Busy-threshold endpoint is served by the KV router frontend. Even when the request plane
-    # is TCP, KV routing may still use NATS for KV events / replica sync; ensure the runtime
-    # can connect to NATS when available.
-    if request_plane != "nats":
-        os.environ.setdefault("NATS_SERVER", "nats://localhost:4222")
 
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 

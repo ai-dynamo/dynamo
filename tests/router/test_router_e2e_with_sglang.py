@@ -8,12 +8,10 @@
 import logging
 import os
 import time
-from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 import pytest
 
-from tests.conftest import EtcdServer, NatsServer
 from tests.router.common import (  # utilities
     _test_router_basic,
     _test_router_decisions,
@@ -492,47 +490,43 @@ def test_sglang_indexers_sync(
     Tests with configuration:
     - jetstream: etcd backend, JetStream for KV events, NATS request plane
     """
+    # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
         f"Starting SGLang indexers sync test: store_backend={store_backend}, "
         f"use_nats_core={use_nats_core}, request_plane={request_plane}"
     )
 
-    # Start NATS manually (needed for all variants - KV event sync)
-    with NatsServer(request) as nats_server:
-        # Start etcd if needed
-        etcd_ctx = EtcdServer(request) if store_backend == "etcd" else nullcontext()
-        with etcd_ctx:
-            N_SGLANG_WORKERS = 2
+    N_SGLANG_WORKERS = 2
 
-            try:
-                # Start SGLang workers
-                logger.info(f"Starting {N_SGLANG_WORKERS} SGLang workers")
-                sglang_workers = SGLangProcess(
-                    request,
-                    sglang_args=SGLANG_ARGS,
-                    num_workers=N_SGLANG_WORKERS,
-                    single_gpu=True,  # fit workers into one GPU
-                    request_plane=request_plane,
-                    store_backend=store_backend,
-                )
-                logger.info(
-                    f"All SGLang workers using namespace: {sglang_workers.namespace}"
-                )
-                sglang_workers.__enter__()
+    try:
+        # Start SGLang workers
+        logger.info(f"Starting {N_SGLANG_WORKERS} SGLang workers")
+        sglang_workers = SGLangProcess(
+            request,
+            sglang_args=SGLANG_ARGS,
+            num_workers=N_SGLANG_WORKERS,
+            single_gpu=True,  # fit workers into one GPU
+            request_plane=request_plane,
+            store_backend=store_backend,
+        )
+        logger.info(
+            f"All SGLang workers using namespace: {sglang_workers.namespace}"
+        )
+        sglang_workers.__enter__()
 
-                # Use the common test implementation (creates its own runtimes for each router)
-                # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
-                _test_router_indexers_sync(
-                    engine_workers=sglang_workers,
-                    block_size=PAGE_SIZE,
-                    model_name=MODEL_NAME,
-                    num_workers=N_SGLANG_WORKERS,
-                    store_backend=store_backend,
-                    request_plane=request_plane,
-                )
+        # Use the common test implementation (creates its own runtimes for each router)
+        # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
+        _test_router_indexers_sync(
+            engine_workers=sglang_workers,
+            block_size=PAGE_SIZE,
+            model_name=MODEL_NAME,
+            num_workers=N_SGLANG_WORKERS,
+            store_backend=store_backend,
+            request_plane=request_plane,
+        )
 
-                logger.info("SGLang indexers sync test completed successfully")
+        logger.info("SGLang indexers sync test completed successfully")
 
-            finally:
-                if "sglang_workers" in locals():
-                    sglang_workers.__exit__(None, None, None)
+    finally:
+        if "sglang_workers" in locals():
+            sglang_workers.__exit__(None, None, None)

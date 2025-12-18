@@ -8,12 +8,10 @@
 import logging
 import os
 import time
-from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 import pytest
 
-from tests.conftest import EtcdServer, NatsServer
 from tests.router.common import (  # utilities
     _test_router_basic,
     _test_router_decisions,
@@ -422,47 +420,43 @@ def test_trtllm_indexers_sync(
     Tests with configuration:
     - jetstream: etcd backend, JetStream for KV events, NATS request plane
     """
+    # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
         f"Starting TRT-LLM indexers sync test: store_backend={store_backend}, "
         f"use_nats_core={use_nats_core}, request_plane={request_plane}"
     )
 
-    # Start NATS manually (needed for all variants - KV event sync)
-    with NatsServer(request) as nats_server:
-        # Start etcd if needed
-        etcd_ctx = EtcdServer(request) if store_backend == "etcd" else nullcontext()
-        with etcd_ctx:
-            N_TRTLLM_WORKERS = 2
+    N_TRTLLM_WORKERS = 2
 
-            try:
-                # Start TRT-LLM workers
-                logger.info(f"Starting {N_TRTLLM_WORKERS} TRT-LLM workers")
-                trtllm_workers = TRTLLMProcess(
-                    request,
-                    trtllm_args=TRTLLM_ARGS,
-                    num_workers=N_TRTLLM_WORKERS,
-                    single_gpu=True,  # fit workers into one GPU
-                    request_plane=request_plane,
-                    store_backend=store_backend,
-                )
-                logger.info(
-                    f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}"
-                )
-                trtllm_workers.__enter__()
+    try:
+        # Start TRT-LLM workers
+        logger.info(f"Starting {N_TRTLLM_WORKERS} TRT-LLM workers")
+        trtllm_workers = TRTLLMProcess(
+            request,
+            trtllm_args=TRTLLM_ARGS,
+            num_workers=N_TRTLLM_WORKERS,
+            single_gpu=True,  # fit workers into one GPU
+            request_plane=request_plane,
+            store_backend=store_backend,
+        )
+        logger.info(
+            f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}"
+        )
+        trtllm_workers.__enter__()
 
-                # Use the common test implementation (creates its own runtimes for each router)
-                # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
-                _test_router_indexers_sync(
-                    engine_workers=trtllm_workers,
-                    block_size=TRTLLM_BLOCK_SIZE,
-                    model_name=MODEL_NAME,
-                    num_workers=N_TRTLLM_WORKERS,
-                    store_backend=store_backend,
-                    request_plane=request_plane,
-                )
+        # Use the common test implementation (creates its own runtimes for each router)
+        # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
+        _test_router_indexers_sync(
+            engine_workers=trtllm_workers,
+            block_size=TRTLLM_BLOCK_SIZE,
+            model_name=MODEL_NAME,
+            num_workers=N_TRTLLM_WORKERS,
+            store_backend=store_backend,
+            request_plane=request_plane,
+        )
 
-                logger.info("TRT-LLM indexers sync test completed successfully")
+        logger.info("TRT-LLM indexers sync test completed successfully")
 
-            finally:
-                if "trtllm_workers" in locals():
-                    trtllm_workers.__exit__(None, None, None)
+    finally:
+        if "trtllm_workers" in locals():
+            trtllm_workers.__exit__(None, None, None)

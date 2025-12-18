@@ -562,14 +562,16 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
       leak across workers.
 
     - If store_kv != "etcd", etcd is not started (returns None)
-    - If request_plane != "nats", NATS is not started (returns None)
+    - NATS is always started when etcd is used, because KV events require NATS
+      regardless of the request_plane (tcp/nats only affects request transport)
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
     import os
 
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
-    if request_plane == "nats" and store_kv == "etcd":
+    # Always start NATS when etcd is used - KV events require NATS regardless of request_plane
+    if store_kv == "etcd":
         with NatsServer(request, port=0) as nats_process:
             with EtcdServer(request, port=0) as etcd_process:
                 # Set environment variables for Rust/Python runtime to use. Note that xdist (parallel execution)
@@ -587,11 +589,6 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
             os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
             yield nats_process, None
             os.environ.pop("NATS_SERVER", None)
-    elif store_kv == "etcd":
-        with EtcdServer(request, port=0) as etcd_process:
-            os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
-            yield None, etcd_process
-            os.environ.pop("ETCD_ENDPOINTS", None)
     else:
         yield None, None
 
