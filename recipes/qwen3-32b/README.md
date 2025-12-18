@@ -148,5 +148,4 @@ kubectl delete dynamographdeployment disagg-router -n ${NAMESPACE}
 ## References
 
 - [Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving](https://github.com/kvcache-ai/Mooncake) - FAST25 paper and trace data
-- [Dynamo KV-Aware Routing](../../docs/architecture/kv-routing.md) - How KV-aware routing works
 
