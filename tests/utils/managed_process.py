@@ -595,6 +595,7 @@ class DynamoFrontendProcess(ManagedProcess):
         router_mode: str = "round-robin",
         extra_args: Optional[list[str]] = None,
         extra_env: Optional[dict[str, str]] = None,
+        terminate_existing: bool = True,
     ):
         # TODO: Refactor remaining duplicate "DynamoFrontendProcess" helpers in tests to
         # use this shared implementation (and delete the copies):
@@ -602,10 +603,6 @@ class DynamoFrontendProcess(ManagedProcess):
         # - tests/frontend/test_completion_mocker_engine.py
         # - tests/frontend/grpc/test_tensor_parameters.py
         # - tests/frontend/grpc/test_tensor_mocker_engine.py
-        # - tests/fault_tolerance/cancellation/utils.py
-        # - tests/fault_tolerance/migration/utils.py
-        # - tests/fault_tolerance/etcd_ha/utils.py
-        # - tests/fault_tolerance/test_vllm_health_check.py
         self._allocated_http_port: Optional[int] = None
         if frontend_port == 0:
             # Treat `0` as "allocate a random free port" for xdist-safe tests.
@@ -646,7 +643,7 @@ class DynamoFrontendProcess(ManagedProcess):
             command=command,
             env=env,
             display_output=True,
-            terminate_existing=True,
+            terminate_existing=terminate_existing,
             log_dir=log_dir,
         )
 
@@ -657,6 +654,11 @@ class DynamoFrontendProcess(ManagedProcess):
             if self._allocated_http_port is not None:
                 deallocate_port(self._allocated_http_port)
                 self._allocated_http_port = None
+
+    @property
+    def frontend_port(self) -> int:
+        """Back-compat alias for older tests that expect `frontend.frontend_port`."""
+        return self.http_port
 
 
 def main():
