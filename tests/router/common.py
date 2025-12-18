@@ -25,6 +25,11 @@ NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 
 
+def _nats_server() -> str:
+    # Prefer dynamically-started NATS from per-test fixtures when present.
+    return os.environ.get("NATS_SERVER", "nats://localhost:4222")
+
+
 ########################################################
 # Helper Classes
 ########################################################
@@ -394,7 +399,7 @@ async def check_nats_consumers(namespace: str, expected_count: Optional[int] = N
     stream_name = f"{slugified}-kv-events"
     logger.info(f"Checking consumers for stream: {stream_name}")
 
-    nc = await nats.connect("nats://localhost:4222")
+    nc = await nats.connect(servers=_nats_server())
     try:
         js = nc.jetstream()
         consumer_infos = await js.consumers_info(stream_name)
@@ -770,7 +775,7 @@ def _test_router_two_routers(
             logger.info(f"Checking consumers for stream: {stream_name}")
 
             # Connect to NATS and list consumers
-            nc = await nats.connect("nats://localhost:4222")
+            nc = await nats.connect(servers=_nats_server())
             try:
                 js = nc.jetstream()
 
@@ -1529,29 +1534,30 @@ def _test_router_indexers_sync(
 
             logger.info(f"Verifying NATS object store bucket exists: {expected_bucket}")
             snapshot_verified = False
-            try:
-                # Connect to NATS and check object store
-                nc = await nats.connect("nats://localhost:4222")
-                try:
-                    js = nc.jetstream()
-                    obj_store = await js.object_store(expected_bucket)
 
-                    # Try to get the expected file
-                    try:
-                        result = await obj_store.get(expected_file)
-                        logger.info(
-                            f"✓ Snapshot file '{expected_file}' found in bucket '{expected_bucket}' "
-                            f"(size: {len(result.data) if result.data else 0} bytes)"
-                        )
-                        snapshot_verified = True
-                    except Exception as e:
-                        logger.error(
-                            f"Snapshot file '{expected_file}' not found in bucket '{expected_bucket}': {e}"
-                        )
-                finally:
-                    await nc.close()
+            # Connect to NATS and check object store. This honors per-test NATS instances
+            # started by fixtures (xdist-safe) instead of assuming localhost:4222.
+            nc = await nats.connect(servers=_nats_server())
+            try:
+                js = nc.jetstream()
+                obj_store = await js.object_store(expected_bucket)
+
+                # Try to get the expected file
+                try:
+                    result = await obj_store.get(expected_file)
+                    logger.info(
+                        f"✓ Snapshot file '{expected_file}' found in bucket '{expected_bucket}' "
+                        f"(size: {len(result.data) if result.data else 0} bytes)"
+                    )
+                    snapshot_verified = True
+                except Exception as e:
+                    logger.error(
+                        f"Snapshot file '{expected_file}' not found in bucket '{expected_bucket}': {e}"
+                    )
             except Exception as e:
                 logger.error(f"Error checking NATS object store: {e}")
+            finally:
+                await nc.close()
 
             # Assert that snapshot was created (threshold=20, sent 25 requests)
             if not snapshot_verified:
@@ -1647,7 +1653,7 @@ def _test_router_indexers_sync(
             slugified = component_subject.lower().replace(".", "-").replace("_", "-")
             stream_name = f"{slugified}-kv-events"
 
-            nc = await nats.connect("nats://localhost:4222")
+            nc = await nats.connect(servers=_nats_server())
             try:
                 js = nc.jetstream()
                 consumer_infos = await js.consumers_info(stream_name)

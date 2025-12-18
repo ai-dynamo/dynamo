@@ -1,5 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+# Timing notes (measured in a TRT-LLM-enabled container):
+# - GPU-1 subset (`-m "gpu_1"`): 136.36s total for 3 tests.
+# These tests load a real model and can be slow/flaky when GPU resources are contended,
+# so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
 import logging
 import os
 import time
@@ -14,7 +19,9 @@ from tests.router.common import (  # utilities
     generate_random_suffix,
     get_runtime,
 )
+from tests.utils.constants import DefaultPort
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +33,15 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.model(MODEL_NAME),
 ]
-PORTS = [
-    8011,
-    8022,
-]  # Frontend ports: use PORTS[0] for single router, PORTS for multi-router
 NUM_REQUESTS = 10
+
+
+def allocate_frontend_ports(request, count: int) -> list[int]:
+    """Allocate random free frontend ports for xdist-safe execution."""
+    ports = allocate_ports(count, DefaultPort.FRONTEND.value)
+    request.addfinalizer(lambda: deallocate_ports(ports))
+    return ports
+
 
 # Shared test payload for all tests
 TEST_PAYLOAD: Dict[str, Any] = {
@@ -265,8 +276,9 @@ class TRTLLMProcess:
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_trtllm_kv_router_basic(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, predownload_models, set_ucx_tls_no_mm
 ):
     """
     Quick e2e sanity test for KV router with TRT-LLM engine instances.
@@ -289,11 +301,12 @@ def test_trtllm_kv_router_basic(
         trtllm_workers.__enter__()
 
         # Run basic router test (starts router internally and waits for workers to be ready)
+        frontend_port = allocate_frontend_ports(request, 1)[0]
         _test_router_basic(
             engine_workers=trtllm_workers,
             block_size=TRTLLM_BLOCK_SIZE,
             request=request,
-            frontend_port=PORTS[0],
+            frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
             frontend_timeout=180,  # 3 minutes should be plenty for TinyLlama
@@ -307,8 +320,9 @@ def test_trtllm_kv_router_basic(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_router_decisions_trtllm_multiple_workers(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, predownload_models, set_ucx_tls_no_mm
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting TRT-LLM router prefix reuse test with two workers")
@@ -353,8 +367,9 @@ def test_router_decisions_trtllm_multiple_workers(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_trtllm_indexers_sync(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, predownload_models, set_ucx_tls_no_mm
 ):
     """
     Test that two KV routers have synchronized indexer states after processing requests
