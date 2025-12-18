@@ -34,6 +34,9 @@ echo "${env_vars}"
 
 eval "${env_vars}"
 
+# Sync to ensure all nodes come up at around the same time
+python3 -c "from mpi4py import MPI; MPI.COMM_WORLD.Barrier()"
+
 trtllm-llmapi-launch python3 -m dynamo.trtllm \
     --model-path ${model_path} \
     --served-model-name ${served_model_name} \
