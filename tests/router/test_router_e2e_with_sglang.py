@@ -3,10 +3,12 @@
 import logging
 import os
 import time
+from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 import pytest
 
+from tests.conftest import EtcdServer, NatsServer
 from tests.router.common import (  # utilities
     _test_router_basic,
     _test_router_decisions,
@@ -75,6 +77,7 @@ class SGLangProcess:
         single_gpu: bool = False,
         data_parallel_size: Optional[int] = None,
         request_plane: str = "tcp",
+        store_backend: str = "etcd",
     ):
         """Initialize SGLang workers with dynamo integration.
 
@@ -90,6 +93,7 @@ class SGLangProcess:
             single_gpu: If True, all workers share GPU 0
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
             request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
+            store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         """
         # Generate unique namespace for isolation
         namespace_suffix = generate_random_suffix()
@@ -98,6 +102,7 @@ class SGLangProcess:
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_workers
         self.worker_processes = []
+        self.store_backend = store_backend
 
         if sglang_args is None:
             sglang_args = {}
@@ -166,14 +171,18 @@ class SGLangProcess:
             command.extend(["--kv-events-config", kv_events_config])
 
             env = os.environ.copy()  # Copy parent environment
-            env.update(
-                {
-                    "CUDA_VISIBLE_DEVICES": gpu_device,
-                    "DYN_NAMESPACE": self.namespace,
-                    "DYN_REQUEST_PLANE": request_plane,
-                    "PYTHONHASHSEED": "0",  # for deterministic event id's
-                }
-            )
+            env_vars = {
+                "CUDA_VISIBLE_DEVICES": gpu_device,
+                "DYN_NAMESPACE": self.namespace,
+                "DYN_REQUEST_PLANE": request_plane,
+                "PYTHONHASHSEED": "0",  # for deterministic event id's
+            }
+
+            # Add DYN_FILE_KV if using file storage backend
+            if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
+                env_vars["DYN_FILE_KV"] = os.environ["DYN_FILE_KV"]
+
+            env.update(env_vars)
 
             # Create managed process for the worker
             process = ManagedProcess(
@@ -426,40 +435,72 @@ def test_router_decisions_sglang_dp(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.parametrize(
+    "store_backend,use_nats_core,request_plane",
+    [
+        ("etcd", False, "nats"),  # JetStream mode
+        # ("etcd", True, "tcp"),  # ignored, needs unconditional nats_client
+        # ("file", False, "nats"),  # File backend - TODO: investigate file backend support for SGLang
+    ],
+    ids=["jetstream"],  # "nats_core" and "file" commented out
+)
 def test_sglang_indexers_sync(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request,
+    predownload_models,
+    file_storage_backend,
+    set_ucx_tls_no_mm,
+    store_backend,
+    use_nats_core,
+    request_plane,
 ):
     """
     Test that two KV routers have synchronized indexer states after processing requests
     with SGLang workers. This test verifies that both routers converge to the same internal state.
+
+    Tests with configuration:
+    - jetstream: etcd backend, JetStream for KV events, NATS request plane
     """
-    logger.info("Starting SGLang indexers sync test")
-    N_SGLANG_WORKERS = 2
+    logger.info(
+        f"Starting SGLang indexers sync test: store_backend={store_backend}, "
+        f"use_nats_core={use_nats_core}, request_plane={request_plane}"
+    )
 
-    try:
-        # Start SGLang workers
-        logger.info(f"Starting {N_SGLANG_WORKERS} SGLang workers")
-        sglang_workers = SGLangProcess(
-            request,
-            sglang_args=SGLANG_ARGS,
-            num_workers=N_SGLANG_WORKERS,
-            single_gpu=True,  # fit workers into one GPU
-        )
-        logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
-        sglang_workers.__enter__()
+    # Start NATS manually (needed for all variants - KV event sync)
+    with NatsServer(request) as nats_server:
+        # Start etcd if needed
+        etcd_ctx = EtcdServer(request) if store_backend == "etcd" else nullcontext()
+        with etcd_ctx:
+            N_SGLANG_WORKERS = 2
 
-        # Use the common test implementation (creates its own runtimes for each router)
-        # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
-        _test_router_indexers_sync(
-            engine_workers=sglang_workers,
-            block_size=PAGE_SIZE,
-            model_name=MODEL_NAME,
-            num_workers=N_SGLANG_WORKERS,
-            store_backend="etcd",
-        )
+            try:
+                # Start SGLang workers
+                logger.info(f"Starting {N_SGLANG_WORKERS} SGLang workers")
+                sglang_workers = SGLangProcess(
+                    request,
+                    sglang_args=SGLANG_ARGS,
+                    num_workers=N_SGLANG_WORKERS,
+                    single_gpu=True,  # fit workers into one GPU
+                    request_plane=request_plane,
+                    store_backend=store_backend,
+                )
+                logger.info(
+                    f"All SGLang workers using namespace: {sglang_workers.namespace}"
+                )
+                sglang_workers.__enter__()
 
-        logger.info("SGLang indexers sync test completed successfully")
+                # Use the common test implementation (creates its own runtimes for each router)
+                # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
+                _test_router_indexers_sync(
+                    engine_workers=sglang_workers,
+                    block_size=PAGE_SIZE,
+                    model_name=MODEL_NAME,
+                    num_workers=N_SGLANG_WORKERS,
+                    store_backend=store_backend,
+                    request_plane=request_plane,
+                )
 
-    finally:
-        if "sglang_workers" in locals():
-            sglang_workers.__exit__(None, None, None)
+                logger.info("SGLang indexers sync test completed successfully")
+
+            finally:
+                if "sglang_workers" in locals():
+                    sglang_workers.__exit__(None, None, None)
