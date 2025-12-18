@@ -126,12 +126,12 @@ jobs:
           - framework: vllm
             base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
             runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
-            cuda_version: '129'
+            cuda_version: '12.9'
             torch_backend: 'cu129'
           - framework: trtllm
             base_image_tag: '25.06-py3'
             runtime_image_tag: ''
-            cuda_version: '129'
+            cuda_version: '12.9'
             torch_backend: 'cu129'
           - framework: sglang
             base_image_tag: ''
