@@ -75,7 +75,7 @@ There are two ways to configure video sampling: either with a fixed number of fr
 
 ## Runtime media decoding options (`media_io_kwargs`)
 
-Parameters of the decoders, can also be set at runtime via an extension to the OpenAI chat completions API. Limits defined in the MDC such as maximum image size, maximum RAM allocation, cannot be overriden at runtime.
+Parameters of the decoders, can also be set at runtime via an extension to the OpenAI chat completions API. Limits defined in the MDC such as maximum image size, maximum RAM allocation, cannot be overridden at runtime.
 
 This can be used for example to set the video sampling strategy for a request, that differs from the default one registered in the MDC:
 

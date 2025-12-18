@@ -8,12 +8,13 @@ use anyhow::Result;
 
 use dynamo_async_openai::types::ChatCompletionRequestUserMessageContentPart;
 
-use super::decoders::{Decoder, MediaDecoder};
+use super::decoders::MediaDecoder;
 use super::rdma::RdmaMediaDataDescriptor;
 
 #[cfg(feature = "media-nixl")]
 use {
-    super::common::EncodedMediaData, super::rdma::get_nixl_agent, dynamo_memory::nixl::NixlAgent,
+    super::common::EncodedMediaData, super::decoders::Decoder, super::rdma::get_nixl_agent,
+    dynamo_memory::nixl::NixlAgent,
 };
 
 const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
