@@ -181,7 +181,7 @@ impl ErrorMessage {
         // Then check for HttpError
         match err.downcast::<HttpError>() {
             Ok(http_error) => ErrorMessage::from_http_error(http_error),
-            Err(err) => ErrorMessage::internal_server_error(&format!("{alt_msg}: {err}")),
+            Err(err) => ErrorMessage::internal_server_error(&format!("{alt_msg}: {err:#}")),
         }
     }
 

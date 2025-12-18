@@ -14,24 +14,40 @@ use super::{DecodedMediaMetadata, Decoder};
 
 const DEFAULT_MAX_ALLOC: u64 = 128 * 1024 * 1024; // 128 MB
 
+/// Image decoder limits - can only be set via server config, not runtime kwargs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ImageDecoder {
+pub struct ImageDecoderLimits {
     #[serde(default)]
-    pub(crate) max_image_width: Option<u32>,
+    pub max_image_width: Option<u32>,
     #[serde(default)]
-    pub(crate) max_image_height: Option<u32>,
-    // maximum allowed total allocation of the decoder in bytes
+    pub max_image_height: Option<u32>,
+    /// Maximum allowed total allocation of the decoder in bytes
     #[serde(default)]
-    pub(crate) max_alloc: Option<u64>,
+    pub max_alloc: Option<u64>,
 }
 
-impl Default for ImageDecoder {
+impl Default for ImageDecoderLimits {
     fn default() -> Self {
         Self {
             max_image_width: None,
             max_image_height: None,
             max_alloc: Some(DEFAULT_MAX_ALLOC),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageDecoder {
+    #[serde(default)]
+    pub(crate) limits: ImageDecoderLimits,
+}
+
+impl Default for ImageDecoder {
+    fn default() -> Self {
+        Self {
+            limits: ImageDecoderLimits::default(),
         }
     }
 }
@@ -50,14 +66,25 @@ pub struct ImageMetadata {
 }
 
 impl Decoder for ImageDecoder {
+    fn with_runtime(&self, runtime: Option<&Self>) -> Self {
+        match runtime {
+            Some(r) => {
+                let mut d = r.clone();
+                d.limits.clone_from(&self.limits);
+                d
+            }
+            None => self.clone(),
+        }
+    }
+
     fn decode(&self, data: EncodedMediaData) -> Result<DecodedMediaData> {
         let bytes = data.into_bytes()?;
 
         let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
         let mut limits = image::Limits::no_limits();
-        limits.max_image_width = self.max_image_width;
-        limits.max_image_height = self.max_image_height;
-        limits.max_alloc = self.max_alloc;
+        limits.max_image_width = self.limits.max_image_width;
+        limits.max_image_height = self.limits.max_image_height;
+        limits.max_alloc = self.limits.max_alloc;
         reader.limits(limits);
 
         let format = reader.format();
@@ -177,9 +204,11 @@ mod tests {
         #[case] test_case: &str,
     ) {
         let decoder = ImageDecoder {
-            max_image_width: max_width,
-            max_image_height: max_height,
-            max_alloc: Some(DEFAULT_MAX_ALLOC),
+            limits: ImageDecoderLimits {
+                max_image_width: max_width,
+                max_image_height: max_height,
+                max_alloc: Some(DEFAULT_MAX_ALLOC),
+            },
         };
         let image_bytes = create_test_image(width, height, 3, format); // RGB
         let encoded_data = create_encoded_media_data(image_bytes);

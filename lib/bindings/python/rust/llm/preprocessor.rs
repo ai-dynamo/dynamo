@@ -92,20 +92,20 @@ impl MediaDecoder {
         }
     }
 
-    fn image_decoder(&mut self, image_decoder: &Bound<'_, PyDict>) -> PyResult<()> {
-        let image_decoder = pythonize::depythonize(image_decoder).map_err(|err| {
-            PyErr::new::<PyException, _>(format!("Failed to parse image_decoder: {}", err))
+    fn enable_image(&mut self, image: &Bound<'_, PyDict>) -> PyResult<()> {
+        let image = pythonize::depythonize(image).map_err(|err| {
+            PyErr::new::<PyException, _>(format!("Failed to parse image decoder config: {}", err))
         })?;
-        self.inner.image_decoder = image_decoder;
+        self.inner.image = Some(image);
         Ok(())
     }
 
     #[cfg(feature = "media-ffmpeg")]
-    fn video_decoder(&mut self, video_decoder: &Bound<'_, PyDict>) -> PyResult<()> {
-        let video_decoder = pythonize::depythonize(video_decoder).map_err(|err| {
-            PyErr::new::<PyException, _>(format!("Failed to parse video_decoder: {}", err))
+    fn enable_video(&mut self, video: &Bound<'_, PyDict>) -> PyResult<()> {
+        let video = pythonize::depythonize(video).map_err(|err| {
+            PyErr::new::<PyException, _>(format!("Failed to parse video decoder config: {}", err))
         })?;
-        self.inner.video_decoder = video_decoder;
+        self.inner.video = Some(video);
         Ok(())
     }
 }
