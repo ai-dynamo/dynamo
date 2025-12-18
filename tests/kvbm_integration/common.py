@@ -59,11 +59,7 @@ class ApiTester:
         self.base_url = (
             base_url or os.environ.get("DYNAMO_API_BASE_URL") or "http://localhost:8000"
         )
-        self.model_id = (
-            model_id
-            or os.environ.get("KVBM_MODEL_ID")
-            or "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-        )
+        self.model_id = model_id or os.environ.get("KVBM_MODEL_ID") or "Qwen/Qwen3-0.6B"
 
     def make_request(
         self,
@@ -553,6 +549,112 @@ def tester(llm_server):
     return t
 
 
+@pytest.fixture(scope="function")
+def llm_server_kvbm(request, runtime_services):
+    """Start LLM server with configurable cache sizes for KVBM testing.
+
+    Usage in test files:
+        @pytest.mark.parametrize("llm_server_kvbm",
+            [{"cpu_blocks": 100, "gpu_blocks": 10}], indirect=True)
+        def test_example(llm_server_kvbm):
+            ...
+    """
+    import importlib.util
+    import os
+    import time
+
+    from tests.utils.managed_process import ManagedProcess
+
+    # Get cache configuration from request.param
+    params = getattr(request, "param", {})
+    cpu_blocks = params.get("cpu_blocks", 100)
+    gpu_blocks = params.get("gpu_blocks", 10)
+
+    # Detect available server type
+    if importlib.util.find_spec("vllm") is not None:
+        server_type = ServerType.vllm
+    elif importlib.util.find_spec("tensorrt_llm") is not None:
+        server_type = ServerType.trtllm
+        pytest.skip("TensorRT-LLM tests are disabled for this test")
+    else:
+        pytest.skip(
+            "Neither vllm nor tensorrt_llm module is available in the current environment."
+        )
+
+    # Build vLLM command
+    port = 8000
+    model = os.environ.get("KVBM_MODEL_ID", "Qwen/Qwen3-0.6B")
+    command = [
+        "vllm",
+        "serve",
+        "--block-size",
+        "16",
+        "--port",
+        str(port),
+        "--kv-transfer-config",
+        '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}',
+        model,
+        "--max-model-len",
+        "8000",  # Required to fit on L4 GPU with smaller models
+    ]
+
+    # GPU blocks override
+    if gpu_blocks is not None:
+        command.extend(["--num-gpu-blocks-override", str(gpu_blocks)])
+
+    # Set up environment
+    env = os.environ.copy()
+    env.update(
+        {
+            "RUST_BACKTRACE": "1",
+            "VLLM_SERVER_DEV_MODE": "1",
+            "DYN_LOG": "debug",
+            "DYN_KVBM_METRICS": "true",
+            "DYN_KVBM_METRICS_PORT": "6880",
+            # DynamoConnector connection settings
+            "NATS_SERVER": "nats://localhost:4222",
+            "ETCD_ENDPOINTS": "http://localhost:2379",
+        }
+    )
+
+    # CPU cache blocks override via env
+    if cpu_blocks is not None:
+        env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] = str(cpu_blocks)
+
+    # Start server with ManagedProcess
+    timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "600"))
+    log_dir = f"{request.node.name}_vllm"
+
+    with ManagedProcess(
+        command=command,
+        env=env,
+        health_check_ports=[port, 6880],  # vLLM server + KVBM metrics
+        timeout=timeout,
+        display_output=True,
+        terminate_existing=True,
+        stragglers=["vllm"],
+        straggler_commands=["vllm serve"],
+        log_dir=log_dir,
+    ) as proc:
+        # Give KVBM connector extra time to fully initialize
+        print("Waiting 5 seconds for KVBM connector to fully initialize...")
+        time.sleep(5)
+
+        # Create wrapper object for compatibility with existing test code
+        class ServerWrapper:
+            """Wrapper to maintain compatibility with LLMServerManager interface."""
+
+            def __init__(self):
+                self.base_url = f"http://localhost:{port}"
+                self.server_type = server_type
+                self.cpu_cache_blocks = cpu_blocks
+                self.gpu_cache_blocks = gpu_blocks
+                self.port = port
+                self.proc = proc
+
+        yield ServerWrapper()
+
+
 class TestDeterminism:
     """Test class for determinism validation."""
 
@@ -684,3 +786,160 @@ class TestDeterminism:
         assert (
             success_rate >= success_rate_threshold
         ), f"Model is not deterministic across cache reset: {total_failed} comparisons failed, success rate {success_rate:.1%} lower than expected {success_rate_threshold*100}%"
+
+
+# ============================================================================
+# KVBM Test Helper Functions
+# ============================================================================
+# Note: KVBM fixtures are in conftest.py for automatic pytest discovery
+
+KVBM_METRICS_PORT = 6880
+
+
+def parse_kvbm_metrics(metrics_text: str) -> dict:
+    """Parse KVBM metrics from Prometheus format.
+
+    Args:
+        metrics_text: Raw Prometheus metrics text
+
+    Returns:
+        Dictionary mapping metric names to integer values
+    """
+    metrics = {}
+    for line in metrics_text.split("\n"):
+        if line.startswith("#") or not line.strip():
+            continue
+        for metric_name in [
+            "kvbm_offload_blocks_d2h",
+            "kvbm_onboard_blocks_h2d",
+            "kvbm_offload_blocks_h2d",
+            "kvbm_onboard_blocks_d2d",
+            "kvbm_matched_tokens",
+        ]:
+            if line.startswith(metric_name + " "):
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    metrics[metric_name] = int(parts[1])
+    return metrics
+
+
+def fetch_kvbm_metrics(port: int = KVBM_METRICS_PORT, timeout: int = 10) -> dict:
+    """Fetch and parse KVBM metrics from the metrics endpoint.
+
+    Args:
+        port: Metrics server port (default: 6880)
+        timeout: Request timeout in seconds
+
+    Returns:
+        Dictionary of parsed metrics
+
+    Raises:
+        RuntimeError: If metrics endpoint is unreachable or returns error
+    """
+    response = requests.get(f"http://localhost:{port}/metrics", timeout=timeout)
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Metrics endpoint returned status {response.status_code}. "
+            "Metrics server may not have started."
+        )
+    return parse_kvbm_metrics(response.text)
+
+
+def assert_offload_metrics(
+    metrics: dict,
+    min_offload: Optional[int] = None,
+    expected_onboard: Optional[int] = None,
+    phase_name: str = "",
+    prev_offload: Optional[int] = None,
+) -> Tuple[int, int]:
+    """Validate KVBM offload/onboard metrics and print status.
+
+    Args:
+        metrics: Dictionary of parsed metrics
+        min_offload: Minimum expected offload_blocks_d2h count (if not None)
+        expected_onboard: Expected onboard_blocks_h2d count (if not None)
+        phase_name: Name of test phase for error messages
+        prev_offload: Previous offload count to check for increase (if not None)
+
+    Returns:
+        Tuple of (offload_d2h, onboard_h2d) values
+
+    Raises:
+        pytest.fail: If metrics don't meet expectations
+    """
+    offload_d2h = metrics.get("kvbm_offload_blocks_d2h", 0)
+    onboard_h2d = metrics.get("kvbm_onboard_blocks_h2d", 0)
+
+    print(f"  offload_blocks_d2h: {offload_d2h}")
+    print(f"  onboard_blocks_h2d: {onboard_h2d}")
+
+    # Check minimum offload requirement
+    if min_offload is not None and offload_d2h < min_offload:
+        pytest.fail(
+            f"{phase_name}: Expected at least {min_offload} offloaded blocks, "
+            f"but got {offload_d2h}. KVBM may not be offloading."
+        )
+
+    # Check for offload increase
+    if prev_offload is not None and offload_d2h <= prev_offload:
+        pytest.fail(
+            f"{phase_name}: Expected more blocks offloaded. "
+            f"Previous={prev_offload}, Current={offload_d2h}"
+        )
+
+    # Check onboard expectation
+    if expected_onboard is not None and onboard_h2d != expected_onboard:
+        if expected_onboard == 0:
+            pytest.fail(
+                f"{phase_name}: Expected 0 onboarded blocks, but got {onboard_h2d}"
+            )
+        else:
+            pytest.fail(
+                f"{phase_name}: Expected {expected_onboard} onboarded blocks, "
+                f"but got {onboard_h2d}. Blocks may not have been retrieved from CPU."
+            )
+
+    # Check onboard is non-zero when we expect it
+    if expected_onboard is None and min_offload is None and prev_offload is None:
+        # If checking onboard explicitly
+        if onboard_h2d == 0:
+            pytest.fail(
+                f"{phase_name}: Expected onboarded blocks, but got 0. "
+                "Blocks may not have been retrieved from CPU."
+            )
+
+    return offload_d2h, onboard_h2d
+
+
+def assert_deterministic(
+    response1: str,
+    response2: str,
+    test_name: str = "",
+    label1: str = "Response 1",
+    label2: str = "Response 2",
+) -> None:
+    """Verify two responses are identical (deterministic).
+
+    Args:
+        response1: First response text
+        response2: Second response text
+        test_name: Name of test for error messages
+        label1: Label for first response in output
+        label2: Label for second response in output
+
+    Raises:
+        pytest.fail: If responses differ
+    """
+    if response1 == response2:
+        print(f" ✓ PASS: {test_name} responses are deterministic")
+        print(f"    {label1}: {response1}")
+        print(f"    {label2}: {response2}")
+    else:
+        print(f" ✗ FAIL: {test_name} responses differ")
+        print(f"    {label1}: {response1}")
+        print(f"    {label2}: {response2}")
+        pytest.fail(
+            f"{test_name}: Responses not deterministic\n"
+            f"{label1}: {response1}\n"
+            f"{label2}: {response2}"
+        )
