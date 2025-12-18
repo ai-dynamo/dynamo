@@ -8,6 +8,9 @@
 #   create non-reproducible builds, and cause dependency conflicts. Every installed version
 #   should be explicitly tested, not an unknown future release.
 
+# For MinIO/S3 operations in LoRA tests (replaces AWS CLI dependency)
+boto3==1.42.4
+boto3-stubs[s3]==1.42.9  # Type stubs for boto3 S3 client
 # For IFEval dataset loading in kvbm tests
 datasets==4.4.1
 # For NATS object store verification in router tests

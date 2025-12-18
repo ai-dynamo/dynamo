@@ -2,20 +2,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt::Display;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use pyo3::{exceptions::PyException, prelude::*};
+use pyo3_async_runtimes::TaskLocals;
 
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
+use dynamo_llm::entrypoint::EngineFactoryCallback;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::kv_router::KvRouterConfig as RsKvRouterConfig;
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::protocols::MockEngineArgs;
+use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
+use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_runtime::protocols::EndpointId;
 
+use super::model_card::ModelDeploymentCard;
 use crate::RouterMode;
+use crate::engine::PythonAsyncEngine;
 
 #[pyclass(eq, eq_int)]
 #[derive(Clone, Debug, PartialEq)]
@@ -117,6 +126,21 @@ impl From<RouterConfig> for RsRouterConfig {
     }
 }
 
+/// Wrapper to hold Python callback and its TaskLocals for async execution
+#[derive(Clone)]
+struct PyEngineFactory {
+    callback: Arc<PyObject>,
+    locals: Arc<TaskLocals>,
+}
+
+impl std::fmt::Debug for PyEngineFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PyEngineFactory")
+            .field("callback", &"<PyObject>")
+            .finish()
+    }
+}
+
 #[pyclass]
 #[derive(Clone, Debug)]
 pub(crate) struct EntrypointArgs {
@@ -137,14 +161,16 @@ pub(crate) struct EntrypointArgs {
     custom_backend_metrics_endpoint: Option<String>,
     custom_backend_metrics_polling_interval: Option<f64>,
     is_prefill: bool,
+    engine_factory: Option<PyEngineFactory>,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, custom_backend_metrics_endpoint=None, custom_backend_metrics_polling_interval=None, is_prefill=false))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, custom_backend_metrics_endpoint=None, custom_backend_metrics_polling_interval=None, is_prefill=false, engine_factory=None))]
     pub fn new(
+        py: Python<'_>,
         engine_type: EngineType,
         model_path: Option<PathBuf>,
         model_name: Option<String>, // e.g. "dyn://namespace.component.endpoint"
@@ -162,6 +188,7 @@ impl EntrypointArgs {
         custom_backend_metrics_endpoint: Option<String>,
         custom_backend_metrics_polling_interval: Option<f64>,
         is_prefill: bool,
+        engine_factory: Option<PyObject>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -171,6 +198,23 @@ impl EntrypointArgs {
                 "tls_cert_path and tls_key_path must be provided together",
             ));
         }
+
+        // Capture TaskLocals at registration time for the engine factory callback
+        let engine_factory = engine_factory
+            .map(|callback| {
+                let locals = pyo3_async_runtimes::tokio::get_current_locals(py).map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to get TaskLocals for engine_factory: {}",
+                        e
+                    ))
+                })?;
+                Ok::<_, PyErr>(PyEngineFactory {
+                    callback: Arc::new(callback),
+                    locals: Arc::new(locals),
+                })
+            })
+            .transpose()?;
+
         Ok(EntrypointArgs {
             engine_type,
             model_path,
@@ -189,6 +233,7 @@ impl EntrypointArgs {
             custom_backend_metrics_endpoint,
             custom_backend_metrics_polling_interval,
             is_prefill,
+            engine_factory,
         })
     }
 }
@@ -251,6 +296,57 @@ pub fn make_engine<'p>(
     })
 }
 
+/// Convert a PyEngineFactory to a Rust EngineFactoryCallback
+fn py_engine_factory_to_callback(factory: PyEngineFactory) -> EngineFactoryCallback {
+    let callback = factory.callback;
+    let locals = factory.locals;
+
+    Arc::new(
+        move |card: RsModelDeploymentCard| -> Pin<
+            Box<dyn Future<Output = anyhow::Result<OpenAIChatCompletionsStreamingEngine>> + Send>,
+        > {
+            let callback = callback.clone();
+            let locals = locals.clone();
+
+            Box::pin(async move {
+                // Acquire GIL to call Python callback and convert coroutine to future
+                let py_future = Python::with_gil(|py| {
+                    // Create Python ModelDeploymentCard wrapper
+                    let py_card = ModelDeploymentCard { inner: card };
+                    let py_card_obj = Py::new(py, py_card)
+                        .map_err(|e| anyhow::anyhow!("Failed to create Python MDC: {}", e))?;
+
+                    // Call Python async function to get a coroutine
+                    let coroutine = callback
+                        .call1(py, (py_card_obj,))
+                        .map_err(|e| anyhow::anyhow!("Failed to call engine_factory: {}", e))?;
+
+                    // Use the TaskLocals captured at registration time
+                    pyo3_async_runtimes::into_future_with_locals(&locals, coroutine.into_bound(py))
+                        .map_err(|e| {
+                            anyhow::anyhow!("Failed to convert coroutine to future: {}", e)
+                        })
+                })?;
+
+                // Await the Python coroutine (GIL is released during await)
+                let py_result = py_future
+                    .await
+                    .map_err(|e| anyhow::anyhow!("engine_factory callback failed: {}", e))?;
+
+                // Extract PythonAsyncEngine from the Python result and wrap in Arc
+                let engine: OpenAIChatCompletionsStreamingEngine = Python::with_gil(|py| {
+                    let engine: PythonAsyncEngine = py_result.extract(py).map_err(|e| {
+                        anyhow::anyhow!("Failed to extract PythonAsyncEngine: {}", e)
+                    })?;
+                    Ok::<_, anyhow::Error>(Arc::new(engine))
+                })?;
+
+                Ok(engine)
+            })
+        },
+    )
+}
+
 async fn select_engine(
     #[allow(unused_variables)] distributed_runtime: super::DistributedRuntime,
     args: EntrypointArgs,
@@ -264,7 +360,14 @@ async fn select_engine(
                 engine: dynamo_llm::engines::make_echo_engine(),
             }
         }
-        EngineType::Dynamic => RsEngineConfig::Dynamic(Box::new(local_model)),
+        EngineType::Dynamic => {
+            //  Convert Python engine factory to Rust callback
+            let engine_factory = args.engine_factory.map(py_engine_factory_to_callback);
+            RsEngineConfig::Dynamic {
+                model: Box::new(local_model),
+                engine_factory,
+            }
+        }
         EngineType::Mocker => {
             let mocker_args = if let Some(extra_args_path) = args.extra_engine_args {
                 MockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
