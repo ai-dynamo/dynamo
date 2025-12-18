@@ -426,7 +426,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
-WORKDIR /workspace
+WORKDIR /sgl-workspace
 
 # Install NATS and ETCD
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
@@ -440,16 +440,16 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && [ `id -u dynamo` -eq 1000 ] \
     && mkdir -p /home/dynamo/.cache /opt/dynamo \
     # Non-recursive chown - only the directories themselves, not contents
-    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
+    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /sgl-workspace \
     # No chmod needed: umask 002 handles new files, COPY --chmod handles copied content
     # Set umask globally for all subsequent RUN commands (must be done as root before USER dynamo)
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
 # Copy attribution files
-COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
+COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /sgl-workspace/
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
-COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+COPY --chmod=775 --chown=dynamo:0 benchmarks/ /sgl-workspace/benchmarks/
 
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
@@ -462,24 +462,24 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         --requirement /mnt/local_src/container/deps/requirements.txt \
         --requirement /mnt/local_src/container/deps/requirements.test.txt && \
-    cd /workspace/benchmarks && \
+    cd /sgl-workspace/benchmarks && \
     pip install --no-cache . && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
-    chmod -R g+w /workspace/benchmarks
+    chmod -R g+w /sgl-workspace/benchmarks
 
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
-COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
-COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
-COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
-COPY --chmod=775 --chown=dynamo:0 components/ /workspace/components/
-COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
+COPY --chmod=775 --chown=dynamo:0 tests /sgl-workspace/tests
+COPY --chmod=775 --chown=dynamo:0 examples /sgl-workspace/examples
+COPY --chmod=775 --chown=dynamo:0 deploy /sgl-workspace/deploy
+COPY --chmod=775 --chown=dynamo:0 components/ /sgl-workspace/components/
+COPY --chmod=775 --chown=dynamo:0 recipes/ /sgl-workspace/recipes/
 
 # Enable forceful shutdown of inflight requests
 ENV SGLANG_FORCE_SHUTDOWN=1
 
 USER dynamo
-WORKDIR /workspace
+WORKDIR /sgl-workspace
 
 ###########################################################
 ########## Development (run.sh, runs as root user) ########
@@ -497,7 +497,7 @@ WORKDIR /workspace
 FROM runtime AS dev
 
 # Don't want ubuntu to be editable, just change uid and gid.
-ARG WORKSPACE_DIR=/workspace
+ARG WORKSPACE_DIR=/sgl-workspace
 
 USER root
 # Install utilities as root
@@ -539,7 +539,7 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     DYNAMO_HOME=${WORKSPACE_DIR} \
     RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/workspace/target \
+    CARGO_TARGET_DIR=/sgl-workspace/target \
     PATH=/usr/local/cargo/bin:$PATH
 
 # Copy rust installation from dynamo_base to avoid duplication efforts
@@ -550,7 +550,7 @@ RUN chmod g+w /usr/local/rustup /usr/local/cargo
 
 # Install maturin, for maturin develop
 # Editable install of dynamo
-COPY pyproject.toml README.md hatch_build.py /workspace/
+COPY pyproject.toml README.md hatch_build.py /sgl-workspace/
 RUN pip install maturin[patchelf] && \
     pip install --no-deps -e .
 
