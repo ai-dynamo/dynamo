@@ -1,10 +1,17 @@
+# syntax=docker/dockerfile:1.10.0
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Multi-architecture Dockerfile for Dynamo Operator
+# Supports both amd64 and arm64 architectures
 
 # Base stage - Common setup for all stages
 ARG DOCKER_PROXY
 ARG BASE_IMAGE="golang"
 ARG BASE_IMAGE_TAG="1.24"
+ARG RUNTIME_IMAGE="nvcr.io/nvidia/distroless/go"
+ARG RUNTIME_IMAGE_TAG="v3.1.13"
+
 FROM ${DOCKER_PROXY}${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
 # Docker buildx automatically provides these
@@ -43,15 +50,21 @@ RUN apt-get update && apt-get install -y make && apt-get clean && rm -rf /var/li
 # Run tests using Makefile
 RUN make test
 
-# Build stage - depends on successful lint and test
+# Build stage
+# Note: This stage does not implicitly run 'linter' or 'tester'.
+# Use --target linter or --target tester to run those stages specifically.
 FROM base AS builder
 
-# Build the binary
+ARG TARGETOS=linux
+ARG TARGETARCH
+
+# Build the binary for the target architecture
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cmd/main.go
 
-# Runtime stage
-FROM nvcr.io/nvidia/distroless/go:v3.1.13
+# Depends on RUNTIME_IMAGE being a multi-arch manifest
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 WORKDIR /
+
 COPY --from=builder /workspace/manager .
 USER 65532:65532
 

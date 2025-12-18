@@ -15,7 +15,7 @@ usage() {
 Usage: $0 [COMMAND] [OPTIONS]
 
 Commands:
-    install         Install sccache binary (requires ARCH_ALT environment variable)
+    install         Install sccache binary
     show-stats      Display sccache statistics with optional build name
     help            Show this help message
 
@@ -23,20 +23,20 @@ Environment variables:
     USE_SCCACHE             Set to 'true' to enable sccache
     SCCACHE_BUCKET          S3 bucket name (fallback if not passed as parameter)
     SCCACHE_REGION          S3 region (fallback if not passed as parameter)
-    ARCH                    Architecture for S3 key prefix (fallback if not passed as parameter)
-    ARCH_ALT                Alternative architecture name for downloads (e.g., x86_64, aarch64)
 
 Examples:
-    # Install sccache (requires ARCH_ALT to be set)
-    ARCH_ALT=x86_64 $0 install
+    # Install sccache
+    $0 install
     # Show stats with build name
     $0 show-stats "UCX"
 EOF
 }
 
+ARCH_ALT=$(uname -m)
+
 install_sccache() {
     if [ -z "${ARCH_ALT:-}" ]; then
-        echo "Error: ARCH_ALT environment variable is required for sccache installation"
+        echo "Error: Cannot get architecture from uname -m, it is required for sccache installation"
         exit 1
     fi
     echo "Installing sccache ${SCCACHE_VERSION} for architecture ${ARCH_ALT}..."
