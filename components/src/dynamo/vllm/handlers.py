@@ -751,7 +751,7 @@ class BaseWorkerHandler(ABC):
 
         # W3C Trace Context format: {version}-{trace_id}-{parent_id}-{trace_flags}
         # version: 00, trace_flags: 01 (sampled)
-        # TODO: properly propagte the trace-flags from current span.
+        # TODO: properly propagate the trace-flags from current span.
         return {"traceparent": f"00-{trace_id}-{span_id}-01"}
 
     async def generate_tokens(
