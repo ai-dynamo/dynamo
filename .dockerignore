@@ -40,5 +40,6 @@
 **/target/*
 **/*safetensors
 container/Dockerfile*
+container/docker-bake.hcl
 .venv
 .venv-docs
