@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::protocols::openai::nvext::WorkerIdInfo;
@@ -24,6 +25,28 @@ pub enum RequestPhase {
     /// Aggregated mode - same worker handles both prefill and decode
     #[default]
     Aggregated,
+}
+
+impl RequestPhase {
+    const PREFILL: u8 = 0;
+    const DECODE: u8 = 1;
+    const AGGREGATED: u8 = 2;
+
+    fn to_u8(self) -> u8 {
+        match self {
+            RequestPhase::Prefill => Self::PREFILL,
+            RequestPhase::Decode => Self::DECODE,
+            RequestPhase::Aggregated => Self::AGGREGATED,
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            Self::PREFILL => RequestPhase::Prefill,
+            Self::DECODE => RequestPhase::Decode,
+            _ => RequestPhase::Aggregated,
+        }
+    }
 }
 
 impl std::fmt::Display for RequestPhase {
@@ -77,8 +100,8 @@ pub struct RequestTracker {
     /// Decode worker ID - set once via OnceLock
     decode_worker_id: OnceLock<u64>,
 
-    /// Request phase (Prefill/Decode/Aggregated) - set once via OnceLock
-    phase: OnceLock<RequestPhase>,
+    /// Request phase (Prefill/Decode/Aggregated) - mutable via AtomicU8
+    phase: AtomicU8,
 }
 
 impl RequestTracker {
@@ -100,7 +123,7 @@ impl RequestTracker {
             isl_blocks: OnceLock::new(),
             prefill_worker_id: OnceLock::new(),
             decode_worker_id: OnceLock::new(),
-            phase: OnceLock::new(),
+            phase: AtomicU8::new(RequestPhase::Aggregated.to_u8()),
         }
     }
 
@@ -174,17 +197,14 @@ impl RequestTracker {
         self.decode_worker_id.set(id).is_ok()
     }
 
-    /// Set the request phase. Returns true if this was the first call.
-    pub fn set_phase(&self, phase: RequestPhase) -> bool {
-        self.phase.set(phase).is_ok()
+    /// Set the request phase. Can be called multiple times to update the phase.
+    pub fn set_phase(&self, phase: RequestPhase) {
+        self.phase.store(phase.to_u8(), Ordering::Release);
     }
 
-    /// Get the request phase. Returns Aggregated if not set.
+    /// Get the current request phase.
     pub fn phase(&self) -> RequestPhase {
-        self.phase
-            .get()
-            .copied()
-            .unwrap_or(RequestPhase::Aggregated)
+        RequestPhase::from_u8(self.phase.load(Ordering::Acquire))
     }
 
     /// Record worker ID based on the current phase.

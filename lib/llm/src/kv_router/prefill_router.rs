@@ -509,20 +509,26 @@ impl
             }
         } else {
             // GAIE Stage 1: Use original path (no bootstrap optimization)
-            tracing::debug!("Using original prefill path (GAIE Stage 1)");
+            // But first check if prefill router is activated - if not, skip to avoid setting phase
+            if self.prefill_router.get().is_none() {
+                tracing::debug!("GAIE Stage 1: Prefill router not activated, skipping to decode");
+                Err(PrefillError::NotActivated)
+            } else {
+                tracing::debug!("Using original prefill path (GAIE Stage 1)");
 
-            // Set phase to Prefill and record prefill start time if tracking is enabled
-            if let Some(ref tracker) = req.tracker {
-                tracker.set_phase(RequestPhase::Prefill);
-                tracker.record_prefill_start();
+                // Set phase to Prefill and record prefill start time if tracking is enabled
+                if let Some(ref tracker) = req.tracker {
+                    tracker.set_phase(RequestPhase::Prefill);
+                    tracker.record_prefill_start();
+                }
+
+                let prefill_context = Context::with_id(prefill_req, request_id.clone());
+                engine_ctx.link_child(prefill_context.context());
+
+                self.call_prefill(prefill_context)
+                    .await
+                    .map(|(result, worker_id)| (Some(result), worker_id, None))
             }
-
-            let prefill_context = Context::with_id(prefill_req, request_id.clone());
-            engine_ctx.link_child(prefill_context.context());
-
-            self.call_prefill(prefill_context)
-                .await
-                .map(|(result, worker_id)| (Some(result), worker_id, None))
         };
 
         // Abort if cancelled during prefill
