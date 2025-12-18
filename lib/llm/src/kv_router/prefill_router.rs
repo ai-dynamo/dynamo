@@ -20,9 +20,10 @@ use dynamo_runtime::{
 
 use crate::{
     discovery::ModelManager,
-    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
+    kv_router::{KvPushRouter, KvRouterConfig, QueryInstanceType, RouterConfigOverride},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
+    protocols::openai::nvext::WorkerIdInfo,
 };
 
 /// Errors that can occur during prefill routing
@@ -67,6 +68,11 @@ impl InnerPrefillRouter {
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
 /// from the prefill response and injecting them into the decode request.
+///
+/// Supports regular Dynamo and GAIE integrated mode via query_instance_id state machine:
+/// - GAIE Stage 1: query_instance_id transitions "" -> "prefill" -> "decode", returns only worker IDs
+/// - GAIE Stage 2: target_prefill_worker_id/target_decode_worker_id are set, full execution with specified workers
+/// - Non-GAIE: like GAIE Stage 2 but the worker ids have to be determined.
 pub struct PrefillRouter {
     prefill_router: OnceLock<InnerPrefillRouter>,
     cancel_token: CancellationToken,
@@ -196,10 +202,13 @@ impl PrefillRouter {
         rand::rng().random()
     }
 
-    /// Query best worker upfront, build bootstrap_info, and spawn prefill in background
+    /// Build bootstrap_info for disaggregated serving
+    /// If preselected_worker is provided (GAIE Stage 2), use it directly.
+    /// Otherwise, query for the best worker.
     async fn build_bootstrap_info(
         &self,
         req: &PreprocessedRequest,
+        preselected_worker: Option<u64>,
     ) -> Option<(u64, u32, BootstrapInfo)> {
         let prefill_router = self.prefill_router.get()?;
 
@@ -209,14 +218,24 @@ impl PrefillRouter {
             InnerPrefillRouter::SimpleRouter(_) => return None,
         };
 
-        // Query best worker without routing
-        let (worker_id, dp_rank) = match kv_router
-            .chooser
-            .find_best_match(None, &req.token_ids, None, false)
-            .await
-        {
-            Ok((worker, _overlap)) => (worker.worker_id, worker.dp_rank),
-            Err(_) => return None,
+        // Use pre-selected worker (GAIE Stage 2) or query for best worker
+        let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
+            let dp_rank = req.dp_rank.unwrap_or(0);
+            tracing::debug!(
+                worker_id = id,
+                dp_rank = dp_rank,
+                "Using pre-selected prefill worker for bootstrap"
+            );
+            (id, dp_rank)
+        } else {
+            match kv_router
+                .chooser
+                .find_best_match(None, &req.token_ids, None, false)
+                .await
+            {
+                Ok((worker, _overlap)) => (worker.worker_id, worker.dp_rank),
+                Err(_) => return None,
+            }
         };
 
         // Look up bootstrap endpoint from discovery
@@ -343,6 +362,56 @@ impl PrefillRouter {
     }
 }
 
+/// GAIE helper functions for preparing prefill requests
+impl PrefillRouter {
+    /// Prepare prefill request for GAIE flows
+    /// - Stage 1: Sets query_instance_id:prefill annotation
+    /// - Stage 2: Sets backend_instance_id to target prefill worker
+    fn prepare_prefill_for_gaie(prefill_req: &mut PreprocessedRequest, is_gaie_stage1: bool) {
+        if is_gaie_stage1 {
+            // GAIE Stage 1: Set query_instance_id to "prefill" for prefill worker selection
+            prefill_req
+                .annotations
+                .retain(|a| !a.starts_with("query_instance_id"));
+            prefill_req
+                .annotations
+                .push(format!("query_instance_id:{}", QueryInstanceType::Prefill));
+        } else if let Some(prefill_worker_id) = prefill_req.target_prefill_worker_id {
+            // GAIE Stage 2: Route to pre-selected prefill worker from the stage 1
+            tracing::debug!(
+                target_prefill_worker_id = prefill_worker_id,
+                "GAIE Stage 2: Routing prefill to pre-selected worker"
+            );
+            prefill_req.backend_instance_id = Some(prefill_worker_id);
+        }
+    }
+
+    /// Prepare decode request for GAIE Stage 1
+    /// Extracts prefill_worker_id from prefill result and sets decode annotations
+    fn prepare_decode_for_gaie_stage1(
+        decode_req: &mut PreprocessedRequest,
+        prefill_result: &PrefillResult,
+    ) {
+        let prefill_worker_id = prefill_result
+            .disaggregated_params
+            .get("worker_id")
+            .and_then(|v| serde_json::from_value::<WorkerIdInfo>(v.clone()).ok())
+            .and_then(|info| info.prefill_worker_id);
+
+        if let Some(worker_id) = prefill_worker_id {
+            decode_req
+                .annotations
+                .retain(|a| !a.starts_with("query_instance_id"));
+            decode_req
+                .annotations
+                .push(format!("query_instance_id:{}", QueryInstanceType::Decode));
+            decode_req
+                .annotations
+                .push(format!("prefill_worker_id:{worker_id}"));
+        }
+    }
+}
+
 impl Drop for PrefillRouter {
     fn drop(&mut self) {
         tracing::debug!("Dropping PrefillRouter, cancelling background activation task");
@@ -369,6 +438,12 @@ impl
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
 
+        // GAIE Stage 1: the presence of the empty query_instance_id signals query-only mode
+        // State machine: "" -> "prefill" -> "decode" (disagg) OR "" -> aggregated worker (agg fallback)
+        let is_gaie_stage1 = req
+            .get_annotation_value("query_instance_id")
+            .is_some_and(|s| s.is_empty());
+
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
@@ -376,35 +451,51 @@ impl
         let mut prefill_req = req.clone();
         prefill_req.stop_conditions.max_tokens = Some(1);
 
-        // Try build_bootstrap_info optimization
-        let prefill_result = if let Some((worker_id, dp_rank, bootstrap_info)) =
-            self.build_bootstrap_info(&prefill_req).await
-        {
-            let bootstrap_room = bootstrap_info.bootstrap_room;
+        // Prepare prefill request for GAIE flows (Stage 1 or Stage 2)
+        Self::prepare_prefill_for_gaie(&mut prefill_req, is_gaie_stage1);
 
-            // Prepare request with bootstrap_room and force routing to specific worker
-            prefill_req.backend_instance_id = Some(worker_id);
-            prefill_req.dp_rank = Some(dp_rank);
-            let extra_args = prefill_req
-                .extra_args
-                .get_or_insert_with(|| serde_json::json!({}));
-            if let Some(obj) = extra_args.as_object_mut() {
-                obj.insert(
-                    "bootstrap_room".to_string(),
-                    serde_json::json!(bootstrap_room),
-                );
+        // Try build_bootstrap_info optimization (skip for GAIE Stage 1 which needs query-only flow)
+        // For GAIE Stage 2, use target_prefill_worker_id if provided
+        let preselected_worker = prefill_req.target_prefill_worker_id;
+        let prefill_result = if !is_gaie_stage1 {
+            if let Some((worker_id, dp_rank, bootstrap_info)) = self
+                .build_bootstrap_info(&prefill_req, preselected_worker)
+                .await
+            {
+                let bootstrap_room = bootstrap_info.bootstrap_room;
+
+                // Prepare request with bootstrap_room and force routing to specific worker
+                prefill_req.backend_instance_id = Some(worker_id);
+                prefill_req.dp_rank = Some(dp_rank);
+                let extra_args = prefill_req
+                    .extra_args
+                    .get_or_insert_with(|| serde_json::json!({}));
+                if let Some(obj) = extra_args.as_object_mut() {
+                    obj.insert(
+                        "bootstrap_room".to_string(),
+                        serde_json::json!(bootstrap_room),
+                    );
+                }
+
+                let prefill_context = Context::with_id(prefill_req, request_id.clone());
+                engine_ctx.link_child(prefill_context.context());
+
+                self.spawn_prefill_task(prefill_context);
+
+                Ok((None, Some(worker_id), Some(bootstrap_info)))
+            } else {
+                // Fallback to original: Wait for prefill to complete
+                tracing::debug!("Using original prefill path");
+
+                let prefill_context = Context::with_id(prefill_req, request_id.clone());
+                engine_ctx.link_child(prefill_context.context());
+
+                self.call_prefill(prefill_context)
+                    .await
+                    .map(|(result, worker_id)| (Some(result), worker_id, None))
             }
-
-            let prefill_context = Context::with_id(prefill_req, request_id.clone());
-            engine_ctx.link_child(prefill_context.context());
-
-            self.spawn_prefill_task(prefill_context);
-
-            Ok((None, Some(worker_id), Some(bootstrap_info)))
         } else {
-            // Fallback to original: Wait for prefill to complete
-            tracing::debug!("Using original prefill path");
-
+            // GAIE Stage 1: Use original path (no bootstrap optimization)
             let prefill_context = Context::with_id(prefill_req, request_id.clone());
             engine_ctx.link_child(prefill_context.context());
 
@@ -429,8 +520,13 @@ impl
 
                 let mut decode_req = req;
 
-                // Update request with prefill result if available (only in original path)
-                if let Some(prefill_result) = maybe_prefill_result {
+                // Update request with prefill result
+                if is_gaie_stage1 {
+                    if let Some(ref prefill_result) = maybe_prefill_result {
+                        Self::prepare_decode_for_gaie_stage1(&mut decode_req, prefill_result);
+                    }
+                } else if let Some(prefill_result) = maybe_prefill_result {
+                    // Normal or GAIE Stage 2: Set prefill_result for decode
                     decode_req.prefill_result = Some(prefill_result);
                 }
 
@@ -448,6 +544,15 @@ impl
                     overlap_score_weight: Some(0.0),
                     ..existing_override.unwrap_or_default()
                 });
+
+                // GAIE Stage 2: Route to pre-selected decode worker if specified
+                if let Some(decode_worker_id) = decode_req.target_decode_worker_id {
+                    decode_req.backend_instance_id = Some(decode_worker_id);
+                    tracing::debug!(
+                        decode_worker_id = decode_worker_id,
+                        "GAIE Stage 2: Routing decode to pre-selected worker"
+                    );
+                }
 
                 // Map the modified request through with preserved context
                 let decode_request = context.map(|_| decode_req);
