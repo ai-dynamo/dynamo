@@ -47,14 +47,7 @@ decode:
       - 4
       - 8
       - 16
-      - 32
-      - 64
-      - 128
-      - 256
-      - 512
-      - 768
-      - 1024
-      - 2048
+      - 24
       - 32
     print_iter_log: true
     kv_cache_config:

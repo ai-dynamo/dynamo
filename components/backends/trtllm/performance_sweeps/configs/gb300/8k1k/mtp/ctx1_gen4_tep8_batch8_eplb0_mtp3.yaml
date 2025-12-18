@@ -50,6 +50,16 @@ decode:
       - 2
       - 4
       - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 768
+      - 1024
+      - 2048
+      - 8
     print_iter_log: true
     kv_cache_config:
       enable_block_reuse: false
@@ -58,12 +68,6 @@ decode:
     moe_config:
       backend: TRTLLM
       use_low_precision_moe_combine: true
-    nvfp4_gemm_config:
-      allowed_backends:
-      - cutlass
-      - cublaslt
-      - cutedsl
-      - cuda_core
     cache_transceiver_config:
       max_tokens_in_buffer: 16384
       backend: UCX

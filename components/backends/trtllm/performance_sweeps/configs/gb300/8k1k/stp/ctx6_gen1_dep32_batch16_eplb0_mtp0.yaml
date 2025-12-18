@@ -60,7 +60,6 @@ decode:
       backend: UCX
     stream_interval: 100
     num_postprocess_workers: 4
-
   env:
     TRTLLM_SERVER_DISABLE_GC: 1
     TRTLLM_WORKER_DISABLE_GC: 1
