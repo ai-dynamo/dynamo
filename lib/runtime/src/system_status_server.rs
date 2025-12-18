@@ -961,7 +961,7 @@ mod integration_tests {
 
                 // Now create a namespace, component, and endpoint to make the system healthy
                 let namespace = drt.namespace("ns1234").unwrap();
-                let mut component = namespace.component("comp1234").unwrap();
+                let component = namespace.component("comp1234").unwrap();
 
                 // Create a simple test handler
                 use crate::pipeline::{async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, SingleIn};

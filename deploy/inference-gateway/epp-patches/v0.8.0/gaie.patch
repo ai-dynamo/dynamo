@@ -161,10 +161,10 @@ index 670d922..0cf04cb 100644
  }
 diff --git a/pkg/epp/requestcontrol/plugins/dynamo_inject_workerid/plugin.go b/pkg/epp/requestcontrol/plugins/dynamo_inject_workerid/plugin.go
 new file mode 100644
-index 0000000..cd9a0b5
+index 0000000..1c8f979
 --- /dev/null
 +++ b/pkg/epp/requestcontrol/plugins/dynamo_inject_workerid/plugin.go
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,171 @@
 +package dynamo_inject_workerid
 +
 +import (
@@ -182,6 +182,7 @@ index 0000000..cd9a0b5
 +	typeString             = "dynamo-inject-workerid"
 +	pluginName             = "dynamo-inject-workerid"
 +	WorkerIDHeader         = "x-worker-instance-id"
++	PrefillWorkerIDHeader  = "x-prefiller-host-port"
 +	tokenDataAnnotationKey = "dynamo/token-data"
 +)
 +
@@ -222,11 +223,18 @@ index 0000000..cd9a0b5
 +	if req.Headers == nil {
 +		req.Headers = map[string]string{}
 +	}
++
++	// Handle worker instance ID
 +	wid := strings.TrimSpace(req.Headers[WorkerIDHeader])
-+	if wid == "" {
-+		return
++	if wid != "" {
++		req.Headers[WorkerIDHeader] = wid
 +	}
-+	req.Headers[WorkerIDHeader] = wid
++
++	// Handle prefill worker ID
++	prefillWid := strings.TrimSpace(req.Headers[PrefillWorkerIDHeader])
++	if prefillWid != "" {
++		req.Headers[PrefillWorkerIDHeader] = prefillWid
++	}
 +}
 +
 +func (p *InjectWorkerIDPreRequest) MutateRequestBody(
@@ -248,13 +256,27 @@ index 0000000..cd9a0b5
 +		return
 +	}
 +
++	prefillWid := strings.TrimSpace(req.Headers[PrefillWorkerIDHeader])
++
 +	nvext, _ := body["nvext"].(map[string]any)
 +	if nvext == nil {
 +		nvext = map[string]any{}
 +		body["nvext"] = nvext
 +	}
-+	if widUint, err := strconv.ParseUint(wid, 10, 64); err == nil {
-+		nvext["backend_instance_id"] = widUint
++
++	if prefillWid != "" && prefillWid != wid {
++		// Disaggregated mode: use prefill_worker_id and decode_worker_id
++		if prefillWidUint, err := strconv.ParseUint(prefillWid, 10, 64); err == nil {
++			nvext["prefill_worker_id"] = prefillWidUint
++		}
++		if widUint, err := strconv.ParseUint(wid, 10, 64); err == nil {
++			nvext["decode_worker_id"] = widUint
++		}
++	} else {
++		// Aggregated mode (empty prefill or prefill == decode): use backend_instance_id
++		if widUint, err := strconv.ParseUint(wid, 10, 64); err == nil {
++			nvext["backend_instance_id"] = widUint
++		}
 +	}
 +
 +	if tokens, ok := req.Annotations[tokenDataAnnotationKey]; ok {
@@ -280,6 +302,36 @@ index 0000000..cd9a0b5
 +			var out []int64
 +			if err := json.Unmarshal(v, &out); err == nil && len(out) > 0 {
 +				nvext["token_data"] = out
++			}
++		}
++	}
++
++	// Remove query_instance_id from nvext.annotations if present
++	if annotations, ok := nvext["annotations"]; ok {
++		switch annList := annotations.(type) {
++		case []string:
++			filtered := make([]string, 0, len(annList))
++			for _, ann := range annList {
++				if ann != "query_instance_id" {
++					filtered = append(filtered, ann)
++				}
++			}
++			if len(filtered) == 0 {
++				delete(nvext, "annotations")
++			} else {
++				nvext["annotations"] = filtered
++			}
++		case []any:
++			filtered := make([]any, 0, len(annList))
++			for _, ann := range annList {
++				if str, ok := ann.(string); !ok || str != "query_instance_id" {
++					filtered = append(filtered, ann)
++				}
++			}
++			if len(filtered) == 0 {
++				delete(nvext, "annotations")
++			} else {
++				nvext["annotations"] = filtered
 +			}
 +		}
 +	}
@@ -313,10 +365,10 @@ index 0000000..b689c00
 +      - pluginRef: picker
 diff --git a/pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go b/pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go
 new file mode 100644
-index 0000000..bc29c0a
+index 0000000..75f30e9
 --- /dev/null
 +++ b/pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go
-@@ -0,0 +1,424 @@
+@@ -0,0 +1,446 @@
 +package dynamo_kv_scorer
 +
 +/*
@@ -367,13 +419,15 @@ index 0000000..bc29c0a
 +                                                            double router_temperature,
 +                                                            bool use_kv_events,
 +                                                            bool router_replica_sync,
++                                                            bool enforce_disagg,
 +                                                            WorkerSelectionPipeline **pipeline_out);
 +
 +dynamo_llm_result_t dynamo_destroy_worker_selection_pipeline(WorkerSelectionPipeline *pipeline);
 +
 +dynamo_llm_result_t dynamo_query_worker_selection_and_annotate(WorkerSelectionPipeline *pipeline,
 +                                                               const char *request_json_c_str,
-+                                                               int64_t *worker_instance_id_out,
++                                                               int64_t *decode_worker_id_out,
++                                                               int64_t *prefill_worker_id_out,
 +                                                               uint32_t **token_ids_out,
 +                                                               size_t *token_count_out,
 +                                                               char **annotated_request_json_out);
@@ -404,7 +458,9 @@ index 0000000..bc29c0a
 +	PluginName               = "dynamo-kv-scorer"
 +	KVAwareScorerType        = "kv-aware-scorer"
 +	StateKeyWorkerInstanceID = schedtypes.StateKey("dynamo/worker-instance-id")
++	StateKeyPrefillWorkerID  = schedtypes.StateKey("dynamo/prefill-worker-id")
 +	WorkerIDHeader           = "x-worker-instance-id"
++	PrefillWorkerIDHeader    = "x-prefiller-host-port"
 +	tokenDataAnnotationKey   = "dynamo/token-data"
 +)
 +
@@ -471,6 +527,7 @@ index 0000000..bc29c0a
 +	ffiRouterTemperature  float64
 +	ffiKvBlockSize        uint32
 +	ffiWorkerID           int64
++	ffiEnforceDisagg      bool
 +
 +	runtimeInitialized bool
 +
@@ -484,6 +541,7 @@ index 0000000..bc29c0a
 +	ffiComponent = getEnvOrDefault("DYNAMO_COMPONENT", "backend")
 +	ffiModel = getEnvOrDefault("DYNAMO_MODEL", "Qwen/Qwen3-0.6B")
 +	ffiWorkerID = getEnvInt64OrDefault("DYNAMO_WORKER_ID", 1)
++	ffiEnforceDisagg = getEnvBoolOrDefault("DYNAMO_ENFORCE_DISAGG", true) // TODO default to false
 +
 +	ffiOverlapScoreWeight = getEnvFloatOrDefault("DYNAMO_OVERLAP_SCORE_WEIGHT", -1.0)
 +	ffiRouterTemperature = getEnvFloatOrDefault("DYNAMO_ROUTER_TEMPERATURE", -1.0)
@@ -575,6 +633,7 @@ index 0000000..bc29c0a
 +			C.double(ffiRouterTemperature),
 +			C.bool(getEnvBoolOrDefault("DYNAMO_USE_KV_EVENTS", true)),
 +			C.bool(getEnvBoolOrDefault("DYNAMO_ROUTER_REPLICA_SYNC", true)),
++			C.bool(ffiEnforceDisagg),
 +			&pipeline,
 +		)
 +		if rc != C.DYNAMO_OK {
@@ -595,13 +654,14 @@ index 0000000..bc29c0a
 +) map[schedtypes.Pod]float64 {
 +	logger := log.FromContext(ctx)
 +
-+	workerID, tokenData, err := k.callDynamoRouter(ctx, req)
++	workerID, prefillWorkerID, tokenData, err := k.callDynamoRouter(ctx, req)
 +	if err != nil {
 +		logger.V(logutil.DEFAULT).Error(err, "Dynamo call failed; proceeding without worker id")
 +	} else if workerID != "" {
 +		logger.V(logutil.DEFAULT).Info(
 +			"Dynamo router selected worker",
 +			"workerID", workerID,
++			"prefillWorkerID", prefillWorkerID,
 +			"tokenDataCount", len(tokenData),
 +			"tokenData", tokenData,
 +		)
@@ -610,6 +670,13 @@ index 0000000..bc29c0a
 +			req.Headers = map[string]string{}
 +		}
 +		req.Headers[WorkerIDHeader] = workerID
++
++		// Set prefill worker ID if present
++		if prefillWorkerID != "" {
++			cycle.Write(StateKeyPrefillWorkerID, stateString(prefillWorkerID))
++			req.Headers[PrefillWorkerIDHeader] = prefillWorkerID
++		}
++
 +		if len(tokenData) > 0 {
 +			if req.Annotations == nil {
 +				req.Annotations = map[string]any{}
@@ -632,15 +699,15 @@ index 0000000..bc29c0a
 +func (k *KVAwareScorer) callDynamoRouter(
 +	ctx context.Context,
 +	req *schedtypes.LLMRequest,
-+) (string, []int64, error) {
++) (workerID string, prefillWorkerID string, tokenData []int64, err error) {
 +	logger := log.FromContext(ctx)
 +
 +	if err := initFFI(); err != nil {
 +		logger.V(logutil.DEFAULT).Error(err, "FFI init failed")
-+		return "", nil, err
++		return "", "", nil, err
 +	}
 +	if !runtimeInitialized {
-+		return "", nil, fmt.Errorf("dynamo runtime not initialized")
++		return "", "", nil, fmt.Errorf("dynamo runtime not initialized")
 +	}
 +
 +	pipelineMutex.RLock()
@@ -648,21 +715,22 @@ index 0000000..bc29c0a
 +	pipelineMutex.RUnlock()
 +
 +	if currentPipeline == nil {
-+		return "", nil, fmt.Errorf("dynamo worker selection pipeline not created")
++		return "", "", nil, fmt.Errorf("dynamo worker selection pipeline not created")
 +	}
 +
 +	// Build OpenAI-compatible JSON request
 +	requestBody := buildOpenAIRequest(req)
-+	requestJSON, err := json.Marshal(requestBody)
-+	if err != nil {
-+		logger.V(logutil.DEFAULT).Error(err, "Failed to marshal OpenAI request")
-+		return "", nil, fmt.Errorf("marshal OpenAI request: %w", err)
++	requestJSON, jsonErr := json.Marshal(requestBody)
++	if jsonErr != nil {
++		logger.V(logutil.DEFAULT).Error(jsonErr, "Failed to marshal OpenAI request")
++		return "", "", nil, fmt.Errorf("marshal OpenAI request: %w", jsonErr)
 +	}
 +	cRequestJSON := C.CString(string(requestJSON))
 +	defer C.free(unsafe.Pointer(cRequestJSON))
 +
 +	// Output variables
-+	var cWorkerID C.int64_t
++	var cDecodeWorkerID C.int64_t
++	var cPrefillWorkerID C.int64_t
 +	var cTokens *C.uint32_t
 +	var cTokenCount C.size_t
 +	var cAnnotatedJSON *C.char
@@ -671,13 +739,14 @@ index 0000000..bc29c0a
 +	rc := C.dynamo_query_worker_selection_and_annotate(
 +		currentPipeline,
 +		cRequestJSON,
-+		&cWorkerID,
++		&cDecodeWorkerID,
++		&cPrefillWorkerID,
 +		&cTokens,
 +		&cTokenCount,
 +		&cAnnotatedJSON,
 +	)
 +	if rc != C.DYNAMO_OK {
-+		return "", nil, fmt.Errorf("dynamo_query_worker_selection_and_annotate failed")
++		return "", "", nil, fmt.Errorf("dynamo_query_worker_selection_and_annotate failed")
 +	}
 +
 +	// Copy tokens into Go memory and free C memory
@@ -692,11 +761,16 @@ index 0000000..bc29c0a
 +	}
 +	C.dynamo_free_worker_selection_result(cTokens, cTokenCount, cAnnotatedJSON)
 +
-+	workerID := fmt.Sprintf("%d", int64(cWorkerID))
++	workerIDStr := fmt.Sprintf("%d", int64(cDecodeWorkerID))
++	prefillWorkerIDStr := ""
++	// Rust returns -1 for prefill_worker_id when not in disaggregated mode
++	if int64(cPrefillWorkerID) >= 0 {
++		prefillWorkerIDStr = fmt.Sprintf("%d", int64(cPrefillWorkerID))
++	}
 +	logger.V(logutil.DEFAULT).Info("Worker selection completed",
-+		"workerID", workerID, "tokenCount", count)
++		"workerID", workerIDStr, "prefillWorkerID", prefillWorkerIDStr, "tokenCount", count)
 +
-+	return workerID, tokens64, nil
++	return workerIDStr, prefillWorkerIDStr, tokens64, nil
 +}
 +
 +func buildOpenAIRequest(req *schedtypes.LLMRequest) map[string]any {

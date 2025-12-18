@@ -302,8 +302,24 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             tracker.record_first_token();
         }
 
-        // Get worker_id info from tracker (set by KvPushRouter)
-        let worker_id_info = self.tracker.as_ref().and_then(|t| t.get_worker_info());
+        // Get worker_id info from tracker (set by KvPushRouter), fallback to disaggregated_params
+        let worker_id_info = self
+            .tracker
+            .as_ref()
+            .and_then(|t| t.get_worker_info())
+            .or_else(|| {
+                delta
+                    .disaggregated_params
+                    .as_ref()
+                    .and_then(|params| params.get("worker_id"))
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+            });
+
+        let token_ids = delta
+            .disaggregated_params
+            .as_ref()
+            .and_then(|params| params.get("token_ids"))
+            .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok());
 
         // Get timing info if this is the final response (has finish_reason)
         let timing_info: Option<TimingInfo> = if finish_reason.is_some() {
@@ -315,11 +331,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             None
         };
 
-        // Inject nvext if we have worker_id or timing
-        if worker_id_info.is_some() || timing_info.is_some() {
+        // Inject nvext if we have worker_id, token_ids, or timing
+        if worker_id_info.is_some() || token_ids.is_some() || timing_info.is_some() {
             let nvext_response = NvExtResponse {
                 worker_id: worker_id_info.clone(),
                 timing: timing_info,
+                token_ids: token_ids.clone(),
             };
 
             if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
@@ -329,6 +346,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
                         "Injected worker_id into completions nvext: prefill={:?}, decode={:?}",
                         info.prefill_worker_id,
                         info.decode_worker_id
+                    );
+                }
+                if let Some(ref tokens) = token_ids {
+                    tracing::debug!(
+                        "Injected token_ids into completions nvext: {} tokens",
+                        tokens.len()
                     );
                 }
             }
