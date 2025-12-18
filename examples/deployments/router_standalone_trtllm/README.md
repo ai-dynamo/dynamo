@@ -80,7 +80,7 @@ The router receives two types of events from TensorRT-LLM engines:
 
 ## Requirements
 
-- **TensorRT-LLM >= 1.2.0rc5**: You need TensorRT-LLM version 1.2.0-rc6 or later, which includes multimodal information (`mm_keys`) in KV cache events. This is required for MM hash-based routing. See [PR #9604](https://github.com/NVIDIA/TensorRT-LLM/pull/9604) for details.
+- **TensorRT-LLM >= 1.2.0rc6**: You need TensorRT-LLM version 1.2.0rc6 or later, which includes multimodal information (`mm_keys`) in KV cache events. This is required for MM hash-based routing. See [PR #9604](https://github.com/NVIDIA/TensorRT-LLM/pull/9604) for details.
 - TensorRT-LLM with pytorch backend
 - Multiple GPUs (one per worker)
 - Python 3.10+
@@ -201,7 +201,7 @@ Workers use sequential ports:
 ┌─────────────────┐
 │     Router      │──┐
 │   (router.py)   │  │ ZMQ (KV Events)
-└────────┬────────┘  │ ZMQ (Metrics)
+└────────┬────────┘  │ 
          │           │
          │ Select    │
          │ Worker    │

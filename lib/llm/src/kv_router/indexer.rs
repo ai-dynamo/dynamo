@@ -146,7 +146,10 @@ pub fn compute_block_hash_for_seq(
             if let Some(mm_infos) = block_mm_infos
                 && let Some(Some(block_mm_info)) = mm_infos.get(block_idx)
             {
-                // Sort mm_hashes for deterministic ordering
+                // The order of different multimodal hashes does not matter.
+                // Only which multimodal infos are present in a block is important.
+                // The order may differ in different code paths, so the hashes are sorted
+                // to keep the block hash stable.
                 let mut mm_hashes: Vec<u64> = block_mm_info
                     .mm_objects
                     .iter()
