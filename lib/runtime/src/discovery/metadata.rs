@@ -223,6 +223,8 @@ fn filter_instances(
 pub struct MetadataSnapshot {
     /// Map of instance_id -> metadata
     pub instances: HashMap<u64, Arc<DiscoveryMetadata>>,
+    /// CR name -> generation for change detection
+    pub generations: HashMap<String, i64>,
     /// Sequence number for debugging
     pub sequence: u64,
     /// Timestamp for observability
@@ -233,9 +235,52 @@ impl MetadataSnapshot {
     pub fn empty() -> Self {
         Self {
             instances: HashMap::new(),
+            generations: HashMap::new(),
             sequence: 0,
             timestamp: std::time::Instant::now(),
         }
+    }
+
+    /// Compare with previous snapshot and return true if changed.
+    /// Logs diagnostic info about what changed.
+    pub fn has_changes_from(&self, prev: &MetadataSnapshot) -> bool {
+        if self.generations == prev.generations {
+            tracing::trace!(
+                "Snapshot (seq={}): no changes, {} instances",
+                self.sequence,
+                self.instances.len()
+            );
+            return false;
+        }
+
+        // Compute diff for logging
+        let added: Vec<_> = self
+            .generations
+            .keys()
+            .filter(|k| !prev.generations.contains_key(*k))
+            .collect();
+        let removed: Vec<_> = prev
+            .generations
+            .keys()
+            .filter(|k| !self.generations.contains_key(*k))
+            .collect();
+        let updated: Vec<_> = self
+            .generations
+            .iter()
+            .filter(|(k, v)| prev.generations.get(*k).is_some_and(|pv| pv != *v))
+            .map(|(k, _)| k)
+            .collect();
+
+        tracing::info!(
+            "Snapshot (seq={}): {} instances, added={:?}, removed={:?}, updated={:?}",
+            self.sequence,
+            self.instances.len(),
+            added,
+            removed,
+            updated
+        );
+
+        true
     }
 
     /// Filter all instances in the snapshot by query

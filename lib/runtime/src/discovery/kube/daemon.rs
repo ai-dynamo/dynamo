@@ -136,7 +136,7 @@ impl DiscoveryDaemon {
 
         // Event-driven loop with debouncing
         let mut sequence = 0u64;
-        let mut prev_instance_ids: HashSet<u64> = HashSet::new();
+        let mut prev_snapshot = MetadataSnapshot::empty();
 
         loop {
             tokio::select! {
@@ -152,45 +152,13 @@ impl DiscoveryDaemon {
 
                     match self.aggregate_snapshot(&ep_reader, &cr_reader, sequence).await {
                         Ok(snapshot) => {
-                            // Compare instance IDs to detect changes
-                            let current_instance_ids: HashSet<u64> =
-                                snapshot.instances.keys().copied().collect();
+                            if snapshot.has_changes_from(&prev_snapshot) {
+                                prev_snapshot = snapshot.clone();
 
-                            let instances_changed = current_instance_ids != prev_instance_ids;
-
-                            if instances_changed {
-                                // Compute what was added and removed
-                                let added: Vec<u64> = current_instance_ids
-                                    .difference(&prev_instance_ids)
-                                    .copied()
-                                    .collect();
-
-                                let removed: Vec<u64> = prev_instance_ids
-                                    .difference(&current_instance_ids)
-                                    .copied()
-                                    .collect();
-
-                                tracing::info!(
-                                    "Daemon snapshot (seq={}): instances changed, total={}, added=[{}], removed=[{}]",
-                                    sequence,
-                                    current_instance_ids.len(),
-                                    added.iter().map(|id| format!("{:x}", id)).collect::<Vec<_>>().join(", "),
-                                    removed.iter().map(|id| format!("{:x}", id)).collect::<Vec<_>>().join(", ")
-                                );
-
-                                // Broadcast the snapshot (only when changed)
                                 if watch_tx.send(Arc::new(snapshot)).is_err() {
                                     tracing::debug!("No watch subscribers, daemon stopping");
                                     break;
                                 }
-
-                                prev_instance_ids = current_instance_ids;
-                            } else {
-                                tracing::trace!(
-                                    "Daemon snapshot (seq={}): no changes, {} instances",
-                                    sequence,
-                                    current_instance_ids.len()
-                                );
                             }
 
                             sequence += 1;
@@ -237,30 +205,36 @@ impl DiscoveryDaemon {
             ready_pods.len()
         );
 
-        // Build a map of CR name -> metadata for quick lookup
-        let cr_map: HashMap<String, Arc<DiscoveryMetadata>> = cr_reader
-            .state()
-            .iter()
-            .filter_map(|arc_cr| {
-                let cr_name = arc_cr.metadata.name.as_ref()?;
+        // Single read of CR state to extract both metadata and generations atomically
+        let cr_state = cr_reader.state();
+        let mut cr_map: HashMap<String, Arc<DiscoveryMetadata>> = HashMap::new();
+        let mut generations: HashMap<String, i64> = HashMap::new();
 
-                // Deserialize the data field to DiscoveryMetadata
-                match serde_json::from_value::<DiscoveryMetadata>(arc_cr.spec.data.clone()) {
-                    Ok(metadata) => {
-                        tracing::trace!("Loaded metadata from CR '{}'", cr_name);
-                        Some((cr_name.clone(), Arc::new(metadata)))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to deserialize metadata from CR '{}': {}",
-                            cr_name,
-                            e
-                        );
-                        None
-                    }
+        for arc_cr in cr_state.iter() {
+            let Some(cr_name) = arc_cr.metadata.name.as_ref() else {
+                continue;
+            };
+
+            // Track generation for change detection
+            if let Some(generation) = arc_cr.metadata.generation {
+                generations.insert(cr_name.clone(), generation);
+            }
+
+            // Deserialize the data field to DiscoveryMetadata
+            match serde_json::from_value::<DiscoveryMetadata>(arc_cr.spec.data.clone()) {
+                Ok(metadata) => {
+                    tracing::trace!("Loaded metadata from CR '{}'", cr_name);
+                    cr_map.insert(cr_name.clone(), Arc::new(metadata));
                 }
-            })
-            .collect();
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to deserialize metadata from CR '{}': {}",
+                        cr_name,
+                        e
+                    );
+                }
+            }
+        }
 
         tracing::trace!(
             "Daemon loaded {} DynamoWorkerMetadata CRs",
@@ -299,6 +273,7 @@ impl DiscoveryDaemon {
 
         Ok(MetadataSnapshot {
             instances,
+            generations,
             sequence,
             timestamp: std::time::Instant::now(),
         })
