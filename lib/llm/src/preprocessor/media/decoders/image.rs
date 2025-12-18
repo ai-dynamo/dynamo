@@ -281,4 +281,33 @@ mod tests {
             format
         );
     }
+
+    #[test]
+    fn test_with_runtime_limit_enforcement() {
+        let server_limits = ImageDecoderLimits {
+            max_image_width: Some(100),
+            max_image_height: Some(100),
+            max_alloc: Some(1024),
+        };
+        let server_config = ImageDecoder {
+            limits: server_limits.clone(),
+        };
+
+        // Runtime config tries to override limits (should be ignored)
+        let runtime_limits = ImageDecoderLimits {
+            max_image_width: Some(9999),
+            max_image_height: Some(9999),
+            max_alloc: Some(999999),
+        };
+        let runtime_config = ImageDecoder {
+            limits: runtime_limits,
+        };
+
+        let merged = server_config.with_runtime(Some(&runtime_config));
+
+        // Check that server limits are preserved
+        assert_eq!(merged.limits.max_image_width, Some(100));
+        assert_eq!(merged.limits.max_image_height, Some(100));
+        assert_eq!(merged.limits.max_alloc, Some(1024));
+    }
 }

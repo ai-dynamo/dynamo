@@ -482,4 +482,35 @@ mod tests {
             last_time
         );
     }
+
+    #[test]
+    fn test_with_runtime_limit_enforcement() {
+        let server_limits = VideoDecoderLimits {
+            max_alloc: Some(1024),
+        };
+        let server_config = VideoDecoder {
+            limits: server_limits,
+            fps: Some(1.0),
+            ..Default::default()
+        };
+
+        // Runtime config tries to override limits (should be ignored)
+        // And sets different FPS (should be accepted)
+        let runtime_limits = VideoDecoderLimits {
+            max_alloc: Some(999999),
+        };
+        let runtime_config = VideoDecoder {
+            limits: runtime_limits,
+            fps: Some(60.0),
+            ..Default::default()
+        };
+
+        let merged = server_config.with_runtime(Some(&runtime_config));
+
+        // Check that server limits are preserved
+        assert_eq!(merged.limits.max_alloc, Some(1024));
+
+        // Check that other fields are overridden
+        assert_eq!(merged.fps, Some(60.0));
+    }
 }

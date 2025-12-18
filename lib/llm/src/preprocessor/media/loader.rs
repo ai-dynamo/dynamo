@@ -107,7 +107,7 @@ impl MediaLoader {
     ) -> Result<RdmaMediaDataDescriptor> {
         #[cfg(not(feature = "media-nixl"))]
         anyhow::bail!(
-            "NIXL is not supported, cannot decode and register media data {oai_content_part:?}"
+            "NIXL is not supported, cannot decode and register media data {oai_content_part:?} with media_io_kwargs {media_io_kwargs:?}"
         );
 
         #[cfg(feature = "media-nixl")]

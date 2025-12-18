@@ -92,20 +92,20 @@ impl MediaDecoder {
         }
     }
 
-    fn enable_image(&mut self, image: &Bound<'_, PyDict>) -> PyResult<()> {
-        let image = pythonize::depythonize(image).map_err(|err| {
+    fn enable_image(&mut self, decoder_options: &Bound<'_, PyDict>) -> PyResult<()> {
+        let decoder_options = pythonize::depythonize(decoder_options).map_err(|err| {
             PyErr::new::<PyException, _>(format!("Failed to parse image decoder config: {}", err))
         })?;
-        self.inner.image = Some(image);
+        self.inner.image = Some(decoder_options);
         Ok(())
     }
 
     #[cfg(feature = "media-ffmpeg")]
-    fn enable_video(&mut self, video: &Bound<'_, PyDict>) -> PyResult<()> {
-        let video = pythonize::depythonize(video).map_err(|err| {
+    fn enable_video(&mut self, decoder_options: &Bound<'_, PyDict>) -> PyResult<()> {
+        let decoder_options = pythonize::depythonize(decoder_options).map_err(|err| {
             PyErr::new::<PyException, _>(format!("Failed to parse video decoder config: {}", err))
         })?;
-        self.inner.video = Some(video);
+        self.inner.video = Some(decoder_options);
         Ok(())
     }
 }
