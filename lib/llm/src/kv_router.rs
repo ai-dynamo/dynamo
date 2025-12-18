@@ -562,6 +562,15 @@ impl KvRouter {
         self.block_size
     }
 
+    /// Get the disaggregated endpoint for a worker, if available.
+    /// Used to look up bootstrap host/port for prefill workers.
+    pub async fn get_disaggregated_endpoint(
+        &self,
+        worker_id: u64,
+    ) -> Option<crate::local_model::runtime_config::DisaggregatedEndpoint> {
+        self.scheduler.get_disaggregated_endpoint(worker_id).await
+    }
+
     /// Get potential prefill and decode loads for all workers
     pub async fn get_potential_loads(&self, tokens: &[u32]) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
