@@ -68,8 +68,9 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
 
-COPY --from=rust_source /usr/local/cargo /usr/local/cargo
-COPY --from=rust_source /usr/local/rustup /usr/local/rustup
+COPY --from=rust_source $RUSTUP_HOME $RUSTUP_HOME
+COPY --from=rust_source $CARGO_HOME $CARGO_HOME
+RUN chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
 
 # Install NATS server
