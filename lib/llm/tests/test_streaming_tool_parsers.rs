@@ -160,6 +160,7 @@ async fn parse_response_stream(
             Box::pin(OpenAIPreprocessor::apply_tool_calling_jail(
                 Some(tool_parser),
                 None, // No tool_choice in this test
+                None, // No tool_definitions in this test
                 stream,
             ))
         } else {

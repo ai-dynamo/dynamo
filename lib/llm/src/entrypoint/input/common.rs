@@ -58,12 +58,15 @@ pub async fn prepare_engine(
     engine_config: EngineConfig,
 ) -> anyhow::Result<PreparedEngine> {
     match engine_config {
-        EngineConfig::Dynamic(local_model) => {
+        EngineConfig::Dynamic {
+            model: local_model, ..
+        } => {
             let model_manager = Arc::new(ModelManager::new());
             let watch_obj = Arc::new(ModelWatcher::new(
                 distributed_runtime.clone(),
                 model_manager.clone(),
                 RouterConfig::default(),
+                None,
             ));
             let discovery = distributed_runtime.discovery();
             let discovery_stream = discovery

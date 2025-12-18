@@ -305,6 +305,8 @@ class NatsServer(ManagedProcess):
 
         self.port = port
         self.use_random_port = use_random_port  # Track if we allocated the port
+        self._request = request  # Store for restart
+        self._timeout = timeout
         data_dir = tempfile.mkdtemp(prefix="nats_")
         command = [
             "nats-server",
@@ -335,6 +337,39 @@ class NatsServer(ManagedProcess):
             logging.warning(f"Failed to release NatsServer port: {e}")
 
         return super().__exit__(exc_type, exc_val, exc_tb)
+
+    def stop(self):
+        """Stop the NATS server for restart. Does not release port or clean up fully."""
+        _logger.info(f"Stopping NATS server on port {self.port}")
+        self._terminate_process_group()
+        if self.proc:
+            try:
+                self.proc.wait(timeout=10)
+            except Exception as e:
+                _logger.warning(f"Error waiting for NATS process to stop: {e}")
+            self.proc = None
+
+    def start(self):
+        """Restart a stopped NATS server with fresh state."""
+        _logger.info(f"Starting NATS server on port {self.port} with fresh state")
+        # Clean up old data directory and create fresh one
+        if self.data_dir:
+            shutil.rmtree(self.data_dir, ignore_errors=True)
+        self.data_dir = tempfile.mkdtemp(prefix="nats_")
+
+        # Rebuild command with new data_dir
+        self.command = [
+            "nats-server",
+            "-js",
+            "--trace",
+            "--store_dir",
+            self.data_dir,
+            "-p",
+            str(self.port),
+        ]
+
+        self._start_process()
+        self._check_ports(self._timeout)
 
 
 class SharedManagedProcess:
@@ -521,6 +556,11 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
     It also sets the NATS_SERVER and ETCD_ENDPOINTS environment variables so that
     Dynamo processes can find the services on the dynamic ports.
 
+    xdist/parallel safety:
+    - Function-scoped: each test gets its own NATS/etcd instances and ports.
+    - Each pytest-xdist worker runs tests in a separate process, so env vars do not
+      leak across workers.
+
     - If store_kv != "etcd", etcd is not started (returns None)
     - If request_plane != "nats", NATS is not started (returns None)
 
@@ -563,7 +603,14 @@ def runtime_services_session(request, tmp_path_factory):
     Uses file-based reference counting to coordinate between pytest-xdist worker processes.
     Only the first worker starts services, and only the last worker tears them down.
 
-    Test isolation is achieved through unique namespaces (test-namespace-{random-suffix}).
+    WARNING: may not be parallel/xdist safe.
+    - This fixture shares one NATS + one etcd across many tests (and across xdist workers).
+    - It is only safe if tests fully isolate state (e.g. unique namespaces) and do not
+      assume exclusive access to global streams/keys/ports.
+    - Prefer `runtime_services_dynamic_ports` for true per-test isolation in parallel runs.
+
+    TODO: once nothing uses `runtime_services_session`, make the per-test dynamic ports
+    behavior the default for router/frontend integration tests.
     """
     with SharedNatsServer(request, tmp_path_factory) as nats:
         with SharedEtcdServer(request, tmp_path_factory) as etcd:
