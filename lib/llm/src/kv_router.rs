@@ -57,6 +57,7 @@ use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
     protocols::common::timing::RequestPhase,
+    protocols::openai::nvext::WorkerIdInfo,
     tokens::SequenceHash,
 };
 
@@ -803,7 +804,31 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         // Handle query-only requests: early return with worker info
         if is_query_only {
-            let worker_id_info = request.tracker.as_ref().and_then(|t| t.get_worker_info());
+            // Get worker info from tracker if available, otherwise build directly from phase
+            let worker_id_info = request
+                .tracker
+                .as_ref()
+                .and_then(|t| t.get_worker_info())
+                .unwrap_or_else(|| {
+                    // No tracker - build WorkerIdInfo directly based on phase
+                    match phase {
+                        RequestPhase::Prefill => WorkerIdInfo {
+                            prefill_worker_id: Some(instance_id),
+                            decode_worker_id: None,
+                        },
+                        RequestPhase::Decode => WorkerIdInfo {
+                            prefill_worker_id: request
+                                .get_annotation_value("prefill_worker_id")
+                                .and_then(|s| s.parse().ok()),
+                            decode_worker_id: Some(instance_id),
+                        },
+                        RequestPhase::Aggregated => WorkerIdInfo {
+                            prefill_worker_id: Some(instance_id),
+                            decode_worker_id: Some(instance_id),
+                        },
+                    }
+                });
+
             tracing::trace!(
                 ?phase,
                 worker_id = instance_id,

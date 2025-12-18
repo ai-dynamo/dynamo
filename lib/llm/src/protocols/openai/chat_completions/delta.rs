@@ -46,11 +46,20 @@ impl NvCreateChatCompletionRequest {
     /// # Returns
     /// * [`DeltaGenerator`] configured with model name and response options.
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
-        // Check if client requested timing in extra_fields
+        // Enable tracking if:
+        // 1. Client requested timing in extra_fields, OR
+        // 2. query_instance_id annotation is present (needs worker_id tracking for response)
         let enable_tracking = self
             .nvext()
-            .and_then(|nv| nv.extra_fields.as_ref())
-            .is_some_and(|fields| fields.iter().any(|f| f == "timing"));
+            .map(|nv| {
+                nv.extra_fields
+                    .as_ref()
+                    .is_some_and(|fields| fields.iter().any(|f| f == "timing"))
+                    || nv.annotations.as_ref().is_some_and(|annots| {
+                        annots.iter().any(|a| a.starts_with("query_instance_id"))
+                    })
+            })
+            .unwrap_or(false);
 
         let options = DeltaGeneratorOptions {
             enable_usage: self
