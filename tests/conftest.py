@@ -646,10 +646,13 @@ def file_storage_backend():
 def num_system_ports(request) -> int:
     """Number of system ports to allocate for this test.
 
-    Default: 2 ports (sufficient for most aggregated and disaggregated tests).
-    Override with: @pytest.mark.parametrize("num_system_ports", [4], indirect=True)
+    Default: 1 port.
+
+    Tests that need multiple system ports (e.g. SYSTEM_PORT1 + SYSTEM_PORT2) must
+    explicitly request them via indirect parametrization:
+      @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
     """
-    return getattr(request, "param", 2)
+    return getattr(request, "param", 1)
 
 
 @pytest.fixture(scope="function")
