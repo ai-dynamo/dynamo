@@ -38,7 +38,7 @@ impl Default for VideoDecoderLimits {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VideoDecoder {
     #[serde(default)]
@@ -56,18 +56,6 @@ pub struct VideoDecoder {
     /// fail if some frames fail to decode
     #[serde(default)]
     pub(crate) strict: bool,
-}
-
-impl Default for VideoDecoder {
-    fn default() -> Self {
-        Self {
-            limits: VideoDecoderLimits::default(),
-            fps: None,
-            max_frames: None,
-            num_frames: None,
-            strict: false,
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

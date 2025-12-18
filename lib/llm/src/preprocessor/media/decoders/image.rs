@@ -37,19 +37,11 @@ impl Default for ImageDecoderLimits {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageDecoder {
     #[serde(default)]
     pub(crate) limits: ImageDecoderLimits,
-}
-
-impl Default for ImageDecoder {
-    fn default() -> Self {
-        Self {
-            limits: ImageDecoderLimits::default(),
-        }
-    }
 }
 
 #[allow(clippy::upper_case_acronyms)]
