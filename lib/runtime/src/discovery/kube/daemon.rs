@@ -193,8 +193,8 @@ impl DiscoveryDaemon {
     ) -> Result<MetadataSnapshot> {
         let start = std::time::Instant::now();
 
-        // Extract ready pods from EndpointSlices: (instance_id, pod_name, pod_ip, system_port)
-        let ready_pods: Vec<(u64, String, String, u16)> = ep_reader
+        // Extract ready pods from EndpointSlices: (instance_id, pod_name)
+        let ready_pods: Vec<(u64, String)> = ep_reader
             .state()
             .iter()
             .flat_map(|arc_slice| extract_endpoint_info(arc_slice.as_ref()))
@@ -240,7 +240,7 @@ impl DiscoveryDaemon {
         let mut instances: HashMap<u64, Arc<DiscoveryMetadata>> = HashMap::new();
         let mut generations: HashMap<u64, i64> = HashMap::new();
 
-        for (instance_id, pod_name, _pod_ip, _system_port) in ready_pods {
+        for (instance_id, pod_name) in ready_pods {
             // CR name is the pod name
             if let Some((metadata, generation)) = cr_map.get(&pod_name) {
                 instances.insert(instance_id, metadata.clone());

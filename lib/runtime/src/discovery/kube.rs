@@ -102,6 +102,10 @@ impl Discovery for KubeDiscoveryClient {
         // Write to local metadata and persist to CR
         // IMPORTANT: Hold the write lock across the CR write to prevent race conditions
         let mut metadata = self.metadata.write().await;
+
+        // Clone state for rollback in case CR persistence fails
+        let original_state = metadata.clone();
+
         match &instance {
             DiscoveryInstance::Endpoint(inst) => {
                 tracing::info!(
@@ -134,7 +138,15 @@ impl Discovery for KubeDiscoveryClient {
         // This persists the metadata to Kubernetes for other pods to discover
         let cr = build_cr(&self.pod_info.pod_name, &self.pod_info.pod_uid, &metadata)?;
 
-        apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await?;
+        if let Err(e) = apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await {
+            // Rollback local state on CR persistence failure
+            tracing::warn!(
+                "Failed to persist metadata to CR, rolling back local state: {}",
+                e
+            );
+            *metadata = original_state;
+            return Err(e);
+        }
 
         tracing::debug!("Persisted metadata to DynamoWorkerMetadata CR");
 
@@ -147,6 +159,10 @@ impl Discovery for KubeDiscoveryClient {
         // Write to local metadata and persist to CR
         // IMPORTANT: Hold the write lock across the CR write to prevent race conditions
         let mut metadata = self.metadata.write().await;
+
+        // Clone state for rollback in case CR persistence fails
+        let original_state = metadata.clone();
+
         match &instance {
             DiscoveryInstance::Endpoint(inst) => {
                 tracing::info!(
@@ -179,7 +195,15 @@ impl Discovery for KubeDiscoveryClient {
         // This persists the removal to Kubernetes for other pods to see
         let cr = build_cr(&self.pod_info.pod_name, &self.pod_info.pod_uid, &metadata)?;
 
-        apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await?;
+        if let Err(e) = apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await {
+            // Rollback local state on CR persistence failure
+            tracing::warn!(
+                "Failed to persist metadata removal to CR, rolling back local state: {}",
+                e
+            );
+            *metadata = original_state;
+            return Err(e);
+        }
 
         tracing::debug!("Persisted metadata removal to DynamoWorkerMetadata CR");
 
