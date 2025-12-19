@@ -45,7 +45,7 @@ pub async fn run(
                 Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
             >::for_engine(engine)?;
             model
-                .attach(&endpoint, ModelType::Chat, ModelInput::Text)
+                .attach(&endpoint, ModelType::Chat, ModelInput::Text, None)
                 .await?;
             let fut_chat = endpoint.endpoint_builder().handler(ingress_chat).start();
 
@@ -76,13 +76,13 @@ pub async fn run(
                 ModelType::Chat | ModelType::Completions
             };
             model
-                .attach(&endpoint, model_type, ModelInput::Tokens)
+                .attach(&endpoint, model_type, ModelInput::Tokens, None)
                 .await?;
 
             let fut = endpoint.endpoint_builder().handler(ingress).start();
             Box::pin(fut)
         }
-        EngineConfig::Dynamic(_) => {
+        EngineConfig::Dynamic { .. } => {
             unreachable!("An endpoint input will never have a Dynamic engine");
         }
     };

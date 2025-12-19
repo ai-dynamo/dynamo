@@ -1,0 +1,71 @@
+[TEST] 2025-09-11T18:53:20 INFO NatsServer: Running command: nats-server -js --trace --store_dir /tmp/nats_m3_09_z7 in /workspace
+[TEST] 2025-09-11T18:53:20 INFO NatsServer: Checking Port: 4222
+[TEST] 2025-09-11T18:53:20 INFO NatsServer: SUCCESS: Check Port: 4222
+[TEST] 2025-09-11T18:53:20 INFO EtcdServer: Running command: etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd_78f3art5 in /workspace
+[TEST] 2025-09-11T18:53:20 INFO EtcdServer: Checking Port: 2379
+[TEST] 2025-09-11T18:53:20 INFO EtcdServer: SUCCESS: Check Port: 2379
+[TEST] 2025-09-11T18:53:20 INFO tests.fault_tolerance.test_vllm_health_check: Caching model deepseek-ai/DeepSeek-R1-Distill-Llama-8B...
+[TEST] 2025-09-11T18:53:20 INFO tests.fault_tolerance.test_vllm_health_check: Model deepseek-ai/DeepSeek-R1-Distill-Llama-8B is ready for use
+[TEST] 2025-09-11T18:53:20 INFO tests.fault_tolerance.test_vllm_health_check: Starting frontend...
+[TEST] 2025-09-11T18:53:20 INFO DynamoFrontendProcess: Terminating Existing python 1
+[TEST] 2025-09-11T18:53:20 INFO DynamoFrontendProcess: Terminating PID: 39 name: nats-server
+[TEST] 2025-09-11T18:53:20 INFO DynamoFrontendProcess: Terminating PID: 40 name: sed
+[TEST] 2025-09-11T18:53:20 INFO DynamoFrontendProcess: Terminating PID: 41 name: etcd
+[TEST] 2025-09-11T18:53:20 INFO DynamoFrontendProcess: Terminating PID: 42 name: sed
+[TEST] 2025-09-11T18:53:20 INFO DynamoFrontendProcess: Terminating PID: 1 name: python
+[TEST] 2025-09-11T18:53:30 INFO DynamoFrontendProcess: Terminating PID: 1 name: python
+[TEST] 2025-09-11T18:53:30 INFO DynamoFrontendProcess: Sending Kill: 1 python
+[TEST] 2025-09-11T18:53:30 INFO DynamoFrontendProcess: Running command: python -m dynamo.frontend --router-mode round-robin in /workspace
+[TEST] 2025-09-11T18:53:30 INFO tests.fault_tolerance.test_vllm_health_check: Frontend started.
+[TEST] 2025-09-11T18:53:30 INFO tests.fault_tolerance.test_vllm_health_check: Starting worker...
+[TEST] 2025-09-11T18:53:30 INFO DynamoWorkerProcess: Running command: python3 -m dynamo.vllm --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B --enforce-eager --gpu-memory-utilization 0.45 --max-model-len 8192 --migration-limit 3 in /workspace
+[TEST] 2025-09-11T18:53:30 INFO DynamoWorkerProcess: Checking URL http://localhost:8000/v1/models
+[TEST] 2025-09-11T18:53:50 INFO DynamoWorkerProcess: Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=21, elapsed=20.0s)
+[TEST] 2025-09-11T18:54:10 INFO DynamoWorkerProcess: Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=41, elapsed=40.1s)
+[TEST] 2025-09-11T18:54:30 INFO DynamoWorkerProcess: Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=61, elapsed=60.1s)
+[TEST] 2025-09-11T18:54:50 INFO DynamoWorkerProcess: Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=81, elapsed=80.2s)
+[TEST] 2025-09-11T18:54:56 INFO DynamoWorkerProcess: SUCCESS: Check URL: http://localhost:8000/v1/models (attempt=87, elapsed=86.2s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+      "object": "object",
+      "created": 1757616896,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[TEST] 2025-09-11T18:54:56 INFO DynamoWorkerProcess: Checking URL http://localhost:9345/health
+[TEST] 2025-09-11T18:54:56 INFO tests.fault_tolerance.test_vllm_health_check: DynamoWorkerProcess { name: decode } status is ready
+[TEST] 2025-09-11T18:54:56 INFO DynamoWorkerProcess: SUCCESS: Check URL: http://localhost:9345/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 73,
+    "nanos": 574907208
+  },
+  "endpoints": {
+    "generate": "ready",
+    "load_metrics": "ready",
+    "clear_kv_blocks": "ready"
+  }
+}
+[TEST] 2025-09-11T18:54:56 INFO tests.fault_tolerance.test_vllm_health_check: Worker PID: 73
+[TEST] 2025-09-11T18:55:08 INFO tests.fault_tolerance.test_vllm_health_check: Sending completion request with prompt: 'Who are you?...' and max_tokens: 100
+[TEST] 2025-09-11T18:55:11 INFO tests.fault_tolerance.test_vllm_health_check: Received response with status code: 200
+[TEST] 2025-09-11T18:55:11 INFO tests.fault_tolerance.test_vllm_health_check: Test request completed successfully
+[TEST] 2025-09-11T18:55:11 INFO tests.fault_tolerance.test_vllm_health_check: Worker children: [495, 496]
+[TEST] 2025-09-11T18:55:11 WARNING tests.fault_tolerance.test_vllm_health_check: Killing vLLM engine process { pid: 496, cmdline: 'VLLM::EngineCore                                                                                                                              ' }
+[TEST] 2025-09-11T18:55:17 INFO DynamoWorkerProcess: Terminating process group: 73
+[TEST] 2025-09-11T18:55:22 INFO DynamoWorkerProcess: Terminating PID: 75 name: tee
+[TEST] 2025-09-11T18:55:22 INFO DynamoWorkerProcess: Terminating PID: 74 name: sed
+[TEST] 2025-09-11T18:55:22 INFO DynamoWorkerProcess: Checking for straggler processes: stragglers=['VLLM::EngineCore'], straggler_commands=['-m dynamo.vllm']
+[TEST] 2025-09-11T18:55:22 INFO DynamoFrontendProcess: Terminating process group: 70
+[TEST] 2025-09-11T18:55:27 INFO DynamoFrontendProcess: Terminating PID: 70 name: python
+[TEST] 2025-09-11T18:55:27 INFO DynamoFrontendProcess: Terminating PID: 72 name: tee
+[TEST] 2025-09-11T18:55:27 INFO DynamoFrontendProcess: Terminating PID: 71 name: sed
+[TEST] 2025-09-11T18:55:27 INFO EtcdServer: Terminating process group: 41
+[TEST] 2025-09-11T18:55:27 INFO NatsServer: Terminating process group: 39

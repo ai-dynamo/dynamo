@@ -1,0 +1,239 @@
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[PYTHON3]   import pynvml  # type: ignore[import]
+[PYTHON3] INFO 09-11 18:53:40 [__init__.py:241] Automatically detected platform cuda.
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:160: UserWarning: Field "model_identity" has conflict with protected namespace "model_".
+[PYTHON3] 
+[PYTHON3] You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+[PYTHON3]   warnings.warn(
+[PYTHON3] [2m2025-09-11T18:53:43.221677Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] binding to: 0.0.0.0:9345
+[PYTHON3] [2m2025-09-11T18:53:43.221755Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] system status server bound to: 0.0.0.0:9345
+[PYTHON3] [2m2025-09-11T18:53:43.221779Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m System status server started successfully on 0.0.0.0:9345
+[PYTHON3] [2m2025-09-11T18:53:43.392507Z[0m [34mDEBUG[0m [2margs.parse_args[0m[2m:[0m --enable-prefix-caching or --no-enable-prefix-caching not specified. Defaulting to True (vLLM v1 default behavior)   
+[PYTHON3] [2m2025-09-11T18:53:43.392549Z[0m [34mDEBUG[0m [2margs.parse_args[0m[2m:[0m Setting reasonable default of 16 for block_size   
+[PYTHON3] [2m2025-09-11T18:53:43.394714Z[0m [34mDEBUG[0m [2mports.allocate_and_reserve_port_block[0m[2m:[0m Successfully bound to ports [24833], now reserving in ETCD   
+[PYTHON3] [2m2025-09-11T18:53:43.403018Z[0m [34mDEBUG[0m [2mports.allocate_and_reserve_port_block[0m[2m:[0m Reserved port block [24833] from range 20000-30000 for vllm-backend-dp0 (block_size=1)   
+[PYTHON3] [2m2025-09-11T18:53:43.403502Z[0m [32m INFO[0m [2margs.configure_ports_with_etcd[0m[2m:[0m Allocated ZMQ KV events port: 24833 (worker_id=vllm-backend-dp0)   
+[PYTHON3] [2m2025-09-11T18:53:43.407406Z[0m [34mDEBUG[0m [2mports.allocate_and_reserve_port_block[0m[2m:[0m Successfully bound to ports [28325], now reserving in ETCD   
+[PYTHON3] [2m2025-09-11T18:53:43.411803Z[0m [34mDEBUG[0m [2mports.allocate_and_reserve_port_block[0m[2m:[0m Reserved port block [28325] from range 20000-30000 for vllm-backend-dp0 (block_size=1)   
+[PYTHON3] [2m2025-09-11T18:53:43.412041Z[0m [32m INFO[0m [2margs.configure_ports_with_etcd[0m[2m:[0m Allocated NIXL side channel ports: base=28325, allocated_ports=[28325] (worker_id=vllm-backend-dp0, dp_rank=0, tp_size=1)   
+[PYTHON3] [2m2025-09-11T18:53:43.412415Z[0m [34mDEBUG[0m [2margs.set_side_channel_host_and_port[0m[2m:[0m Set NIXL side channel to 10.20.56.81:28325   
+[PYTHON3] [2m2025-09-11T18:53:43.412465Z[0m [32m INFO[0m [2margs.create_kv_transfer_config[0m[2m:[0m Creating kv_transfer_config from --connector ['nixl']   
+[PYTHON3] [2m2025-09-11T18:53:43.412579Z[0m [32m INFO[0m [2margs.create_kv_events_config[0m[2m:[0m Creating Dynamo default kv_events_config for prefix caching   
+[PYTHON3] [2m2025-09-11T18:53:43.412624Z[0m [34mDEBUG[0m [2margs.overwrite_args[0m[2m:[0m Setting Dynamo defaults for vLLM   
+[PYTHON3] [2m2025-09-11T18:53:43.412696Z[0m [34mDEBUG[0m [2margs.overwrite_args[0m[2m:[0m  engine_args.task = generate   
+[PYTHON3] [2m2025-09-11T18:53:43.412741Z[0m [34mDEBUG[0m [2margs.overwrite_args[0m[2m:[0m  engine_args.skip_tokenizer_init = False   
+[PYTHON3] [2m2025-09-11T18:53:43.412801Z[0m [34mDEBUG[0m [2margs.overwrite_args[0m[2m:[0m  engine_args.disable_log_requests = True   
+[PYTHON3] [2m2025-09-11T18:53:43.412825Z[0m [34mDEBUG[0m [2margs.overwrite_args[0m[2m:[0m  engine_args.disable_log_stats = False   
+[PYTHON3] [2m2025-09-11T18:53:43.412862Z[0m [34mDEBUG[0m [2margs.overwrite_args[0m[2m:[0m  engine_args.kv_transfer_config = KVTransferConfig(kv_connector='NixlConnector', engine_id='19ea9d31-1cd0-4a88-b047-3fef2f2ec148', kv_buffer_device='cuda', kv_buffer_size=1000000000.0, kv_role='kv_both', kv_rank=None, kv_parallel_size=1, kv_ip='127.0.0.1', kv_port=14579, kv_connector_extra_config={}, kv_connector_module_path=None)   
+[PYTHON3] [2m2025-09-11T18:53:43.412890Z[0m [34mDEBUG[0m [2margs.overwrite_args[0m[2m:[0m  engine_args.kv_events_config = KVEventsConfig(enable_kv_cache_events=True, publisher='zmq', endpoint='tcp://*:24833', replay_endpoint=None, buffer_steps=10000, hwm=100000, max_queue_size=100000, topic='')   
+[PYTHON3] [2m2025-09-11T18:53:43.413016Z[0m [34mDEBUG[0m [2mmain.worker[0m[2m:[0m Signal handlers set up for graceful shutdown   
+[PYTHON3] [2m2025-09-11T18:53:43.413252Z[0m [34mDEBUG[0m [2mdynamo_runtime::component::service[0m[2m:[0m component: dynamo.backend; creating, service_name: dynamo_backend    
+[PYTHON3] [2m2025-09-11T18:53:43.413268Z[0m [34mDEBUG[0m [2mdynamo_runtime::component::service[0m[2m:[0m Starting service: dynamo_backend
+[PYTHON3] [2m2025-09-11T18:53:43.413274Z[0m [34mDEBUG[0m [2mdynamo_runtime::component::service[0m[2m:[0m Got builder
+[PYTHON3] [2m2025-09-11T18:53:43.415938Z[0m [34mDEBUG[0m [2mdynamo_runtime::component::client[0m[2m:[0m instance source updated
+[PYTHON3] [2m2025-09-11T18:53:43.415967Z[0m [34mDEBUG[0m [2mdynamo_runtime::pipeline::network::tcp::server[0m[2m:[0m tcp transport service on 10.20.56.81:42365
+[PYTHON3] [2m2025-09-11T18:53:43.415961Z[0m [34mDEBUG[0m [2mdynamo_runtime::component::client[0m[2m:[0m Starting endpoint watcher for prefix: instances/dynamo/prefill/generate
+[PYTHON3] [2m2025-09-11T18:53:43.416061Z[0m [34mDEBUG[0m [2mmain.setup_vllm_engine[0m[2m:[0m LMCache is disabled   
+[PYTHON3] [2m2025-09-11T18:53:43.431363Z[0m [34mDEBUG[0m [2mconnectionpool._new_conn[0m[2m:[0m Starting new HTTPS connection (1): huggingface.co:443   
+[PYTHON3] [2m2025-09-11T18:53:43.602528Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/config.json HTTP/1.1" 307 0   
+[PYTHON3] [2m2025-09-11T18:53:43.724759Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /api/resolve-cache/models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/6a6f4aa4197940add57724a7707d069478df56b1/config.json HTTP/1.1" 200 0   
+[PYTHON3] [2m2025-09-11T18:53:43.842073Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/config.json HTTP/1.1" 307 0   
+[PYTHON3] [2m2025-09-11T18:53:43.886554Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /api/resolve-cache/models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/6a6f4aa4197940add57724a7707d069478df56b1/config.json HTTP/1.1" 200 0   
+[PYTHON3] [2m2025-09-11T18:53:44.008299Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/config.json HTTP/1.1" 307 0   
+[PYTHON3] [2m2025-09-11T18:53:44.032421Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /api/resolve-cache/models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/6a6f4aa4197940add57724a7707d069478df56b1/config.json HTTP/1.1" 200 0   
+[PYTHON3] [2m2025-09-11T18:53:44.145240Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "GET /api/models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/tree/main?recursive=True&expand=False HTTP/1.1" 200 1672   
+[PYTHON3] [2m2025-09-11T18:53:44.259056Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "GET /api/models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/tree/main?recursive=True&expand=False HTTP/1.1" 200 1672   
+[PYTHON3] [2m2025-09-11T18:53:44.375465Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/preprocessor_config.json HTTP/1.1" 404 0   
+[PYTHON3] INFO 09-11 18:53:51 [__init__.py:711] Resolved architecture: LlamaForCausalLM
+[PYTHON3] `torch_dtype` is deprecated! Use `dtype` instead!
+[PYTHON3] INFO 09-11 18:53:51 [__init__.py:1750] Using max model len 8192
+[PYTHON3] [2m2025-09-11T18:53:51.299191Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/generation_config.json HTTP/1.1" 307 0   
+[PYTHON3] [2m2025-09-11T18:53:51.505785Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /api/resolve-cache/models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/6a6f4aa4197940add57724a7707d069478df56b1/generation_config.json HTTP/1.1" 200 0   
+[PYTHON3] WARNING 09-11 18:53:51 [__init__.py:1625] Default sampling parameters have been overridden by the model's Hugging Face generation config recommended from the model creator. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+[PYTHON3] [2m2025-09-11T18:53:51.624016Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/config.json HTTP/1.1" 307 0   
+[PYTHON3] [2m2025-09-11T18:53:51.647191Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /api/resolve-cache/models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/6a6f4aa4197940add57724a7707d069478df56b1/config.json HTTP/1.1" 200 0   
+[PYTHON3] [2m2025-09-11T18:53:51.756467Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/config.json HTTP/1.1" 307 0   
+[PYTHON3] [2m2025-09-11T18:53:51.779684Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /api/resolve-cache/models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/6a6f4aa4197940add57724a7707d069478df56b1/config.json HTTP/1.1" 200 0   
+[PYTHON3] [2m2025-09-11T18:53:51.888329Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/config.json HTTP/1.1" 307 0   
+[PYTHON3] [2m2025-09-11T18:53:51.911436Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /api/resolve-cache/models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/6a6f4aa4197940add57724a7707d069478df56b1/config.json HTTP/1.1" 200 0   
+[PYTHON3] [2m2025-09-11T18:53:52.019791Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/preprocessor_config.json HTTP/1.1" 404 0   
+[PYTHON3] INFO 09-11 18:53:52 [__init__.py:711] Resolved architecture: LlamaForCausalLM
+[PYTHON3] INFO 09-11 18:53:52 [__init__.py:1750] Using max model len 8192
+[PYTHON3] [2m2025-09-11T18:53:52.635682Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/config.json HTTP/1.1" 307 0   
+[PYTHON3] [2m2025-09-11T18:53:52.658827Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /api/resolve-cache/models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/6a6f4aa4197940add57724a7707d069478df56b1/config.json HTTP/1.1" 200 0   
+[PYTHON3] [2m2025-09-11T18:53:52.769642Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/config.json HTTP/1.1" 307 0   
+[PYTHON3] [2m2025-09-11T18:53:52.792501Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /api/resolve-cache/models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/6a6f4aa4197940add57724a7707d069478df56b1/config.json HTTP/1.1" 200 0   
+[PYTHON3] INFO 09-11 18:53:52 [scheduler.py:222] Chunked prefill is enabled with max_num_batched_tokens=2048.
+[PYTHON3] INFO 09-11 18:53:52 [__init__.py:3565] Cudagraph is disabled under eager mode
+[PYTHON3] [2m2025-09-11T18:53:52.940148Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/tokenizer_config.json HTTP/1.1" 307 0   
+[PYTHON3] [2m2025-09-11T18:53:53.060566Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /api/resolve-cache/models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/6a6f4aa4197940add57724a7707d069478df56b1/tokenizer_config.json HTTP/1.1" 200 0   
+[PYTHON3] [2m2025-09-11T18:53:53.250078Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "GET /api/models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/tree/main/additional_chat_templates?recursive=False&expand=False HTTP/1.1" 404 64   
+[PYTHON3] [2m2025-09-11T18:53:53.757821Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/generation_config.json HTTP/1.1" 307 0   
+[PYTHON3] [2m2025-09-11T18:53:53.801165Z[0m [34mDEBUG[0m [2mconnectionpool._make_request[0m[2m:[0m https://huggingface.co:443 "HEAD /api/resolve-cache/models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/6a6f4aa4197940add57724a7707d069478df56b1/generation_config.json HTTP/1.1" 200 0   
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[PYTHON3]   import pynvml  # type: ignore[import]
+[PYTHON3] [2m2025-09-11T18:53:57.202832Z[0m [34mDEBUG[0m [2m__init__.load_plugins_by_group[0m[2m:[0m No plugins for group vllm.platform_plugins found.   
+[PYTHON3] [2m2025-09-11T18:53:57.202879Z[0m [34mDEBUG[0m [2m__init__.tpu_platform_plugin[0m[2m:[0m Checking if TPU platform is available.   
+[PYTHON3] [2m2025-09-11T18:53:57.203046Z[0m [34mDEBUG[0m [2m__init__.tpu_platform_plugin[0m[2m:[0m TPU platform is not available because: No module named 'libtpu'   
+[PYTHON3] [2m2025-09-11T18:53:57.203066Z[0m [34mDEBUG[0m [2m__init__.cuda_platform_plugin[0m[2m:[0m Checking if CUDA platform is available.   
+[PYTHON3] [2m2025-09-11T18:53:57.215996Z[0m [34mDEBUG[0m [2m__init__.cuda_platform_plugin[0m[2m:[0m Confirmed CUDA platform is available.   
+[PYTHON3] [2m2025-09-11T18:53:57.216842Z[0m [34mDEBUG[0m [2m__init__.rocm_platform_plugin[0m[2m:[0m Checking if ROCm platform is available.   
+[PYTHON3] [2m2025-09-11T18:53:57.217025Z[0m [34mDEBUG[0m [2m__init__.rocm_platform_plugin[0m[2m:[0m ROCm platform is not available because: No module named 'amdsmi'   
+[PYTHON3] [2m2025-09-11T18:53:57.217044Z[0m [34mDEBUG[0m [2m__init__.xpu_platform_plugin[0m[2m:[0m Checking if XPU platform is available.   
+[PYTHON3] [2m2025-09-11T18:53:57.217189Z[0m [34mDEBUG[0m [2m__init__.xpu_platform_plugin[0m[2m:[0m XPU platform is not available because: No module named 'intel_extension_for_pytorch'   
+[PYTHON3] [2m2025-09-11T18:53:57.217209Z[0m [34mDEBUG[0m [2m__init__.cpu_platform_plugin[0m[2m:[0m Checking if CPU platform is available.   
+[PYTHON3] [2m2025-09-11T18:53:57.217656Z[0m [34mDEBUG[0m [2m__init__.neuron_platform_plugin[0m[2m:[0m Checking if Neuron platform is available.   
+[PYTHON3] [2m2025-09-11T18:53:57.217924Z[0m [34mDEBUG[0m [2m__init__.cuda_platform_plugin[0m[2m:[0m Checking if CUDA platform is available.   
+[PYTHON3] [2m2025-09-11T18:53:57.247023Z[0m [34mDEBUG[0m [2m__init__.cuda_platform_plugin[0m[2m:[0m Confirmed CUDA platform is available.   
+[PYTHON3] [2m2025-09-11T18:53:57.247590Z[0m [32m INFO[0m [2m__init__.resolve_current_platform_cls_qualname[0m[2m:[0m Automatically detected platform cuda.   
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/pydantic/_internal/_fields.py:160: UserWarning: Field "model_identity" has conflict with protected namespace "model_".
+[PYTHON3] 
+[PYTHON3] You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+[PYTHON3]   warnings.warn(
+[PYTHON3] [2m2025-09-11T18:53:58.630670Z[0m [32m INFO[0m [2mcore.startup_handshake[0m[2m:[0m Waiting for init message from front-end.   
+[PYTHON3] [2m2025-09-11T18:53:58.631926Z[0m [34mDEBUG[0m [2mcore.startup_handshake[0m[2m:[0m Received init message: EngineHandshakeMetadata(addresses=EngineZmqAddresses(inputs=['ipc:///tmp/0c644701-2a21-4d6a-957e-63c838b4666e'], outputs=['ipc:///tmp/868fe640-f9ad-4c36-a9f9-6b99e5b68016'], coordinator_input=None, coordinator_output=None, frontend_stats_publish_address=None), parallel_config={'data_parallel_master_ip': '127.0.0.1', 'data_parallel_master_port': 0, 'data_parallel_size': 1})   
+[PYTHON3] [2m2025-09-11T18:53:58.631961Z[0m [34mDEBUG[0m [2mcore.__init__[0m[2m:[0m Has DP Coordinator: False, stats publish address: None   
+[PYTHON3] [2m2025-09-11T18:53:58.643405Z[0m [34mDEBUG[0m [2m__init__.load_plugins_by_group[0m[2m:[0m Available plugins for group vllm.general_plugins:   
+[PYTHON3] [2m2025-09-11T18:53:58.643431Z[0m [34mDEBUG[0m [2m__init__.load_plugins_by_group[0m[2m:[0m - lora_filesystem_resolver -> vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver   
+[PYTHON3] [2m2025-09-11T18:53:58.643447Z[0m [34mDEBUG[0m [2m__init__.load_plugins_by_group[0m[2m:[0m All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.   
+[PYTHON3] [2m2025-09-11T18:53:58.648621Z[0m [32m INFO[0m [2mcore.__init__[0m[2m:[0m Initializing a V1 LLM engine (v0.10.1.1) with config: model='deepseek-ai/DeepSeek-R1-Distill-Llama-8B', speculative_config=None, tokenizer='deepseek-ai/DeepSeek-R1-Distill-Llama-8B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config={}, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=8192, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto, device_config=cuda, decoding_config=DecodingConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_backend=''), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=0, served_model_name=deepseek-ai/DeepSeek-R1-Distill-Llama-8B, enable_prefix_caching=True, chunked_prefill_enabled=True, use_async_output_proc=True, pooler_config=None, compilation_config={"level":0,"debug_dump_path":"","cache_dir":"","backend":"","custom_ops":[],"splitting_ops":null,"use_inductor":true,"compile_sizes":[],"inductor_compile_config":{"enable_auto_functionalized_v2":false},"inductor_passes":{},"cudagraph_mode":0,"use_cudagraph":true,"cudagraph_num_of_warmups":0,"cudagraph_capture_sizes":[],"cudagraph_copy_inputs":false,"full_cuda_graph":false,"pass_config":{},"max_capture_size":0,"local_cache_dir":null}   
+[PYTHON3] [2m2025-09-11T18:54:00.434948Z[0m [34mDEBUG[0m [2mdecorators.cls_decorator_helper[0m[2m:[0m Inferred dynamic dimensions for forward method of <class 'vllm.model_executor.models.llama.LlamaModel'>: ['input_ids', 'positions', 'intermediate_tensors', 'inputs_embeds']   
+[PYTHON3] [2m2025-09-11T18:54:00.435138Z[0m [34mDEBUG[0m [2mdecorators.cls_decorator_helper[0m[2m:[0m Inferred dynamic dimensions for forward method of <class 'vllm.model_executor.models.llama_eagle3.LlamaModel'>: ['input_ids', 'positions', 'hidden_states']   
+[PYTHON3] [2m2025-09-11T18:54:01.169729Z[0m [34mDEBUG[0m [2m__init__.find_unimplemented_methods[0m[2m:[0m Methods determine_num_available_blocks,device_config,get_cache_block_size_bytes not implemented in <vllm.v1.worker.gpu_worker.Worker object at 0x7fec495ae810>   
+[PYTHON3] [2m2025-09-11T18:54:01.169811Z[0m [34mDEBUG[0m [2m__init__.set_current_vllm_config[0m[2m:[0m enabled custom ops: Counter()   
+[PYTHON3] [2m2025-09-11T18:54:01.169836Z[0m [34mDEBUG[0m [2m__init__.set_current_vllm_config[0m[2m:[0m disabled custom ops: Counter()   
+[PYTHON3] [2m2025-09-11T18:54:01.487717Z[0m [34mDEBUG[0m [2mparallel_state.init_distributed_environment[0m[2m:[0m world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://10.20.56.81:54497 backend=nccl   
+[PYTHON3] [2m2025-09-11T18:54:01.577820Z[0m [34mDEBUG[0m [2mparallel_state.init_distributed_environment[0m[2m:[0m Detected 1 nodes in the distributed environment   
+[PYTHON3] [2m2025-09-11T18:54:01.590243Z[0m [32m INFO[0m [2mparallel_state.initialize_model_parallel[0m[2m:[0m rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, TP rank 0, EP rank 0   
+[PYTHON3] [2m2025-09-11T18:54:01.608477Z[0m [32m INFO[0m [2mnixl_connector[0m[2m:[0m NIXL is available   
+[PYTHON3] [2m2025-09-11T18:54:01.609080Z[0m [32m INFO[0m [2mfactory.create_connector[0m[2m:[0m Creating v1 connector with name: NixlConnector and engine_id: 19ea9d31-1cd0-4a88-b047-3fef2f2ec148   
+[PYTHON3] [2m2025-09-11T18:54:01.609107Z[0m [32m INFO[0m [2mnixl_connector.__init__[0m[2m:[0m Initializing NIXL wrapper   
+[PYTHON3] [2m2025-09-11T18:54:01.609127Z[0m [32m INFO[0m [2mnixl_connector.__init__[0m[2m:[0m Initializing NIXL worker 19ea9d31-1cd0-4a88-b047-3fef2f2ec148   
+[PYTHON3] [2m2025-09-11T18:54:01.870433Z[0m [32m INFO[0m [2mcuda.get_attn_backend_cls[0m[2m:[0m Using Flash Attention backend on V1 engine.   
+[PYTHON3] [2m2025-09-11T18:54:01.870507Z[0m [32m INFO[0m [2mnixl_connector.get_required_kvcache_layout[0m[2m:[0m NixlConnector setting KV cache layout to HND for better xfer performance.   
+[PYTHON3] [2m2025-09-11T18:54:01.870537Z[0m [34mDEBUG[0m [2mnixl_connector.__init__[0m[2m:[0m Detected attention backend FLASH_ATTN_VLLM_V1   
+[PYTHON3] [2m2025-09-11T18:54:01.870554Z[0m [34mDEBUG[0m [2mnixl_connector.__init__[0m[2m:[0m Detected kv cache layout HND   
+[PYTHON3] [2m2025-09-11T18:54:01.872783Z[0m [32m INFO[0m [2mtopk_topp_sampler.__init__[0m[2m:[0m Using FlashInfer for top-p & top-k sampling.   
+[PYTHON3] [2m2025-09-11T18:54:01.887209Z[0m [34mDEBUG[0m [2m__init__._load_logitsprocs_plugins[0m[2m:[0m No logitsprocs plugins installed (group vllm.logits_processors).   
+[PYTHON3] [2m2025-09-11T18:54:01.893724Z[0m [34mDEBUG[0m [2m__init__.set_current_vllm_config[0m[2m:[0m enabled custom ops: Counter()   
+[PYTHON3] [2m2025-09-11T18:54:01.893758Z[0m [34mDEBUG[0m [2m__init__.set_current_vllm_config[0m[2m:[0m disabled custom ops: Counter()   
+[PYTHON3] [2m2025-09-11T18:54:01.893810Z[0m [32m INFO[0m [2mgpu_model_runner.load_model[0m[2m:[0m Starting to load model deepseek-ai/DeepSeek-R1-Distill-Llama-8B...   
+[PYTHON3] [2m2025-09-11T18:54:02.116096Z[0m [32m INFO[0m [2mgpu_model_runner.load_model[0m[2m:[0m Loading model from scratch...   
+[PYTHON3] [2m2025-09-11T18:54:02.262948Z[0m [34mDEBUG[0m [2m__init__.set_current_vllm_config[0m[2m:[0m enabled custom ops: Counter({'rms_norm': 65, 'column_parallel_linear': 64, 'row_parallel_linear': 64, 'silu_and_mul': 32, 'vocab_parallel_embedding': 2, 'rotary_embedding': 1})   
+[PYTHON3] [2m2025-09-11T18:54:02.262987Z[0m [34mDEBUG[0m [2m__init__.set_current_vllm_config[0m[2m:[0m disabled custom ops: Counter()   
+[PYTHON3] [2m2025-09-11T18:54:02.263258Z[0m [34mDEBUG[0m [2mbase_loader.load_model[0m[2m:[0m Loading weights on cuda ...   
+[PYTHON3] [2m2025-09-11T18:54:02.561662Z[0m [32m INFO[0m [2mweight_utils.download_weights_from_hf[0m[2m:[0m Using model weights format ['*.safetensors']   
+[PYTHON3] [1;36m(EngineCore_0 pid=496)[0;0m Backend UCX was instantiated
+[PYTHON3] [1;36m(EngineCore_0 pid=496)[0;0m Initialized NIXL agent: cb7d61ee-dffb-48ae-aefc-226223922847
+[PYTHON3] [1;36m(EngineCore_0 pid=496)[0;0m Loading safetensors checkpoint shards:   0% Completed | 0/2 [00:00<?, ?it/s]
+[PYTHON3] [1;36m(EngineCore_0 pid=496)[0;0m Loading safetensors checkpoint shards:  50% Completed | 1/2 [00:07<00:07,  7.19s/it]
+[PYTHON3] [2m2025-09-11T18:54:11.236318Z[0m [34mDEBUG[0m [2mutils._load_param[0m[2m:[0m Loaded weight lm_head.weight with shape torch.Size([128256, 4096])   
+[PYTHON3] [1;36m(EngineCore_0 pid=496)[0;0m Loading safetensors checkpoint shards: 100% Completed | 2/2 [00:13<00:00,  6.85s/it]
+[PYTHON3] [1;36m(EngineCore_0 pid=496)[0;0m Loading safetensors checkpoint shards: 100% Completed | 2/2 [00:13<00:00,  6.90s/it]
+[PYTHON3] [1;36m(EngineCore_0 pid=496)[0;0m 
+[PYTHON3] [2m2025-09-11T18:54:17.014488Z[0m [32m INFO[0m [2mdefault_loader.load_weights[0m[2m:[0m Loading weights took 14.06 seconds   
+[PYTHON3] [2m2025-09-11T18:54:17.442973Z[0m [32m INFO[0m [2mgpu_model_runner.load_model[0m[2m:[0m Model loading took 14.9889 GiB and 14.901032 seconds   
+[PYTHON3] [1;36m(EngineCore_0 pid=496)[0;0m /opt/dynamo/venv/lib/python3.12/site-packages/torch/utils/cpp_extension.py:2356: UserWarning: TORCH_CUDA_ARCH_LIST is not set, all archs for visible cards are included for compilation. 
+[PYTHON3] [1;36m(EngineCore_0 pid=496)[0;0m If this is not desired, please set os.environ['TORCH_CUDA_ARCH_LIST'].
+[PYTHON3] [1;36m(EngineCore_0 pid=496)[0;0m   warnings.warn(
+[PYTHON3] [2m2025-09-11T18:54:54.169394Z[0m [34mDEBUG[0m [2mgpu_worker.determine_available_memory[0m[2m:[0m Initial free memory: 47.21 GiB; Requested memory: 0.45 (util), 21.39 GiB   
+[PYTHON3] [2m2025-09-11T18:54:54.169433Z[0m [34mDEBUG[0m [2mgpu_worker.determine_available_memory[0m[2m:[0m Free memory after profiling: 32.15 GiB (total), 6.33 GiB (within requested)   
+[PYTHON3] [2m2025-09-11T18:54:54.169456Z[0m [34mDEBUG[0m [2mgpu_worker.determine_available_memory[0m[2m:[0m Memory profiling takes 36.49 seconds. Total non KV cache memory: 15.46GiB; torch peak memory increase: 0.46GiB; non-torch forward increase memory: 0.02GiB; weights memory: 14.99GiB.   
+[PYTHON3] [2m2025-09-11T18:54:54.169478Z[0m [32m INFO[0m [2mgpu_worker.determine_available_memory[0m[2m:[0m Available KV cache memory: 5.93 GiB   
+[PYTHON3] [2m2025-09-11T18:54:54.373064Z[0m [32m INFO[0m [2mkv_cache_utils._get_kv_cache_config_uniform_type[0m[2m:[0m GPU KV cache size: 48,560 tokens   
+[PYTHON3] [2m2025-09-11T18:54:54.373123Z[0m [32m INFO[0m [2mkv_cache_utils._get_kv_cache_config_uniform_type[0m[2m:[0m Maximum concurrency for 8,192 tokens per request: 5.93x   
+[PYTHON3] [2m2025-09-11T18:54:54.387532Z[0m [32m INFO[0m [2mnixl_connector.register_kv_caches[0m[2m:[0m Registering KV_Caches. use_mla: False, kv_buffer_device: cuda, use_host_buffer: False, num_blocks: 3035, block_shape: torch.Size([16, 8, 128]), per_layer_kv_cache_shape: torch.Size([2, 3035, 16, 8, 128])   
+[PYTHON3] [2m2025-09-11T18:54:54.388376Z[0m [34mDEBUG[0m [2mnixl_connector.register_kv_caches[0m[2m:[0m Registering descs: [(140623940157440, 99450880, 0, ''), (140624039608320, 99450880, 0, ''), (140623738830848, 99450880, 0, ''), (140623838281728, 99450880, 0, ''), (140623537504256, 99450880, 0, ''), (140623636955136, 99450880, 0, ''), (140623336177664, 99450880, 0, ''), (140623435628544, 99450880, 0, ''), (140623134851072, 99450880, 0, ''), (140623234301952, 99450880, 0, ''), (140622933524480, 99450880, 0, ''), (140623032975360, 99450880, 0, ''), (140622732197888, 99450880, 0, ''), (140622831648768, 99450880, 0, ''), (140622530871296, 99450880, 0, ''), (140622630322176, 99450880, 0, ''), (140622329544704, 99450880, 0, ''), (140622428995584, 99450880, 0, ''), (140622128218112, 99450880, 0, ''), (140622227668992, 99450880, 0, ''), (140621926891520, 99450880, 0, ''), (140622026342400, 99450880, 0, ''), (140621725564928, 99450880, 0, ''), (140621825015808, 99450880, 0, ''), (140621524238336, 99450880, 0, ''), (140621623689216, 99450880, 0, ''), (140621322911744, 99450880, 0, ''), (140621422362624, 99450880, 0, ''), (140621121585152, 99450880, 0, ''), (140621221036032, 99450880, 0, ''), (140620920258560, 99450880, 0, ''), (140621019709440, 99450880, 0, ''), (140620718931968, 99450880, 0, ''), (140620818382848, 99450880, 0, ''), (140620517605376, 99450880, 0, ''), (140620617056256, 99450880, 0, ''), (140620316278784, 99450880, 0, ''), (140620415729664, 99450880, 0, ''), (140620114952192, 99450880, 0, ''), (140620214403072, 99450880, 0, ''), (140619913625600, 99450880, 0, ''), (140620013076480, 99450880, 0, ''), (140619712299008, 99450880, 0, ''), (140619811749888, 99450880, 0, ''), (140619510972416, 99450880, 0, ''), (140619610423296, 99450880, 0, ''), (140619309645824, 99450880, 0, ''), (140619409096704, 99450880, 0, ''), (140619108319232, 99450880, 0, ''), (140619207770112, 99450880, 0, ''), (140618906992640, 99450880, 0, ''), (140619006443520, 99450880, 0, ''), (140618705666048, 99450880, 0, ''), (140618805116928, 99450880, 0, ''), (140618504339456, 99450880, 0, ''), (140618603790336, 99450880, 0, ''), (140618303012864, 99450880, 0, ''), (140618402463744, 99450880, 0, ''), (140618101686272, 99450880, 0, ''), (140618201137152, 99450880, 0, ''), (140617900359680, 99450880, 0, ''), (140617999810560, 99450880, 0, ''), (140617699033088, 99450880, 0, ''), (140617798483968, 99450880, 0, '')]   
+[PYTHON3] [2m2025-09-11T18:54:54.392398Z[0m [34mDEBUG[0m [2mnixl_connector.register_kv_caches[0m[2m:[0m Done registering descs   
+[PYTHON3] [2m2025-09-11T18:54:54.422708Z[0m [34mDEBUG[0m [2mnixl_connector.register_kv_caches[0m[2m:[0m Created 194240 blocks for src engine 19ea9d31-1cd0-4a88-b047-3fef2f2ec148 and rank 0   
+[PYTHON3] [2m2025-09-11T18:54:54.441021Z[0m [34mDEBUG[0m [2mnixl_connector._nixl_handshake_listener[0m[2m:[0m Size of encoded NixlAgentMetadata: 16344 bytes   
+[PYTHON3] [2m2025-09-11T18:54:54.441153Z[0m [34mDEBUG[0m [2mnixl_connector._nixl_handshake_listener[0m[2m:[0m Starting listening on path: tcp://10.20.56.81:28325   
+[PYTHON3] [2m2025-09-11T18:54:54.452663Z[0m [34mDEBUG[0m [2m__init__.set_current_vllm_config[0m[2m:[0m enabled custom ops: Counter({'rms_norm': 65, 'column_parallel_linear': 64, 'row_parallel_linear': 64, 'silu_and_mul': 32, 'vocab_parallel_embedding': 2, 'rotary_embedding': 1})   
+[PYTHON3] [2m2025-09-11T18:54:54.452706Z[0m [34mDEBUG[0m [2m__init__.set_current_vllm_config[0m[2m:[0m disabled custom ops: Counter()   
+[PYTHON3] [2m2025-09-11T18:54:54.494370Z[0m [32m INFO[0m [2mcore._initialize_kv_caches[0m[2m:[0m init engine (profile, create kv cache, warmup model) took 37.04 seconds   
+[PYTHON3] [2m2025-09-11T18:54:55.307398Z[0m [32m INFO[0m [2mfactory.create_connector[0m[2m:[0m Creating v1 connector with name: NixlConnector and engine_id: 19ea9d31-1cd0-4a88-b047-3fef2f2ec148   
+[PYTHON3] [2m2025-09-11T18:54:55.307459Z[0m [32m INFO[0m [2mnixl_connector.__init__[0m[2m:[0m Initializing NIXL Scheduler 19ea9d31-1cd0-4a88-b047-3fef2f2ec148   
+[PYTHON3] [2m2025-09-11T18:54:55.308064Z[0m [32m INFO[0m [2mkv_events.__init__[0m[2m:[0m Starting ZMQ publisher thread   
+[PYTHON3] [2m2025-09-11T18:54:55.349402Z[0m [32m INFO[0m [2m__init__.__post_init__[0m[2m:[0m Cudagraph is disabled under eager mode   
+[PYTHON3] [2m2025-09-11T18:54:55.349875Z[0m [34mDEBUG[0m [2mcore._process_input_queue[0m[2m:[0m EngineCore waiting for work.   
+[PYTHON3] [2m2025-09-11T18:54:55.438893Z[0m [32m INFO[0m [2mmain.setup_vllm_engine[0m[2m:[0m VllmWorker for deepseek-ai/DeepSeek-R1-Distill-Llama-8B has been initialized   
+[PYTHON3] [2m2025-09-11T18:54:55.439181Z[0m [32m INFO[0m [2mmain.init[0m[2m:[0m VllmWorker for deepseek-ai/DeepSeek-R1-Distill-Llama-8B has been initialized   
+[PYTHON3] [2m2025-09-11T18:54:55.439237Z[0m [32m INFO[0m [2mengine_monitor.__init__[0m[2m:[0m VllmEngineMonitor initialized and health check task started.   
+[PYTHON3] [2m2025-09-11T18:54:55.439310Z[0m [34mDEBUG[0m [2mdynamo_llm::kv_router::publisher[0m[2m:[0m KVEventPublisher connecting to ZMQ endpoint tcp://127.0.0.1:24833 (topic '')
+[PYTHON3] [2m2025-09-11T18:54:55.439328Z[0m [32m INFO[0m [2mmain.init[0m[2m:[0m Reading Events from tcp://127.0.0.1:24833   
+[PYTHON3] [2m2025-09-11T18:54:55.439368Z[0m [32m INFO[0m [2mmain.init[0m[2m:[0m Getting engine runtime configuration metadata from vLLM engine...   
+[PYTHON3] [2m2025-09-11T18:54:55.439396Z[0m [32m INFO[0m [2mmain.get_engine_cache_info[0m[2m:[0m Cache config values: {'num_gpu_blocks': 3035}   
+[PYTHON3] [2m2025-09-11T18:54:55.439420Z[0m [32m INFO[0m [2mmain.get_engine_cache_info[0m[2m:[0m Scheduler config values: {'max_num_seqs': 256, 'max_num_batched_tokens': 2048}   
+[PYTHON3] [2m2025-09-11T18:54:55.439816Z[0m [34mDEBUG[0m [2mhandlers._prefill_check_loop[0m[2m:[0m Current Prefill Workers: 0   
+[PYTHON3] [2m2025-09-11T18:54:55.440180Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Using hf-hub for model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+[PYTHON3] [2m2025-09-11T18:54:55.440307Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::publisher[0m[2m:[0m Registered KvStats Prometheus metrics
+[PYTHON3] [2m2025-09-11T18:54:55.440334Z[0m [34mDEBUG[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Starting endpoint: instances/dynamo/backend/load_metrics:694d98147d54c0c8
+[PYTHON3] [2m2025-09-11T18:54:55.440683Z[0m [34mDEBUG[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Registering endpoint 'load_metrics' with graceful shutdown tracker
+[PYTHON3] [2m2025-09-11T18:54:55.440693Z[0m [34mDEBUG[0m [2mdynamo_runtime::utils::graceful_shutdown[0m[2m:[0m Endpoint registered, total active: 0 -> 1
+[PYTHON3] [2m2025-09-11T18:54:55.451624Z[0m [34mDEBUG[0m [2mdynamo_runtime::transports::nats[0m[2m:[0m Successfully created NATS stream namespace-dynamo-component-backend-kv-events
+[PYTHON3] [2m2025-09-11T18:54:55.484590Z[0m [34mDEBUG[0m [2mreqwest::connect[0m[2m:[0m starting new connection: https://huggingface.co/    
+[PYTHON3] [2m2025-09-11T18:54:55.650045Z[0m [34mDEBUG[0m [2mdynamo_llm::model_card[0m[2m:[0m Uploading model deployment card fields to NATS [3mnats_addr[0m[2m=[0m"0.0.0.0:4222" [3mbucket_name[0m[2m=[0mdeepseek-ai_deepseek-r1-distill-llama-8b
+[PYTHON3] [2m2025-09-11T18:54:55.826563Z[0m [34mDEBUG[0m [2mdynamo_llm::local_model[0m[2m:[0m Registering with etcd as models/e0f321c4-b61e-40ee-bb8d-921475254efc
+[PYTHON3] [2m2025-09-11T18:54:55.830572Z[0m [34mDEBUG[0m [2mmain.init[0m[2m:[0m Starting serve_endpoint for decode worker   
+[PYTHON3] [2m2025-09-11T18:54:55.830875Z[0m [34mDEBUG[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Starting endpoint: instances/dynamo/backend/generate:694d98147d54c0c8
+[PYTHON3] [2m2025-09-11T18:54:55.830876Z[0m [34mDEBUG[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Starting endpoint: instances/dynamo/backend/clear_kv_blocks:694d98147d54c0c8
+[PYTHON3] [2m2025-09-11T18:54:55.830971Z[0m [34mDEBUG[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Endpoint 'generate' has graceful_shutdown=false
+[PYTHON3] [2m2025-09-11T18:54:55.831098Z[0m [34mDEBUG[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Registering endpoint 'clear_kv_blocks' with graceful shutdown tracker
+[PYTHON3] [2m2025-09-11T18:54:55.831104Z[0m [34mDEBUG[0m [2mdynamo_runtime::utils::graceful_shutdown[0m[2m:[0m Endpoint registered, total active: 1 -> 2
+[PYTHON3] [2m2025-09-11T18:55:00.441202Z[0m [34mDEBUG[0m [2mhandlers._prefill_check_loop[0m[2m:[0m Current Prefill Workers: 0   
+[PYTHON3] [2m2025-09-11T18:55:05.443680Z[0m [34mDEBUG[0m [2mhandlers._prefill_check_loop[0m[2m:[0m Current Prefill Workers: 0   
+[PYTHON3] [2m2025-09-11T18:55:08.817638Z[0m [34mDEBUG[0m [2mhandlers.generate[0m[2m:[0m New Request ID: 392b937d1a3641419b4fb9a0af2aca98   
+[PYTHON3] [2m2025-09-11T18:55:08.817889Z[0m [34mDEBUG[0m [2m_core::engine[0m[2m:[0m starting task to process python async generator stream [3mrequest_id[0m[2m=[0m"fc13f7df-a20f-4b14-890e-56f1c655a53c"
+[PYTHON3] [2m2025-09-11T18:55:08.818616Z[0m [34mDEBUG[0m [2mcore._process_input_queue[0m[2m:[0m EngineCore loop active.   
+[PYTHON3] [2m2025-09-11T18:55:08.818712Z[0m [34mDEBUG[0m [2mnixl_connector.get_num_new_matched_tokens[0m[2m:[0m NIXLConnector get_num_new_matched_tokens: num_computed_tokens=0, kv_transfer_params=None   
+[PYTHON3] [2m2025-09-11T18:55:08.818780Z[0m [34mDEBUG[0m [2mnixl_connector.update_state_after_alloc[0m[2m:[0m NIXLConnector update_state_after_alloc: num_external_tokens=0, kv_transfer_params=None   
+[PYTHON3] [2m2025-09-11T18:55:08.823788Z[0m [33m WARN[0m [2mcudagraph_dispatcher.dispatch[0m[2m:[0m cudagraph dispatching keys are not initialized. No cudagraph will be used.   
+[PYTHON3] [2m2025-09-11T18:55:10.443974Z[0m [34mDEBUG[0m [2mhandlers._prefill_check_loop[0m[2m:[0m Current Prefill Workers: 0   
+[PYTHON3] [2m2025-09-11T18:55:11.267091Z[0m [34mDEBUG[0m [2mnixl_connector.request_finished[0m[2m:[0m NIXLConnector request_finished, request_status=FINISHED_LENGTH_CAPPED, kv_transfer_params=None   
+[PYTHON3] [2m2025-09-11T18:55:11.267347Z[0m [34mDEBUG[0m [2mcore._process_input_queue[0m[2m:[0m EngineCore waiting for work.   
+[PYTHON3] [2m2025-09-11T18:55:11.267830Z[0m [34mDEBUG[0m [2m_core::engine[0m[2m:[0m finished processing python async generator stream [3mrequest_id[0m[2m=[0m"fc13f7df-a20f-4b14-890e-56f1c655a53c"
+[PYTHON3] ERROR 09-11 18:55:11 [core_client.py:562] Engine core proc EngineCore_0 died unexpectedly, shutting down client.
+[PYTHON3] /usr/lib/python3.12/weakref.py:590: RuntimeWarning: No running event loop. zmq.asyncio should be used from within an asyncio loop.
+[PYTHON3]   return info.func(*info.args, **(info.kwargs or {}))
+[PYTHON3] Exception in thread MPClientEngineMonitor:
+[PYTHON3] Traceback (most recent call last):
+[PYTHON3]   File "/usr/lib/python3.12/threading.py", line 1073, in _bootstrap_inner
+[PYTHON3]     self.run()
+[PYTHON3]   File "/usr/lib/python3.12/threading.py", line 1010, in run
+[PYTHON3]     self._target(*self._args, **self._kwargs)
+[PYTHON3]   File "/opt/vllm/vllm/v1/engine/core_client.py", line 565, in monitor_engine_cores
+[PYTHON3]     _self.shutdown()
+[PYTHON3]   File "/opt/vllm/vllm/v1/engine/core_client.py", line 517, in shutdown
+[PYTHON3]     self._finalizer()
+[PYTHON3]   File "/usr/lib/python3.12/weakref.py", line 590, in __call__
+[PYTHON3]     return info.func(*info.args, **(info.kwargs or {}))
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/vllm/vllm/v1/engine/core_client.py", line 350, in __call__
+[PYTHON3]     loop = self.output_socket._get_loop()
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/zmq/_future.py", line 59, in _get_loop
+[PYTHON3]     current_loop = self._default_loop()
+[PYTHON3]                    ^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/zmq/asyncio.py", line 116, in _default_loop
+[PYTHON3]     return asyncio.get_event_loop()
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/usr/lib/python3.12/asyncio/events.py", line 702, in get_event_loop
+[PYTHON3]     raise RuntimeError('There is no current event loop in thread %r.'
+[PYTHON3] RuntimeError: There is no current event loop in thread 'MPClientEngineMonitor'.
+[PYTHON3] [2m2025-09-11T18:55:11.450662Z[0m [31mERROR[0m [2mengine_monitor._check_engine_health[0m[2m:[0m vLLM AsyncLLM health check failed: EngineCore encountered an issue. See stack trace (above) for the root cause.   
+[PYTHON3] [2m2025-09-11T18:55:11.450693Z[0m [33m WARN[0m [2mengine_monitor._check_engine_health[0m[2m:[0m Initiating Dynamo Runtime shutdown.   
+[PYTHON3] [2m2025-09-11T18:55:11.450702Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[PYTHON3] [2m2025-09-11T18:55:11.450717Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[PYTHON3] [2m2025-09-11T18:55:11.450726Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[PYTHON3] [2m2025-09-11T18:55:11.450729Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 2
+[PYTHON3] [2m2025-09-11T18:55:11.450732Z[0m [34mDEBUG[0m [2mdynamo_runtime::utils::graceful_shutdown[0m[2m:[0m Waiting for 2 endpoints to complete
+[PYTHON3] [2m2025-09-11T18:55:11.450751Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m PushEndpoint received cancellation signal, shutting down service
+[PYTHON3] [2m2025-09-11T18:55:11.450775Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m PushEndpoint received cancellation signal, shutting down service
+[PYTHON3] [2m2025-09-11T18:55:11.450786Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m Waiting for 0 inflight requests to complete
+[PYTHON3] [2m2025-09-11T18:55:11.450794Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m All inflight requests completed
+[PYTHON3] [2m2025-09-11T18:55:11.450808Z[0m [34mDEBUG[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Unregistering endpoint from graceful shutdown tracker
+[PYTHON3] [2m2025-09-11T18:55:11.450812Z[0m [34mDEBUG[0m [2mdynamo_runtime::utils::graceful_shutdown[0m[2m:[0m Endpoint unregistered, remaining active: 2 -> 1
+[PYTHON3] [2m2025-09-11T18:55:11.450809Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m PushEndpoint received cancellation signal, shutting down service
+[PYTHON3] [2m2025-09-11T18:55:11.450823Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m Skipping graceful shutdown, not waiting for inflight requests
+[PYTHON3] /usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+[PYTHON3]   warnings.warn('resource_tracker: There appear to be %d '

@@ -21,15 +21,20 @@ This document covers:
 
 ## Support Matrix
 
-| Backend | Dense Models (P:TP, D:TP) | MoE Models (P:TEP, D:DEP) |
+| Backend | Dense Models | MoE Models |
 |---------|-------------|------------|
 | vLLM | ✅ | 🚧 |
 | SGLang | ✅ | ✅ |
 | TensorRT-LLM | ✅ | 🚧 |
 
+Specifically, the profiler sweeps over the following parallelization mapping for prefill and decode:
+| Model Architecture | Prefill Parallelization Mapping | Decode Parallelization Mapping |
+|---------|-------------|------------|
+| MLA+MoE (DeepseekV3ForCausalLM, DeepseekV32ForCausalLM) | TEP, DEP | TEP, DEP |
+| GQA+MoE (Qwen3MoeForCausalLM) | TP, TEP, DEP | TP, TEP, DEP |
+| Other Models | TP | TP |
+
 > [!NOTE]
-> - We only support multi-node engines for MoE models.
-> - For MoE models, we currently only support deepseek-style MLA+MoE models. For other MoE models like GQA+MoE, please use the dense mode (sweep over TP sizes) instead.
 > - Exact model x parallelization mapping support is dependent on the backend. The profiler does not guarantee that the recommended P/D engine configuration is supported and bug-free by the backend.
 
 ## Using DGDR for Profiling (Recommended)
@@ -165,6 +170,67 @@ Suggested prefill TP:4 (TTFT 48.37 ms, throughput 15505.23 tokens/s/GPU)
 Suggested decode TP:4 (ITL 4.83 ms, throughput 51.22 tokens/s/GPU)
 ```
 
+#### Interactive Configuration Selection WebUI
+
+When running the profiler with `--pick-with-webui`, an interactive web interface is launched that allows you to visually explore profiling results and manually select configurations.
+
+**Features:**
+- **Interactive Charts**: Visualize prefill TTFT, decode ITL, and GPU hours analysis with hover-to-highlight synchronization between charts and tables
+- **Pareto-Optimal Analysis**: The GPU Hours table shows pareto-optimal configurations balancing latency and throughput
+- **DGD Config Preview**: Click "Show Config" on any row to view the corresponding DynamoGraphDeployment YAML
+- **GPU Cost Estimation**: Toggle GPU cost display to convert GPU hours to cost ($/1000 requests)
+- **SLA Visualization**: Red dashed lines indicate your TTFT and ITL targets
+
+**Selection Methods:**
+1. **GPU Hours Table** (recommended): Click any row to select both prefill and decode configurations at once based on the pareto-optimal combination
+2. **Individual Selection**: Click one row in the Prefill table AND one row in the Decode table to manually choose each
+
+**Example DGD Config Output:**
+
+When you click "Show Config", you'll see a DynamoGraphDeployment configuration like:
+
+```yaml
+# DynamoGraphDeployment Configuration
+# Prefill: 1 GPU(s), TP=1
+# Decode: 4 GPU(s), TP=4
+# Model: Qwen/Qwen3-32B-FP8
+# Backend: trtllm
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+spec:
+  services:
+    PrefillWorker:
+      subComponentType: prefill
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          args:
+          - --tensor-parallel-size=1
+    DecodeWorker:
+      subComponentType: decode
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          args:
+          - --tensor-parallel-size=4
+```
+
+**Usage:**
+```bash
+python -m benchmarks.profiler.profile_sla \
+  --backend trtllm \
+  --config path/to/disagg.yaml \
+  --pick-with-webui \
+  --use-ai-configurator \
+  --model Qwen/Qwen3-32B-FP8 \
+  --aic-system h200_sxm \
+  --ttft 200 --itl 15
+```
+
+Once you have selected a configuration, the full DynamoGraphDeployment CRD will be saved in your output folder as `config_with_planner.yaml`.
+
+The WebUI launches on port 8000 by default (configurable with `--webui-port`).
+
 #### Output Performance Plots
 
 The profiler will generate the following plots to better visualize the performance data:
@@ -269,7 +335,7 @@ profilingConfig:
 **When to use:**
 - **min_num_gpus_per_engine**: Skip small TP sizes if your model is large
 - **max_num_gpus_per_engine**: Limit search space or work around constraints (e.g., [AIC attention heads](#ai-configurator-attention-head-constraint-error))
-- **num_gpus_per_node**: Required for MoE models with TEP/DEP sizing
+- **num_gpus_per_node**: Determine the upper bound of number of GPUs per node for dense models and configure Grove for multi-node MoE engines.
 - **gpu_type**: Informational, auto-detected by controller
 
 > [!TIP]

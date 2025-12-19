@@ -1,0 +1,1 @@
+[TEST] 2025-10-07T17:38:12 ERROR kubernetes_asyncio.config.kube_config: [Errno 2] No such file or directory: 'kubelogin'

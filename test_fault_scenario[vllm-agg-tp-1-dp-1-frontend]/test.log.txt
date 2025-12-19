@@ -1,0 +1,2 @@
+[TEST] 2025-10-15T15:32:51 WARNING root: Unable to detect result type in test_fault_scenario[vllm-agg-tp-1-dp-1-frontend]. No client result files found.
+[TEST] 2025-10-15T15:32:51 ERROR root: Failed to parse results for test_fault_scenario[vllm-agg-tp-1-dp-1-frontend]: Unable to auto-detect result type. Use force_parser='aiperf' or force_parser='legacy' to specify explicitly.

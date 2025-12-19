@@ -1,0 +1,41 @@
+[TEST] 2025-12-19T21:21:27 INFO NatsServer: Running command: nats-server -js --trace --store_dir /tmp/nats_gfzrpmfx -p 4299 in /workspace
+[TEST] 2025-12-19T21:21:27 INFO NatsServer: Checking Port: 4299
+[TEST] 2025-12-19T21:21:27 INFO NatsServer: SUCCESS: Check Port: 4299
+[TEST] 2025-12-19T21:21:27 INFO EtcdServer: Running command: etcd --listen-client-urls http://0.0.0.0:2444 --advertise-client-urls http://0.0.0.0:2444 --listen-peer-urls http://0.0.0.0:2445 --initial-advertise-peer-urls http://localhost:2445 --initial-cluster default=http://localhost:2445 --data-dir /tmp/etcd_3k479_6f in /workspace
+[TEST] 2025-12-19T21:21:27 INFO EtcdServer: Checking Port: 2444
+[TEST] 2025-12-19T21:21:28 INFO EtcdServer: SUCCESS: Check Port: 2444
+[TEST] 2025-12-19T21:21:28 INFO root: Set up file storage backend in: /tmp/tmpktx3dvsa
+[TEST] 2025-12-19T21:21:28 INFO tests.router.test_router_e2e_with_mockers: Starting mocker two KV router test with etcd storage backend
+[TEST] 2025-12-19T21:21:28 INFO tests.router.test_router_e2e_with_mockers: Starting 2 mocker instances
+[TEST] 2025-12-19T21:21:28 INFO tests.router.test_router_e2e_with_mockers: Created mocker process with 2 worker(s), endpoint: dyn://test-namespace-bnzxrwtsyg.mocker.generate
+[TEST] 2025-12-19T21:21:28 INFO tests.router.test_router_e2e_with_mockers: All mockers using endpoint: dyn://test-namespace-bnzxrwtsyg.mocker.generate
+[TEST] 2025-12-19T21:21:28 INFO tests.router.test_router_e2e_with_mockers: Starting mocker process with 2 worker(s)
+[TEST] 2025-12-19T21:21:28 INFO ManagedProcess: Running command: python -m dynamo.mocker --model-path Qwen/Qwen3-0.6B --endpoint dyn://test-namespace-bnzxrwtsyg.mocker.generate --store-kv etcd --num-workers 2 --speedup-ratio 10.0 --block-size 16 in /workspace
+[TEST] 2025-12-19T21:21:28 INFO tests.router.common: Starting KV router frontend on port 9102
+[TEST] 2025-12-19T21:21:28 INFO KVRouterProcess: Running command: python3 -m dynamo.frontend --kv-cache-block-size 16 --router-mode kv --http-port 9102 --store-kv etcd --namespace test-namespace-bnzxrwtsyg in /workspace
+[TEST] 2025-12-19T21:21:28 INFO KVRouterProcess: Checking Port: 9102
+[TEST] 2025-12-19T21:21:28 ERROR KVRouterProcess: Main server process died with exit code 1 while waiting for port 9102
+[TEST] 2025-12-19T21:21:28 ERROR KVRouterProcess: === Last 8 lines from /tmp/dynamo_tests/test_mocker_two_kv_router[etcd]/python3.log.txt ===
+[TEST] 2025-12-19T21:21:28 ERROR KVRouterProcess: [PYTHON3] Traceback (most recent call last):
+[TEST] 2025-12-19T21:21:28 ERROR KVRouterProcess: [PYTHON3]   File "<frozen runpy>", line 198, in _run_module_as_main
+[TEST] 2025-12-19T21:21:28 ERROR KVRouterProcess: [PYTHON3]   File "<frozen runpy>", line 88, in _run_code
+[TEST] 2025-12-19T21:21:28 ERROR KVRouterProcess: [PYTHON3]   File "/workspace/components/src/dynamo/frontend/__main__.py", line 4, in <module>
+[TEST] 2025-12-19T21:21:28 ERROR KVRouterProcess: [PYTHON3]     from dynamo.frontend.main import main
+[TEST] 2025-12-19T21:21:28 ERROR KVRouterProcess: [PYTHON3]   File "/workspace/components/src/dynamo/frontend/main.py", line 29, in <module>
+[TEST] 2025-12-19T21:21:28 ERROR KVRouterProcess: [PYTHON3]     from dynamo.llm import (
+[TEST] 2025-12-19T21:21:28 ERROR KVRouterProcess: [PYTHON3] ImportError: cannot import name 'ModelDeploymentCard' from 'dynamo.llm' (/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/llm/__init__.py)
+[TEST] 2025-12-19T21:21:28 ERROR KVRouterProcess: === End of log tail ===
+[TEST] 2025-12-19T21:21:28 INFO KVRouterProcess: Terminating process group: 177
+[TEST] 2025-12-19T21:21:28 INFO KVRouterProcess: Terminating PID: 179 name: tee
+[TEST] 2025-12-19T21:21:28 INFO KVRouterProcess: Terminating PID: 178 name: sed
+[TEST] 2025-12-19T21:21:28 INFO tests.router.test_router_e2e_with_mockers: Stopping mocker process
+[TEST] 2025-12-19T21:21:28 INFO ManagedProcess: Terminating process group: 174
+[TEST] 2025-12-19T21:21:33 INFO ManagedProcess: Terminating PID: 174 name: python
+[TEST] 2025-12-19T21:21:33 INFO ManagedProcess: Terminating PID: 176 name: tee
+[TEST] 2025-12-19T21:21:33 INFO ManagedProcess: Terminating PID: 175 name: sed
+[TEST] 2025-12-19T21:21:33 INFO EtcdServer: Terminating process group: 156
+[TEST] 2025-12-19T21:21:38 INFO EtcdServer: Terminating PID: 156 name: etcd
+[TEST] 2025-12-19T21:21:38 INFO EtcdServer: Terminating PID: 157 name: sed
+[TEST] 2025-12-19T21:21:38 INFO NatsServer: Terminating process group: 145
+[TEST] 2025-12-19T21:21:43 INFO NatsServer: Terminating PID: 145 name: nats-server
+[TEST] 2025-12-19T21:21:43 INFO NatsServer: Terminating PID: 146 name: sed

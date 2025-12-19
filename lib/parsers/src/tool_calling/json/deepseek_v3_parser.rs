@@ -5,6 +5,7 @@ use regex::RegexBuilder;
 use serde_json::Value;
 use uuid::Uuid;
 
+use super::super::ToolDefinition;
 use super::config::JsonParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
@@ -129,6 +130,7 @@ fn parse_single_tool_call_v3(block: &str, separator_tokens: &[String]) -> Option
 pub fn parse_tool_calls_deepseek_v3(
     message: &str,
     config: &JsonParserConfig,
+    _tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     // Format Structure:
     // <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>{type}<｜tool▁sep｜>{function_name}\n```json\n{json_arguments}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
@@ -281,8 +283,11 @@ mod tests {
 ```json
 {"location": "Paris"}
 ```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
-        let config = ToolCallConfig::deepseek_v3().json;
-        let (result, content) = parse_tool_calls_deepseek_v3(text, &config).unwrap();
+        let config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config, None).unwrap();
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 2);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -299,8 +304,11 @@ mod tests {
 ```json
 {"location": "New York"}
 ```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
-        let config = ToolCallConfig::deepseek_v3().json;
-        let (result, content) = parse_tool_calls_deepseek_v3(text, &config).unwrap();
+        let config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config, None).unwrap();
         assert_eq!(
             content,
             Some("The following tool call retrieves weather information: ".to_string())
@@ -317,8 +325,11 @@ mod tests {
 ```json
 }
 ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
-        let config = ToolCallConfig::deepseek_v3().json;
-        let (result, content) = parse_tool_calls_deepseek_v3(text, &config).unwrap();
+        let config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config, None).unwrap();
         assert_eq!(content, Some(text.to_string()));
         assert_eq!(result.len(), 0);
     }
@@ -335,8 +346,11 @@ mod tests {
 ```json
 {"location": "Shanghai", "radius": 50}
 ```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
-        let config = ToolCallConfig::deepseek_v3().json;
-        let (result, content) = parse_tool_calls_deepseek_v3(text, &config).unwrap();
+        let config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config, None).unwrap();
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 3);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -361,8 +375,11 @@ mod tests {
 ```json
 }
 ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
-        let config = ToolCallConfig::deepseek_v3().json;
-        let (result, content) = parse_tool_calls_deepseek_v3(text, &config).unwrap();
+        let config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config, None).unwrap();
         assert_eq!(content, Some(text.trim().to_string()));
         assert_eq!(result.len(), 0);
     }
@@ -380,8 +397,11 @@ mod tests {
 ```json
 }
 ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
-        let config = ToolCallConfig::deepseek_v3().json;
-        let (result, content) = parse_tool_calls_deepseek_v3(text, &config).unwrap();
+        let config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config, None).unwrap();
         assert_eq!(content, Some(text.trim().to_string()));
         assert_eq!(result.len(), 0);
     }
@@ -404,10 +424,13 @@ mod tests {
   "Summarizing the codebase purpose and
   functionality"}]}
 ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
-        let config = ToolCallConfig::deepseek_v3().json;
+        let config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
 
         let (tool_call_results, normal_content) =
-            parse_tool_calls_deepseek_v3(text, &config).unwrap();
+            parse_tool_calls_deepseek_v3(text, &config, None).unwrap();
 
         assert_eq!(tool_call_results.len(), 1);
 
@@ -454,7 +477,10 @@ mod detect_parser_tests {
     #[test]
     fn test_detect_tool_call_start_deepseek_v3_chunk_with_tool_call_start_token() {
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function宽带}"#;
-        let config = ToolCallConfig::deepseek_v3().json;
+        let config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
         let result = detect_tool_call_start_deepseek_v3(text, &config);
         assert!(result);
     }
@@ -462,7 +488,10 @@ mod detect_parser_tests {
     #[test]
     fn test_detect_tool_call_start_deepseek_v3_chunk_without_tool_call_start_token() {
         let text = r#"<｜tool▁call▁begin｜>function宽带}"#;
-        let config = ToolCallConfig::deepseek_v3().json;
+        let config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
         let result = detect_tool_call_start_deepseek_v3(text, &config);
         assert!(!result);
     }
@@ -470,7 +499,10 @@ mod detect_parser_tests {
     #[test]
     fn test_detect_tool_call_start_deepseek_v3_chunk_with_tool_call_start_token_in_middle() {
         let text = r#"The following tool calls retrieve weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function宽带}"#;
-        let config = ToolCallConfig::deepseek_v3().json;
+        let config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
         let result = detect_tool_call_start_deepseek_v3(text, &config);
         assert!(result);
     }
@@ -478,7 +510,10 @@ mod detect_parser_tests {
     #[test]
     fn test_detect_tool_call_start_deepseek_v3_partial_tokens() {
         // Test partial token detection for streaming scenarios with unicode characters
-        let config = ToolCallConfig::deepseek_v3().json;
+        let config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
 
         // Test various partial prefixes
         assert!(

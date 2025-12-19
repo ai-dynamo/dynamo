@@ -1,0 +1,4 @@
+[TEST] 2025-10-15T23:21:57 INFO ManagedDeployment: Restarting dynamo-platform-etcd app.kubernetes.io/component=etcd
+[TEST] 2025-10-15T23:21:57 INFO ManagedDeployment: Cleaning up 0 active port forwards
+[TEST] 2025-10-15T23:21:58 WARNING root: Unable to detect result type in test_fault_scenario[vllm-agg-tp-1-dp-1-none]. No client result files found.
+[TEST] 2025-10-15T23:21:58 ERROR root: Failed to parse results for test_fault_scenario[vllm-agg-tp-1-dp-1-none]: Unable to auto-detect result type. Use force_parser='aiperf' or force_parser='legacy' to specify explicitly.

@@ -1,0 +1,401 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  creationTimestamp: '2025-09-15T02:42:10Z'
+  generateName: fault-tolerance-test-vllmprefillworker-7994fb6797-
+  labels:
+    nvidia.com/dynamo-component: VllmPrefillWorker
+    nvidia.com/dynamo-component-type: worker
+    nvidia.com/dynamo-graph-deployment-name: fault-tolerance-test
+    nvidia.com/dynamo-namespace: vllm-disagg
+    nvidia.com/metrics-enabled: 'true'
+    nvidia.com/selector: fault-tolerance-test-vllmprefillworker
+    pod-template-hash: 7994fb6797
+  managedFields:
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:metadata:
+        f:generateName: {}
+        f:labels:
+          .: {}
+          f:nvidia.com/dynamo-component: {}
+          f:nvidia.com/dynamo-component-type: {}
+          f:nvidia.com/dynamo-graph-deployment-name: {}
+          f:nvidia.com/dynamo-namespace: {}
+          f:nvidia.com/metrics-enabled: {}
+          f:nvidia.com/selector: {}
+          f:pod-template-hash: {}
+        f:ownerReferences:
+          .: {}
+          k:{"uid":"a073db6c-8a0c-4184-9331-c755659e85cb"}: {}
+      f:spec:
+        f:containers:
+          k:{"name":"main"}:
+            .: {}
+            f:args: {}
+            f:command: {}
+            f:env:
+              .: {}
+              k:{"name":"DYN_LOG"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_LOGGING_JSONL"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_NAMESPACE"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_PARENT_DGD_K8S_NAME"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_PARENT_DGD_K8S_NAMESPACE"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_SYSTEM_ENABLED"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_SYSTEM_PORT"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"ETCD_ENDPOINTS"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"NATS_SERVER"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+            f:envFrom: {}
+            f:image: {}
+            f:imagePullPolicy: {}
+            f:livenessProbe:
+              .: {}
+              f:failureThreshold: {}
+              f:httpGet:
+                .: {}
+                f:path: {}
+                f:port: {}
+                f:scheme: {}
+              f:periodSeconds: {}
+              f:successThreshold: {}
+              f:timeoutSeconds: {}
+            f:name: {}
+            f:ports:
+              .: {}
+              k:{"containerPort":9090,"protocol":"TCP"}:
+                .: {}
+                f:containerPort: {}
+                f:name: {}
+                f:protocol: {}
+            f:readinessProbe:
+              .: {}
+              f:failureThreshold: {}
+              f:httpGet:
+                .: {}
+                f:path: {}
+                f:port: {}
+                f:scheme: {}
+              f:periodSeconds: {}
+              f:successThreshold: {}
+              f:timeoutSeconds: {}
+            f:resources:
+              .: {}
+              f:limits:
+                .: {}
+                f:nvidia.com/gpu: {}
+              f:requests:
+                .: {}
+                f:nvidia.com/gpu: {}
+            f:startupProbe:
+              .: {}
+              f:failureThreshold: {}
+              f:httpGet:
+                .: {}
+                f:path: {}
+                f:port: {}
+                f:scheme: {}
+              f:periodSeconds: {}
+              f:successThreshold: {}
+              f:timeoutSeconds: {}
+            f:terminationMessagePath: {}
+            f:terminationMessagePolicy: {}
+            f:volumeMounts:
+              .: {}
+              k:{"mountPath":"/dev/shm"}:
+                .: {}
+                f:mountPath: {}
+                f:name: {}
+            f:workingDir: {}
+        f:dnsPolicy: {}
+        f:enableServiceLinks: {}
+        f:imagePullSecrets:
+          .: {}
+          k:{"name":"docker-imagepullsecret"}: {}
+        f:restartPolicy: {}
+        f:schedulerName: {}
+        f:securityContext: {}
+        f:serviceAccount: {}
+        f:serviceAccountName: {}
+        f:terminationGracePeriodSeconds: {}
+        f:volumes:
+          .: {}
+          k:{"name":"shared-memory"}:
+            .: {}
+            f:emptyDir:
+              .: {}
+              f:medium: {}
+              f:sizeLimit: {}
+            f:name: {}
+    manager: kube-controller-manager
+    operation: Update
+    time: '2025-09-15T02:42:10Z'
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:status:
+        f:conditions:
+          k:{"type":"ContainersReady"}:
+            .: {}
+            f:lastProbeTime: {}
+            f:lastTransitionTime: {}
+            f:status: {}
+            f:type: {}
+          k:{"type":"Initialized"}:
+            .: {}
+            f:lastProbeTime: {}
+            f:lastTransitionTime: {}
+            f:status: {}
+            f:type: {}
+          k:{"type":"PodReadyToStartContainers"}:
+            .: {}
+            f:lastProbeTime: {}
+            f:lastTransitionTime: {}
+            f:status: {}
+            f:type: {}
+          k:{"type":"Ready"}:
+            .: {}
+            f:lastProbeTime: {}
+            f:lastTransitionTime: {}
+            f:status: {}
+            f:type: {}
+        f:containerStatuses: {}
+        f:hostIP: {}
+        f:hostIPs: {}
+        f:phase: {}
+        f:podIP: {}
+        f:podIPs:
+          .: {}
+          k:{"ip":"10.244.8.160"}:
+            .: {}
+            f:ip: {}
+        f:startTime: {}
+    manager: kubelet
+    operation: Update
+    subresource: status
+    time: '2025-09-15T02:48:58Z'
+  name: fault-tolerance-test-vllmprefillworker-7994fb6797-7kwrg
+  namespace: nnshah1-test
+  ownerReferences:
+  - apiVersion: apps/v1
+    blockOwnerDeletion: true
+    controller: true
+    kind: ReplicaSet
+    name: fault-tolerance-test-vllmprefillworker-7994fb6797
+    uid: a073db6c-8a0c-4184-9331-c755659e85cb
+  resourceVersion: '4463953'
+  uid: 22fb7f1b-c2da-4905-bbea-5b004cfc7e55
+spec:
+  containers:
+  - args:
+    - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker
+    command:
+    - /bin/sh
+    - -c
+    env:
+    - name: DYN_LOG
+      value: info
+    - name: DYN_LOGGING_JSONL
+      value: 'true'
+    - name: DYN_NAMESPACE
+      value: vllm-disagg
+    - name: DYN_PARENT_DGD_K8S_NAME
+      value: fault-tolerance-test
+    - name: DYN_PARENT_DGD_K8S_NAMESPACE
+      value: nnshah1-test
+    - name: DYN_SYSTEM_ENABLED
+      value: 'true'
+    - name: DYN_SYSTEM_PORT
+      value: '9090'
+    - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+      value: '["generate"]'
+    - name: ETCD_ENDPOINTS
+      value: dynamo-platform-etcd.nnshah1-test:2379
+    - name: NATS_SERVER
+      value: nats://dynamo-platform-nats.nnshah1-test:4222
+    envFrom:
+    - secretRef:
+        name: hf-token-secret
+    image: nvcr.io/nvidian/swdl/dynamo:nnshah1-vllm-latest-5
+    imagePullPolicy: IfNotPresent
+    livenessProbe:
+      failureThreshold: 1
+      httpGet:
+        path: /live
+        port: system
+        scheme: HTTP
+      periodSeconds: 5
+      successThreshold: 1
+      timeoutSeconds: 30
+    name: main
+    ports:
+    - containerPort: 9090
+      name: system
+      protocol: TCP
+    readinessProbe:
+      failureThreshold: 60
+      httpGet:
+        path: /health
+        port: system
+        scheme: HTTP
+      periodSeconds: 10
+      successThreshold: 1
+      timeoutSeconds: 30
+    resources:
+      limits:
+        nvidia.com/gpu: '1'
+      requests:
+        nvidia.com/gpu: '1'
+    startupProbe:
+      failureThreshold: 60
+      httpGet:
+        path: /live
+        port: system
+        scheme: HTTP
+      periodSeconds: 10
+      successThreshold: 1
+      timeoutSeconds: 5
+    terminationMessagePath: /dev/termination-log
+    terminationMessagePolicy: File
+    volumeMounts:
+    - mountPath: /dev/shm
+      name: shared-memory
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-qc5fr
+      readOnly: true
+    workingDir: /workspace/components/backends/vllm
+  dnsPolicy: ClusterFirst
+  enableServiceLinks: true
+  imagePullSecrets:
+  - name: docker-imagepullsecret
+  nodeName: aks-a100a-13707911-vmss000004
+  preemptionPolicy: PreemptLowerPriority
+  priority: 0
+  restartPolicy: Always
+  schedulerName: default-scheduler
+  securityContext: {}
+  serviceAccount: dynamo-platform-dynamo-operator-component
+  serviceAccountName: dynamo-platform-dynamo-operator-component
+  terminationGracePeriodSeconds: 60
+  tolerations:
+  - effect: NoExecute
+    key: node.kubernetes.io/not-ready
+    operator: Exists
+    tolerationSeconds: 300
+  - effect: NoExecute
+    key: node.kubernetes.io/unreachable
+    operator: Exists
+    tolerationSeconds: 300
+  - effect: NoSchedule
+    key: nvidia.com/gpu
+    operator: Exists
+  volumes:
+  - emptyDir:
+      medium: Memory
+      sizeLimit: 8Gi
+    name: shared-memory
+  - name: kube-api-access-qc5fr
+    projected:
+      defaultMode: 420
+      sources:
+      - serviceAccountToken:
+          expirationSeconds: 3607
+          path: token
+      - configMap:
+          items:
+          - key: ca.crt
+            path: ca.crt
+          name: kube-root-ca.crt
+      - downwardAPI:
+          items:
+          - fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+            path: namespace
+status:
+  conditions:
+  - lastProbeTime: null
+    lastTransitionTime: '2025-09-15T02:42:30Z'
+    status: 'True'
+    type: PodReadyToStartContainers
+  - lastProbeTime: null
+    lastTransitionTime: '2025-09-15T02:42:27Z'
+    status: 'True'
+    type: Initialized
+  - lastProbeTime: null
+    lastTransitionTime: '2025-09-15T02:48:58Z'
+    status: 'True'
+    type: Ready
+  - lastProbeTime: null
+    lastTransitionTime: '2025-09-15T02:48:58Z'
+    status: 'True'
+    type: ContainersReady
+  - lastProbeTime: null
+    lastTransitionTime: '2025-09-15T02:42:10Z'
+    status: 'True'
+    type: PodScheduled
+  containerStatuses:
+  - containerID: containerd://8962df5cc4ae2c2eb4278e436fdd63aae770f1e6aed00078fb5f851006c3750f
+    image: nvcr.io/nvidian/swdl/dynamo:nnshah1-vllm-latest-5
+    imageID: nvcr.io/nvidian/swdl/dynamo@sha256:63d5dc787ab89285deda89d8f9b77506e1d6d62352c3122912d34e191d56061e
+    lastState:
+      terminated:
+        containerID: containerd://3471347e1d94e4d44b1f81899bdbedf4b51a492528079ddeb3b12bdfc3f6893c
+        exitCode: 1
+        finishedAt: '2025-09-15T02:46:19Z'
+        reason: Error
+        startedAt: '2025-09-15T02:42:29Z'
+    name: main
+    ready: true
+    restartCount: 1
+    started: true
+    state:
+      running:
+        startedAt: '2025-09-15T02:46:19Z'
+    volumeMounts:
+    - mountPath: /dev/shm
+      name: shared-memory
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-qc5fr
+      readOnly: true
+      recursiveReadOnly: Disabled
+  hostIP: 10.224.0.8
+  hostIPs:
+  - ip: 10.224.0.8
+  phase: Running
+  podIP: 10.244.8.160
+  podIPs:
+  - ip: 10.244.8.160
+  qosClass: BestEffort
+  startTime: '2025-09-15T02:42:27Z'

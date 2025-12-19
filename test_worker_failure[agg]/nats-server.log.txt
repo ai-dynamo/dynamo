@@ -1,0 +1,20 @@
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.247025 [INF] Starting nats-server
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.247151 [INF]   Version:  2.10.24
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.247154 [INF]   Git:      [1d6f7ea]
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.247156 [INF]   Name:     NCWMRFX73OADA3RQWELX55F3FB2QXB3HTBNN2W6NAY34QSGDKFPFBLKN
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.247160 [INF]   Node:     j0DgNUGa
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.247161 [INF]   ID:       NCWMRFX73OADA3RQWELX55F3FB2QXB3HTBNN2W6NAY34QSGDKFPFBLKN
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.247612 [INF] Starting JetStream
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.248297 [INF]     _ ___ _____ ___ _____ ___ ___   _   __  __
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.248310 [INF]  _ | | __|_   _/ __|_   _| _ \ __| /_\ |  \/  |
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.248313 [INF] | || | _|  | | \__ \ | | |   / _| / _ \| |\/| |
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.248316 [INF]  \__/|___| |_| |___/ |_| |_|_\___/_/ \_\_|  |_|
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.248318 [INF] 
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.248320 [INF]          https://docs.nats.io/jetstream
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.248323 [INF] 
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.248325 [INF] ---------------- JETSTREAM ----------------
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.248330 [INF]   Max Memory:      46.96 GB
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.248333 [INF]   Max Storage:     79.90 GB
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.248336 [INF]   Store Directory: "/tmp/nats_lp_y17s7/jetstream"
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.248339 [INF] -------------------------------------------
+[NATS-SERVER] [66088] 2025/06/09 14:49:41.249173 [FTL] Error listening on port: 0.0.0.0:4222, "listen tcp 0.0.0.0:4222: bind: address already in use"

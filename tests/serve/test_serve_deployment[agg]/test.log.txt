@@ -1,0 +1,18 @@
+[TEST] 2025-07-08T16:51:05 INFO NatsServer: Running command: nats-server -js --trace --store_dir /tmp/nats_ez7_nbf1 in /workspace/tests/serve
+[TEST] 2025-07-08T16:51:05 INFO NatsServer: Checking Port: 4222
+[TEST] 2025-07-08T16:51:05 INFO NatsServer: SUCCESS: Check Port: 4222
+[TEST] 2025-07-08T16:51:05 INFO EtcdServer: Running command: etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd_b0ca0z3x in /workspace/tests/serve
+[TEST] 2025-07-08T16:51:05 INFO EtcdServer: Checking Port: 2379
+[TEST] 2025-07-08T16:51:05 INFO EtcdServer: SUCCESS: Check Port: 2379
+[TEST] 2025-07-08T16:51:05 INFO tests.serve.conftest: HF_TOKEN found in environment
+[TEST] 2025-07-08T16:51:05 INFO tests.serve.conftest: Pre-downloading model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+[TEST] 2025-07-08T16:51:05 INFO tests.serve.conftest: Successfully pre-downloaded: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+[TEST] 2025-07-08T16:51:05 INFO tests.serve.conftest: Pre-downloading model: llava-hf/llava-1.5-7b-hf
+[TEST] 2025-07-08T16:51:05 INFO tests.serve.conftest: Successfully pre-downloaded: llava-hf/llava-1.5-7b-hf
+[TEST] 2025-07-08T16:51:05 INFO test_serve_deployment[agg]: Starting test_deployment
+[TEST] 2025-07-08T16:51:05 INFO DynamoServeProcess: Running command: dynamo serve graphs.agg:Frontend -f /workspace/examples/llm/configs/agg.yaml --Frontend.port 8000 --Frontend.port 8000 in /workspace/examples/llm
+[TEST] 2025-07-08T16:51:05 INFO DynamoServeProcess: Checking Port: 8000
+[TEST] 2025-07-08T16:51:12 INFO EtcdServer: Terminating PID: 4928 name: etcd
+[TEST] 2025-07-08T16:51:12 INFO EtcdServer: Terminating PID: 4929 name: sed
+[TEST] 2025-07-08T16:51:12 INFO NatsServer: Terminating PID: 4917 name: nats-server
+[TEST] 2025-07-08T16:51:12 INFO NatsServer: Terminating PID: 4918 name: sed

@@ -1,0 +1,267 @@
+[DYNAMO] [2m2025-06-09T14:49:41.913Z[0m [32m INFO[0m [2mutils.resolve_service_config[0m[2m:[0m Applying command line overrides: defaultdict(<class 'dict'>, {'Frontend': {'port': 8000}})   
+[DYNAMO] [2m2025-06-09T14:49:41.913Z[0m [32m INFO[0m [2mutils.resolve_service_config[0m[2m:[0m Running dynamo serve with config: {'Common': {'model': 'deepseek-ai/DeepSeek-R1-Distill-Llama-8B', 'block-size': 64, 'max-model-len': 16384}, 'Frontend': {'served_model_name': 'deepseek-ai/DeepSeek-R1-Distill-Llama-8B', 'endpoint': 'dynamo.Processor.chat/completions', 'port': 8000}, 'Processor': {'router': 'round-robin', 'router-num-threads': 4, 'common-configs': ['model', 'block-size', 'max-model-len']}, 'MockVllmWorker': {'enforce-eager': True, 'max-num-batched-tokens': 16384, 'enable-prefix-caching': True, 'ServiceArgs': {'workers': 2}, 'common-configs': ['model', 'block-size', 'max-model-len']}, 'Planner': {'environment': 'local', 'no-operation': True}}   
+[DYNAMO] [2m2025-06-09T14:49:44.995Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:44.996Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:44.998Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:45.002Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:45.003Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:45.004Z[0m [32m INFO[0m [2m__init__.resolve_current_platform_cls_qualname[0m[2m:[0m Automatically detected platform cuda.   
+[DYNAMO] [2m2025-06-09T14:49:45.134Z[0m [32m INFO[0m [2mnixl[0m[2m:[0m NIXL is available   
+[DYNAMO] ╭────────────────── Dynamo Serve ───────────────────╮
+[DYNAMO] │ Starting Dynamo service: graphs.mock_agg:Frontend │
+[DYNAMO] ╰───────────────────────────────────────────────────╯
+[DYNAMO] [2m2025-06-09T14:49:45.816Z[0m [33m WARN[0m [2mresource._init_nvml[0m[2m:[0m PyNVML not available. GPU functionality will be limited.   
+[DYNAMO] [2m2025-06-09T14:49:45.816Z[0m [33m WARN[0m [2mresource._init_nvml[0m[2m:[0m PyNVML not available. GPU functionality will be limited.   
+[DYNAMO] [2m2025-06-09T14:49:45.816Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Getting resource envs for service Frontend   
+[DYNAMO] [2m2025-06-09T14:49:45.816Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Using configured worker count: 1   
+[DYNAMO] [2m2025-06-09T14:49:45.816Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Final resource allocation - workers: 1, envs: []   
+[DYNAMO] [2m2025-06-09T14:49:45.816Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Serving dynamo graph with namespace dynamo   
+[DYNAMO] [2m2025-06-09T14:49:45.816Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Clearing namespace dynamo before serving   
+[DYNAMO] [2m2025-06-09T14:49:45.816Z[0m [32m INFO[0m [2mserving.clear_namespace[0m[2m:[0m Clearing namespace dynamo using utils/clear_namespace.py   
+[DYNAMO] [2m2025-06-09T14:49:50.840Z[0m [32m INFO[0m [2mserving.clear_namespace[0m[2m:[0m Clear namespace output:    
+[DYNAMO] [2m2025-06-09T14:49:50.840Z[0m [32m INFO[0m [2mserving.clear_namespace[0m[2m:[0m Successfully cleared namespace dynamo   
+[DYNAMO] [2m2025-06-09T14:49:50.840Z[0m [32m INFO[0m [2mserving.clear_namespace[0m[2m:[0m Clear namespace stderr: [2m2025-06-09T14:49:48.999Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:48.999Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:49.001Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:49.005Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:49.006Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:49.007Z[0m [32m INFO[0m [2m__init__.resolve_current_platform_cls_qualname[0m[2m:[0m Automatically detected platform cuda.   
+[DYNAMO] [2m2025-06-09T14:49:49.149Z[0m [32m INFO[0m [2mnixl[0m[2m:[0m NIXL is available   
+[DYNAMO] [2m2025-06-09T14:49:49.958Z[0m [32m INFO[0m [2mclear_namespace.clear_namespace[0m[2m:[0m Cleared /dynamo in EtcdKvCache   
+[DYNAMO] [2m2025-06-09T14:49:50.063Z[0m [32m INFO[0m [2mclear_namespace.clear_namespace[0m[2m:[0m Cleared 0 requests from prefill queuedynamo_prefill_queue   
+[DYNAMO] [2m2025-06-09T14:49:50.064Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd[0m[2m:[0m KvCache watcher for prefix '/dynamo/' stopped
+[DYNAMO]    
+[DYNAMO] [2m2025-06-09T14:49:50.840Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Getting resource envs for service Planner   
+[DYNAMO] [2m2025-06-09T14:49:50.840Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Using configured worker count: 1   
+[DYNAMO] [2m2025-06-09T14:49:50.840Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Final resource allocation - workers: 1, envs: []   
+[DYNAMO] [2m2025-06-09T14:49:50.840Z[0m [32m INFO[0m [2mserving.create_dynamo_watcher[0m[2m:[0m Created watcher for Planner's in the dynamo namespace   
+[DYNAMO] [2m2025-06-09T14:49:50.840Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Getting resource envs for service Processor   
+[DYNAMO] [2m2025-06-09T14:49:50.840Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Using configured worker count: 1   
+[DYNAMO] [2m2025-06-09T14:49:50.840Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Final resource allocation - workers: 1, envs: []   
+[DYNAMO] [2m2025-06-09T14:49:50.841Z[0m [32m INFO[0m [2mserving.create_dynamo_watcher[0m[2m:[0m Created watcher for Processor's in the dynamo namespace   
+[DYNAMO] [2m2025-06-09T14:49:50.841Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Getting resource envs for service MockVllmWorker   
+[DYNAMO] [2m2025-06-09T14:49:50.841Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Using configured worker count: 2   
+[DYNAMO] [2m2025-06-09T14:49:50.841Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Final resource allocation - workers: 2, envs: []   
+[DYNAMO] [2m2025-06-09T14:49:50.841Z[0m [32m INFO[0m [2mserving.create_dynamo_watcher[0m[2m:[0m Created watcher for MockVllmWorker's in the dynamo namespace   
+[DYNAMO] [2m2025-06-09T14:49:50.841Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Created watcher for Frontend with 1 workers in the dynamo namespace   
+[DYNAMO] [2m2025-06-09T14:49:50.850Z[0m [32m INFO[0m [2marbiter._ensure_ioloop[0m[2m:[0m Installing handle_callback_exception to loop   
+[DYNAMO] [2m2025-06-09T14:49:50.850Z[0m [32m INFO[0m [2msighandler.__init__[0m[2m:[0m Registering signals...   
+[DYNAMO] [2m2025-06-09T14:49:50.851Z[0m [33m WARN[0m [2mserving.serve_dynamo_graph[0m[2m:[0m arbiter: tcp://127.0.0.1:47413   
+[DYNAMO] [2m2025-06-09T14:49:50.851Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Building component resources for 4 watchers   
+[DYNAMO] [2m2025-06-09T14:49:50.851Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Processing watcher: dynamo_Planner   
+[DYNAMO] [2m2025-06-09T14:49:50.851Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Final GPU info for dynamo_Planner: {}   
+[DYNAMO] [2m2025-06-09T14:49:50.851Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Processing watcher: dynamo_Processor   
+[DYNAMO] [2m2025-06-09T14:49:50.851Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Final GPU info for dynamo_Processor: {}   
+[DYNAMO] [2m2025-06-09T14:49:50.851Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Processing watcher: dynamo_MockVllmWorker   
+[DYNAMO] [2m2025-06-09T14:49:50.851Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Final GPU info for dynamo_MockVllmWorker: {}   
+[DYNAMO] [2m2025-06-09T14:49:50.851Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Processing watcher: dynamo_Frontend   
+[DYNAMO] [2m2025-06-09T14:49:50.851Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Final GPU info for dynamo_Frontend: {}   
+[DYNAMO] [2m2025-06-09T14:49:50.851Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Completed component resources: {'dynamo_Planner': {}, 'dynamo_Processor': {}, 'dynamo_MockVllmWorker': {}, 'dynamo_Frontend': {}}   
+[DYNAMO] [2m2025-06-09T14:49:50.851Z[0m [33m WARN[0m [2mutils.save_dynamo_state[0m[2m:[0m Saved state to /root/.dynamo/state/dynamo.json   
+[DYNAMO] [2m2025-06-09T14:49:50.852Z[0m [32m INFO[0m [2marbiter.start[0m[2m:[0m Starting master on pid 66100   
+[DYNAMO] [2m2025-06-09T14:49:50.855Z[0m [32m INFO[0m [2marbiter.initialize[0m[2m:[0m sockets started   
+[DYNAMO] [2m2025-06-09T14:49:50.892Z[0m [32m INFO[0m [2marbiter.start[0m[2m:[0m Arbiter now waiting for commands   
+[DYNAMO] [2m2025-06-09T14:49:50.892Z[0m [32m INFO[0m [2mwatcher._start[0m[2m:[0m dynamo_Planner started   
+[DYNAMO] [2m2025-06-09T14:49:50.922Z[0m [32m INFO[0m [2mwatcher._start[0m[2m:[0m dynamo_Processor started   
+[DYNAMO] [2m2025-06-09T14:49:50.967Z[0m [32m INFO[0m [2mwatcher._start[0m[2m:[0m dynamo_MockVllmWorker started   
+[DYNAMO] [2m2025-06-09T14:49:50.993Z[0m [32m INFO[0m [2mwatcher._start[0m[2m:[0m dynamo_Frontend started   
+[DYNAMO] [2m2025-06-09T14:49:50.993Z[0m [32m INFO[0m [2mserving.<lambda>[0m[2m:[0m Starting graphs.mock_agg:Frontend (Press CTRL+C to quit)   
+[DYNAMO] [2m2025-06-09T14:49:54.707Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.708Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.710Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.715Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.716Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.717Z[0m [32m INFO[0m [2m__init__.resolve_current_platform_cls_qualname[0m[2m:[0m Automatically detected platform cuda.   
+[DYNAMO] [2m2025-06-09T14:49:54.813Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.814Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.816Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.821Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.821Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.823Z[0m [32m INFO[0m [2m__init__.resolve_current_platform_cls_qualname[0m[2m:[0m Automatically detected platform cuda.   
+[DYNAMO] [2m2025-06-09T14:49:54.828Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.829Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.829Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.830Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.831Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.832Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.837Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.837Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.837Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.838Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.839Z[0m [32m INFO[0m [2m__init__.resolve_current_platform_cls_qualname[0m[2m:[0m Automatically detected platform cuda.   
+[DYNAMO] [2m2025-06-09T14:49:54.839Z[0m [32m INFO[0m [2m__init__.resolve_current_platform_cls_qualname[0m[2m:[0m Automatically detected platform cuda.   
+[DYNAMO] [2m2025-06-09T14:49:54.904Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.905Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.906Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.912Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.912Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:49:54.914Z[0m [32m INFO[0m [2m__init__.resolve_current_platform_cls_qualname[0m[2m:[0m Automatically detected platform cuda.   
+[DYNAMO] [2m2025-06-09T14:49:54.996Z[0m [32m INFO[0m [2mnixl[0m[2m:[0m NIXL is available   
+[DYNAMO] [2m2025-06-09T14:49:55.127Z[0m [32m INFO[0m [2mnixl[0m[2m:[0m NIXL is available   
+[DYNAMO] [2m2025-06-09T14:49:55.129Z[0m [32m INFO[0m [2mnixl[0m[2m:[0m NIXL is available   
+[DYNAMO] [2m2025-06-09T14:49:55.149Z[0m [32m INFO[0m [2mnixl[0m[2m:[0m NIXL is available   
+[DYNAMO] [2m2025-06-09T14:49:55.188Z[0m [32m INFO[0m [2mnixl[0m[2m:[0m NIXL is available   
+[DYNAMO] [2m2025-06-09T14:49:55.748Z[0m [32m INFO[0m [2mserve_dynamo.dyn_worker[0m[2m:[0m [Planner:1] Registering component dynamo/Planner   
+[DYNAMO] [2m2025-06-09T14:49:55.749Z[0m [32m INFO[0m [2mserve_dynamo.dyn_worker[0m[2m:[0m [Planner:1] Created Planner component   
+[DYNAMO] [2m2025-06-09T14:49:55.750Z[0m [32m INFO[0m [2mplanner_service.__init__[0m[2m:[0m [Planner] Starting planner   
+[DYNAMO] [2m2025-06-09T14:49:55.846Z[0m [32m INFO[0m [2mserve_dynamo.dyn_worker[0m[2m:[0m [Processor:1] Registering component dynamo/Processor   
+[DYNAMO] [2m2025-06-09T14:49:55.847Z[0m [32m INFO[0m [2mserve_dynamo.dyn_worker[0m[2m:[0m [Processor:1] Created Processor component   
+[DYNAMO] [2m2025-06-09T14:49:55.847Z[0m [32m INFO[0m [2mconfig.as_args[0m[2m:[0m [Processor:1] Running Processor with args=['--model', 'deepseek-ai/DeepSeek-R1-Distill-Llama-8B', '--block-size', '64', '--max-model-len', '16384', '--router', 'round-robin', '--router-num-threads', '4']   
+[DYNAMO] [2m2025-06-09T14:49:55.863Z[0m [32m INFO[0m [2mserve_dynamo.dyn_worker[0m[2m:[0m [MockVllmWorker:1] Registering component dynamo/MockVllmWorker   
+[DYNAMO] [2m2025-06-09T14:49:55.864Z[0m [32m INFO[0m [2mserve_dynamo.dyn_worker[0m[2m:[0m [MockVllmWorker:1] Created MockVllmWorker component   
+[DYNAMO] [2m2025-06-09T14:49:55.864Z[0m [32m INFO[0m [2mconfig.as_args[0m[2m:[0m [MockVllmWorker:1] Running MockVllmWorker with args=['--model', 'deepseek-ai/DeepSeek-R1-Distill-Llama-8B', '--block-size', '64', '--max-model-len', '16384', '--enforce-eager', '--max-num-batched-tokens', '16384', '--enable-prefix-caching']   
+[DYNAMO] [2m2025-06-09T14:49:55.891Z[0m [32m INFO[0m [2mserve_dynamo.dyn_worker[0m[2m:[0m [MockVllmWorker:2] Registering component dynamo/MockVllmWorker   
+[DYNAMO] [2m2025-06-09T14:49:55.892Z[0m [32m INFO[0m [2mserve_dynamo.dyn_worker[0m[2m:[0m [MockVllmWorker:2] Created MockVllmWorker component   
+[DYNAMO] [2m2025-06-09T14:49:55.892Z[0m [32m INFO[0m [2mconfig.as_args[0m[2m:[0m [MockVllmWorker:2] Running MockVllmWorker with args=['--model', 'deepseek-ai/DeepSeek-R1-Distill-Llama-8B', '--block-size', '64', '--max-model-len', '16384', '--enforce-eager', '--max-num-batched-tokens', '16384', '--enable-prefix-caching']   
+[DYNAMO] [2m2025-06-09T14:49:55.908Z[0m [32m INFO[0m [2mserve_dynamo.dyn_worker[0m[2m:[0m [Frontend:1] Registering component dynamo/Frontend   
+[DYNAMO] [2m2025-06-09T14:49:55.910Z[0m [32m INFO[0m [2mserve_dynamo.dyn_worker[0m[2m:[0m [Frontend:1] Created Frontend component   
+[DYNAMO] [2m2025-06-09T14:49:55.912Z[0m [32m INFO[0m [2mmock_worker.__init__[0m[2m:[0m [MockVllmWorker:1] Prefill queue: nats://localhost:4222:dynamo_prefill_queue   
+[DYNAMO] [2m2025-06-09T14:49:55.941Z[0m [32m INFO[0m [2mmock_worker.__init__[0m[2m:[0m [MockVllmWorker:2] Prefill queue: nats://localhost:4222:dynamo_prefill_queue   
+[DYNAMO] [2m2025-06-09T14:49:56.529Z[0m [32m INFO[0m [2mmock_worker.async_init[0m[2m:[0m [MockVllmWorker:1] VllmWorker has been initialized   
+[DYNAMO] [2m2025-06-09T14:49:56.529Z[0m [32m INFO[0m [2mserve_dynamo.dyn_worker[0m[2m:[0m [MockVllmWorker:1] Starting MockVllmWorker instance with all registered endpoints   
+[DYNAMO] [2m2025-06-09T14:49:56.529Z[0m [32m INFO[0m [2mmock_worker.create_metrics_publisher_endpoint[0m[2m:[0m [MockVllmWorker:1] Creating metrics publisher endpoint with primary lease   
+[DYNAMO] [2m2025-06-09T14:49:56.558Z[0m [32m INFO[0m [2mmock_worker.async_init[0m[2m:[0m [MockVllmWorker:2] VllmWorker has been initialized   
+[DYNAMO] [2m2025-06-09T14:49:56.558Z[0m [32m INFO[0m [2mserve_dynamo.dyn_worker[0m[2m:[0m [MockVllmWorker:2] Starting MockVllmWorker instance with all registered endpoints   
+[DYNAMO] [2m2025-06-09T14:49:56.558Z[0m [32m INFO[0m [2mmock_worker.create_metrics_publisher_endpoint[0m[2m:[0m [MockVllmWorker:2] Creating metrics publisher endpoint with primary lease   
+[DYNAMO] [2m2025-06-09T14:49:56.810Z[0m [32m INFO[0m [2mfrontend.start_http_server[0m[2m:[0m [Frontend:1] Starting HTTP server   
+[DYNAMO] [2m2025-06-09T14:49:56.810Z[0m [32m INFO[0m [2mserve_dynamo.dyn_worker[0m[2m:[0m [Frontend:1] Starting Frontend instance with all registered endpoints   
+[DYNAMO] [2m2025-06-09T14:49:56.810Z[0m [32m INFO[0m [2mserve_dynamo.dyn_worker[0m[2m:[0m [Frontend:1] No Dynamo endpoints found in service Frontend but keeping service alive   
+[DYNAMO] [2m2025-06-09T14:49:56.810Z[0m [32m INFO[0m [2mserve_dynamo.add_fastapi_routes[0m[2m:[0m [Frontend:1] Registering regular endpoint /dummy_api   
+[DYNAMO] [2m2025-06-09T14:49:56.811Z[0m [32m INFO[0m [2mserve_dynamo.add_fastapi_routes[0m[2m:[0m [Frontend:1] Added API route /dummy_api to FastAPI app   
+[DYNAMO] [2m2025-06-09T14:49:56.811Z[0m [32m INFO[0m [2mserve_dynamo.web_worker[0m[2m:[0m [Frontend:1] Starting FastAPI server on 0.0.0.0:3999 with routes: ['/dummy_api']   
+[DYNAMO] [2m2025-06-09T14:49:56.822Z[0m [32m INFO[0m [2mserver._serve[0m[2m:[0m [Frontend:1] Started server process [66407]   
+[DYNAMO] [2m2025-06-09T14:49:56.822Z[0m [32m INFO[0m [2mon.startup[0m[2m:[0m [Frontend:1] Waiting for application startup.   
+[DYNAMO] [2m2025-06-09T14:49:56.822Z[0m [32m INFO[0m [2mon.startup[0m[2m:[0m [Frontend:1] Application startup complete.   
+[DYNAMO] [2m2025-06-09T14:49:56.822Z[0m [32m INFO[0m [2mserver._log_started_message[0m[2m:[0m [Frontend:1] Uvicorn running on http://0.0.0.0:3999 (Press CTRL+C to quit)   
+[DYNAMO] [2m2025-06-09T14:49:56.825Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m Starting HTTP service on: 0.0.0.0:8000 [3maddress[0m[2m=[0m"0.0.0.0:8000"
+[DYNAMO] [2m2025-06-09T14:49:56.826Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m added model [3mmodel_name[0m[2m=[0m"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+[DYNAMO] [2m2025-06-09T14:49:56.889Z[0m [31mERROR[0m [1mchat_completions[0m: [2mdynamo_llm::http::service::openai[0m[2m:[0m Internal server error: Failed to generate completions: no instances found for endpoint "instances/dynamo/Processor/chat/completions"
+[DYNAMO] [2m2025-06-09T14:50:01.891Z[0m [31mERROR[0m [1mchat_completions[0m: [2mdynamo_llm::http::service::openai[0m[2m:[0m Internal server error: Failed to generate completions: no instances found for endpoint "instances/dynamo/Processor/chat/completions"
+[DYNAMO] [2m2025-06-09T14:50:02.148Z[0m [32m INFO[0m [2mconfig._resolve_task[0m[2m:[0m This model supports multiple tasks: {'classify', 'score', 'embed', 'generate', 'reward'}. Defaulting to 'generate'.   
+[DYNAMO] [2m2025-06-09T14:50:02.235Z[0m [33m WARN[0m [2mconfig.get_diff_sampling_param[0m[2m:[0m Default sampling parameters have been overridden by the model's Hugging Face generation config recommended from the model creator. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.   
+[DYNAMO] [2m2025-06-09T14:50:02.872Z[0m [32m INFO[0m [2mserving_chat.__init__[0m[2m:[0m Using default chat sampling params from model: {'temperature': 0.6, 'top_p': 0.95}   
+[DYNAMO] [2m2025-06-09T14:50:02.989Z[0m [32m INFO[0m [2mserving_completion.__init__[0m[2m:[0m Using default completion sampling params from model: {'temperature': 0.6, 'top_p': 0.95}   
+[DYNAMO] [2m2025-06-09T14:50:03.007Z[0m [32m INFO[0m [2mprocessor._start_worker_tasks[0m[2m:[0m [Processor:1] Started 4 queue worker tasks   
+[DYNAMO] [2m2025-06-09T14:50:03.007Z[0m [32m INFO[0m [2mserve_dynamo.dyn_worker[0m[2m:[0m [Processor:1] Starting Processor instance with all registered endpoints   
+[DYNAMO] [2m2025-06-09T14:50:03.007Z[0m [32m INFO[0m [2mprocessor._process_queue[0m[2m:[0m [Processor:1] Queue worker 0 started   
+[DYNAMO] [2m2025-06-09T14:50:03.007Z[0m [32m INFO[0m [2mprocessor._process_queue[0m[2m:[0m [Processor:1] Queue worker 1 started   
+[DYNAMO] [2m2025-06-09T14:50:03.007Z[0m [32m INFO[0m [2mprocessor._process_queue[0m[2m:[0m [Processor:1] Queue worker 2 started   
+[DYNAMO] [2m2025-06-09T14:50:03.007Z[0m [32m INFO[0m [2mprocessor._process_queue[0m[2m:[0m [Processor:1] Queue worker 3 started   
+[DYNAMO] [2m2025-06-09T14:50:06.909Z[0m [32m INFO[0m [2mchat_utils._log_chat_template_content_format[0m[2m:[0m Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.   
+[DYNAMO] [2m2025-06-09T14:50:06.916Z[0m [32m INFO[0m [2mmock_worker.generate[0m[2m:[0m [MockVllmWorker:1] Prefilling locally for request c9b04edc-d514-4efd-9483-e09c97efdd45 with length 13   
+[DYNAMO] [2m2025-06-09T14:50:12.158Z[0m [32m INFO[0m [2mmock_worker.graceful_shutdown[0m[2m:[0m [MockVllmWorker:1] Received shutdown signal, shutting down DistributedRuntime   
+[DYNAMO] [2m2025-06-09T14:50:12.158Z[0m [32m INFO[0m [2mmock_worker.graceful_shutdown[0m[2m:[0m [MockVllmWorker:1] DistributedRuntime shutdown complete   
+[DYNAMO] [2m2025-06-09T14:50:12.158Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m Shutting down service
+[DYNAMO] [2m2025-06-09T14:50:12.158Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m Waiting for 0 inflight requests to complete
+[DYNAMO] [2m2025-06-09T14:50:12.158Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m All inflight requests completed
+[DYNAMO] [2m2025-06-09T14:50:12.158Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m Shutting down service
+[DYNAMO] [2m2025-06-09T14:50:12.158Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m Waiting for 0 inflight requests to complete
+[DYNAMO] [2m2025-06-09T14:50:12.158Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m All inflight requests completed
+[DYNAMO] [2m2025-06-09T14:50:12.159Z[0m [32m INFO[0m [2mmock_worker.<lambda>[0m[2m:[0m [MockVllmWorker:1] metrics publisher endpoint created   
+[DYNAMO] [2m2025-06-09T14:50:12.159Z[0m [32m INFO[0m [2mserve_dynamo.exit_handler[0m[2m:[0m [MockVllmWorker:1] Running shutdown hooks on exit   
+[DYNAMO] [2m2025-06-09T14:50:12.159Z[0m [32m INFO[0m [2mserve_dynamo.exit_handler[0m[2m:[0m [MockVllmWorker:1] Shutdown hooks completed successfully   
+[DYNAMO] [2m2025-06-09T14:50:12.166Z[0m [32m INFO[0m [2mmock_worker.generate[0m[2m:[0m [MockVllmWorker:2] Prefilling locally for request fbfd8b00-3d7f-46fb-8031-8714796c2922 with length 13   
+[DYNAMO] [2m2025-06-09T14:50:14.768Z[0m [32m INFO[0m [2mmock_worker.generate[0m[2m:[0m [MockVllmWorker:2] Prefilling locally for request cfabb12a-b523-411c-905b-a0a09f97466b with length 13   
+[DYNAMO] [2m2025-06-09T14:50:17.369Z[0m [32m INFO[0m [2mmock_worker.generate[0m[2m:[0m [MockVllmWorker:2] Prefilling locally for request a4d90fc7-40d1-4947-a51a-8bedb66dc871 with length 13   
+[DYNAMO] [2m2025-06-09T14:50:19.971Z[0m [32m INFO[0m [2mmock_worker.generate[0m[2m:[0m [MockVllmWorker:2] Prefilling locally for request c4978337-aa1a-4532-9c08-97c37eda57b5 with length 13   
+[DYNAMO] [2m2025-06-09T14:50:22.573Z[0m [32m INFO[0m [2mmock_worker.generate[0m[2m:[0m [MockVllmWorker:2] Prefilling locally for request a46d2d73-a56e-4a8d-8c50-6bdad290a6ab with length 13   
+[DYNAMO] [2m2025-06-09T14:50:25.174Z[0m [32m INFO[0m [2mmock_worker.generate[0m[2m:[0m [MockVllmWorker:2] Prefilling locally for request 4712d531-2ebe-44d6-9dde-3634a66af60e with length 13   
+[DYNAMO] [2m2025-06-09T14:50:25.776Z[0m [32m INFO[0m [2mplanner_service.async_init[0m[2m:[0m [Planner] Calling start_planner   
+[DYNAMO] [2m2025-06-09T14:50:25.778Z[0m [32m INFO[0m [2mplanner.__init__[0m[2m:[0m [Planner] Components present in namespace: dynamo   
+[DYNAMO] ┏━━━━━━━━━━━┳━━━━━━━━━━┓
+[DYNAMO] ┃ Component ┃ Endpoint ┃
+[DYNAMO] ┡━━━━━━━━━━━╇━━━━━━━━━━┩
+[DYNAMO] └───────────┴──────────┘
+[DYNAMO] [2m2025-06-09T14:50:25.781Z[0m [32m INFO[0m [2mplanner.run[0m[2m:[0m [Planner] Running in no-operation mode - detailed metrics will be logged at DEBUG level   
+[DYNAMO] /opt/dynamo/venv/lib/python3.12/site-packages/numpy/_core/fromnumeric.py:3860: RuntimeWarning: Mean of empty slice.
+[DYNAMO]   return _methods._mean(a, axis=axis, dtype=dtype,
+[DYNAMO] /opt/dynamo/venv/lib/python3.12/site-packages/numpy/_core/_methods.py:145: RuntimeWarning: invalid value encountered in scalar divide
+[DYNAMO]   ret = ret.dtype.type(ret / rcount)
+[DYNAMO] [2m2025-06-09T14:50:25.992Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:26.996Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:27.776Z[0m [32m INFO[0m [2mmock_worker.generate[0m[2m:[0m [MockVllmWorker:2] Prefilling locally for request 5fcae16a-5856-4e41-8cf3-5ad41d459a9d with length 13   
+[DYNAMO] [2m2025-06-09T14:50:28.000Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:29.004Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:30.007Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:30.378Z[0m [32m INFO[0m [2mmock_worker.generate[0m[2m:[0m [MockVllmWorker:2] Prefilling locally for request 3a75a999-dc1d-45ce-9960-5f7b2e771b28 with length 13   
+[DYNAMO] [2m2025-06-09T14:50:31.011Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:32.015Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:32.979Z[0m [32m INFO[0m [2mmock_worker.generate[0m[2m:[0m [MockVllmWorker:2] Prefilling locally for request 3193527d-ff78-48fe-b274-0dfad93bdf45 with length 13   
+[DYNAMO] [2m2025-06-09T14:50:33.019Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:34.024Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:35.028Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:35.581Z[0m [32m INFO[0m [2mmock_worker.generate[0m[2m:[0m [MockVllmWorker:2] Prefilling locally for request 84eee7f3-10bc-4e28-b3a2-3cd0a5636b88 with length 13   
+[DYNAMO] [2m2025-06-09T14:50:36.032Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:36.134Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:37.137Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:38.141Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:39.145Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:40.151Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:41.154Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:42.158Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:43.162Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:44.164Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:45.168Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:46.172Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:47.176Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:48.180Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:49.184Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:50.189Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:51.193Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:52.196Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:53.199Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:54.203Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:55.208Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:56.212Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:57.215Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:58.218Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:50:59.222Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:51:00.226Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:51:01.230Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:51:02.234Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:51:03.238Z[0m [33m WARN[0m [2mx2num.check_nan[0m[2m:[0m [Planner] NaN or Inf found in input tensor.   
+[DYNAMO] [2m2025-06-09T14:51:04.228Z[0m [32m INFO[0m [2mserve_dynamo.signal_handler[0m[2m:[0m [Planner] Received signal 15, initiating graceful shutdown   
+[DYNAMO] [2m2025-06-09T14:51:04.228Z[0m [32m INFO[0m [2mserve_dynamo.exit_handler[0m[2m:[0m [Planner] Running shutdown hooks on exit   
+[DYNAMO] [2m2025-06-09T14:51:04.228Z[0m [32m INFO[0m [2mserve_dynamo.exit_handler[0m[2m:[0m [Planner] Shutdown hooks completed successfully   
+[DYNAMO] [2m2025-06-09T14:51:04.229Z[0m [32m INFO[0m [2mserve_dynamo.signal_handler[0m[2m:[0m [Processor:1] Received signal 15, initiating graceful shutdown   
+[DYNAMO] [2m2025-06-09T14:51:04.230Z[0m [32m INFO[0m [2mserve_dynamo.exit_handler[0m[2m:[0m [Processor:1] Running shutdown hooks on exit   
+[DYNAMO] [2m2025-06-09T14:51:04.230Z[0m [32m INFO[0m [2mserve_dynamo.exit_handler[0m[2m:[0m [Processor:1] Shutdown hooks completed successfully   
+[DYNAMO] [2m2025-06-09T14:51:04.230Z[0m [32m INFO[0m [2mmock_worker.graceful_shutdown[0m[2m:[0m [MockVllmWorker:2] Received shutdown signal, shutting down DistributedRuntime   
+[DYNAMO] [2m2025-06-09T14:51:04.230Z[0m [32m INFO[0m [2mmock_worker.graceful_shutdown[0m[2m:[0m [MockVllmWorker:2] DistributedRuntime shutdown complete   
+[DYNAMO] [2m2025-06-09T14:51:04.230Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m Shutting down service
+[DYNAMO] [2m2025-06-09T14:51:04.230Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m Waiting for 0 inflight requests to complete
+[DYNAMO] [2m2025-06-09T14:51:04.230Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m All inflight requests completed
+[DYNAMO] [2m2025-06-09T14:51:04.230Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m Shutting down service
+[DYNAMO] [2m2025-06-09T14:51:04.230Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m Waiting for 0 inflight requests to complete
+[DYNAMO] [2m2025-06-09T14:51:04.230Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::push_endpoint[0m[2m:[0m All inflight requests completed
+[DYNAMO] [2m2025-06-09T14:51:04.230Z[0m [32m INFO[0m [2mmock_worker.<lambda>[0m[2m:[0m [MockVllmWorker:2] metrics publisher endpoint created   
+[DYNAMO] [2m2025-06-09T14:51:04.231Z[0m [32m INFO[0m [2mdynamo_runtime::worker[0m[2m:[0m SIGTERM received, starting graceful shutdown
+[DYNAMO] [2m2025-06-09T14:51:04.231Z[0m [32m INFO[0m [2mserve_dynamo.exit_handler[0m[2m:[0m [MockVllmWorker:2] Running shutdown hooks on exit   
+[DYNAMO] [2m2025-06-09T14:51:04.231Z[0m [32m INFO[0m [2mserve_dynamo.exit_handler[0m[2m:[0m [MockVllmWorker:2] Shutdown hooks completed successfully   
+[DYNAMO] [2m2025-06-09T14:51:04.231Z[0m [32m INFO[0m [2msighandler.signal[0m[2m:[0m Got signal SIG_TERM   
+[DYNAMO] [2m2025-06-09T14:51:04.232Z[0m [32m INFO[0m [2mserving.clear_namespace[0m[2m:[0m Clearing namespace dynamo using utils/clear_namespace.py   
+[DYNAMO] [2m2025-06-09T14:51:04.241Z[0m [32m INFO[0m [2mserver.shutdown[0m[2m:[0m [Frontend:1] Shutting down   
+[DYNAMO] [2m2025-06-09T14:51:04.341Z[0m [32m INFO[0m [2mon.shutdown[0m[2m:[0m [Frontend:1] Waiting for application shutdown.   
+[DYNAMO] [2m2025-06-09T14:51:04.341Z[0m [32m INFO[0m [2mon.shutdown[0m[2m:[0m [Frontend:1] Application shutdown complete.   
+[DYNAMO] [2m2025-06-09T14:51:04.341Z[0m [32m INFO[0m [2mserver._serve[0m[2m:[0m [Frontend:1] Finished server process [66407]   
+[DYNAMO] [2m2025-06-09T14:51:04.341Z[0m [32m INFO[0m [2mserve_dynamo.signal_handler[0m[2m:[0m [Frontend:1] Received signal 15, initiating graceful shutdown   
+[DYNAMO] [2m2025-06-09T14:51:04.341Z[0m [32m INFO[0m [2mserve_dynamo.exit_handler[0m[2m:[0m [Frontend:1] Running shutdown hooks on exit   
+[DYNAMO] [2m2025-06-09T14:51:04.803Z[0m [32m INFO[0m [2mserve_dynamo.exit_handler[0m[2m:[0m [Frontend:1] Shutdown hooks completed successfully   
+[DYNAMO] [2m2025-06-09T14:51:09.383Z[0m [32m INFO[0m [2mserving.clear_namespace[0m[2m:[0m Clear namespace output:    
+[DYNAMO] [2m2025-06-09T14:51:09.383Z[0m [32m INFO[0m [2mserving.clear_namespace[0m[2m:[0m Successfully cleared namespace dynamo   
+[DYNAMO] [2m2025-06-09T14:51:09.383Z[0m [32m INFO[0m [2mserving.clear_namespace[0m[2m:[0m Clear namespace stderr: [2m2025-06-09T14:51:07.510Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:51:07.511Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:51:07.512Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:51:07.517Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:51:07.518Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-09T14:51:07.519Z[0m [32m INFO[0m [2m__init__.resolve_current_platform_cls_qualname[0m[2m:[0m Automatically detected platform cuda.   
+[DYNAMO] [2m2025-06-09T14:51:07.664Z[0m [32m INFO[0m [2mnixl[0m[2m:[0m NIXL is available   
+[DYNAMO] [2m2025-06-09T14:51:08.482Z[0m [32m INFO[0m [2mclear_namespace.clear_namespace[0m[2m:[0m Cleared /dynamo in EtcdKvCache   
+[DYNAMO] [2m2025-06-09T14:51:08.588Z[0m [32m INFO[0m [2mclear_namespace.clear_namespace[0m[2m:[0m Cleared 0 requests from prefill queuedynamo_prefill_queue   
+[DYNAMO] [2m2025-06-09T14:51:08.589Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd[0m[2m:[0m KvCache watcher for prefix '/dynamo/' stopped
+[DYNAMO]    
+[DYNAMO] [2m2025-06-09T14:51:09.383Z[0m [32m INFO[0m [2marbiter.stop[0m[2m:[0m Arbiter exiting   
+[DYNAMO] [2m2025-06-09T14:51:09.383Z[0m [32m INFO[0m [2mwatcher._stop[0m[2m:[0m dynamo_Planner stopped   
+[DYNAMO] [2m2025-06-09T14:51:09.384Z[0m [32m INFO[0m [2mwatcher._stop[0m[2m:[0m dynamo_Processor stopped   
+[DYNAMO] [2m2025-06-09T14:51:09.384Z[0m [32m INFO[0m [2mwatcher._stop[0m[2m:[0m dynamo_MockVllmWorker stopped   
+[DYNAMO] [2m2025-06-09T14:51:09.385Z[0m [32m INFO[0m [2mwatcher._stop[0m[2m:[0m dynamo_Frontend stopped   

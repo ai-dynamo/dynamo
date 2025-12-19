@@ -23,6 +23,9 @@ use minijinja::value::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::preprocessor::media::MediaDecoder;
+
+pub mod deepseek_v32;
 mod template;
 
 pub use template::ContextMixins;
@@ -74,6 +77,10 @@ pub trait OAIChatLikeRequest {
     }
 
     fn extract_text(&self) -> Option<TextInput> {
+        None
+    }
+
+    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
         None
     }
 }

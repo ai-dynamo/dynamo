@@ -1,0 +1,20 @@
+[NATS-SERVER] [827] 2025/08/19 11:44:49.028417 [INF] Starting nats-server
+[NATS-SERVER] [827] 2025/08/19 11:44:49.030022 [INF]   Version:  2.10.28
+[NATS-SERVER] [827] 2025/08/19 11:44:49.030024 [INF]   Git:      [e0b99bd]
+[NATS-SERVER] [827] 2025/08/19 11:44:49.030025 [INF]   Name:     NCXUIJ6PB2EETGIGI6HI63PTTMNT33KJPBRPC3LWWFLML2C2ONTOP5FR
+[NATS-SERVER] [827] 2025/08/19 11:44:49.030029 [INF]   Node:     eCeIYRZs
+[NATS-SERVER] [827] 2025/08/19 11:44:49.030030 [INF]   ID:       NCXUIJ6PB2EETGIGI6HI63PTTMNT33KJPBRPC3LWWFLML2C2ONTOP5FR
+[NATS-SERVER] [827] 2025/08/19 11:44:49.031194 [INF] Starting JetStream
+[NATS-SERVER] [827] 2025/08/19 11:44:49.031420 [INF]     _ ___ _____ ___ _____ ___ ___   _   __  __
+[NATS-SERVER] [827] 2025/08/19 11:44:49.031423 [INF]  _ | | __|_   _/ __|_   _| _ \ __| /_\ |  \/  |
+[NATS-SERVER] [827] 2025/08/19 11:44:49.031424 [INF] | || | _|  | | \__ \ | | |   / _| / _ \| |\/| |
+[NATS-SERVER] [827] 2025/08/19 11:44:49.031425 [INF]  \__/|___| |_| |___/ |_| |_|_\___/_/ \_\_|  |_|
+[NATS-SERVER] [827] 2025/08/19 11:44:49.031426 [INF] 
+[NATS-SERVER] [827] 2025/08/19 11:44:49.031428 [INF]          https://docs.nats.io/jetstream
+[NATS-SERVER] [827] 2025/08/19 11:44:49.031429 [INF] 
+[NATS-SERVER] [827] 2025/08/19 11:44:49.031430 [INF] ---------------- JETSTREAM ----------------
+[NATS-SERVER] [827] 2025/08/19 11:44:49.031432 [INF]   Max Memory:      46.96 GB
+[NATS-SERVER] [827] 2025/08/19 11:44:49.031434 [INF]   Max Storage:     112.71 GB
+[NATS-SERVER] [827] 2025/08/19 11:44:49.031435 [INF]   Store Directory: "/tmp/nats_h3qm1o0o/jetstream"
+[NATS-SERVER] [827] 2025/08/19 11:44:49.031436 [INF] -------------------------------------------
+[NATS-SERVER] [827] 2025/08/19 11:44:49.032821 [FTL] Error listening on port: 0.0.0.0:4222, "listen tcp 0.0.0.0:4222: bind: address already in use"

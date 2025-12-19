@@ -1,0 +1,10 @@
+[PYTHON] [2m2025-09-11T18:53:30.900518Z[0m [32m INFO[0m [2mdynamo_llm::entrypoint::input::http[0m[2m:[0m Watching for remote model at models
+[PYTHON] [2m2025-09-11T18:53:30.907934Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m Starting HTTP(S) service [3mprotocol[0m[2m=[0m"HTTP" [3maddress[0m[2m=[0m"0.0.0.0:8000"
+[PYTHON] [2m2025-09-11T18:54:55.831885Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m chat endpoints enabled
+[PYTHON] [2m2025-09-11T18:54:55.831905Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m completion endpoints enabled
+[PYTHON] [2m2025-09-11T18:54:56.155800Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m Chat completions is ready
+[PYTHON] [2m2025-09-11T18:54:56.183767Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m Completions is ready
+[PYTHON] [2m2025-09-11T18:54:56.185898Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m added model [3mmodel_name[0m[2m=[0m"deepseek-ai/DeepSeek-R1-Distill-Llama-8B" [3mnamespace[0m[2m=[0m"dynamo"
+[PYTHON] [2m2025-09-11T18:55:18.321027Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m removed model [3mmodel_name[0m[2m=[0m"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+[PYTHON] [2m2025-09-11T18:55:18.321059Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m chat endpoints disabled
+[PYTHON] [2m2025-09-11T18:55:18.321066Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m completion endpoints disabled

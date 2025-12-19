@@ -52,7 +52,7 @@ impl
 
             // Generate 5 response chunks
             for i in 0..5 {
-                let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None);
+                let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None, None);
                 yield Annotated::from_data(output);
             }
         };
@@ -339,6 +339,7 @@ mod integration_tests {
             distributed_runtime.clone(),
             service.state().manager_clone(),
             dynamo_llm::entrypoint::RouterConfig::default(),
+            None,
         );
         // Start watching for model registrations via discovery interface
         let discovery = distributed_runtime.discovery();
@@ -378,6 +379,7 @@ mod integration_tests {
                 &test_endpoint,
                 dynamo_llm::model_type::ModelType::Chat,
                 dynamo_llm::model_type::ModelInput::Text,
+                None,
             )
             .await
             .unwrap();
@@ -509,6 +511,7 @@ mod integration_tests {
                 distributed_runtime.clone(),
                 service.state().manager_clone(),
                 dynamo_llm::entrypoint::RouterConfig::default(),
+                None,
             );
 
             // Get all model entries for our test model
