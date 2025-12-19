@@ -2826,7 +2826,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"ray start --head --port=6379 && python3 -m dynamo.vllm --custom-flag custom-value --tensor-parallel-size 4 --pipeline-parallel-size 1",
+													"ray start --head --port=6379 && python3 -m dynamo.vllm --custom-flag custom-value --tensor-parallel-size 4 --pipeline-parallel-size 1 --distributed-executor-backend ray",
 												},
 												Ports: []corev1.ContainerPort{
 													{
