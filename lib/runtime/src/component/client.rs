@@ -132,7 +132,14 @@ impl Client {
     }
 
     /// Monitor the key-value instance source and update instance_avail.
+    ///
+    /// This function also performs periodic reconciliation: if `instance_source` hasn't
+    /// changed for `INSTANCE_RECONCILE_INTERVAL`, we reset `instance_avail` to match
+    /// `instance_source`. This ensures instances removed via `report_instance_down`
+    /// are eventually restored even if the discovery source doesn't emit updates.
     fn monitor_instance_source(&self) {
+        const INSTANCE_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+
         let cancel_token = self.endpoint.drt().primary_token();
         let client = self.clone();
         let endpoint_id = self.endpoint.id();
@@ -152,11 +159,20 @@ impl Client {
                 // Send update to watch channel subscribers
                 let _ = client.instance_avail_tx.send(instance_ids);
 
-                if let Err(err) = rx.changed().await {
-                    tracing::error!(
-                        "monitor_instance_source: The Sender is dropped: {err}, endpoint={endpoint_id}",
-                    );
-                    cancel_token.cancel();
+                tokio::select! {
+                    result = rx.changed() => {
+                        if let Err(err) = result {
+                            tracing::error!(
+                                "monitor_instance_source: The Sender is dropped: {err}, endpoint={endpoint_id}",
+                            );
+                            cancel_token.cancel();
+                        }
+                    }
+                    _ = tokio::time::sleep(INSTANCE_RECONCILE_INTERVAL) => {
+                        tracing::trace!(
+                            "monitor_instance_source: periodic reconciliation for endpoint={endpoint_id}",
+                        );
+                    }
                 }
             }
         });
