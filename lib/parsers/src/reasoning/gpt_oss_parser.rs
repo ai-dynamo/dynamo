@@ -18,8 +18,35 @@ static GLOBAL_HARMONY_GPTOSS_ENCODING: OnceLock<Result<HarmonyEncoding, anyhow::
     OnceLock::new();
 
 fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
-    GLOBAL_HARMONY_GPTOSS_ENCODING
-        .get_or_init(|| load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss))
+    GLOBAL_HARMONY_GPTOSS_ENCODING.get_or_init(|| {
+        // `openai-harmony` uses `reqwest::blocking` internally. When this is reached from
+        // async code, that blocking path can trip Tokio's "blocking is not allowed here"
+        // invariants (Tokio may also create/drop internal runtimes for blocking I/O).
+        //
+        // We run initialization inside `block_in_place` when we're on the multi-thread
+        // Tokio runtime so the blocking work happens in a "blocking allowed" section.
+        // This avoids panics when `get_harmony_encoding()` is first hit from async
+        // request handlers.
+        //
+        // `block_in_place` is safe here because the work is one-time initialization
+        // guarded by `OnceLock`, and it prevents panics in async contexts.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                // `block_in_place` is only supported on the multi-thread runtime.
+                if matches!(
+                    handle.runtime_flavor(),
+                    tokio::runtime::RuntimeFlavor::MultiThread
+                ) {
+                    tokio::task::block_in_place(|| {
+                        load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss)
+                    })
+                } else {
+                    load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss)
+                }
+            }
+            Err(_) => load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss),
+        }
+    })
 }
 
 pub struct GptOssReasoningParser {
