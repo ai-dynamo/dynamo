@@ -31,6 +31,9 @@ jobs:
     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
       has_code_changes: ${{ steps.filter.outputs.has_code_changes }}
+      vllm: ${{ steps.filter.outputs.vllm }}
+      sglang: ${{ steps.filter.outputs.sglang }}
+      trtllm: ${{ steps.filter.outputs.trtllm }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -127,7 +130,7 @@ jobs:
 
   vllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.has_code_changes == 'true' || needs.changed-files.outputs.vllm == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -194,7 +197,7 @@ jobs:
 
   sglang:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.has_code_changes == 'true' || needs.changed-files.outputs.sglang == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -255,7 +258,7 @@ jobs:
 
   trtllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.has_code_changes == 'true' || needs.changed-files.outputs.trtllm == 'true'
     strategy:
       fail-fast: false
       matrix:

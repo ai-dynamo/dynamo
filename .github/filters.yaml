@@ -10,19 +10,15 @@ ci: &ci
 
 has_code_changes:
   - *ci
-  - 'benchmarks/**'
-  - 'components/**'
-  - 'container/**'
+  - 'container/build.sh'
+  - 'container/deps/*'
   - 'deploy/**'
-  - 'examples/**'
-  - 'launch/**'
   - 'lib/**'
-  - 'recipes/**'
   - 'tests/**'
-  - '*.toml'
-  - '*.lock'
-  - '*.py'
-  - '*.rs'
+  - 'components/src/dynamo/router/**'
+  - 'components/src/dynamo/mocker/**'
+  - 'components/src/dynamo/frontend/**'
+  - 'components/src/dynamo/common/**'
 
 vllm: &vllm
   - 'container/Dockerfile.vllm'
@@ -30,23 +26,19 @@ vllm: &vllm
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
-  - 'container/build.sh'
   - 'tests/serve/test_vllm.py'
 
 sglang: &sglang
   - 'container/Dockerfile.sglang'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
-  - 'container/build.sh'
   - 'tests/serve/test_sglang.py'
 
 trtllm: &trtllm
   - 'container/Dockerfile.trtllm'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
-  - 'container/build.sh'
   - 'container/build_trtllm_wheel.sh'
-  - 'container/deps/**'
   - 'tests/serve/test_trtllm.py'
 
 sdk:
