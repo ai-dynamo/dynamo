@@ -193,6 +193,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             common: Default::default(),
             nvext: resp.nvext,
             chat_template_args: None,
+            media_io_kwargs: None,
             unsupported_fields: Default::default(),
         })
     }
@@ -368,6 +369,7 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
+                stop_reason: None,
                 logprobs: None,
             }],
             created: now,

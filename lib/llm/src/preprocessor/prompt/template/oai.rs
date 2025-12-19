@@ -6,6 +6,7 @@ use super::*;
 use minijinja::{context, value::Value};
 use std::result::Result::Ok;
 
+use crate::preprocessor::media::MediaDecoder;
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
 };
@@ -213,6 +214,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
 
     fn chat_template_args(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
         self.chat_template_args.as_ref()
+    }
+
+    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
+        self.media_io_kwargs.as_ref()
     }
 }
 

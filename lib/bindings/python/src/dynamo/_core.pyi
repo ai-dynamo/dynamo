@@ -232,16 +232,42 @@ class Client:
         ...
 
 
-def compute_block_hash_for_seq_py(tokens: List[int], kv_block_size: int) -> List[int]:
+def compute_block_hash_for_seq_py(
+    tokens: List[int],
+    kv_block_size: int,
+    block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None
+) -> List[int]:
     """
-    Compute block hashes for a sequence of tokens
+    Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
+
+    When block_mm_infos is provided, the mm_hashes are included in the hash computation
+    to ensure that blocks with identical tokens but different multimodal objects produce
+    different hashes.
 
     Args:
         tokens: List of token IDs
-        kv_block_size: Size of each KV cache block
+        kv_block_size: Size of each block in tokens
+        block_mm_infos: Optional per-block multimodal metadata. Each element corresponds to a block
+                       and should be None or a dict with structure:
+                       {
+                           "mm_objects": [
+                               {
+                                   "mm_hash": int,  # Hash of the MM object
+                               }
+                           ]
+                       }
 
     Returns:
-        List of block hashes as integers
+        List of block hashes (one per block)
+
+    Example:
+        >>> tokens = [1, 2, 3, 4] * 8  # 32 tokens = 1 block
+        >>> mm_info = {
+        ...     "mm_objects": [{
+        ...         "mm_hash": 0xDEADBEEF,
+        ...     }]
+        ... }
+        >>> hashes = compute_block_hash_for_seq_py(tokens, 32, [mm_info])
     """
 
     ...
@@ -460,6 +486,7 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    enable_local_indexer: bool
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
 
@@ -793,7 +820,7 @@ class KvEventPublisher:
     ...
 
     def __init__(
-        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0
+        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0, enable_local_indexer: bool = False
     ) -> None:
         """
         Create a `KvEventPublisher` object
@@ -803,6 +830,7 @@ class KvEventPublisher:
             worker_id: The worker ID
             kv_block_size: The KV block size (must be > 0)
             dp_rank: The data parallel rank (defaults to 0)
+            enable_local_indexer: Enable worker-local KV indexer (defaults to False)
         """
 
     def publish_stored(
@@ -843,7 +871,8 @@ class ZmqKvEventPublisherConfig:
         worker_id: int,
         kv_block_size: int,
         zmq_endpoint: str = "tcp://127.0.0.1:5557",
-        zmq_topic: str = ""
+        zmq_topic: str = "",
+        enable_local_indexer: bool = False
     ) -> None:
         """
         Configuration for the ZmqKvEventPublisher.
@@ -852,6 +881,7 @@ class ZmqKvEventPublisherConfig:
         :param kv_block_size: The block size for the key-value store.
         :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
         :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
+        :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to False.
         """
         ...
 

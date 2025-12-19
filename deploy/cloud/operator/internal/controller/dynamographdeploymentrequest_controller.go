@@ -118,10 +118,11 @@ const (
 	VolumeNameProfilingOutput = "profiling-output"
 
 	// Volume paths
-	ProfilingOutputPath = "/data"
-	ProfilingOutputFile = "config_with_planner.yaml"
-	ProfilingConfigPath = "/config"
-	ProfilingConfigFile = "disagg.yaml"
+	ProfilingOutputPath       = "/data"
+	ProfilingOutputFile       = "config_with_planner.yaml"
+	ProfilingOutputFileMocker = "mocker_config_with_planner.yaml"
+	ProfilingConfigPath       = "/config"
+	ProfilingConfigFile       = "disagg.yaml"
 
 	// Command line arguments
 	ArgModel   = "--model"
@@ -201,6 +202,13 @@ data:
   {{.OutputFile}}: |
 EOF
 sed 's/^/    /' {{.OutputPath}}/{{.OutputFile}} >> /tmp/cm.yaml
+
+# Add mocker config (profiler always generates both real and mocker configs)
+if [ -f {{.OutputPath}}/{{.MockerOutputFile}} ]; then
+  echo "  {{.MockerOutputFile}}: |" >> /tmp/cm.yaml
+  sed 's/^/    /' {{.OutputPath}}/{{.MockerOutputFile}} >> /tmp/cm.yaml
+  echo "Added mocker config to ConfigMap"
+fi
 
 # Note: Profiling data (raw_data.npz converted to JSON) is included in the
 # generated DGD YAML as a separate ConfigMap by the profiler, no need to add it here
@@ -582,6 +590,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	dgdName := generatedDGD.Name
 	dgdNamespace := dgdr.Namespace
 
+	// Apply deployment overrides
 	if dgdr.Spec.DeploymentOverrides != nil {
 		if dgdr.Spec.DeploymentOverrides.Name != "" {
 			dgdName = dgdr.Spec.DeploymentOverrides.Name
@@ -987,11 +996,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 
 		var scriptBuf bytes.Buffer
 		err = tmpl.Execute(&scriptBuf, map[string]string{
-			"OutputPath":    ProfilingOutputPath,
-			"OutputFile":    ProfilingOutputFile,
-			"ConfigMapName": outputConfigMapName,
-			"Namespace":     dgdr.Namespace,
-			"DGDRName":      dgdr.Name,
+			"OutputPath":       ProfilingOutputPath,
+			"OutputFile":       ProfilingOutputFile,
+			"MockerOutputFile": ProfilingOutputFileMocker,
+			"ConfigMapName":    outputConfigMapName,
+			"Namespace":        dgdr.Namespace,
+			"DGDRName":         dgdr.Name,
 		})
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to execute sidecar script template: %w", err)
@@ -1265,7 +1275,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) getProfilingJobErrorDetails(ctx
 // generateDGDSpec generates DGD spec from profiling results (online or offline/AIC)
 func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
-	logger.Info("Generating DGD spec from profiling results", "name", dgdr.Name)
+	logger.Info("Generating DGD spec from profiling results", "name", dgdr.Name, "backend", dgdr.Spec.Backend)
 
 	// Read the generated spec from ConfigMap (created by sidecar)
 	outputConfigMapName := getOutputConfigMapName(dgdr)
@@ -1282,18 +1292,28 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 		return fmt.Errorf("failed to get output ConfigMap: %w", err)
 	}
 
-	// Get YAML content from ConfigMap
-	yamlContent, exists := cm.Data[ProfilingOutputFile]
-	if !exists {
-		return fmt.Errorf("key %s not found in ConfigMap %s", ProfilingOutputFile, outputConfigMapName)
+	// Select the right config file based on useMocker flag
+	// Profiler always generates both real and mocker configs
+	var outputFile string
+	if dgdr.Spec.UseMocker {
+		outputFile = ProfilingOutputFileMocker
+		logger.Info("Using mocker deployment config")
+	} else {
+		outputFile = ProfilingOutputFile
 	}
 
-	logger.Info("Found profiling output in ConfigMap", "configMap", outputConfigMapName, "size", len(yamlContent))
+	// Get YAML content from ConfigMap
+	yamlContent, exists := cm.Data[outputFile]
+	if !exists {
+		return fmt.Errorf("key %s not found in ConfigMap %s", outputFile, outputConfigMapName)
+	}
+
+	logger.Info("Found profiling output in ConfigMap", "configMap", outputConfigMapName, "outputFile", outputFile, "size", len(yamlContent))
 
 	// Extract DGD and any supporting resources from potentially multi-document YAML (ConfigMap + DGD)
 	dgd, additionalResources, err := r.extractResourcesFromYAML([]byte(yamlContent))
 	if err != nil {
-		return fmt.Errorf("failed to extract DGD from %s: %w", ProfilingOutputFile, err)
+		return fmt.Errorf("failed to extract DGD from %s: %w", outputFile, err)
 	}
 
 	logger.Info("Parsed profiling output", "dgdName", dgd.Name, "additionalResources", len(additionalResources))

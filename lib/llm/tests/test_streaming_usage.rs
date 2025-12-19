@@ -106,6 +106,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             log_probs: None,
             top_logprobs: None,
             finish_reason: None,
+            stop_reason: None,
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
@@ -118,6 +119,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             log_probs: None,
             top_logprobs: None,
             finish_reason: None,
+            stop_reason: None,
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
@@ -130,6 +132,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             log_probs: None,
             top_logprobs: None,
             finish_reason: Some(FinishReason::Stop),
+            stop_reason: None,
             index: Some(0),
             completion_usage: cached_tokens.map(|ct| AoaiCompletionUsage {
                 prompt_tokens: 0,
@@ -183,6 +186,7 @@ fn create_chat_request(include_usage: Option<bool>) -> NvCreateChatCompletionReq
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -208,11 +212,29 @@ async fn test_streaming_without_usage() {
     // Collect all chunks
     let chunks: Vec<_> = transformed_stream.collect().await;
 
-    // Verify we got exactly 3 chunks (no extra usage chunk)
-    assert_eq!(chunks.len(), 3, "Should have exactly 3 content chunks");
+    // Filter out metrics annotation events (events without SSE data payload)
+    let content_chunks: Vec<_> = chunks
+        .into_iter()
+        .filter(|chunk| {
+            // Metrics annotation events have event=Some(ANNOTATION_LLM_METRICS) and data=None
+            !(chunk
+                .event
+                .as_ref()
+                .map(|e| e == "llm_metrics")
+                .unwrap_or(false)
+                && chunk.data.is_none())
+        })
+        .collect();
+
+    // Verify we got exactly 3 content chunks (no extra usage chunk)
+    assert_eq!(
+        content_chunks.len(),
+        3,
+        "Should have exactly 3 content chunks"
+    );
 
     // Verify all chunks have usage: None
-    for (i, chunk) in chunks.iter().enumerate() {
+    for (i, chunk) in content_chunks.iter().enumerate() {
         if let Some(response) = &chunk.data {
             assert!(
                 response.usage.is_none(),
@@ -322,15 +344,29 @@ async fn test_streaming_with_usage_false() {
     // Collect all chunks
     let chunks: Vec<_> = transformed_stream.collect().await;
 
+    // Filter out metrics annotation events (events without SSE data payload)
+    let content_chunks: Vec<_> = chunks
+        .into_iter()
+        .filter(|chunk| {
+            // Metrics annotation events have event=Some(ANNOTATION_LLM_METRICS) and data=None
+            !(chunk
+                .event
+                .as_ref()
+                .map(|e| e == "llm_metrics")
+                .unwrap_or(false)
+                && chunk.data.is_none())
+        })
+        .collect();
+
     // Verify we got exactly 3 chunks (no extra usage chunk when explicitly false)
     assert_eq!(
-        chunks.len(),
+        content_chunks.len(),
         3,
         "Should have exactly 3 content chunks when include_usage is false"
     );
 
     // Verify all chunks have usage: None
-    for (i, chunk) in chunks.iter().enumerate() {
+    for (i, chunk) in content_chunks.iter().enumerate() {
         if let Some(response) = &chunk.data {
             assert!(
                 response.usage.is_none(),
@@ -388,6 +424,7 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
         unsupported_fields: Default::default(),
     }
 }

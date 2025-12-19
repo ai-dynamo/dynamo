@@ -52,18 +52,23 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Python Package** | **Version** | glibc version                         | CUDA Version |
 | :----------------- | :---------- | :------------------------------------ | :----------- |
-| ai-dynamo          | 0.7.0       | >=2.28                                |              |
-| ai-dynamo-runtime  | 0.7.0       | >=2.28 (Python 3.12 has known issues) |              |
+| ai-dynamo          | 0.8.0       | >=2.28                                |              |
+| ai-dynamo-runtime  | 0.8.0       | >=2.28 (Python 3.12 has known issues) |              |
 | NIXL               | 0.7.1       | >=2.27                                | >=11.8       |
 
 ### Build Dependency
 
-| **Build Dependency** | **Version as of Dynamo v0.7.0**                                                   |
-| :------------------- | :------------------------------------------------------------------------------- |
-| **SGLang**           | 0.5.3.post4                                                                      |
-| **TensorRT-LLM**     | 1.2.0rc2                                                                         |
-| **vLLM**             | 0.11.0                                                                           |
-| **NIXL**             | 0.7.1                                                                            |
+The following table shows the dependency versions included with each Dynamo release:
+
+| **Dependency** | **main (ToT)** | **v0.8.0 (unreleased)** | **v0.7.1** | **v0.7.0.post1** | **v0.7.0** |
+| :------------- | :------------- | :---------------------- | :--------- | :--------------- | :--------- |
+| SGLang         | 0.5.6          | 0.5.6.post1             | 0.5.3.post4| 0.5.3.post4      | 0.5.3.post4|
+| TensorRT-LLM   | 1.2.0rc5       | 1.2.0rc6                | 1.2.0rc3   | 1.2.0rc3         | 1.2.0rc2   |
+| vLLM           | 0.12.0         | 0.12.0                  | 0.11.0     | 0.11.0           | 0.11.0     |
+| NIXL           | 0.8.0          | 0.8.0                   | 0.7.1      | 0.7.1            | 0.7.1      |
+
+> [!Note]
+> **main (ToT)** reflects the current development branch. **v0.8.0** is the upcoming release (planned for January 14, 2025) and not yet available.
 
 
 > [!Important]
@@ -72,7 +77,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 ### CUDA Support by Framework
 | **Dynamo Version**   | **SGLang**              | **TensorRT-LLM**        | **vLLM**                |
 | :------------------- | :-----------------------| :-----------------------| :-----------------------|
-| **Dynamo 0.7.0**     | CUDA 12.8               | CUDA 13.0               | CUDA 12.8               |
+| **Dynamo 0.7.1**     | CUDA 12.8               | CUDA 13.0               | CUDA 12.8               |
 
 ## Cloud Service Provider Compatibility
 
