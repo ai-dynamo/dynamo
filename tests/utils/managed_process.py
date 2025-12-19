@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import json
 import logging
@@ -20,6 +8,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -119,6 +108,17 @@ class ManagedProcess:
         try:
             self._logger = logging.getLogger(self.__class__.__name__)
             self._command_name = self.command[0]
+
+            # Keep test logs out of the git working tree: many tests pass a relative
+            # `log_dir` derived from `request.node.name`, which otherwise creates a large
+            # number of untracked directories under the repo root during pytest runs.
+            if not os.path.isabs(self.log_dir):
+                log_root = os.environ.get(
+                    "DYN_TEST_OUTPUT_PATH",
+                    os.path.join(tempfile.gettempdir(), "dynamo_tests"),
+                )
+                self.log_dir = os.path.join(log_root, self.log_dir)
+
             os.makedirs(self.log_dir, exist_ok=True)
             log_name = f"{self._command_name}.log.txt"
             self._log_path = os.path.join(self.log_dir, log_name)
@@ -595,14 +595,20 @@ class DynamoFrontendProcess(ManagedProcess):
         router_mode: str = "round-robin",
         extra_args: Optional[list[str]] = None,
         extra_env: Optional[dict[str, str]] = None,
-        terminate_existing: bool = True,
+        # Default to false so pytest-xdist workers don't kill each other's frontends.
+        terminate_existing: bool = False,
     ):
         # TODO: Refactor remaining duplicate "DynamoFrontendProcess" helpers in tests to
         # use this shared implementation (and delete the copies):
         # - tests/frontend/test_vllm.py
-        # - tests/frontend/test_completion_mocker_engine.py
-        # - tests/frontend/grpc/test_tensor_parameters.py
-        # - tests/frontend/grpc/test_tensor_mocker_engine.py
+        # - tests/router/common.py
+        # - tests/router/test_router_e2e_with_vllm.py
+        # - tests/router/test_router_e2e_with_sglang.py
+        # - tests/router/test_router_e2e_with_trtllm.py
+        # - tests/fault_tolerance/cancellation/utils.py
+        # - tests/fault_tolerance/migration/utils.py
+        # - tests/fault_tolerance/etcd_ha/utils.py
+        # - tests/fault_tolerance/test_vllm_health_check.py
         self._allocated_http_port: Optional[int] = None
         if frontend_port == 0:
             # Treat `0` as "allocate a random free port" for xdist-safe tests.

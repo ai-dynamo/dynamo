@@ -163,7 +163,7 @@ jobs:
           platform: 'linux/${{ matrix.platform.arch }}'
           base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
           runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ matrix.platform.arch == 'arm64' && '129' || '' }}
+          cuda_version: ${{ matrix.platform.arch == 'arm64' && '12.9' || '' }}
           torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}

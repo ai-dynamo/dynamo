@@ -617,7 +617,10 @@ def test_serve_deployment(
 @pytest.mark.gpu_2
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
 def test_multimodal_b64(
-    request, runtime_services_dynamic_ports, dynamo_dynamic_ports, predownload_models
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_models,
 ):
     """
     Test multimodal inference with base64 url passthrough.
@@ -764,12 +767,14 @@ def test_lora_aggregated(
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
 @pytest.mark.post_merge
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_lora_aggregated_router(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
     minio_lora_service,
     dynamo_dynamic_ports,
+    num_system_ports,
 ):
     """
     Test LoRA inference with aggregated vLLM deployment using KV router.
@@ -780,6 +785,9 @@ def test_lora_aggregated_router(
     3. Loads the LoRA adapter on both workers via system API
     4. Runs inference with the LoRA model, verifying KV cache routing
     """
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     minio_config: MinioLoraConfig = minio_lora_service
 
     # Create payloads that load LoRA on both workers and test inference

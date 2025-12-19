@@ -85,6 +85,8 @@ class SGLangProcess:
         num_workers: int = 2,
         single_gpu: bool = False,
         data_parallel_size: Optional[int] = None,
+        request_plane: str = "tcp",
+        store_backend: str = "etcd",
     ):
         """Initialize SGLang workers with dynamo integration.
 
@@ -99,6 +101,8 @@ class SGLangProcess:
             num_workers: Number of SGLang worker processes
             single_gpu: If True, all workers share GPU 0
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
+            request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
+            store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         """
         # Generate unique namespace for isolation
         namespace_suffix = generate_random_suffix()
@@ -106,7 +110,9 @@ class SGLangProcess:
         self.component_name = "backend"
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_workers
+        self.data_parallel_size = data_parallel_size
         self.worker_processes = []
+        self.store_backend = store_backend
 
         if sglang_args is None:
             sglang_args = {}
@@ -175,13 +181,18 @@ class SGLangProcess:
             command.extend(["--kv-events-config", kv_events_config])
 
             env = os.environ.copy()  # Copy parent environment
-            env.update(
-                {
-                    "CUDA_VISIBLE_DEVICES": gpu_device,
-                    "DYN_NAMESPACE": self.namespace,
-                    "PYTHONHASHSEED": "0",  # for deterministic event id's
-                }
-            )
+            env_vars = {
+                "CUDA_VISIBLE_DEVICES": gpu_device,
+                "DYN_NAMESPACE": self.namespace,
+                "DYN_REQUEST_PLANE": request_plane,
+                "PYTHONHASHSEED": "0",  # for deterministic event id's
+            }
+
+            # Add DYN_FILE_KV if using file storage backend
+            if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
+                env_vars["DYN_FILE_KV"] = os.environ["DYN_FILE_KV"]
+
+            env.update(env_vars)
 
             # Create managed process for the worker
             process = ManagedProcess(
@@ -302,17 +313,25 @@ class SGLangProcess:
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
 def test_sglang_kv_router_basic(
-    request, runtime_services_dynamic_ports, predownload_models, set_ucx_tls_no_mm
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
 ):
     """
     Quick e2e sanity test for KV router with SGLang engine instances.
+    Tests both NATS and TCP request planes.
     """
 
     # runtime_services starts etcd and nats
     N_SGLANG_WORKERS = 2
-    logger.info(f"Starting SGLang KV router test with {N_SGLANG_WORKERS} workers")
+    logger.info(
+        f"Starting SGLang KV router test with {N_SGLANG_WORKERS} workers using request_plane={request_plane}"
+    )
 
     try:
         # Start SGLang workers
@@ -322,6 +341,7 @@ def test_sglang_kv_router_basic(
             sglang_args=SGLANG_ARGS,
             num_workers=N_SGLANG_WORKERS,
             single_gpu=True,  # fit workers into one GPU
+            request_plane=request_plane,
         )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
         sglang_workers.__enter__()
@@ -337,6 +357,7 @@ def test_sglang_kv_router_basic(
             num_requests=NUM_REQUESTS,
             frontend_timeout=180,  # 3 minutes should be plenty for TinyLlama
             store_backend="etcd",  # Explicit for clarity
+            request_plane=request_plane,
         )
 
     finally:
@@ -348,8 +369,13 @@ def test_sglang_kv_router_basic(
 @pytest.mark.gpu_1
 @pytest.mark.skip(reason="Broken by sglang changes")
 # TODO: Re-enable this test once https://github.com/sgl-project/sglang/pull/14934 is merged
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_router_decisions_sglang_multiple_workers(
-    request, runtime_services_dynamic_ports, predownload_models, set_ucx_tls_no_mm
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting SGLang router prefix reuse test with two workers")
@@ -363,6 +389,7 @@ def test_router_decisions_sglang_multiple_workers(
             sglang_args=SGLANG_ARGS,
             num_workers=N_WORKERS,
             single_gpu=True,  # Worker uses GPU 0
+            request_plane=request_plane,
         )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
 
@@ -370,7 +397,7 @@ def test_router_decisions_sglang_multiple_workers(
         sglang_workers.__enter__()
 
         # Get runtime and create endpoint
-        runtime = get_runtime()
+        runtime = get_runtime(request_plane=request_plane)
         namespace = runtime.namespace(sglang_workers.namespace)
         component = namespace.component("backend")
         endpoint = component.endpoint("generate")
@@ -386,9 +413,14 @@ def test_router_decisions_sglang_multiple_workers(
 
 
 @pytest.mark.gpu_2
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
 def test_router_decisions_sglang_dp(
-    request, runtime_services_dynamic_ports, predownload_models, set_ucx_tls_no_mm
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
 ):
     """Validate KV cache prefix reuse with SGLang by sending progressive requests with overlapping prefixes.
     Same flow as test_router_decisions_sglang_multiple_workers; force first request to (worker_id, dp_rank=1).
@@ -408,12 +440,13 @@ def test_router_decisions_sglang_dp(
             num_workers=N_WORKERS,  # Ignored when data_parallel_size is set
             single_gpu=False,
             data_parallel_size=DP_SIZE,  # Creates DP_SIZE processes (one per rank)
+            request_plane=request_plane,
         )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
         sglang_workers.__enter__()
 
         # Get runtime and create endpoint
-        runtime = get_runtime()
+        runtime = get_runtime(request_plane=request_plane)
         # Use the namespace from the SGLang workers
         namespace = runtime.namespace(sglang_workers.namespace)
         component = namespace.component("backend")  # endpoint is backend.generate
@@ -431,15 +464,39 @@ def test_router_decisions_sglang_dp(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.parametrize(
+    "store_backend,use_nats_core,request_plane",
+    [
+        ("etcd", False, "nats"),  # JetStream mode
+        # ("etcd", True, "tcp"),  # ignored, needs unconditional nats_client
+        # ("file", False, "nats"),  # File backend - TODO: investigate file backend support for SGLang
+    ],
+    ids=["jetstream"],  # "nats_core" and "file" commented out
+)
 @pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
 def test_sglang_indexers_sync(
-    request, runtime_services_dynamic_ports, predownload_models, set_ucx_tls_no_mm
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    file_storage_backend,
+    set_ucx_tls_no_mm,
+    store_backend,
+    use_nats_core,
+    request_plane,
 ):
     """
     Test that two KV routers have synchronized indexer states after processing requests
     with SGLang workers. This test verifies that both routers converge to the same internal state.
+
+    Tests with configuration:
+    - jetstream: etcd backend, JetStream for KV events, NATS request plane
     """
-    logger.info("Starting SGLang indexers sync test")
+    # runtime_services_dynamic_ports handles NATS and etcd startup
+    logger.info(
+        f"Starting SGLang indexers sync test: store_backend={store_backend}, "
+        f"use_nats_core={use_nats_core}, request_plane={request_plane}"
+    )
+
     N_SGLANG_WORKERS = 2
 
     try:
@@ -450,6 +507,8 @@ def test_sglang_indexers_sync(
             sglang_args=SGLANG_ARGS,
             num_workers=N_SGLANG_WORKERS,
             single_gpu=True,  # fit workers into one GPU
+            request_plane=request_plane,
+            store_backend=store_backend,
         )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
         sglang_workers.__enter__()
@@ -461,7 +520,8 @@ def test_sglang_indexers_sync(
             block_size=PAGE_SIZE,
             model_name=MODEL_NAME,
             num_workers=N_SGLANG_WORKERS,
-            store_backend="etcd",
+            store_backend=store_backend,
+            request_plane=request_plane,
         )
 
         logger.info("SGLang indexers sync test completed successfully")

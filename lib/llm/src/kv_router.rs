@@ -22,8 +22,6 @@ use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::protocols::openai::nvext::WorkerIdInfo;
-
 pub mod approx;
 pub mod indexer;
 pub mod prefill_router;
@@ -58,6 +56,7 @@ use crate::{
     model_card::ModelDeploymentCard,
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
+    protocols::common::timing::RequestPhase,
     tokens::SequenceHash,
 };
 
@@ -476,7 +475,7 @@ impl KvRouter {
 
         let isl_tokens = tokens.len();
 
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
         let seq_hashes = compute_seq_hash_for_block(&block_hashes);
 
         let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
@@ -531,7 +530,7 @@ impl KvRouter {
         let isl_tokens = tokens.len();
 
         let maybe_seq_hashes = self.kv_router_config.router_track_active_blocks.then(|| {
-            let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+            let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
             compute_seq_hash_for_block(&block_hashes)
         });
 
@@ -574,11 +573,11 @@ impl KvRouter {
     /// Get potential prefill and decode loads for all workers
     pub async fn get_potential_loads(&self, tokens: &[u32]) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
 
         let maybe_seq_hashes = self.kv_router_config.router_track_active_blocks.then(|| {
-            let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+            let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
             compute_seq_hash_for_block(&block_hashes)
         });
 
@@ -662,7 +661,10 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let context_id = ctx.context().id().to_string();
         // Handle different request types
         let response = match request {
-            RouterRequest::New { tokens } => {
+            RouterRequest::New {
+                tokens,
+                request_extra_info: _,
+            } => {
                 let (best_worker, overlap_blocks) = self
                     .find_best_match(Some(&context_id), &tokens, None, true)
                     .await?;
@@ -731,84 +733,104 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Extract context ID for request tracking
         let context_id = request.context().id().to_string();
 
-        // Check if this is a query_instance_id request first
-        let query_instance_id = request.has_annotation("query_instance_id");
+        // Simple query-only detection: presence of query_instance_id annotation means query-only mode
+        let is_query_only = request.get_annotation_value("query_instance_id").is_some();
 
-        let (instance_id, dp_rank, overlap_amount) = if let Some(id) = request.backend_instance_id {
-            // If instance_id is set, use it and compute actual overlap
-            let dp_rank = request.dp_rank.unwrap_or(0);
-            if query_instance_id {
-                tracing::debug!(
-                    "backend_instance_id is set, routing to instance {id} with dp_rank {dp_rank} and ignoring query_instance_id annotation"
-                );
-            }
+        // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
+        let phase = request
+            .tracker
+            .as_ref()
+            .map(|t| t.phase())
+            .unwrap_or(RequestPhase::Aggregated);
 
-            // Compute actual overlap blocks by querying the indexer
-            let block_hashes =
-                compute_block_hash_for_seq(&request.token_ids, self.chooser.block_size());
-            let overlap_scores = self.chooser.indexer.find_matches(block_hashes).await?;
-            let worker = WorkerWithDpRank::new(id, dp_rank);
-            let overlap_blocks = overlap_scores.scores.get(&worker).copied().unwrap_or(0);
-
-            self.chooser
-                .add_request(
-                    context_id.clone(),
-                    &request.token_ids,
-                    overlap_blocks,
-                    worker,
-                )
-                .await;
-            (id, dp_rank, overlap_blocks)
-        } else {
-            // Otherwise, find the best match
-            let (best_worker, overlap_amount) = self
-                .chooser
-                .find_best_match(
-                    Some(&context_id),
-                    &request.token_ids,
-                    request.router_config_override.as_ref(),
-                    !query_instance_id, // Don't update states if query_instance_id
-                )
-                .await?;
-            (best_worker.worker_id, best_worker.dp_rank, overlap_amount)
+        // Get pre-selected worker based on phase
+        let preselected = match phase {
+            RequestPhase::Prefill => request.target_prefill_worker_id,
+            RequestPhase::Decode => request.target_decode_worker_id,
+            RequestPhase::Aggregated => None,
         };
 
-        // if request has the annotation "query_instance_id",
-        // then the request will not be routed to the worker,
-        // and instead the worker_instance_id will be returned.
-        let stream_context = request.context().clone();
-        if query_instance_id {
-            let instance_id_str = instance_id.to_string();
-            let response = Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
+        let block_size = self.chooser.block_size() as usize;
+        let (instance_id, dp_rank, overlap_amount) =
+            if let Some(id) = preselected.or(request.backend_instance_id) {
+                // Route to pre-selected or explicitly specified worker
+                let dp_rank = request.dp_rank.unwrap_or(0);
+                tracing::debug!(
+                    worker_id = id,
+                    dp_rank = dp_rank,
+                    ?phase,
+                    "Routing to specified worker"
+                );
 
-            // Return the tokens in nvext.token_data format
-            let response_tokens = Annotated::from_annotation("token_data", &request.token_ids)?;
+                // Compute actual overlap blocks by querying the indexer
+                let block_hashes =
+                    compute_block_hash_for_seq(&request.token_ids, self.chooser.block_size(), None);
+                let overlap_scores = self.chooser.indexer.find_matches(block_hashes).await?;
+                let worker = WorkerWithDpRank::new(id, dp_rank);
+                let overlap_blocks = overlap_scores.scores.get(&worker).copied().unwrap_or(0);
+
+                if !is_query_only {
+                    self.chooser
+                        .add_request(
+                            context_id.clone(),
+                            &request.token_ids,
+                            overlap_blocks,
+                            worker,
+                        )
+                        .await;
+                }
+                (id, dp_rank, overlap_blocks)
+            } else {
+                // Find the best worker match
+                // Don't update states if this is a query-only request
+                let (best_worker, overlap_amount) = self
+                    .chooser
+                    .find_best_match(
+                        Some(&context_id),
+                        &request.token_ids,
+                        request.router_config_override.as_ref(),
+                        !is_query_only,
+                    )
+                    .await?;
+                (best_worker.worker_id, best_worker.dp_rank, overlap_amount)
+            };
+
+        // Record metrics in tracker: KV hit rate and worker ID based on phase
+        if let Some(ref tracker) = request.tracker {
+            let isl_blocks = request.token_ids.len().div_ceil(block_size);
+            tracker.record_kv_hit(overlap_amount, isl_blocks);
+            tracker.record_worker(instance_id);
+        }
+
+        // Handle query-only requests: early return with worker info
+        if is_query_only {
+            let stream_context = request.context().clone();
+            // Tracker is always created for query-only requests (delta generator enables tracking
+            // when query_instance_id annotation is present)
+            let worker_id_info = request.tracker.as_ref().and_then(|t| t.get_worker_info());
+
             tracing::trace!(
-                "Tokens requested in the response through the query_instance_id annotation: {:?}",
-                response_tokens
+                ?phase,
+                worker_id = instance_id,
+                ?worker_id_info,
+                "Returning worker selection (query-only mode)"
             );
-            let stream = stream::iter(vec![response, response_tokens]);
+
+            let output = LLMEngineOutput {
+                disaggregated_params: Some(json!({
+                    "worker_id": worker_id_info,
+                    "token_ids": request.token_ids
+                })),
+                ..Default::default()
+            };
+            let response = Annotated::from_data(output);
+            let stream = stream::iter(vec![response]);
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
+
+        // Route to worker
         let (mut backend_input, context) = request.into_parts();
-        backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
         backend_input.dp_rank = Some(dp_rank);
-
-        // Get prefill worker ID from prefill_result if available
-        // In aggregated mode, prefill_result is None, so we use decode_worker_id for both
-        let decode_worker_id = instance_id;
-        let prefill_worker_id = backend_input
-            .prefill_result
-            .as_ref()
-            .and_then(|prefill_result| {
-                prefill_result
-                    .disaggregated_params
-                    .get("worker_id")
-                    .and_then(|v| serde_json::from_value::<WorkerIdInfo>(v.clone()).ok())
-                    .and_then(|info| info.prefill_worker_id)
-            })
-            .or(Some(decode_worker_id)); // Use decode_worker_id if no separate prefill worker
-
         let updated_request = context.map(|_| backend_input);
 
         let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
@@ -818,7 +840,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut prefill_marked = false;
-            let mut first_item = true;
 
             loop {
                 tokio::select! {
@@ -830,7 +851,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     }
 
                     item = response_stream.next() => {
-                        let Some(mut item) = item else {
+                        let Some(item) = item else {
                             break;
                         };
 
@@ -839,34 +860,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 tracing::warn!("Failed to mark prefill completed for request {context_id}: {e}");
                             }
                             prefill_marked = true;
-                        }
-
-                        // Always inject worker_id in first item's disaggregated_params
-                        // This is needed for:
-                        // 1. PrefillRouter to know which prefill worker was chosen
-                        // 2. Client response when extra_fields contains "worker_id"
-                        if first_item {
-                            first_item = false;
-
-                            let Some(ref mut data) = item.data else {
-                                yield item;
-                                continue;
-                            };
-
-                            // prefill_worker_id comes from prefill_result.disaggregated_params or falls back to instance_id
-                            // decode_worker_id is always the current instance_id
-                            let worker_id_info = WorkerIdInfo {
-                                prefill_worker_id,
-                                decode_worker_id: Some(decode_worker_id),
-                            };
-                            let worker_id_json = serde_json::to_value(&worker_id_info)
-                                .expect("WorkerIdInfo serialization should not fail");
-
-                            if let Some(obj) = data.disaggregated_params.as_mut().and_then(|p| p.as_object_mut()) {
-                                obj.insert("worker_id".to_string(), worker_id_json);
-                            } else {
-                                data.disaggregated_params = Some(json!({"worker_id": worker_id_json}));
-                            }
                         }
 
                         yield item;
