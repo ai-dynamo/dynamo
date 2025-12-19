@@ -484,7 +484,7 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --break-system-packages --no-cache . && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks && \
-    # Install NVIDIA packages that are needed for DeepEP to work properly despite SGLang requirements
+    # Install NVIDIA packages that are needed for DeepEP to work properly
     # This is done in the upstream runtime image too, but we overrode these packages earlier
     pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
         nvidia-nccl-cu12==2.28.3 \
@@ -505,7 +505,6 @@ ENV SGLANG_FORCE_SHUTDOWN=1
 # Our scripting assumes /workspace is where dynamo is located
 # In order to maintain the ability to have sglang and dynamo
 # in the same workspace, symlink /workspace to /sgl-workspace/dynamo
-WORKDIR /sgl-workspace
 USER root
 RUN ln -s /workspace /sgl-workspace/dynamo
 
