@@ -55,7 +55,8 @@ jobs:
           # Set offline mode for pull requests, full check for pushes to main
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             echo "Running lychee in offline mode (internal links only) for PR check"
-            OFFLINE_FLAG="--offline"
+            OFFLINE_FLAG=""
+            # OFFLINE_FLAG="--offline"
           else
             echo "Running lychee in full mode (all links) for main branch"
             OFFLINE_FLAG=""
@@ -70,6 +71,7 @@ jobs:
             --timeout 20 \
             --root-dir "${{ github.workspace }}" \
             --exclude-path ".*ATTRIBUTIONS.*" \
+            --exclude-path "./lib/llm/tests/data/*" \
             --accept "200..=299, 403, 429" \
             --exclude-all-private --exclude 0.0.0.0 \
             $OFFLINE_FLAG \
