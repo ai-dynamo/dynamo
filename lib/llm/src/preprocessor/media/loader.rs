@@ -166,6 +166,7 @@ impl MediaLoader {
 
 #[cfg(all(test, feature = "media-nixl"))]
 mod tests {
+    use super::super::decoders::ImageDecoder;
     use super::super::rdma::DataType;
     use super::*;
     use dynamo_async_openai::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
@@ -184,7 +185,11 @@ mod tests {
             .create_async()
             .await;
 
-        let media_decoder = MediaDecoder::default();
+        let media_decoder = MediaDecoder {
+            image: Some(ImageDecoder::default()),
+            #[cfg(feature = "media-ffmpeg")]
+            video: None,
+        };
         let fetcher = MediaFetcher {
             allow_direct_ip: true,
             allow_direct_port: true,
