@@ -738,8 +738,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         // Detect if this request was pre-routed by EPP (GAIE Stage 1)
         // EPP sets worker IDs directly, so their presence indicates bookkeeping is handled
-        // by GAIE hooks (not by this router)
-        let is_epp_routed = request.backend_instance_id.is_some()
+        // by GAIE hooks (not by this router in Stage 2)
+        let is_epp_routed_stage2 = request.backend_instance_id.is_some()
             || (request.target_prefill_worker_id.is_some()
                 && request.target_decode_worker_id.is_some());
 
@@ -777,7 +777,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 let overlap_blocks = overlap_scores.scores.get(&worker).copied().unwrap_or(0);
 
                 // Skip add_request if EPP already handled bookkeeping via GAIE hooks
-                if !is_query_only && !is_epp_routed {
+                if !is_query_only && !is_epp_routed_stage2 {
                     self.chooser
                         .add_request(
                             context_id.clone(),
@@ -845,7 +845,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let stream_context = response_stream.context();
 
         // If EPP handled bookkeeping via GAIE hooks, just forward the stream without wrapping
-        if is_epp_routed {
+        if is_epp_routed_stage2 {
             return Ok(ResponseStream::new(
                 Box::pin(response_stream),
                 stream_context,
