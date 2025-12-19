@@ -543,6 +543,7 @@ fn convert_event(
             token_ids,
             block_size,
             lora_id,
+            block_mm_infos,
             ..
         } => {
             let num_block_tokens = vec![block_size as u64; block_hashes.len()];
@@ -563,6 +564,7 @@ fn convert_event(
                         &block_hashes_u64,
                         lora_id.unwrap_or(0),
                         warning_count,
+                        block_mm_infos.as_deref(),
                     ),
                 }),
                 dp_rank,
@@ -595,18 +597,25 @@ pub fn create_stored_block_from_parts(
     block_hash: u64,
     token_ids: &[u32],
     _lora_id: u64,
+    mm_extra_info: Option<BlockExtraInfo>,
 ) -> KvCacheStoredBlockData {
-    let tokens_hash = compute_block_hash_for_seq(token_ids, kv_block_size)[0];
+    // Compute tokens_hash including MM info if present
+    let block_mm_infos = mm_extra_info.as_ref().map(|info| vec![Some(info.clone())]);
+    let tokens_hash =
+        compute_block_hash_for_seq(token_ids, kv_block_size, block_mm_infos.as_deref())[0];
+
     tracing::trace!(
-        "Creating stored block: external_block_hash={}, tokens_hash={}, token_ids={:?}, kv_block_size={}",
+        "Creating stored block: external_block_hash={}, tokens_hash={}, token_ids={:?}, kv_block_size={}, mm_extra_info={:?}",
         block_hash,
         tokens_hash.0,
         token_ids,
-        kv_block_size
+        kv_block_size,
+        mm_extra_info
     );
     KvCacheStoredBlockData {
         block_hash: ExternalSequenceBlockHash::from(block_hash),
         tokens_hash,
+        mm_extra_info,
     }
 }
 
@@ -617,11 +626,14 @@ pub fn create_stored_blocks(
     block_hashes: &[u64],
     lora_id: u64,
     warning_count: &Arc<AtomicU32>,
+    block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
 ) -> Vec<KvCacheStoredBlockData> {
     let mut blocks: Vec<KvCacheStoredBlockData> = Vec::new();
 
     let mut token_offset: usize = 0;
-    for (num_tokens_it, block_hash_it) in num_block_tokens.iter().zip(block_hashes.iter()) {
+    for (block_idx, (num_tokens_it, block_hash_it)) in
+        num_block_tokens.iter().zip(block_hashes.iter()).enumerate()
+    {
         if *num_tokens_it != kv_block_size as u64 {
             if warning_count.fetch_add(1, Ordering::Relaxed) < 3 {
                 tracing::warn!(
@@ -634,11 +646,16 @@ pub fn create_stored_blocks(
         }
 
         let tokens = &token_ids[token_offset..(token_offset + *num_tokens_it as usize)];
+        let mm_extra_info = block_mm_infos
+            .and_then(|infos| infos.get(block_idx))
+            .and_then(|opt| opt.clone());
+
         blocks.push(create_stored_block_from_parts(
             kv_block_size,
             *block_hash_it,
             tokens,
             lora_id,
+            mm_extra_info,
         ));
         token_offset += *num_tokens_it as usize;
     }
@@ -702,6 +719,9 @@ enum RawKvEvent {
         lora_id: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         medium: Option<String>,
+        /// Multimodal extra info for each block (length should match block_hashes)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
     },
     BlockRemoved {
         block_hashes: Vec<BlockHashValue>,
@@ -747,6 +767,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut block_size: Option<usize> = None;
         let mut lora_id: Option<Option<u64>> = None;
         let mut medium: Option<Option<String>> = None;
+        let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
 
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
@@ -771,6 +792,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "medium" => {
                     medium = Some(map.next_value()?);
                 }
+                "block_mm_infos" => {
+                    block_mm_infos = Some(map.next_value()?);
+                }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -791,6 +815,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     block_size,
                     lora_id: lora_id.unwrap_or(None),
                     medium: medium.unwrap_or(None),
+                    block_mm_infos: block_mm_infos.unwrap_or(None),
                 })
             }
             Some("BlockRemoved") => {
@@ -836,6 +861,8 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     .ok_or_else(|| de::Error::invalid_length(4, &"missing block_size"))?;
                 let lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
                 let medium: Option<String> = seq.next_element()?.unwrap_or(None);
+                let block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> =
+                    seq.next_element()?.unwrap_or(None);
 
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
 
@@ -846,6 +873,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     block_size,
                     lora_id,
                     medium,
+                    block_mm_infos,
                 })
             }
             "BlockRemoved" => {
@@ -1088,11 +1116,12 @@ mod test_event_processing {
         let token_ids = vec![10, 20, 30, 40];
         let blk_hash = 0xdead_beef;
 
-        let stored = create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, 0);
+        let stored = create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, 0, None);
 
         assert_eq!(stored.block_hash.0, blk_hash);
-        let expected_hash = compute_block_hash_for_seq(&token_ids, 4)[0];
+        let expected_hash = compute_block_hash_for_seq(&token_ids, 4, None)[0];
         assert_eq!(stored.tokens_hash, expected_hash);
+        assert!(stored.mm_extra_info.is_none());
     }
 
     // ---------------------------------------------------------------------
@@ -1113,6 +1142,7 @@ mod test_event_processing {
             &block_hashes,
             /*lora_id=*/ 0,
             &Arc::new(AtomicU32::new(0)),
+            None,
         );
 
         assert_eq!(blocks.len(), 2);
@@ -1136,6 +1166,7 @@ mod test_event_processing {
             &block_hashes,
             /*lora_id=*/ 0,
             &warning_count,
+            None,
         );
 
         // should early-exit as second has mismatch
@@ -1156,6 +1187,7 @@ mod test_event_processing {
             block_size: 4,
             lora_id: Some(0),
             medium: None,
+            block_mm_infos: None,
         };
 
         let out = convert_event(raw_evt, 42, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
@@ -1303,10 +1335,12 @@ mod tests_startup_helpers {
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
                         tokens_hash: LocalBlockHash(200),
+                        mm_extra_info: None,
                     },
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(101),
                         tokens_hash: LocalBlockHash(201),
+                        mm_extra_info: None,
                     },
                 ],
             }),
@@ -1391,6 +1425,7 @@ mod tests_startup_helpers {
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(100),
                     tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
                 }],
             }),
             dp_rank: 0,
@@ -1471,6 +1506,7 @@ mod tests_startup_helpers {
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(100),
                     tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
                 }],
             }),
             dp_rank: 0,
@@ -1615,6 +1651,7 @@ mod tests_startup_helpers {
             block_size: 4,
             lora_id: None,
             medium: None,
+            block_mm_infos: None,
         }];
 
         let batch = KvEventBatch {
@@ -1705,10 +1742,12 @@ mod tests_startup_helpers {
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
                         tokens_hash: LocalBlockHash(200),
+                        mm_extra_info: None,
                     },
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(101),
                         tokens_hash: LocalBlockHash(201),
+                        mm_extra_info: None,
                     },
                 ],
             }),
@@ -1769,10 +1808,12 @@ mod tests_startup_helpers {
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100), // Shared prefix
                         tokens_hash: LocalBlockHash(200),
+                        mm_extra_info: None,
                     },
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(102), // New block
                         tokens_hash: LocalBlockHash(202),
+                        mm_extra_info: None,
                     },
                 ],
             }),

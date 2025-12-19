@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::kv_router::RouterConfigOverride;
+use crate::kv_router::{RouterConfigOverride, protocols::RequestExtraInfo};
 #[cfg(feature = "media-nixl")]
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
@@ -118,6 +118,10 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_fields: Option<Vec<String>>,
 
+    /// Multimodal request-level metadata (mm_hash and token offsets)
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_extra_info: Option<RequestExtraInfo>,
     /// Optional request tracker for per-request metrics (shared with DeltaGenerator)
     #[builder(default)]
     #[serde(skip)]

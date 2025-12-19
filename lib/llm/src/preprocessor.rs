@@ -345,11 +345,10 @@ impl OpenAIPreprocessor {
         #[cfg(feature = "media-nixl")]
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
-            let results = futures::future::join_all(
-                fetch_tasks
-                    .iter()
-                    .map(|(_, content_part)| loader.fetch_and_decode_media_part(content_part)),
-            )
+            let media_io_kwargs = request.media_io_kwargs();
+            let results = futures::future::join_all(fetch_tasks.iter().map(|(_, content_part)| {
+                loader.fetch_and_decode_media_part(content_part, media_io_kwargs)
+            }))
             .await;
 
             for ((type_str, _), result) in fetch_tasks.into_iter().zip(results.into_iter()) {

@@ -18,6 +18,10 @@ pub use video::{VideoDecoder, VideoMetadata};
 pub trait Decoder: Clone + Send + 'static {
     fn decode(&self, data: EncodedMediaData) -> Result<DecodedMediaData>;
 
+    // Merges this decoder with an optional runtime override.
+    // Limits should always be enforced from the MDC config
+    fn with_runtime(&self, runtime: Option<&Self>) -> Self;
+
     async fn decode_async(&self, data: EncodedMediaData) -> Result<DecodedMediaData> {
         // light clone (only config params)
         let decoder = self.clone();
@@ -27,13 +31,16 @@ pub trait Decoder: Clone + Send + 'static {
     }
 }
 
+/// Media decoder configuration.
+/// Used both for MDC server config and runtime `media_io_kwargs`.
+/// When used at runtime, limits are enforced from MDC and cannot be overridden.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct MediaDecoder {
-    #[serde(default)]
-    pub image_decoder: ImageDecoder,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageDecoder>,
     #[cfg(feature = "media-ffmpeg")]
-    #[serde(default)]
-    pub video_decoder: VideoDecoder,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<VideoDecoder>,
     // TODO: audio decoder
 }
 
