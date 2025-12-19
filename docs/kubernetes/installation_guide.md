@@ -327,6 +327,8 @@ just add the following to the helm install command:
 ```
 
 **Clean uninstall?**
+
+# TODO: just have manual steps instead of a script
 ```bash
 ./uninstall.sh  # Removes all CRDs and platform
 ```
