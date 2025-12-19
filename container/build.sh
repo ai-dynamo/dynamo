@@ -598,65 +598,6 @@ BUILD_ARGS+=" --build-arg NIXL_LIBFABRIC_REF=${NIXL_LIBFABRIC_REF} "
 # Add EFA_VERSION as a build argument
 BUILD_ARGS+=" --build-arg EFA_VERSION=${EFA_VERSION} "
 
-# Function to build local-dev image
-build_local_dev_with_header() {
-    local dev_base_image="$1"
-    local tags="$2"
-    local success_msg="$3"
-    local header_title="$4"
-
-    # Get user info right before using it
-    USER_UID=${CUSTOM_UID:-$(id -u)}
-    USER_GID=${CUSTOM_GID:-$(id -g)}
-
-    # Set up dockerfile path
-    DOCKERFILE_LOCAL_DEV="${SOURCE_DIR}/Dockerfile.local_dev"
-
-    if [[ ! -f "$DOCKERFILE_LOCAL_DEV" ]]; then
-        echo "ERROR: Dockerfile.local_dev not found at: $DOCKERFILE_LOCAL_DEV"
-        exit 1
-    fi
-
-    echo ""
-    echo "Now building new local-dev image from: $dev_base_image"
-    echo "User 'dynamo' will have UID: $USER_UID, GID: $USER_GID"
-
-    # Show the docker command being executed if not in dry-run mode
-    if [ -z "$RUN_PREFIX" ]; then
-        set -x
-    fi
-
-    $RUN_PREFIX docker build \
-        --build-arg DEV_BASE="$dev_base_image" \
-        --build-arg USER_UID="$USER_UID" \
-        --build-arg USER_GID="$USER_GID" \
-        --build-arg ARCH="$ARCH" \
-        --file "$DOCKERFILE_LOCAL_DEV" \
-        $tags \
-        "$SOURCE_DIR" || {
-        { set +x; } 2>/dev/null
-        echo "ERROR: Failed to build local_dev image"
-        exit 1
-    }
-
-    { set +x; } 2>/dev/null
-    echo "$success_msg"
-
-    # Show usage instructions
-    echo ""
-    echo "To run the local-dev image as the local user ($USER_UID/$USER_GID):"
-    # Extract the first tag from the tags string (the full version tag, not the latest tag)
-    last_tag=$(echo "$tags" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
-    # Calculate relative path to run.sh from current working directory
-    # Get the directory where build.sh is located
-    build_dir="$(dirname "${BASH_SOURCE[0]}")"
-    # Get the absolute path to run.sh (in the same directory as build.sh)
-    run_abs_path="$(realpath "$build_dir/run.sh")"
-    # Calculate relative path from current PWD to run.sh
-    run_path="$(python3 -c "import os; print(os.path.relpath('$run_abs_path', '$PWD'))")"
-    echo "  $run_path --image $last_tag --mount-workspace ..."
-}
-
 # Function to build AWS EFA images from base runtime or dev images
 build_aws_with_header() {
     local base_image="$1"
@@ -697,14 +638,6 @@ build_aws_with_header() {
     echo "$success_msg"
 }
 
-
-# Handle local-dev target
-if [[ $TARGET == "local-dev" ]]; then
-    LOCAL_DEV_BUILD=true
-    TARGET_STR="--target dev"
-fi
-
-# BUILD DEV IMAGE
 
 BUILD_ARGS+=" --build-arg BASE_IMAGE=$BASE_IMAGE --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG"
 
@@ -961,11 +894,73 @@ if [[ "$PLATFORM" == *"linux/arm64"* && "${FRAMEWORK}" == "SGLANG" ]]; then
     # Add arguments required for sglang blackwell build
     BUILD_ARGS+=" --build-arg GRACE_BLACKWELL=true --build-arg BUILD_TYPE=blackwell_aarch64"
 fi
+
+# Dev/local-dev targets: build from a concatenated Dockerfile:
+#   <framework Dockerfile> + container/dev/Dockerfile.dev
+if [[ -z "${TARGET:-}" || "${TARGET:-}" == "dev" || "${TARGET:-}" == "local-dev" ]]; then
+    _gen_dev_dockerfile_temp() {
+        local fw_df dev_df out
+        fw_df="$1"
+        dev_df="${SOURCE_DIR}/dev/Dockerfile.dev"
+        if [[ ! -f "${fw_df}" ]]; then
+            error "ERROR:" "Framework Dockerfile not found: ${fw_df}"
+        fi
+        if [[ ! -f "${dev_df}" ]]; then
+            error "ERROR:" "Dev Dockerfile not found: ${dev_df}"
+        fi
+
+        out="$(mktemp -t dynamo-dev-combined.XXXXXX.Dockerfile)"
+        cat "${fw_df}" "${dev_df}" > "${out}"
+        printf '\n' >> "${out}"
+
+        if [[ ! -s "${out}" ]]; then
+            rm -f "${out}"
+            error "ERROR:" "Temp Dockerfile was generated but is empty"
+        fi
+        printf '%s\n' "${out}"
+    }
+
+    DOCKERFILE="$(_gen_dev_dockerfile_temp "${DOCKERFILE}")"
+
+    # Ensure we clean up the temp Dockerfile (opt-out with KEEP_DEV_DOCKERFILE_TEMP=1 for debugging).
+    if [[ "${KEEP_DEV_DOCKERFILE_TEMP:-}" != "1" ]]; then
+        trap 'rm -f "${DOCKERFILE}" 2>/dev/null || true' EXIT
+    fi
+
+    # Dockerfile.dev expects a lowercase framework string.
+    BUILD_ARGS+=" --build-arg FRAMEWORK=${FRAMEWORK,,} "
+
+    # Preserve historical tagging behavior for dev/local-dev (build.sh used to delegate out).
+    base="${TAG#--tag }"
+    base="${base%-runtime}"
+    base="${base%-local-dev}"
+    base="${base%-dev}"
+    if [[ -z "${TARGET:-}" || "${TARGET}" == "dev" ]]; then
+        TAG="--tag ${base}-dev"
+    else
+        TAG="--tag ${base}-local-dev"
+        # Default UID/GID behavior: current user if not specified.
+        if [[ -z "${CUSTOM_UID:-}" ]]; then
+            CUSTOM_UID="$(id -u)"
+        fi
+        if [[ -z "${CUSTOM_GID:-}" ]]; then
+            CUSTOM_GID="$(id -g)"
+        fi
+        BUILD_ARGS+=" --build-arg USER_UID=${CUSTOM_UID} --build-arg USER_GID=${CUSTOM_GID} "
+    fi
+fi
+
 LATEST_TAG=""
 if [ -z "${NO_TAG_LATEST}" ]; then
-    LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
-    if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
-        LATEST_TAG="${LATEST_TAG}-${TARGET}"
+    if [[ -z "${TARGET:-}" || "${TARGET}" == "dev" ]]; then
+        LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
+    elif [[ "${TARGET}" == "local-dev" ]]; then
+        LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}-local-dev"
+    else
+        LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
+        if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
+            LATEST_TAG="${LATEST_TAG}-${TARGET}"
+        fi
     fi
 fi
 
@@ -1061,47 +1056,5 @@ if [[ "${MAKE_EFA:-}" == "true" ]]; then
 
     build_aws_with_header "$BASE_IMAGE_FOR_EFA" "$AWS_TAGS" "$EFA_STAGE" "Successfully built ${EFA_STAGE} image"
 fi
-
-# Handle local-dev build
-if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
-    if [[ "${MAKE_EFA:-}" == "true" ]]; then
-        # With EFA: build local-dev-aws from dev-aws
-        DEV_AWS_IMAGE=$(echo "$AWS_TAGS" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
-
-        LOCAL_DEV_AWS_TAGS=""
-        if [[ -n "$TAG" ]]; then
-            TAG_NAME=$(echo "$TAG" | sed 's/--tag //')
-            LOCAL_DEV_AWS_TAGS+=" --tag ${TAG_NAME}-local-dev-aws"
-        fi
-        if [[ -n "$LATEST_TAG" ]]; then
-            LATEST_TAG_NAME=$(echo "$LATEST_TAG" | sed 's/--tag //')
-            LOCAL_DEV_AWS_TAGS+=" --tag ${LATEST_TAG_NAME}-local-dev-aws"
-        fi
-
-        build_local_dev_with_header "$DEV_AWS_IMAGE" "$LOCAL_DEV_AWS_TAGS" "Successfully built local-dev-aws image" "Building Local-Dev-AWS Image"
-    else
-        # Without EFA: build regular local-dev from dev
-        if [[ -n "$TAG" ]]; then
-            DEV_IMAGE=$(echo "$TAG" | sed 's/--tag //')
-        else
-            DEV_IMAGE="dynamo:latest-${FRAMEWORK,,}"
-        fi
-
-        LOCAL_DEV_TAGS=""
-        if [[ -n "$TAG" ]]; then
-            TAG_NAME=$(echo "$TAG" | sed 's/--tag //')
-            LOCAL_DEV_TAGS+=" --tag ${TAG_NAME}-local-dev"
-        fi
-        if [[ -n "$LATEST_TAG" ]]; then
-            LATEST_TAG_NAME=$(echo "$LATEST_TAG" | sed 's/--tag //')
-            LOCAL_DEV_TAGS+=" --tag ${LATEST_TAG_NAME}-local-dev"
-        fi
-
-        # Extract first tag for success message
-        FIRST_TAG=$(echo "$LOCAL_DEV_TAGS" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
-        build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built $FIRST_TAG" "Building Local-Dev Image"
-    fi
-fi
-
 
 { set +x; } 2>/dev/null
