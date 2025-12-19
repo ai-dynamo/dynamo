@@ -45,17 +45,14 @@ vllm: &vllm
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
-  - 'tests/serve/test_vllm.py'
 
 sglang: &sglang
   - 'container/Dockerfile.sglang'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
-  - 'tests/serve/test_sglang.py'
 
 trtllm: &trtllm
   - 'container/Dockerfile.trtllm'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/build_trtllm_wheel.sh'
-  - 'tests/serve/test_trtllm.py'
