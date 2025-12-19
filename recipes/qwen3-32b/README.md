@@ -2,6 +2,11 @@
 
 This recipe demonstrates the performance difference between **aggregated (round-robin)** and **disaggregated (KV-aware)** routing using a real-world conversation trace dataset from the [Mooncake FAST25 paper](https://github.com/kvcache-ai/Mooncake).
 
+## Results
+
+https://github.com/user-attachments/assets/c425002b-4459-47c4-bfca-fd1e2620500c
+
+
 ## Experiment Overview
 
 We compare two deployment modes on **16x H200 GPUs across 2 nodes**:
