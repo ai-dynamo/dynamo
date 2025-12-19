@@ -69,7 +69,7 @@ You can monitor the deployment status using:
 
 ```bash
 
-export NAMESPACE=<namespace-with-the-dynamo-cloud-operator>
+export NAMESPACE=<namespace-with-the-dynamo-operator>
 
 # Check the DynamoGraphDeployment status
 kubectl get dynamographdeployment llm-agg -n $NAMESPACE

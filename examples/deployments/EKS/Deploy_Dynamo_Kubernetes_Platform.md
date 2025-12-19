@@ -1,4 +1,4 @@
-# Steps to install Dynamo Cloud from Source
+# Steps to install Dynamo Kubernetes Platform from Source
 
 ## 1. Build Dynamo Base Image
 
@@ -12,7 +12,7 @@ aws ecr create-repository --repository-name <ECR_REPOSITORY>
 Build Image
 
 ```
-export NAMESPACE=dynamo-cloud
+export NAMESPACE=dynamo-system
 export DOCKER_SERVER=<ECR_REGISTRY>
 export DOCKER_USERNAME=AWS
 export DOCKER_PASSWORD="$(aws ecr get-login-password --region <ECR_REGION>)"
@@ -53,10 +53,10 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 ```
 
-Install Dynamo Cloud
+Install Dynamo Kubernetes Platform
 
 ```
-cd dynamo/cloud/helm
+cd deploy/helm/charts
 helm install dynamo-crds ./crds/ \
   --namespace default \
   --wait \
@@ -88,8 +88,8 @@ Your pods should be running like below
 ```
 ubuntu@ip-192-168-83-157:~/dynamo/examples/backends/vllm/deploy$ kubectl get pods -A
 NAMESPACE      NAME                                                              READY   STATUS    RESTARTS   AGE
-dynamo-cloud   dynamo-platform-dynamo-operator-controller-manager-86795c5f4j4k   2/2     Running   0          4h17m
-dynamo-cloud   dynamo-platform-etcd-0                                            1/1     Running   0          4h17m
-dynamo-cloud   dynamo-platform-nats-0                                            2/2     Running   0          4h17m
-dynamo-cloud   dynamo-platform-nats-box-5dbf45c748-bxqj7                         1/1     Running   0          4h17m
+dynamo-system   dynamo-platform-dynamo-operator-controller-manager-86795c5f4j4k   2/2     Running   0          4h17m
+dynamo-system   dynamo-platform-etcd-0                                            1/1     Running   0          4h17m
+dynamo-system   dynamo-platform-nats-0                                            2/2     Running   0          4h17m
+dynamo-system   dynamo-platform-nats-box-5dbf45c748-bxqj7                         1/1     Running   0          4h17m
 ```

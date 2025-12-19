@@ -23,7 +23,7 @@ High-level guide to Dynamo Kubernetes deployments. Start here, then dive into sp
 
 **Kubernetes Namespace**: The K8s namespace where your DynamoGraphDeployment resource is created.
 - Used for: Resource isolation, RBAC, organizing deployments
-- Example: `dynamo-system`, `dynamo-cloud`, `team-a-namespace`
+- Example: `dynamo-system`, `team-a-namespace`
 
 **Dynamo Namespace**: The logical namespace used by Dynamo components for service discovery via etcd.
 - Used for: Runtime component communication, service discovery
