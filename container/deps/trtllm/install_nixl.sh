@@ -23,7 +23,7 @@ set -ex
 
 GITHUB_URL="https://github.com"
 
-UCX_VERSION="v1.19.1"
+UCX_VERSION="v1.20.0-rc1"
 UCX_INSTALL_PATH="/usr/local/ucx/"
 CUDA_PATH="/usr/local/cuda"
 
