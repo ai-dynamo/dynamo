@@ -69,6 +69,7 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 							FieldPath: "metadata.uid",
 						},
 					}},
+					{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 					{Name: "PLANNER_PROMETHEUS_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort)},
 				},
 			},
