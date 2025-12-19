@@ -55,8 +55,7 @@ jobs:
           # Set offline mode for pull requests, full check for pushes to main
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             echo "Running lychee in offline mode (internal links only) for PR check"
-            OFFLINE_FLAG=""
-            # OFFLINE_FLAG="--offline"
+            OFFLINE_FLAG="--offline"
           else
             echo "Running lychee in full mode (all links) for main branch"
             OFFLINE_FLAG=""
