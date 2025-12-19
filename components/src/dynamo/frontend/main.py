@@ -242,6 +242,12 @@ def parse_args():
         default=False,
         help="Start KServe gRPC server.",
     )
+    parser.add_argument(
+        "--grpc-metrics-port",
+        type=int,
+        default=8788,
+        help="HTTP metrics port for gRPC service (u16). Only used with --kserve-grpc-server. Defaults to 8788.",
+    )
     add_config_dump_args(parser)
     parser.add_argument(
         "--custom-backend-metrics-endpoint",
@@ -372,6 +378,8 @@ async def async_main():
         kwargs["tls_key_path"] = flags.tls_key_path
     if flags.namespace:
         kwargs["namespace"] = flags.namespace
+    if flags.kserve_grpc_server and flags.grpc_metrics_port:
+        kwargs["http_metrics_port"] = flags.grpc_metrics_port
     if flags.custom_backend_metrics_endpoint:
         kwargs[
             "custom_backend_metrics_endpoint"

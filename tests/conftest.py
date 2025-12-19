@@ -6,14 +6,15 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Generator, Optional
 
 import pytest
 from filelock import FileLock
 
-from tests.utils.constants import TEST_MODELS
+from tests.utils.constants import TEST_MODELS, DefaultPort
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
+    ServicePorts,
     allocate_port,
     allocate_ports,
     deallocate_port,
@@ -631,3 +632,37 @@ def file_storage_backend():
             os.environ["DYN_FILE_KV"] = old_env
         else:
             os.environ.pop("DYN_FILE_KV", None)
+
+
+########################################################
+# Shared Port Allocation (Dynamo deployments)
+########################################################
+
+
+@pytest.fixture(scope="function")
+def num_system_ports(request) -> int:
+    """Number of system ports to allocate for this test.
+
+    Default: 1 port.
+
+    Tests that need multiple system ports (e.g. SYSTEM_PORT1 + SYSTEM_PORT2) must
+    explicitly request them via indirect parametrization:
+      @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+    """
+    return getattr(request, "param", 1)
+
+
+@pytest.fixture(scope="function")
+def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None]:
+    """Allocate per-test ports for Dynamo deployments.
+
+    - frontend_port: OpenAI-compatible HTTP/gRPC ingress (dynamo.frontend)
+    - system_ports: List of worker metrics/system ports (configurable count via num_system_ports)
+    """
+    frontend_port = allocate_port(DefaultPort.FRONTEND.value)
+    system_port_list = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
+    all_ports = [frontend_port, *system_port_list]
+    try:
+        yield ServicePorts(frontend_port=frontend_port, system_ports=system_port_list)
+    finally:
+        deallocate_ports(all_ports)

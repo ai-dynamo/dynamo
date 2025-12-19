@@ -253,14 +253,21 @@ def sglang_config_test(request):
 
 @pytest.mark.e2e
 @pytest.mark.sglang
+# Use 2 system ports because some `sglang_configs` validate metrics on multiple ports.
+# This test iterates over all configs via `sglang_config_test`.
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_sglang_deployment(
     sglang_config_test,
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
+    num_system_ports,
     predownload_models,
 ):
     """Test SGLang deployment scenarios using common helpers"""
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     config = dataclasses.replace(
         sglang_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )

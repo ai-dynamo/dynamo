@@ -21,9 +21,14 @@ pub async fn run(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
-    let grpc_service_builder = kserve::KserveService::builder()
+    let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
         .with_request_template(engine_config.local_model().request_template());
+
+    // Set HTTP metrics port if provided (for parallel test execution)
+    if let Some(http_metrics_port) = engine_config.local_model().http_metrics_port() {
+        grpc_service_builder = grpc_service_builder.http_metrics_port(http_metrics_port);
+    }
 
     let grpc_service = match engine_config {
         EngineConfig::Dynamic { ref model, .. } => {

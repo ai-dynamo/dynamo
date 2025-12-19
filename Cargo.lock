@@ -2552,7 +2552,7 @@ checksum = "e1d926b4d407d372f141f93bb444696142c29d32962ccbd3531117cf3aa0bfa9"
 
 [[package]]
 name = "dynamo-async-openai"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -2590,14 +2590,14 @@ dependencies = [
 
 [[package]]
 name = "dynamo-config"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-discovery"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2639,7 +2639,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2657,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -2768,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2785,7 +2785,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "dynamo-async-openai",
@@ -2804,7 +2804,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-run"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2832,7 +2832,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2910,7 +2910,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "bytemuck",
  "dashmap 6.1.0",
@@ -5313,7 +5313,7 @@ checksum = "2874a2af47a2325c2001a6e6fad9b16a53b802102b528163885171cf92b15976"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-once-cell",

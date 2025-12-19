@@ -20,9 +20,10 @@ use dynamo_runtime::{
 
 use crate::{
     discovery::ModelManager,
-    kv_router::{KvPushRouter, KvRouterConfig, QueryInstanceType, RouterConfigOverride},
+    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
+    protocols::common::timing::RequestPhase,
     protocols::openai::nvext::WorkerIdInfo,
 };
 
@@ -375,7 +376,7 @@ impl PrefillRouter {
                 .retain(|a| !a.starts_with("query_instance_id"));
             prefill_req
                 .annotations
-                .push(format!("query_instance_id:{}", QueryInstanceType::Prefill));
+                .push(format!("query_instance_id:{}", RequestPhase::Prefill));
         } else if let Some(prefill_worker_id) = prefill_req.target_prefill_worker_id {
             // GAIE Stage 2: Route to pre-selected prefill worker from the stage 1
             tracing::debug!(
@@ -404,7 +405,7 @@ impl PrefillRouter {
                 .retain(|a| !a.starts_with("query_instance_id"));
             decode_req
                 .annotations
-                .push(format!("query_instance_id:{}", QueryInstanceType::Decode));
+                .push(format!("query_instance_id:{}", RequestPhase::Decode));
             decode_req
                 .annotations
                 .push(format!("prefill_worker_id:{worker_id}"));
@@ -477,6 +478,12 @@ impl
                     );
                 }
 
+                // Set phase to Prefill and record prefill start time if tracking is enabled
+                if let Some(ref tracker) = req.tracker {
+                    tracker.set_phase(RequestPhase::Prefill);
+                    tracker.record_prefill_start();
+                }
+
                 let prefill_context = Context::with_id(prefill_req, request_id.clone());
                 engine_ctx.link_child(prefill_context.context());
 
@@ -487,6 +494,12 @@ impl
                 // Fallback to original: Wait for prefill to complete
                 tracing::debug!("Using original prefill path");
 
+                // Set phase to Prefill and record prefill start time if tracking is enabled
+                if let Some(ref tracker) = req.tracker {
+                    tracker.set_phase(RequestPhase::Prefill);
+                    tracker.record_prefill_start();
+                }
+
                 let prefill_context = Context::with_id(prefill_req, request_id.clone());
                 engine_ctx.link_child(prefill_context.context());
 
@@ -496,12 +509,26 @@ impl
             }
         } else {
             // GAIE Stage 1: Use original path (no bootstrap optimization)
-            let prefill_context = Context::with_id(prefill_req, request_id.clone());
-            engine_ctx.link_child(prefill_context.context());
+            // But first check if prefill router is activated - if not, skip to avoid setting phase
+            if self.prefill_router.get().is_none() {
+                tracing::debug!("GAIE Stage 1: Prefill router not activated, skipping to decode");
+                Err(PrefillError::NotActivated)
+            } else {
+                tracing::debug!("Using original prefill path (GAIE Stage 1)");
 
-            self.call_prefill(prefill_context)
-                .await
-                .map(|(result, worker_id)| (Some(result), worker_id, None))
+                // Set phase to Prefill and record prefill start time if tracking is enabled
+                if let Some(ref tracker) = req.tracker {
+                    tracker.set_phase(RequestPhase::Prefill);
+                    tracker.record_prefill_start();
+                }
+
+                let prefill_context = Context::with_id(prefill_req, request_id.clone());
+                engine_ctx.link_child(prefill_context.context());
+
+                self.call_prefill(prefill_context)
+                    .await
+                    .map(|(result, worker_id)| (Some(result), worker_id, None))
+            }
         };
 
         // Abort if cancelled during prefill
@@ -517,6 +544,11 @@ impl
         match prefill_result {
             Ok((maybe_prefill_result, _prefill_worker_id, bootstrap_info)) => {
                 tracing::debug!("Prefill completed, proceeding to decode");
+
+                // Set phase to Decode for the decode request
+                if let Some(ref tracker) = req.tracker {
+                    tracker.set_phase(RequestPhase::Decode);
+                }
 
                 let mut decode_req = req;
 
