@@ -365,7 +365,7 @@ index 0000000..b689c00
 +      - pluginRef: picker
 diff --git a/pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go b/pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go
 new file mode 100644
-index 0000000..75f30e9
+index 0000000..6ee6634
 --- /dev/null
 +++ b/pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go
 @@ -0,0 +1,446 @@
@@ -541,7 +541,7 @@ index 0000000..75f30e9
 +	ffiComponent = getEnvOrDefault("DYNAMO_COMPONENT", "backend")
 +	ffiModel = getEnvOrDefault("DYNAMO_MODEL", "Qwen/Qwen3-0.6B")
 +	ffiWorkerID = getEnvInt64OrDefault("DYNAMO_WORKER_ID", 1)
-+	ffiEnforceDisagg = getEnvBoolOrDefault("DYNAMO_ENFORCE_DISAGG", true) // TODO default to false
++	ffiEnforceDisagg = getEnvBoolOrDefault("DYNAMO_ENFORCE_DISAGG", false)
 +
 +	ffiOverlapScoreWeight = getEnvFloatOrDefault("DYNAMO_OVERLAP_SCORE_WEIGHT", -1.0)
 +	ffiRouterTemperature = getEnvFloatOrDefault("DYNAMO_ROUTER_TEMPERATURE", -1.0)

@@ -340,6 +340,7 @@ mod integration_tests {
             service.state().manager_clone(),
             dynamo_llm::entrypoint::RouterConfig::default(),
             None,
+            service.state().metrics_clone(),
         );
         // Start watching for model registrations via discovery interface
         let discovery = distributed_runtime.discovery();
@@ -512,6 +513,7 @@ mod integration_tests {
                 service.state().manager_clone(),
                 dynamo_llm::entrypoint::RouterConfig::default(),
                 None,
+                service.state().metrics_clone(),
             );
 
             // Get all model entries for our test model
