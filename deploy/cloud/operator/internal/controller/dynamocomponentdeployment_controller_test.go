@@ -829,7 +829,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Env: []corev1.EnvVar{
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
-											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
+											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
@@ -964,7 +964,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Env: []corev1.EnvVar{
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
-											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
+											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
