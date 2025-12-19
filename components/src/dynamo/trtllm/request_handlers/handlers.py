@@ -70,22 +70,33 @@ class EncodeHandler(HandlerBase):
 
     async def generate(self, request: dict, context: Context):
         logging.debug(f"New Request ID: {context.id()}")
-        if self.connector:
-            # Use helper method to process embedding request
-            async for response in EncodeHelper.process_encode_request(
-                request,
-                self.multimodal_processor,
-                self.connector,
-                self.tokenizer,
-                self.model_dir,
-                self.model_type,
-                self.engine,
-            ):
-                yield response
-            return
+        if self.multimodal_processor is None:
+            logging.error("encode handler: no multimodal_processor configured")
+            raise RuntimeError("encode handler: no multimodal_processor configured")
 
-        logging.error("encode handler: no Dynamo NIXL connector found")
-        raise RuntimeError("encode handler: no Dynamo NIXL connector found")
+        # Only the embedding_paths -> NIXL transfer path requires a connector.
+        # Full EPD (image URLs -> MultimodalEncoder) does not.
+        messages = request.get("extra_args", {}).get(
+            "messages", request.get("messages", [])
+        )
+        _, _, embedding_paths = self.multimodal_processor.extract_prompt_and_media(
+            messages
+        )
+        if embedding_paths and not self.connector:
+            logging.error("encode handler: no Dynamo NIXL connector found")
+            raise RuntimeError("encode handler: no Dynamo NIXL connector found")
+
+        async for response in EncodeHelper.process_encode_request(
+            request,
+            self.multimodal_processor,
+            self.connector,
+            self.tokenizer,
+            self.model_dir,
+            self.model_type,
+            self.engine,
+        ):
+            yield response
+        return
 
 
 class PrefillHandler(HandlerBase):
@@ -97,6 +108,7 @@ class PrefillHandler(HandlerBase):
         super().__init__(config)
 
     async def remote_encode_full_epd(self, request: dict):
+        encode_response = None
         async for res in await self.encode_client.round_robin(request):
             encode_response = res.data()
             break
@@ -151,7 +163,7 @@ class PrefillHandler(HandlerBase):
 
             # Handle image URLs (full E-PD flow with MultimodalEncoder)
             elif image_urls:
-                if self.encode_client and self.connector:
+                if self.encode_client:
                     encode_response = await self.remote_encode_full_epd(request)
 
                     # Check if encode worker returned disaggregated params (full EPD flow)

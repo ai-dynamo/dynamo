@@ -59,6 +59,8 @@ class MultimodalRequestProcessor:
         self.allowed_local_media_path = allowed_local_media_path
         self.max_file_size_mb = max_file_size_mb
         self.max_file_size_bytes = max_file_size_mb * 1024 * 1024
+        # Used for streaming delta computation in create_response_chunk()
+        self.previous_decoded_text = ""
 
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""

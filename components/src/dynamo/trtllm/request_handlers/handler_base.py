@@ -174,6 +174,8 @@ class HandlerBase:
 
         # In generation-only mode, multimodal embeddings are already processed and in KV cache
         # Remove multimodal_embedding_handles to avoid TRT-LLM validation error
+        # NOTE: `hasattr` is used for TRT-LLM version compatibility: TBD
+        # may not have multimodal_embedding_handles/multimodal_hashes on DisaggregatedParams.
         if (
             hasattr(disaggregated_params, "multimodal_embedding_handles")
             and disaggregated_params.multimodal_embedding_handles
@@ -188,7 +190,6 @@ class HandlerBase:
         self,
         request: dict,
         epd_metadata: dict,
-        prefill_result: Optional[dict],
         embeddings: Any,
         ep_disaggregated_params: Any,
     ) -> Optional[Any]:
@@ -201,7 +202,6 @@ class HandlerBase:
         Args:
             request: The request dictionary
             epd_metadata: EPD metadata extracted from prefill result
-            prefill_result: Result from prefill worker
             embeddings: Multimodal embeddings (if any)
             ep_disaggregated_params: Disaggregated params from encoder/prefill
 
@@ -218,6 +218,7 @@ class HandlerBase:
             # In EPD generation-only mode (decode), pass the SAME input format as prefill
             # This matches TRT-LLM's test: llm_decode.generate(inputs, disaggregated_params=...)
             # The inputs dict provides prompt structure, disaggregated_params provide multimodal embeddings
+            prompt_token_ids = None
             if epd_token_ids:
                 prompt_token_ids = epd_token_ids
 
@@ -417,7 +418,6 @@ class HandlerBase:
             processed_input = await self._prepare_decode_input(
                 request,
                 epd_metadata,
-                prefill_result,
                 embeddings,
                 ep_disaggregated_params,
             )

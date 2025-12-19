@@ -3,7 +3,7 @@
 
 import logging
 from dataclasses import asdict
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 import torch
 from tensorrt_llm.inputs import default_multimodal_input_loader
@@ -191,22 +191,37 @@ class EncodeHelper:
     async def process_encode_request(
         request: Dict[str, Any],
         multimodal_processor,
-        connector: nixl_connect.Connector,
+        connector: Optional[nixl_connect.Connector],
         tokenizer=None,
         model_dir=None,
         model_type=None,
         engine=None,
     ):
         """
-        Process embedding request by loading embeddings and creating NIXL readable operation.
+        Process an ENCODE-mode request.
+
+        Supported flows:
+        - Embedding-path flow (NIXL transfer):
+          - Extract `embedding_paths` from OpenAI messages (URLs ending in .pt/.pth/.bin)
+          - Load embeddings tensor (or dict containing mm_embeddings + auxiliary tensors)
+          - Create a NIXL readable op and yield metadata to the prefill worker, then wait
+            for read completion.
+        - Full EPD flow (MultimodalEncoder):
+          - Extract `image_urls` + `text_prompt`
+          - Build encoder inputs via TRT-LLM's `default_multimodal_input_loader`
+          - Run `MultimodalEncoder.generate(...)` to obtain `disaggregated_params`
+          - Encode the params for network transfer and also return the processed prompt
+            + token ids for downstream prefill/decode consistency.
 
         Args:
-            request: Request containing messages with embedding paths
-            multimodal_processor: Multimodal processor for loading embeddings
-            connector: NIXL connector for creating readable operations
+            request: Request containing OpenAI-format multimodal messages
+            multimodal_processor: Multimodal processor used to extract prompt/media and load embeddings
+            connector: NIXL connector (required only for embedding_paths flow)
 
         Yields:
-            Response dictionary with NIXL metadata and embeddings info, or error response
+            Response dictionary:
+            - For NIXL transfer: nixl_readable_metadata + shape/dtype (+ auxiliary_data)
+            - For full EPD: ep_disaggregated_params (+ processed_prompt + prompt_token_ids)
         """
         # Load embeddings first to get the actual shape
         # Extract messages from extra_args (set by Rust preprocessor for multimodal) or fall back to direct field
@@ -224,6 +239,9 @@ class EncodeHelper:
         ) = multimodal_processor.extract_prompt_and_media(messages)
 
         if embedding_paths:
+            if connector is None:
+                yield {"error": "NIXL connector is required for embedding_paths encode"}
+                return
             # Load the embeddings data
             loaded_data = multimodal_processor.load_tensor_from_path_or_url(
                 embedding_paths[0]
@@ -279,6 +297,10 @@ class EncodeHelper:
             )
             # engine.llm is the MultimodalEncoder instance
             # MultimodalEncoder.generate() returns a list of GenerationResult objects
+            if engine is None:
+                yield {"error": "No engine configured on encode worker for full EPD"}
+                return
+
             encoder_outputs = list(engine.llm.generate(inputs))
             if not encoder_outputs:
                 logging.error("ENCODE WORKER: encoder_outputs is empty")
@@ -291,6 +313,8 @@ class EncodeHelper:
                 )
                 yield {"ep_disaggregated_params": None}
                 return
+            # NOTE: `hasattr` is used for TRT-LLM version compatibility: older versions
+            # may not have multimodal_embedding_handles/multimodal_hashes on DisaggregatedParams.
             if (
                 hasattr(ep_disaggregated_params, "multimodal_embedding_handles")
                 and ep_disaggregated_params.multimodal_embedding_handles
