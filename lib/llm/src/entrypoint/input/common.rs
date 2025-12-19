@@ -8,6 +8,7 @@ use crate::{
     discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
+    http::service::metrics::Metrics,
     kv_router::{KvPushRouter, KvRouter, PrefillRouter},
     migration::Migration,
     model_card::ModelDeploymentCard,
@@ -25,7 +26,7 @@ use crate::{
 
 use dynamo_runtime::{
     DistributedRuntime,
-    component::{Client, Endpoint},
+    component::Client,
     engine::{AsyncEngineStream, Data},
     pipeline::{
         Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
@@ -62,11 +63,14 @@ pub async fn prepare_engine(
             model: local_model, ..
         } => {
             let model_manager = Arc::new(ModelManager::new());
+            // Create metrics for migration tracking (not exposed via /metrics in Dynamic engine mode)
+            let metrics = Arc::new(Metrics::new());
             let watch_obj = Arc::new(ModelWatcher::new(
                 distributed_runtime.clone(),
                 model_manager.clone(),
                 RouterConfig::default(),
                 None,
+                metrics,
             ));
             let discovery = distributed_runtime.discovery();
             let discovery_stream = discovery
@@ -167,7 +171,6 @@ where
 #[allow(clippy::too_many_arguments)]
 pub async fn build_routed_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
-    endpoint: &Endpoint,
     client: &Client,
     router_mode: RouterMode,
     worker_monitor: Option<KvWorkerMonitor>,
@@ -175,6 +178,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
+    metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -191,7 +195,6 @@ where
         OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?;
     build_routed_pipeline_with_preprocessor(
         card,
-        endpoint,
         client,
         router_mode,
         worker_monitor,
@@ -200,6 +203,7 @@ where
         hf_tokenizer,
         prefill_chooser,
         enforce_disagg,
+        metrics,
     )
     .await
 }
@@ -207,7 +211,6 @@ where
 #[allow(clippy::too_many_arguments)]
 pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     card: &ModelDeploymentCard,
-    endpoint: &Endpoint,
     client: &Client,
     router_mode: RouterMode,
     worker_monitor: Option<KvWorkerMonitor>,
@@ -216,6 +219,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
+    metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -230,7 +234,7 @@ where
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
-    let migration = Migration::from_mdc(card, endpoint)?.into_operator();
+    let migration = Migration::from_mdc(card, metrics).into_operator();
 
     // For KV routing, use the client from the chooser to ensure shared state
     let router_client = if router_mode == RouterMode::KV {

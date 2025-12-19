@@ -147,6 +147,21 @@ pub mod frontend_service {
     /// Request migration limit for a worker serving the model (MDC)
     pub const MODEL_MIGRATION_LIMIT: &str = "model_migration_limit";
 
+    /// Total number of request migrations due to worker unavailability
+    pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
+
+    /// Label name for the type of migration
+    pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
+
+    /// Migration type label values
+    pub mod migration_type {
+        /// Migration during initial stream creation (NoResponders error)
+        pub const NEW_REQUEST: &str = "new_request";
+
+        /// Migration during ongoing request (stream disconnected)
+        pub const ONGOING_REQUEST: &str = "ongoing_request";
+    }
+
     /// Status label values
     pub mod status {
         /// Value for successful requests
@@ -303,24 +318,6 @@ pub const KVSTATS_METRICS: &[&str] = &[
 pub mod kvrouter {
     /// Number of KV cache events applied to the index (including status)
     pub const KV_CACHE_EVENTS_APPLIED: &str = "kv_cache_events_applied";
-}
-
-/// Migration operator Prometheus metric names
-pub mod migration {
-    /// Total number of request migrations
-    pub const MIGRATIONS_TOTAL: &str = "migrations_total";
-
-    /// Label name for the type of migration
-    pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
-
-    /// Migration type label values
-    pub mod migration_types {
-        /// Migration during stream creation - cannot reach worker
-        pub const NEW_REQUEST: &str = "new_request";
-
-        /// Migration during ongoing request - worker dropped
-        pub const ONGOING_REQUEST: &str = "ongoing_request";
-    }
 }
 
 // Shared regex patterns for Prometheus sanitization
