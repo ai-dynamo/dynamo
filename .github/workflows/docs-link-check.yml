@@ -60,6 +60,7 @@ jobs:
           #   echo "Running lychee in full mode (all links) for main branch"
           #   OFFLINE_FLAG=""
           # fi
+          OFFLINE_FLAG=""
 
           # Run lychee against all files in repo
           lychee \
