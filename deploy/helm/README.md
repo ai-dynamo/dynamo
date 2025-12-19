@@ -19,5 +19,5 @@ limitations under the License.
 
 There are two Helm charts available for the Dynamo Kubernetes Platform:
 
-- [platform](platform/README.md) - This chart installs the complete Dynamo Kubernetes Platform, including the Dynamo Operator, NATS, etcd, Grove, and Kai Scheduler.
-- [crds](crds/README.md) - This chart installs the CRDs for the Dynamo Kubernetes Platform.
+- [platform](./charts/platform/README.md) - This chart installs the complete Dynamo Kubernetes Platform, including the Dynamo Operator, NATS, etcd, Grove, and Kai Scheduler.
+- [crds](./charts/crds/README.md) - This chart installs the CRDs for the Dynamo Kubernetes Platform.

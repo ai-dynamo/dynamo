@@ -111,8 +111,8 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 		fi; \
 	done
 	if [ ! -d "../helm/charts/crds/templates/" ]; then \
-		echo "ERROR: Directory ../helm/charts/crds/templates/ does not exist"; \
-		exit 1; \
+		echo "Creating directory ../helm/charts/crds/templates/"; \
+		mkdir -p ../helm/charts/crds/templates/; \
 	fi
 	cp config/crd/bases/*.yaml ../helm/charts/crds/templates/
 	echo "Adding NVIDIA header to RBAC files"
