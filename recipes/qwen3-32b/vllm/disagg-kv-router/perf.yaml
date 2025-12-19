@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: Pod
+metadata:
+  name: disagg-router-6p-2d-benchmark
+  labels:
+    app: benchmark
+spec:
+  containers:
+  - name: python
+    image: python:3.11
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        # Setup
+        ulimit -n 1048576
+        ulimit -u 65536
+        apt update && apt install tmux wget curl jq -y
+
+        # Install benchmarking tool
+        pip install aiperf
+
+        # Wait for model to be ready
+        echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models..."
+        until curl -s "http://${FRONTEND}:8000/v1/models" | jq -e --arg model "${MODEL_NAME}" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do
+          echo "[$(date '+%H:%M:%S')] Model not ready, retrying in 5s..."
+          sleep 5
+        done
+        echo "Model '${MODEL_NAME}' is ready!"
+
+        # Download Mooncake conversation trace dataset if not already present
+        mkdir -p ${BASE_DIR}/traces
+        mkdir -p ${BASE_DIR}/artifacts
+        if [ ! -f ${BASE_DIR}/traces/conversation_trace.jsonl ]; then
+          wget -qO ${BASE_DIR}/traces/conversation_trace.jsonl https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/traces/conversation_trace.jsonl
+        fi
+
+        # Setup Paths and Endpoints
+        export INPUT_FILE="${BASE_DIR}/traces/conversation_trace.jsonl"
+        export MODEL_BASE_NAME="${MODEL_NAME##*/}"
+        export FRONTEND_LIB="${FRONTEND%-frontend}"
+        export ARTIFACT_DIR="${BASE_DIR}/artifacts/${MODEL_BASE_NAME}_${FRONTEND_LIB}"
+        mkdir -p "${ARTIFACT_DIR}"
+
+        # Run Benchmark so its easy to attach and watch
+        tmux new-session -d -s benchmark -c "${ARTIFACT_DIR}"
+        tmux send-keys -t benchmark "aiperf profile -m ${MODEL_NAME} --input-file ${INPUT_FILE} --custom-dataset-type mooncake_trace --fixed-schedule --url http://${FRONTEND}:8000 --streaming --artifact-dir ${ARTIFACT_DIR} --goodput \"time_to_first_token:2000 inter_token_latency:25\"" C-m
+        sleep 7200
+    env:
+      - name: MODEL_NAME
+        value: Qwen/Qwen3-32B
+      - name: FRONTEND
+        value: disagg-router-6p-2d-frontend
+      - name: BASE_DIR
+        value: /perf-cache
+    resources:
+      requests:
+        cpu: "8"
+        memory: 16Gi
+      limits:
+        cpu: "16"
+        memory: 32Gi
+    volumeMounts:
+    - name: model-cache
+      mountPath: /home/dynamo/.cache/huggingface
+    - name: perf-cache
+      mountPath: /perf-cache
+    workingDir: /workspace
+  volumes:
+  - name: model-cache
+    persistentVolumeClaim:
+      claimName: model-cache
+  - name: perf-cache
+    persistentVolumeClaim:
+      claimName: perf-cache
+  restartPolicy: Never

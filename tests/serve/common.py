@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 import pytest
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
-from tests.serve.conftest import ServicePorts
+from tests.conftest import ServicePorts
 from tests.utils.client import send_request
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig, EngineProcess
@@ -53,31 +53,45 @@ def run_serve_deployment(
 
     if ports is not None:
         dynamic_frontend_port = int(ports.frontend_port)
-        dynamic_system_port1 = int(ports.system_port1)
-        dynamic_system_port2 = int(ports.system_port2)
+        dynamic_system_ports = [int(p) for p in ports.system_ports]
+
         # The environments are used by the bash scripts to set the ports.
-        merged_env.update(
-            {
-                "DYN_HTTP_PORT": str(dynamic_frontend_port),
-                # Alias for PORT1 (many scripts only read this).
-                "DYN_SYSTEM_PORT": str(dynamic_system_port1),
-                "DYN_SYSTEM_PORT1": str(dynamic_system_port1),
-                "DYN_SYSTEM_PORT2": str(dynamic_system_port2),
-            }
-        )
+        merged_env["DYN_HTTP_PORT"] = str(dynamic_frontend_port)
+
+        # If no system ports are provided, explicitly ensure we don't pass any
+        # stale DYN_SYSTEM_PORT* values via extra_env.
+        if not dynamic_system_ports:
+            for k in list(merged_env.keys()):
+                if k == "DYN_SYSTEM_PORT":
+                    merged_env.pop(k, None)
+                    continue
+                if k.startswith("DYN_SYSTEM_PORT") and k != "DYN_SYSTEM_PORT":
+                    suffix = k.removeprefix("DYN_SYSTEM_PORT")
+                    if suffix.isdigit():
+                        merged_env.pop(k, None)
+        else:
+            # Alias for PORT1 (many scripts only read this).
+            merged_env["DYN_SYSTEM_PORT"] = str(dynamic_system_ports[0])
+            merged_env["DYN_SYSTEM_PORT1"] = str(dynamic_system_ports[0])
+            for idx, port in enumerate(dynamic_system_ports, start=1):
+                merged_env[f"DYN_SYSTEM_PORT{idx}"] = str(port)
+
         # Ensure EngineProcess health checks hit the correct frontend port.
         config = dataclasses.replace(config, frontend_port=dynamic_frontend_port)
     else:
         # Backward compat: infer from config/extra_env if no explicit ports are passed.
         dynamic_frontend_port = int(config.frontend_port)
-        dynamic_system_port1 = int(
-            merged_env.get("DYN_SYSTEM_PORT1")
-            or merged_env.get("DYN_SYSTEM_PORT")
-            or DefaultPort.SYSTEM1.value
-        )
-        dynamic_system_port2 = int(
-            merged_env.get("DYN_SYSTEM_PORT2") or DefaultPort.SYSTEM2.value
-        )
+        # Preserve the historical two-port behavior in this branch. Tests that
+        # need tighter control should pass `ports=...` to avoid default port
+        # collisions under xdist.
+        dynamic_system_ports = [
+            int(
+                merged_env.get("DYN_SYSTEM_PORT1")
+                or merged_env.get("DYN_SYSTEM_PORT")
+                or DefaultPort.SYSTEM1.value
+            ),
+            int(merged_env.get("DYN_SYSTEM_PORT2") or DefaultPort.SYSTEM2.value),
+        ]
 
     with EngineProcess.from_script(
         config, request, extra_env=merged_env
@@ -96,9 +110,19 @@ def run_serve_deployment(
             # worker system ports (mapped from DefaultPort -> per-test ports).
             if getattr(payload, "endpoint", "") == "/metrics":
                 if payload.port == DefaultPort.SYSTEM1.value:
-                    payload.port = dynamic_system_port1
+                    if len(dynamic_system_ports) < 1:
+                        raise RuntimeError(
+                            "Payload targets SYSTEM_PORT1 but no system ports were provided "
+                            f"(payload={payload.__class__.__name__})"
+                        )
+                    payload.port = dynamic_system_ports[0]
                 elif payload.port == DefaultPort.SYSTEM2.value:
-                    payload.port = dynamic_system_port2
+                    if len(dynamic_system_ports) < 2:
+                        raise RuntimeError(
+                            "Payload targets SYSTEM_PORT2 but only 1 system port was provided "
+                            f"(payload={payload.__class__.__name__})"
+                        )
+                    payload.port = dynamic_system_ports[1]
             else:
                 payload.port = dynamic_frontend_port
 
@@ -109,9 +133,19 @@ def run_serve_deployment(
                 mapped_system_ports: list[int] = []
                 for p in payload.system_ports:
                     if p == DefaultPort.SYSTEM1.value:
-                        mapped_system_ports.append(dynamic_system_port1)
+                        if len(dynamic_system_ports) < 1:
+                            raise RuntimeError(
+                                "Payload.system_ports includes SYSTEM_PORT1 but no system ports were provided "
+                                f"(payload={payload.__class__.__name__})"
+                            )
+                        mapped_system_ports.append(dynamic_system_ports[0])
                     elif p == DefaultPort.SYSTEM2.value:
-                        mapped_system_ports.append(dynamic_system_port2)
+                        if len(dynamic_system_ports) < 2:
+                            raise RuntimeError(
+                                "Payload.system_ports includes SYSTEM_PORT2 but only 1 system port was provided "
+                                f"(payload={payload.__class__.__name__})"
+                            )
+                        mapped_system_ports.append(dynamic_system_ports[1])
                     else:
                         mapped_system_ports.append(p)
                 payload.system_ports = mapped_system_ports

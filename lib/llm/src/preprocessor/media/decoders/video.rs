@@ -20,10 +20,30 @@ use crate::preprocessor::media::{
 
 /// Small time buffer (seconds) to avoid edge cases when seeking near frame boundaries
 const FRAME_TIME_BUFFER_SECS: f64 = 0.001;
+const DEFAULT_MAX_ALLOC: u64 = 512 * 1024 * 1024; // 512 MB
 
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VideoDecoderLimits {
+    /// Maximum allowed total allocation of decoded frames in bytes
+    #[serde(default)]
+    pub max_alloc: Option<u64>,
+}
+
+impl Default for VideoDecoderLimits {
+    fn default() -> Self {
+        Self {
+            max_alloc: Some(DEFAULT_MAX_ALLOC),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VideoDecoder {
+    #[serde(default)]
+    pub(crate) limits: VideoDecoderLimits,
+
     /// sample N frames per second
     #[serde(default)]
     pub(crate) fps: Option<f64>,
@@ -36,9 +56,6 @@ pub struct VideoDecoder {
     /// fail if some frames fail to decode
     #[serde(default)]
     pub(crate) strict: bool,
-    /// maximum allowed total allocation of the decoded frames in bytes
-    #[serde(default)]
-    pub(crate) max_alloc: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -182,6 +199,17 @@ fn decode_frame_at_timestamp(
 }
 
 impl Decoder for VideoDecoder {
+    fn with_runtime(&self, runtime: Option<&Self>) -> Self {
+        match runtime {
+            Some(r) => {
+                let mut d = r.clone();
+                d.limits.clone_from(&self.limits);
+                d
+            }
+            None => self.clone(),
+        }
+    }
+
     fn decode(&self, data: EncodedMediaData) -> Result<DecodedMediaData> {
         anyhow::ensure!(
             self.fps.is_none() || self.num_frames.is_none(),
@@ -212,7 +240,7 @@ impl Decoder for VideoDecoder {
             "Invalid video dimensions {width}x{height}"
         );
 
-        let max_alloc = self.max_alloc.unwrap_or(u64::MAX);
+        let max_alloc = self.limits.max_alloc.unwrap_or(u64::MAX);
         anyhow::ensure!(
             (width as u64) * (height as u64) * requested_frames * 3 <= max_alloc,
             "Video dimensions {requested_frames}x{width}x{height}x3 exceed max alloc {max_alloc}"
@@ -320,11 +348,11 @@ mod tests {
 
         let requested_frames = 5u64;
         let decoder = VideoDecoder {
+            limits: VideoDecoderLimits::default(),
             fps: None,
             max_frames: None,
             num_frames: Some(requested_frames),
             strict: false,
-            max_alloc: None,
         };
 
         let decoded = decoder.decode(encoded_data).unwrap();
@@ -342,11 +370,11 @@ mod tests {
 
         let target_fps = 0.5f64;
         let decoder = VideoDecoder {
+            limits: VideoDecoderLimits::default(),
             fps: Some(target_fps),
             max_frames: None,
             num_frames: None,
             strict: false,
-            max_alloc: None,
         };
 
         let decoded = decoder.decode(encoded_data).unwrap();
@@ -375,11 +403,11 @@ mod tests {
         let (encoded_data, width, height, _) = load_test_video(video_file);
 
         let decoder = VideoDecoder {
+            limits: VideoDecoderLimits { max_alloc },
             fps: None,
             max_frames: None,
             num_frames: Some(num_frames),
             strict: false,
-            max_alloc,
         };
 
         let result = decoder.decode(encoded_data);
@@ -403,11 +431,11 @@ mod tests {
         let (encoded_data, ..) = load_test_video("240p_10.mp4");
 
         let decoder = VideoDecoder {
+            limits: VideoDecoderLimits::default(),
             fps: Some(2.0f64),
             max_frames: None,
             num_frames: Some(5u64),
             strict: false,
-            max_alloc: None,
         };
 
         let result = decoder.decode(encoded_data);
@@ -441,5 +469,36 @@ mod tests {
             "Last time should be > 8s, got {}",
             last_time
         );
+    }
+
+    #[test]
+    fn test_with_runtime_limit_enforcement() {
+        let server_limits = VideoDecoderLimits {
+            max_alloc: Some(1024),
+        };
+        let server_config = VideoDecoder {
+            limits: server_limits,
+            fps: Some(1.0),
+            ..Default::default()
+        };
+
+        // Runtime config tries to override limits (should be ignored)
+        // And sets different FPS (should be accepted)
+        let runtime_limits = VideoDecoderLimits {
+            max_alloc: Some(999999),
+        };
+        let runtime_config = VideoDecoder {
+            limits: runtime_limits,
+            fps: Some(60.0),
+            ..Default::default()
+        };
+
+        let merged = server_config.with_runtime(Some(&runtime_config));
+
+        // Check that server limits are preserved
+        assert_eq!(merged.limits.max_alloc, Some(1024));
+
+        // Check that other fields are overridden
+        assert_eq!(merged.fps, Some(60.0));
     }
 }
