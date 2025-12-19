@@ -28,7 +28,7 @@ aws ecr get-login-password | docker login --username AWS --password-stdin <ECR_R
 docker push <ECR_REGISTRY>/<ECR_REPOSITORY>:$IMAGE_TAG
 ```
 
-## 2. Install Dynamo Cloud
+## 2. Install Dynamo Kubernetes Platform
 
 Build and Push Operator Image
 

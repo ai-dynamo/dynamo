@@ -17,7 +17,7 @@
 
 **Dynamo** - NVIDIA's high-performance distributed inference framework for Large Language Models (LLMs) and generative AI models, designed for multinode environments with disaggregated serving and cache-aware routing.
 
-**Dynamo Cloud** - A Kubernetes platform providing managed deployment experience for Dynamo inference graphs.
+**Dynamo Kubernetes Platform** - A Kubernetes platform providing managed deployment experience for Dynamo inference graphs.
 
 ## E
 **Endpoint** - A specific network-accessible API within a Dynamo component, such as `generate` or `load_metrics`.

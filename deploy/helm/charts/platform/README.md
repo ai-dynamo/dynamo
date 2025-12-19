@@ -23,7 +23,7 @@ A Helm chart for NVIDIA Dynamo Platform.
 
 ## 🚀 Overview
 
-The Dynamo Platform Helm chart deploys the complete Dynamo Cloud infrastructure on Kubernetes, including:
+The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform infrastructure on Kubernetes, including:
 
 - **Dynamo Operator**: Kubernetes operator for managing Dynamo deployments
 - **NATS**: High-performance messaging system for component communication
@@ -166,7 +166,7 @@ For detailed etcd configuration options beyond `etcd.enabled`, please refer to t
 
 ## 📚 Additional Resources
 
-- [Dynamo Cloud Deployment Installation Guide](../../../../docs/kubernetes/installation_guide.md)
+- [Dynamo Kubernetes Platform Deployment Installation Guide](../../../../docs/kubernetes/installation_guide.md)
 - [NATS Documentation](https://docs.nats.io/)
 - [etcd Documentation](https://etcd.io/docs/)
 - [Kubernetes Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)

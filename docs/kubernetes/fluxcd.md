@@ -4,7 +4,7 @@ This section describes how to use FluxCD for GitOps-based deployment of Dynamo i
 
 ## Prerequisites
 
-- A Kubernetes cluster with [Dynamo Cloud](./installation_guide.md) installed
+- A Kubernetes cluster with [Dynamo Kubernetes Platform](./installation_guide.md) installed
 - [FluxCD](https://fluxcd.io/flux/installation/) installed in your cluster
 - A Git repository to store your deployment configurations
 
@@ -16,9 +16,9 @@ The GitOps workflow for Dynamo deployments consists of three main steps:
 2. Create and commit a DynamoGraphDeployment custom resource for initial deployment
 3. Update the graph by building a new version and updating the CR for subsequent updates
 
-## Step 1: Build and Push Dynamo Cloud Operator
+## Step 1: Build and Push Dynamo Operator
 
-First, follow to [See Install Dynamo Cloud](./installation_guide.md).
+First, follow to [See Install Dynamo Kubernetes Platform](./installation_guide.md).
 
 ## Step 2: Create Initial Deployment
 
