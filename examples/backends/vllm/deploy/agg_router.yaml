@@ -36,5 +36,3 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
-            - --kv-events-config
-            - '{"enable_kv_cache_events": false}'
