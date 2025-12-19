@@ -110,9 +110,11 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 			yq eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
 	done
-	if [ -d "../helm/crds/templates/" ]; then \
-		cp config/crd/bases/*.yaml ../helm/crds/templates/; \
+	if [ ! -d "../helm/charts/crds/templates/" ]; then \
+		echo "ERROR: Directory ../helm/charts/crds/templates/ does not exist"; \
+		exit 1; \
 	fi
+	cp config/crd/bases/*.yaml ../helm/charts/crds/templates/
 	echo "Adding NVIDIA header to RBAC files"
 	for file in config/rbac/*.yaml; do \
 		if [ -f "$$file" ] && ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
@@ -324,7 +326,7 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 		--output-path=./docs/api_reference.md
 	@echo "✅ Generated API reference at ./docs/api_reference.md"
 	# concatenate header.md, api_reference.md, and footer.md
-	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../../docs/kubernetes/api_reference.md
+	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/kubernetes/api_reference.md
 	rm ./docs/api_reference.md
 	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
 

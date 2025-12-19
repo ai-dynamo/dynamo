@@ -34,7 +34,7 @@ These are independent. A single Kubernetes namespace can host multiple Dynamo na
 
 ## Pre-deployment Checks
 
-Before deploying the platform, it is recommended to run the pre-deployment checks to ensure the cluster is ready for deployment. Please refer to the [pre-deployment checks](../../deploy/cloud/pre-deployment/README.md) for more details.
+Before deploying the platform, it is recommended to run the pre-deployment checks to ensure the cluster is ready for deployment. Please refer to the [pre-deployment checks](../../deploy/pre-deployment/README.md) for more details.
 
 ## 1. Install Platform First
 

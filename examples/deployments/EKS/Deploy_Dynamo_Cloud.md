@@ -33,7 +33,7 @@ docker push <ECR_REGISTRY>/<ECR_REPOSITORY>:$IMAGE_TAG
 Build and Push Operator Image
 
 ```
-cd deploy/cloud/operator
+cd deploy/operator
 vim Earthfile # change ARG IMAGE_SUFFIX=<ECR_REPOSITORY>
 earthly --push +docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 ```

@@ -46,13 +46,13 @@ deploy/
 commit -S
 ```
 
-- Every time you modify `deploy/cloud/helm/crds/templates/*.yaml`, please bump up the version of the CRD helm chart in
-    1. deploy/cloud/helm/platform/components/operator/Chart.yaml
-    2. deploy/cloud/helm/platform/Chart.yaml
+- Every time you modify `deploy/helm/charts/crds/templates/*.yaml`, please bump up the version of the CRD helm chart in
+    1. deploy/helm/charts/platform/components/operator/Chart.yaml
+    2. deploy/helm/charts/platform/Chart.yaml
 then
 
 ```bash
-deploy/cloud/helm/platform
+deploy/helm/charts/platform
 helm dependency update
 ```
 
@@ -116,7 +116,7 @@ Once you have an MR up and standard checks pass trigger the integration tests by
 **Go Tests (Operator):**
 
 ```bash
-cd deploy/cloud/operator
+cd deploy/operator
 go test ./... -v
 go test -race ./...
 ```
@@ -136,7 +136,7 @@ pytest tests/serve/test_dynamo_serve.py::test_serve_deployment[agg] -v
 **Operator Integration Tests:**
 
 ```bash
-cd deploy/cloud/operator
+cd deploy/operator
 make test-e2e
 ```
 
