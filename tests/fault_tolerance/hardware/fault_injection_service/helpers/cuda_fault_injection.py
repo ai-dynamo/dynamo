@@ -228,13 +228,18 @@ class CUDAFaultInjector:
             deployment_name: Name of the deployment
             namespace: Kubernetes namespace
             force_delete_pods: If True, force delete pods to apply clean spec
-            service_names: Service names to check (default: ["VllmDecodeWorker", "VllmPrefillWorker"])
+            service_names: Service names to check (default: all supported backends)
 
         Returns:
             True if cleanup succeeded
         """
         if service_names is None:
-            service_names = ["VllmDecodeWorker", "VllmPrefillWorker"]
+            # Support vLLM, SGLang, and TensorRT-LLM service names
+            service_names = [
+                "VllmDecodeWorker", "VllmPrefillWorker",  # vLLM
+                "decode", "prefill",  # SGLang
+                "TRTLLMDecodeWorker", "TRTLLMPrefillWorker", "TRTLLMWorker",  # TensorRT-LLM
+            ]
         print("\n[→] Cleaning up CUDA fault injection...")
 
         sys.path.insert(0, str(self.lib_dir))
@@ -641,8 +646,13 @@ class CUDAFaultInjector:
                     name=deployment_name,
                 )
 
-                # Check both worker services
-                for service_name in ["VllmDecodeWorker", "VllmPrefillWorker"]:
+                # Check worker services (supports vLLM, SGLang, TensorRT-LLM)
+                worker_services = [
+                    "VllmDecodeWorker", "VllmPrefillWorker",  # vLLM
+                    "decode", "prefill",  # SGLang
+                    "TRTLLMDecodeWorker", "TRTLLMPrefillWorker", "TRTLLMWorker",  # TensorRT-LLM
+                ]
+                for service_name in worker_services:
                     if service_name in dgd["spec"]["services"]:
                         service = dgd["spec"]["services"][service_name]
                         env_vars = (

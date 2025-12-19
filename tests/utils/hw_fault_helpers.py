@@ -104,8 +104,13 @@ class HWFaultConfig:
     fault_timeout: int = 600  # 10 minutes for fault effects
 
     # Service names to patch (for CUDA injection)
+    # Supports vLLM, SGLang, and TensorRT-LLM backends
     service_names: List[str] = field(
-        default_factory=lambda: ["VllmDecodeWorker", "VllmPrefillWorker"]
+        default_factory=lambda: [
+            "VllmDecodeWorker", "VllmPrefillWorker",  # vLLM
+            "decode", "prefill",  # SGLang
+            "TRTLLMDecodeWorker", "TRTLLMPrefillWorker", "TRTLLMWorker",  # TensorRT-LLM
+        ]
     )
 
     @classmethod
@@ -122,7 +127,12 @@ class HWFaultConfig:
             setup_timeout=config.get("setup_timeout", 300),
             fault_timeout=config.get("fault_timeout", 600),
             service_names=config.get(
-                "service_names", ["VllmDecodeWorker", "VllmPrefillWorker"]
+                "service_names",
+                [
+                    "VllmDecodeWorker", "VllmPrefillWorker",  # vLLM
+                    "decode", "prefill",  # SGLang
+                    "TRTLLMDecodeWorker", "TRTLLMPrefillWorker", "TRTLLMWorker",  # TensorRT-LLM
+                ],
             ),
         )
 
@@ -529,7 +539,7 @@ class HWFaultManager:
             self.logger.error(f"[HW Faults] Failed to get deployment pods: {e}")
             return []
 
-    async def remove_node_affinity(self) -> bool:
+    async def remove_node_affinity(self, delete_pods: bool = True) -> bool:
         """
         Remove node affinity from worker pods to allow rescheduling.
 
@@ -537,6 +547,14 @@ class HWFaultManager:
         1. CUDA passthrough setup pins workers to a specific node
         2. When that node is cordoned, workers can't reschedule
         3. Removing affinity allows workers to schedule on healthy nodes
+
+        Note: Cordoned nodes don't evict running pods - they only prevent NEW scheduling.
+        So we must delete pods to force them to reschedule to healthy nodes.
+
+        Args:
+            delete_pods: If True (default), delete pods to force immediate reschedule.
+                        This is required for simulated faults where the node is still
+                        healthy but cordoned. If False, just update spec.
 
         Returns:
             True if successful
@@ -546,14 +564,18 @@ class HWFaultManager:
         )
 
         try:
-            cuda_injector = self._get_cuda_injector()
-
-            # Use the cleanup function which removes node affinity
-            # Pass full_cleanup=False to only remove affinity, not all artifacts
-            success = cuda_injector.cleanup_cuda_fault_injection(
-                deployment_name=self.deployment_name,
-                namespace=self.namespace,
-            )
+            if delete_pods:
+                # Full cleanup - removes all CUDA artifacts and deletes pods
+                # Required for fault simulation where node is cordoned but healthy
+                cuda_injector = self._get_cuda_injector()
+                success = cuda_injector.cleanup_cuda_fault_injection(
+                    deployment_name=self.deployment_name,
+                    namespace=self.namespace,
+                )
+            else:
+                # Light-weight: just remove node affinity from DGD spec (no pod deletion)
+                # Only use this if pods will crash/restart naturally
+                success = await self._remove_node_affinity_only()
 
             if success:
                 self.logger.info(
@@ -566,6 +588,237 @@ class HWFaultManager:
 
         except Exception as e:
             self.logger.error(f"[HW Faults] Failed to remove node affinity: {e}")
+            return False
+
+    async def _remove_node_affinity_only(self) -> bool:
+        """
+        Remove ONLY the node affinity from DGD spec without deleting pods or other artifacts.
+        
+        This allows pods to reschedule when they naturally restart (e.g., due to CUDA faults)
+        without forcing an immediate restart.
+        """
+        try:
+            k8s_custom = client.CustomObjectsApi()
+            
+            with suppress_deprecation_warnings():
+                dgd = k8s_custom.get_namespaced_custom_object(
+                    group="nvidia.com",
+                    version="v1alpha1",
+                    namespace=self.namespace,
+                    plural="dynamographdeployments",
+                    name=self.deployment_name,
+                )
+            
+            # Remove node affinity from all worker services
+            services = dgd.get("spec", {}).get("services", {})
+            patched = False
+            
+            for service_name in self.config.service_names:
+                if service_name in services:
+                    service = services[service_name]
+                    if "extraPodSpec" in service and "affinity" in service["extraPodSpec"]:
+                        del service["extraPodSpec"]["affinity"]
+                        patched = True
+                        self.logger.debug(f"[HW Faults] Removed affinity from {service_name}")
+            
+            if patched:
+                with suppress_deprecation_warnings():
+                    k8s_custom.patch_namespaced_custom_object(
+                        group="nvidia.com",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural="dynamographdeployments",
+                        name=self.deployment_name,
+                        body=dgd,
+                    )
+                self.logger.info("[HW Faults] Node affinity removed from DGD spec (no pod restart)")
+            else:
+                self.logger.info("[HW Faults] No node affinity found to remove")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"[HW Faults] Failed to remove node affinity: {e}")
+            return False
+
+    async def cleanup_cuda_spec_without_restart(self) -> bool:
+        """
+        Remove CUDA fault injection from DGD spec WITHOUT deleting pods.
+        
+        This is used when relying on NVSentinel's node-drainer to evict pods.
+        The spec is cleaned up so that when pods are evicted by node-drainer,
+        the new pods will come up WITHOUT:
+        - CUDA LD_PRELOAD library
+        - Node affinity pinning
+        
+        Returns:
+            True if successful
+        """
+        try:
+            k8s_custom = client.CustomObjectsApi()
+            k8s_core = client.CoreV1Api()
+            
+            self.logger.info("[HW Faults] Cleaning up DGD spec (keeping pods running)...")
+            
+            with suppress_deprecation_warnings():
+                dgd = k8s_custom.get_namespaced_custom_object(
+                    group="nvidia.com",
+                    version="v1alpha1",
+                    namespace=self.namespace,
+                    plural="dynamographdeployments",
+                    name=self.deployment_name,
+                )
+            
+            services = dgd.get("spec", {}).get("services", {})
+            patched_services = []
+            
+            for service_name in self.config.service_names:
+                if service_name not in services:
+                    continue
+                    
+                service = services[service_name]
+                changed = False
+                
+                # Remove node affinity
+                if "extraPodSpec" in service:
+                    if "affinity" in service["extraPodSpec"]:
+                        del service["extraPodSpec"]["affinity"]
+                        changed = True
+                    
+                    # Remove init container for CUDA library
+                    # Names used by inject_into_pods.py: compile-cuda-fault-lib, decode-cuda-fault-lib
+                    if "initContainers" in service["extraPodSpec"]:
+                        original_count = len(service["extraPodSpec"]["initContainers"])
+                        cuda_init_names = ["compile-cuda-fault-lib", "decode-cuda-fault-lib", "cuda-fault-init"]
+                        service["extraPodSpec"]["initContainers"] = [
+                            ic for ic in service["extraPodSpec"]["initContainers"]
+                            if ic.get("name") not in cuda_init_names
+                        ]
+                        if len(service["extraPodSpec"]["initContainers"]) < original_count:
+                            changed = True
+                        if not service["extraPodSpec"]["initContainers"]:
+                            del service["extraPodSpec"]["initContainers"]
+                    
+                    # Remove volumes for CUDA library
+                    # Names used by inject_into_pods.py: cuda-fault-lib-source, cuda-fault-lib, node-fault-marker
+                    if "volumes" in service["extraPodSpec"]:
+                        original_count = len(service["extraPodSpec"]["volumes"])
+                        cuda_volume_names = ["cuda-fault-lib", "cuda-fault-lib-source", "node-fault-marker", "host-fault-dir"]
+                        service["extraPodSpec"]["volumes"] = [
+                            v for v in service["extraPodSpec"]["volumes"]
+                            if v.get("name") not in cuda_volume_names
+                        ]
+                        if len(service["extraPodSpec"]["volumes"]) < original_count:
+                            changed = True
+                        if not service["extraPodSpec"]["volumes"]:
+                            del service["extraPodSpec"]["volumes"]
+                    
+                    # Remove main container modifications
+                    if "mainContainer" in service["extraPodSpec"]:
+                        main = service["extraPodSpec"]["mainContainer"]
+                        
+                        # Remove volume mounts
+                        # Names used by inject_into_pods.py: cuda-fault-lib, node-fault-marker
+                        if "volumeMounts" in main:
+                            original_count = len(main["volumeMounts"])
+                            cuda_mount_names = ["cuda-fault-lib", "cuda-fault-lib-source", "node-fault-marker", "host-fault-dir"]
+                            main["volumeMounts"] = [
+                                vm for vm in main["volumeMounts"]
+                                if vm.get("name") not in cuda_mount_names
+                            ]
+                            if len(main["volumeMounts"]) < original_count:
+                                changed = True
+                            if not main["volumeMounts"]:
+                                del main["volumeMounts"]
+                        
+                        if not main:
+                            del service["extraPodSpec"]["mainContainer"]
+                    
+                    if not service["extraPodSpec"]:
+                        del service["extraPodSpec"]
+                
+                # Remove envs that were added for CUDA fault injection
+                if "envs" in service:
+                    cuda_envs = ["LD_PRELOAD", "CUDA_FAULT_INJECTION_ENABLED", "CUDA_XID_TYPE"]
+                    original_count = len(service["envs"])
+                    service["envs"] = [
+                        e for e in service["envs"]
+                        if e.get("name") not in cuda_envs
+                    ]
+                    if len(service["envs"]) < original_count:
+                        changed = True
+                    if not service["envs"]:
+                        del service["envs"]
+                
+                if changed:
+                    patched_services.append(service_name)
+            
+            if patched_services:
+                # Use replace instead of patch to ensure array items are properly removed
+                # Strategic merge patch doesn't remove array items correctly
+                self.logger.info(f"[HW Faults] Replacing DGD spec for services: {patched_services}")
+                
+                # Debug: Log what we're about to set (should all be False after cleanup)
+                for svc in patched_services:
+                    svc_spec = dgd.get("spec", {}).get("services", {}).get(svc, {})
+                    has_init = "initContainers" in svc_spec.get("extraPodSpec", {})
+                    has_affinity = "affinity" in svc_spec.get("extraPodSpec", {})
+                    has_ldpreload = any(e.get("name") == "LD_PRELOAD" for e in svc_spec.get("envs", []))
+                    self.logger.info(f"[HW Faults]   {svc}: initContainers={has_init}, affinity={has_affinity}, LD_PRELOAD={has_ldpreload}")
+                    if has_init or has_affinity or has_ldpreload:
+                        self.logger.error(f"[HW Faults]   ⚠️  Cleanup FAILED for {svc} - items still present!")
+                
+                with suppress_deprecation_warnings():
+                    result = k8s_custom.replace_namespaced_custom_object(
+                        group="nvidia.com",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural="dynamographdeployments",
+                        name=self.deployment_name,
+                        body=dgd,
+                    )
+                self.logger.info(f"[HW Faults] DGD spec replaced successfully")
+                
+                # Verify the change actually took effect
+                with suppress_deprecation_warnings():
+                    verify_dgd = k8s_custom.get_namespaced_custom_object(
+                        group="nvidia.com",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural="dynamographdeployments",
+                        name=self.deployment_name,
+                    )
+                for svc in patched_services:
+                    svc_spec = verify_dgd.get("spec", {}).get("services", {}).get(svc, {})
+                    has_init = "initContainers" in svc_spec.get("extraPodSpec", {})
+                    has_affinity = "affinity" in svc_spec.get("extraPodSpec", {})
+                    if has_init or has_affinity:
+                        self.logger.error(f"[HW Faults]   ❌ VERIFICATION FAILED: {svc} still has initContainers={has_init}, affinity={has_affinity}")
+                    else:
+                        self.logger.info(f"[HW Faults]   ✓ Verified {svc} is clean")
+            else:
+                self.logger.info("[HW Faults] No CUDA artifacts found in DGD spec")
+            
+            # Delete ConfigMap (but NOT pods)
+            try:
+                k8s_core.delete_namespaced_config_map(
+                    name="cuda-fault-injection-lib",
+                    namespace=self.namespace,
+                )
+                self.logger.info("[HW Faults] ConfigMap deleted")
+            except ApiException as e:
+                if e.status != 404:
+                    self.logger.warning(f"[HW Faults] Failed to delete ConfigMap: {e}")
+            
+            self.logger.info("[HW Faults] DGD spec cleaned - pods still running")
+            self.logger.info("[HW Faults] When node-drainer evicts pods, new ones will be clean")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"[HW Faults] Failed to cleanup DGD spec: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     async def enable_cuda_faults(
