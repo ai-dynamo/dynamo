@@ -433,10 +433,7 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 	if isK8sDiscoveryEnabled {
 		service.Labels = map[string]string{
 			commonconsts.KubeLabelDynamoDiscoveryBackend: "kubernetes",
-		}
-		// Discovery is enabled for non frontend components
-		if component.ComponentType != commonconsts.ComponentTypeFrontend {
-			service.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+			commonconsts.KubeLabelDynamoDiscoveryEnabled: commonconsts.KubeLabelValueTrue,
 		}
 	}
 	return service, nil
