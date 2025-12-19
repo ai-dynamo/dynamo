@@ -2858,7 +2858,6 @@ class DynamoInfo(NodeInfo):
                 ".",  # Current directory
                 os.path.expanduser("~/dynamo"),
                 "/workspace",
-                "/sgl-workspace",  # Unique workspace for sglang
             ]
         )
 
