@@ -736,6 +736,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Simple query-only detection: presence of query_instance_id annotation means query-only mode
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
 
+        // Detect if this request was pre-routed by EPP (GAIE Stage 1)
+        // EPP sets worker IDs directly, so their presence indicates bookkeeping is handled
+        // by GAIE hooks (not by this router)
+        let is_epp_routed = request.backend_instance_id.is_some()
+            || (request.target_prefill_worker_id.is_some()
+                && request.target_decode_worker_id.is_some());
+
         // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
         let phase = request
             .tracker
@@ -769,7 +776,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 let worker = WorkerWithDpRank::new(id, dp_rank);
                 let overlap_blocks = overlap_scores.scores.get(&worker).copied().unwrap_or(0);
 
-                if !is_query_only {
+                // Skip add_request if EPP already handled bookkeeping via GAIE hooks
+                if !is_query_only && !is_epp_routed {
                     self.chooser
                         .add_request(
                             context_id.clone(),
@@ -835,6 +843,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
         let stream_context = response_stream.context();
+
+        // If EPP handled bookkeeping via GAIE hooks, just forward the stream without wrapping
+        if is_epp_routed {
+            return Ok(ResponseStream::new(
+                Box::pin(response_stream),
+                stream_context,
+            ));
+        }
+
         let chooser = self.chooser.clone();
         let context_for_monitoring = stream_context.clone();
 
