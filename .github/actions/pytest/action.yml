@@ -28,6 +28,10 @@ inputs:
     description: 'Run pytest in dry-run mode (collect tests only, do not execute)'
     required: false
     default: 'false'
+  start_minio:
+    description: 'Start MinIO service for LoRA tests (true/false)'
+    required: false
+    default: 'true'
 
 
 runs:
@@ -46,6 +50,47 @@ runs:
         fi
         echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
         echo "🏗️  Platform architecture: ${PLATFORM_ARCH}"
+
+    - name: Start MinIO Service
+      if: inputs.start_minio == 'true'
+      shell: bash
+      env:
+        MINIO_CONTAINER_NAME: dynamo-minio-test
+        MINIO_ACCESS_KEY: minioadmin
+        MINIO_SECRET_KEY: minioadmin
+      run: |
+        # Start MinIO for S3-compatible object storage (used by LoRA tests)
+        echo "🗄️  Starting MinIO service..."
+
+        # Remove any existing container
+        docker rm -f "${MINIO_CONTAINER_NAME}" 2>/dev/null || true
+
+        docker run -d \
+          --name "${MINIO_CONTAINER_NAME}" \
+          -p 9000:9000 \
+          -p 9001:9001 \
+          -e "MINIO_ROOT_USER=${MINIO_ACCESS_KEY}" \
+          -e "MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}" \
+          quay.io/minio/minio server /data --console-address ':9001'
+
+        # Wait for MinIO to be ready
+        echo "⏳ Waiting for MinIO to be ready..."
+        MAX_ATTEMPTS=30
+        ATTEMPT=0
+        while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+          if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
+            echo "✅ MinIO is ready (attempt $((ATTEMPT + 1)))"
+            break
+          fi
+          ATTEMPT=$((ATTEMPT + 1))
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "❌ MinIO failed to start within ${MAX_ATTEMPTS}s"
+            echo "📋 Container logs:"
+            docker logs "${MINIO_CONTAINER_NAME}" 2>&1 || true
+            exit 1
+          fi
+          sleep 1
+        done
 
     - name: Run tests
       shell: bash
@@ -139,6 +184,13 @@ runs:
 
         # Exit with original test result to maintain workflow behavior
         exit ${TEST_EXIT_CODE}
+
+    - name: Cleanup MinIO Service
+      if: always() && inputs.start_minio == 'true'
+      shell: bash
+      run: |
+        echo "🧹 Cleaning up MinIO container..."
+        docker rm -f dynamo-minio-test 2>/dev/null || true
 
     - name: Upload Test Results
       uses: actions/upload-artifact@v4

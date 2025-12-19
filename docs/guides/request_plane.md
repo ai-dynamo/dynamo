@@ -21,8 +21,8 @@ limitations under the License.
 
 Dynamo supports multiple transport mechanisms for its request plane (the communication layer between services). You can choose from three different request plane modes based on your deployment requirements:
 
-- **NATS** (default): Message broker-based request plane
-- **TCP**: Direct TCP connection for optimal performance
+- **TCP** (default): Direct TCP connection for optimal performance
+- **NATS**: Message broker-based request plane
 - **HTTP**: HTTP/2-based request plane
 
 This guide explains how to configure and use request plane in your Dynamo deployment.
@@ -37,16 +37,21 @@ The request plane is the transport layer that handles communication between Dyna
 | **TCP** | Low-latency direct communication | Direct connections, minimal overhead |
 | **HTTP** | Standard deployments, debugging | HTTP/2 protocol, easier observability with standard tools, widely compatible |
 
-## KV Routing and NATS
+## Request Plane vs KV Event Plane
 
-Dynamo's Key-Value (KV) cache based routing optimizes large language model inference by intelligently directing requests to workers with the most relevant KV cache data. KV-aware routing improves both Time To First Token (TTFT) through better cache locality and Inter-Token Latency (ITL) through intelligent load balancing.
+Dynamo has **two independent communication planes**:
 
-Please refer to the [KV Cache Routing documentation](../router/kv_cache_routing.md) for more details.
+- **Request plane** (**`DYN_REQUEST_PLANE`**): how **RPC requests** flow between components (frontend → router → worker), via `tcp`, `http`, or `nats`.
+- **KV event plane** (currently only **NATS** is supported): how **KV cache events** (and optional router replica sync) are distributed/persisted for KV-aware routing.
 
-There are two modes of KV based routing:
-- Exact KV routing (needs NATS):  KV routing is based KV events indexing in a radix tree scoring the best match for the request. *This requires NATS* to persist and distribute KV events across routers.
+**Note:** if you are using `tcp` or `http` request plane and choose to use NATS for KV events, you must still configure NATS server using `NATS_SERVER` environment variable, e.g. `NATS_SERVER=nats://nats-hostname:port`.
 
-- Approximate KV routing (does not need NATS): KV routing is based on approximate load heuristics. *This does not require NATS*.
+Because they are independent, you can mix them.
+
+For example, a deployment with TCP request plane can use different KV event planes:
+- **JetStream KV events**: requests use TCP, KV routing still uses NATS JetStream + object store for persistence.
+- **NATS Core KV events (local indexer)**: requests use TCP, KV events use NATS Core pub/sub and persistence lives on workers.
+- **no KV events**: requests use TCP and KV routing runs without events (no NATS required, but no event-backed persistence).
 
 ## Configuration
 
@@ -59,51 +64,27 @@ export DYN_REQUEST_PLANE=<mode>
 ```
 
 Where `<mode>` is one of:
-- `nats` (default)
-- `tcp`
+- `tcp` (default)
+- `nats`
 - `http`
 
 The value is case-insensitive.
 
 ### Default Behavior
 
-If `DYN_REQUEST_PLANE` is not set or contains an invalid value, Dynamo defaults to `nats`.
+If `DYN_REQUEST_PLANE` is not set or contains an invalid value, Dynamo defaults to `tcp`.
 
 ## Usage Examples
 
-### Using NATS (Default)
+### Using TCP (Default)
 
-NATS is the default request plane and provides the most flexibility for complex deployments.
-
-**Prerequisites:**
-- NATS server must be running and accessible
-- Configure NATS connection via standard Dynamo NATS environment variables
-
-```bash
-# Explicitly set to NATS (optional, as it's the default)
-
-# Run your Dynamo service
-DYN_REQUEST_PLANE=nats python -m dynamo.frontend --http-port=8000 &
-DYN_REQUEST_PLANE=nats python -m dynamo.vllm --model Qwen/Qwen3-0.6B
-```
-
-**When to use NATS:**
-- Production deployments with service discovery
-- Currently (HA) highly available routers require durable messages persisted in NATS message broker. If you want to completely disable NATS, KV based routing won't be available
-- Multiple frontends and backends
-- Need for message replay and persistence features
-
-Limitations:
-- NATS does not support payloads beyond 16MB (use TCP for larger payloads)
-
-### Using TCP
-
-TCP provides direct, low-latency communication between services.
+TCP is the default request plane and provides direct, low-latency communication between services.
 
 **Configuration:**
 
 ```bash
-# Set request plane to TCP
+# TCP is the default, so no need to set DYN_REQUEST_PLANE explicitly
+# But you can explicitly set it if desired:
 export DYN_REQUEST_PLANE=tcp
 
 # Optional: Configure TCP server host and port
@@ -119,7 +100,7 @@ DYN_REQUEST_PLANE=tcp python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 
 **When to use TCP:**
 - Simple deployments with direct service-to-service communication (e.g. frontend to backend)
-- Minimal infrastructure requirements (no NATS needed)
+- Minimal infrastructure requirements (**no NATS needed unless you enable KV-event-backed routing/replica sync**)
 - Low-latency requirements
 
 **TCP Configuration Options:**
@@ -172,6 +153,31 @@ Additional HTTP-specific environment variables:
 - `DYN_HTTP2_KEEP_ALIVE_TIMEOUT_SECS`: Keep-alive timeout for HTTP client (default: 10 seconds)
 - `DYN_HTTP2_ADAPTIVE_WINDOW`: Enable adaptive flow control (default: true)
 
+### Using NATS
+
+NATS provides durable jetstream messaging for request plane and can be used for KV events (and router replica sync).
+
+**Prerequisites:**
+- NATS server must be running and accessible
+- Configure NATS connection via standard Dynamo NATS environment variables
+
+```bash
+# Explicitly set to NATS
+export DYN_REQUEST_PLANE=nats
+
+# Run your Dynamo service
+DYN_REQUEST_PLANE=nats python -m dynamo.frontend --http-port=8000 &
+DYN_REQUEST_PLANE=nats python -m dynamo.vllm --model Qwen/Qwen3-0.6B
+```
+
+**When to use NATS:**
+- Production deployments with service discovery
+- Currently KV based routing require NATS. If you want to completely disable NATS, KV based routing won't be available
+- Need for message replay and persistence features
+
+Limitations:
+- NATS does not support payloads beyond 16MB (use TCP for larger payloads)
+
 ## Complete Example
 
 Here's a complete example showing how to launch a Dynamo deployment with different request planes:
@@ -221,7 +227,7 @@ This abstraction means your application code doesn't need to change when switchi
 
 Request plane configuration is loaded from environment variables at startup and cached globally. The configuration hierarchy is:
 
-1. **Mode Selection**: `DYN_REQUEST_PLANE` (defaults to `nats`)
+1. **Mode Selection**: `DYN_REQUEST_PLANE` (defaults to `tcp`)
 2. **Transport-Specific Config**: Mode-specific environment variables (e.g., `DYN_TCP_*`, `DYN_HTTP2_*`)
 
 ## Migration Guide
@@ -274,7 +280,7 @@ curl http://localhost:8000/v1/chat/completions \
 **Solutions:**
 - Check `DYN_REQUEST_PLANE` spelling (valid values: `nats`, `tcp`, `http`)
 - Value is case-insensitive but must be one of the three options
-- If not set, defaults to `nats`
+- If not set, defaults to `tcp`
 
 ### Issue: Port Conflicts
 

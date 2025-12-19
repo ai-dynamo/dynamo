@@ -135,6 +135,7 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
 def test_etcd_ha_failover_trtllm_aggregated(request, predownload_models):
     """
     Test ETCD High Availability with repeated node failures and recoveries for TRT-LLM in aggregated mode.
@@ -208,6 +209,7 @@ def test_etcd_ha_failover_trtllm_aggregated(request, predownload_models):
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
 def test_etcd_ha_failover_trtllm_disaggregated(
     request, predownload_models, set_ucx_tls_no_mm
 ):
@@ -288,6 +290,7 @@ def test_etcd_ha_failover_trtllm_disaggregated(
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
 def test_etcd_non_ha_shutdown_trtllm_aggregated(request, predownload_models):
     """
     Test that frontend and worker shut down when single ETCD node is terminated for TRT-LLM in aggregated mode.
@@ -348,6 +351,7 @@ def test_etcd_non_ha_shutdown_trtllm_aggregated(request, predownload_models):
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
 def test_etcd_non_ha_shutdown_trtllm_disaggregated(
     request, predownload_models, set_ucx_tls_no_mm
 ):

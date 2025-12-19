@@ -104,12 +104,21 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 				},
 			},
 		},
+		{
+			Name: "POD_UID",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.uid",
+				},
+			},
+		},
 	}
 
-	if context.DiscoveryBackend != "" {
+	// Set discovery backend env var to "kubernetes" unless explicitly set to "etcd"
+	if context.DiscoveryBackend != "etcd" {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
-			Value: context.DiscoveryBackend,
+			Value: "kubernetes",
 		})
 	}
 

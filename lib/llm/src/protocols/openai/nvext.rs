@@ -35,6 +35,11 @@ pub struct NvExtResponse {
     /// Populated when client requests `extra_fields: ["timing"]`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timing: Option<TimingInfo>,
+
+    /// Token IDs for GAIE Stage 1 query-only mode
+    /// Contains the tokenized prompt for reuse in Stage 2
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_ids: Option<Vec<u32>>,
 }
 
 /// NVIDIA LLM extensions to the OpenAI API
@@ -87,6 +92,18 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub extra_fields: Option<Vec<String>>,
+
+    /// Targeted prefill worker ID for disaggregated serving (GAIE Stage 2)
+    /// When set, the request will be routed to this specific prefill worker.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_id: Option<u64>,
+
+    /// Targeted decode worker ID for disaggregated serving (GAIE Stage 2)
+    /// When set, the request will be routed to this specific decode worker.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_worker_id: Option<u64>,
 }
 
 impl Default for NvExt {
@@ -133,6 +150,8 @@ mod tests {
         assert_eq!(nv_ext.token_data, None);
         assert_eq!(nv_ext.max_thinking_tokens, None);
         assert_eq!(nv_ext.extra_fields, None);
+        assert_eq!(nv_ext.prefill_worker_id, None);
+        assert_eq!(nv_ext.decode_worker_id, None);
     }
 
     // Test valid builder configurations
@@ -155,6 +174,20 @@ mod tests {
         assert_eq!(nv_ext.max_thinking_tokens, Some(1024));
         assert_eq!(nv_ext.extra_fields, Some(vec!["worker_id".to_string()]));
         // Validate the built struct
+        assert!(nv_ext.validate().is_ok());
+    }
+
+    // Test GAIE Stage 2 disaggregated worker IDs
+    #[test]
+    fn test_nv_ext_disagg_worker_ids() {
+        let nv_ext = NvExt::builder()
+            .prefill_worker_id(100)
+            .decode_worker_id(200)
+            .build()
+            .unwrap();
+
+        assert_eq!(nv_ext.prefill_worker_id, Some(100));
+        assert_eq!(nv_ext.decode_worker_id, Some(200));
         assert!(nv_ext.validate().is_ok());
     }
 }

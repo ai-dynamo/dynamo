@@ -77,7 +77,7 @@ type Config struct {
 	// ExcludedNamespaces is a thread-safe set of namespaces to exclude (cluster-wide mode only)
 	ExcludedNamespaces ExcludedNamespacesInterface
 
-	// DiscoveryBackend is the discovery backend to use. By default, will rely on ETCD for discovery. Can be set to "kubernetes" to use Kubernetes API for service discovery.
+	// DiscoveryBackend is the discovery backend to use. Default is "kubernetes" for Kubernetes API service discovery. Set to "etcd" to use ETCD for discovery.
 	DiscoveryBackend string
 
 	// WebhooksEnabled indicates whether admission webhooks are enabled
