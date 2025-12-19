@@ -2,23 +2,42 @@ docs: &docs
   - 'docs/**'
   - '**/*.md'
   - '**/*.rst'
+  - '**/*.txt'
 
 ci: &ci
   - '.github/workflows/**'
   - '.github/filters.yaml'
   - '.github/actions/**'
 
-has_code_changes:
+core:
   - *ci
   - 'container/build.sh'
   - 'container/deps/*'
-  - 'deploy/**'
   - 'lib/**'
   - 'tests/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/mocker/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - '*.toml'
+  - '*.lock'
+  - '*.py'
+  - '*.rs'
+  - '!**/*.md' # Avoid running on doc changes
+  - '!**/*.rst' # Avoid running on doc changes
+  - '!**/*.txt' # Avoid running on doc changes
+
+operator:
+  - *ci
+  - 'deploy/cloud/operator/**'
+
+deploy:
+  - 'deploy/cloud/helm/**'
+  - 'deploy/utils/**'
+
+planner:
+  - 'components/src/dynamo/planner/**'
+  - 'tests/planner/**'
 
 vllm: &vllm
   - 'container/Dockerfile.vllm'
@@ -40,6 +59,3 @@ trtllm: &trtllm
   - 'components/src/dynamo/trtllm/**'
   - 'container/build_trtllm_wheel.sh'
   - 'tests/serve/test_trtllm.py'
-
-sdk:
-  - 'deploy/**'
