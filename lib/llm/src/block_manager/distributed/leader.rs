@@ -15,7 +15,8 @@ use tokio::sync::OnceCell;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 use crate::block_manager::config::ObjectStorageConfig;
-use super::registry::{DistributedRegistry, ObjectRegistry, SequenceHashRegistry};
+use super::registry::{DistributedRegistry, ObjectRegistry, RemoteKeyBuilder, SequenceHashRegistry};
+use crate::block_manager::block::transfer::remote::RemoteKey;
 
 #[derive(Builder, Clone, Debug, Default)]
 pub struct KvbmLeaderNumBlocksConfig {
@@ -119,31 +120,14 @@ pub struct KvbmLeaderState {
     pub workers_ready_notify: Arc<Notify>,
 }
 
-/// The leader of the KVBM.
-///
-/// This is responsible for:
-/// - Establishing a ZMQ connection with workers.
-/// - Syncing the leader barrier with workers.
-/// - Sending messages to workers.
-/// - Maintaining G4 registry for fast onboard lookups.
 pub struct KvbmLeader {
     state: Arc<KvbmLeaderState>,
     zmq_leader: Arc<OnceCell<ZmqActiveMessageLeader>>,
     config: KvbmLeaderConfig,
-
-    /// G4 local registry for tracking sequence hashes offloaded to object storage.
-    /// This is a local cache - the distributed registry is the source of truth.
     g4_registry: Option<SequenceHashRegistry>,
-
-    /// Distributed registry client for cross-worker lookups.
-    /// This is the source of truth for what exists in object storage.
     distributed_registry: Option<Arc<dyn DistributedRegistry>>,
-
-    /// Bucket name for distributed registry lookups.
-    g4_bucket: String,
-
-    /// Tokio runtime handle for blocking calls from non-async contexts.
-    /// Captured at construction time when we're in an async context.
+    key_builder: Option<RemoteKeyBuilder>,
+    worker_id: u32,
     runtime_handle: Option<tokio::runtime::Handle>,
 }
 
@@ -174,12 +158,18 @@ impl KvbmLeader {
             None
         };
 
-        // Get bucket name from config or use default
-        let g4_bucket = config
-            .object_storage_config
-            .as_ref()
-            .map(|c| c.resolve_bucket(0))
-            .unwrap_or_else(|| "kvcache".to_string());
+        let key_builder = if g4_enabled {
+            config.object_storage_config.as_ref().map(|obj_cfg| {
+                RemoteKeyBuilder::from_object_config(
+                    obj_cfg.bucket_template.clone(),
+                    config.world_size as u32,
+                )
+            })
+        } else {
+            None
+        };
+
+        let worker_id = 0u32;
 
         // Capture the tokio runtime handle for later blocking calls
         let runtime_handle = tokio::runtime::Handle::try_current().ok();
@@ -190,7 +180,8 @@ impl KvbmLeader {
             config,
             g4_registry,
             distributed_registry,
-            g4_bucket,
+            key_builder,
+            worker_id,
             runtime_handle,
         };
 
@@ -320,88 +311,61 @@ impl KvbmLeader {
         }
     }
 
-    /// Check if G4 is enabled.
     pub fn g4_enabled(&self) -> bool {
-        tracing::debug!(
-            "g4_enabled: g4_registry={}, distributed_registry={}",
-            self.g4_registry.is_some(),
-            self.distributed_registry.is_some()
-        );
         self.g4_registry.is_some() || self.distributed_registry.is_some()
     }
 
-    /// Get a clone of the G4 registry (if enabled).
-    /// Returns the shared registry reference for use by other components.
     pub fn g4_registry(&self) -> Option<SequenceHashRegistry> {
         self.g4_registry.clone()
     }
 
-    /// Register sequence hashes in the G4 registry after successful offload.
-    /// Updates both local cache and distributed registry.
     pub fn g4_register_hashes(&self, hashes: &[u64]) {
         if hashes.is_empty() {
             return;
         }
 
-        // Register in local cache (sync, in-memory)
         if let Some(registry) = &self.g4_registry {
             registry.register(hashes);
-            tracing::debug!(
-                "Registered {} hashes in local G4 cache",
-                hashes.len()
-            );
+            tracing::debug!("Registered {} hashes in local G4 cache", hashes.len());
         }
 
-        // Register in distributed registry (async, network)
-        if let Some(distributed) = &self.distributed_registry {
-            let distributed = distributed.clone();
-            let bucket = self.g4_bucket.clone();
-            let hashes = hashes.to_vec();
+        let (distributed, builder, handle) = match (
+            &self.distributed_registry,
+            &self.key_builder,
+            &self.runtime_handle,
+        ) {
+            (Some(d), Some(b), Some(h)) => (d.clone(), b, h),
+            _ => return,
+        };
 
-            // Spawn async registration - fire and forget, non-blocking
-            if let Some(handle) = &self.runtime_handle {
-                handle.spawn(async move {
-                    match distributed.register(&bucket, &hashes).await {
-                        Ok(()) => {
-                            tracing::debug!(
-                                "Registered {} hashes in distributed registry (bucket={})",
-                                hashes.len(),
-                                bucket
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to register {} hashes in distributed registry: {}",
-                                hashes.len(),
-                                e
-                            );
-                        }
-                    }
-                });
-            } else {
+        let keys: Vec<RemoteKey> = hashes
+            .iter()
+            .map(|&hash| builder.build_for_worker(self.worker_id, hash))
+            .collect();
+        let num_keys = keys.len();
+
+        handle.spawn(async move {
+            if let Err(e) = distributed.register_remote_keys(&keys).await {
                 tracing::warn!(
-                    "No runtime handle - cannot register {} hashes in distributed registry",
-                    hashes.len()
+                    "Failed to register {} RemoteKeys in distributed registry: {}",
+                    num_keys,
+                    e
                 );
             }
-        }
+        });
     }
 
-    /// Check which hashes need offloading (deduplication).
-    ///
-    /// Returns hashes that are NOT already in G4 storage.
-    /// Checks local registry first, then distributed registry.
     pub async fn g4_filter_for_offload(&self, hashes: &[u64]) -> Vec<u64> {
         if hashes.is_empty() {
             return vec![];
         }
 
-        // First filter out hashes already in local registry
         let need_check: Vec<u64> = match &self.g4_registry {
             Some(registry) => {
                 let existing: std::collections::HashSet<_> =
                     registry.match_keys(hashes).into_iter().collect();
-                hashes.iter()
+                hashes
+                    .iter()
                     .filter(|h| !existing.contains(h))
                     .copied()
                     .collect()
@@ -410,129 +374,125 @@ impl KvbmLeader {
         };
 
         if need_check.is_empty() {
-            tracing::debug!("g4_filter_for_offload: all {} hashes in local cache", hashes.len());
             return vec![];
         }
 
-        // Check distributed registry for remaining
-        if let Some(distributed) = &self.distributed_registry {
-            let bucket = self.g4_bucket.clone();
-            match distributed.can_offload(&bucket, &need_check).await {
-                Ok(result) => {
-                    tracing::debug!(
-                        "g4_filter_for_offload: {} can offload, {} already stored, {} leased",
-                        result.can_offload.len(),
-                        result.already_stored.len(),
-                        result.leased.len()
-                    );
-                    result.can_offload
-                }
-                Err(e) => {
-                    tracing::warn!("Distributed registry can_offload failed: {}", e);
-                    // Fall back to allowing all (no dedup)
-                    need_check
-                }
+        let (distributed, builder) = match (&self.distributed_registry, &self.key_builder) {
+            (Some(d), Some(b)) => (d, b),
+            _ => return need_check,
+        };
+
+        let bucket = builder.location_for_worker(self.worker_id);
+        match distributed.can_offload(&bucket, &need_check).await {
+            Ok(result) => result.can_offload,
+            Err(e) => {
+                tracing::warn!("Distributed registry can_offload failed: {}", e);
+                need_check
             }
-        } else {
-            // No distributed registry, allow all that aren't in local
-            need_check
         }
     }
 
-    /// Match sequence hashes against the G4 registry (local + distributed).
-    ///
-    /// Returns the contiguous prefix of hashes that exist in G4.
-    /// First checks local cache, then queries distributed registry for remaining.
     pub fn g4_lookup(&self, hashes: &[u64]) -> Vec<u64> {
+        self.g4_lookup_remote_keys(hashes)
+            .into_iter()
+            .filter_map(|key| key.sequence_hash())
+            .collect()
+    }
+
+    pub fn g4_lookup_remote_keys(&self, hashes: &[u64]) -> Vec<RemoteKey> {
         if hashes.is_empty() {
             return vec![];
         }
-        // First check local registry (fast path)
-        let local_matched = match &self.g4_registry {
-            Some(registry) => registry.match_keys(hashes),
-            None => vec![],
+
+        let local_matched: Vec<RemoteKey> = match (&self.g4_registry, &self.key_builder) {
+            (Some(registry), Some(builder)) => {
+                let local_hashes = registry.match_keys(hashes);
+                local_hashes
+                    .iter()
+                    .map(|&hash| builder.build_for_worker(self.worker_id, hash))
+                    .collect()
+            }
+            _ => vec![],
         };
 
-        tracing::debug!(
-            "g4_lookup: local_matched={} of {} hashes",
-            local_matched.len(),
-            hashes.len()
-        );
-
-        // If we matched everything locally, we're done
         if local_matched.len() == hashes.len() {
             return local_matched;
         }
 
-        // Check distributed registry for remaining hashes
-        if let Some(distributed) = &self.distributed_registry {
-            let remaining_offset = local_matched.len();
-            let remaining_hashes = &hashes[remaining_offset..];
+        let (key_builder, distributed, handle) = match (
+            &self.key_builder,
+            &self.distributed_registry,
+            &self.runtime_handle,
+        ) {
+            (Some(kb), Some(d), Some(h)) => (kb, d, h),
+            _ => return local_matched,
+        };
 
-            tracing::debug!(
-                "g4_lookup: checking distributed registry for {} remaining hashes",
-                remaining_hashes.len()
-            );
-
-            if !remaining_hashes.is_empty() {
-                // Use stored runtime handle for blocking call
-                let distributed_matched = if let Some(handle) = &self.runtime_handle {
-                    let bucket = self.g4_bucket.clone();
-                    let dist = distributed.clone();
-                    let hashes = remaining_hashes.to_vec();
-
-                    // Use the stored handle to run the async lookup
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        tokio::task::block_in_place(|| {
-                            handle.block_on(async {
-                                dist.match_sequence_hashes(&bucket, &hashes).await
-                            })
-                        })
-                    })) {
-                        Ok(Ok(matches)) => {
-                            let result: Vec<u64> = matches.into_iter().map(|(h, _)| h).collect();
-                            tracing::debug!(
-                                "g4_lookup: distributed registry returned {} matches",
-                                result.len()
-                            );
-                            result
-                        }
-                        Ok(Err(e)) => {
-                            tracing::warn!("Distributed registry lookup failed: {}", e);
-                            vec![]
-                        }
-                        Err(_) => {
-                            tracing::warn!("Distributed registry lookup panicked (block_in_place failed)");
-                            vec![]
-                        }
-                    }
-                } else {
-                    tracing::warn!("No runtime handle available for distributed registry lookup");
-                    vec![]
-                };
-
-                if !distributed_matched.is_empty() {
-                    tracing::debug!(
-                        "Distributed registry matched {} additional hashes",
-                        distributed_matched.len()
-                    );
-
-                    // Register matches in local cache for future lookups
-                    if let Some(local_registry) = &self.g4_registry {
-                        local_registry.register(&distributed_matched);
-                    }
-
-                    // Combine local and distributed matches
-                    let mut all_matched = local_matched;
-                    all_matched.extend(distributed_matched);
-                    return all_matched;
-                }
-            }
-        } else {
-            tracing::warn!("g4_lookup: no distributed registry available");
+        let remaining_hashes = &hashes[local_matched.len()..];
+        if remaining_hashes.is_empty() {
+            return local_matched;
         }
 
-        local_matched
+        let candidate_keys: Vec<RemoteKey> = remaining_hashes
+            .iter()
+            .flat_map(|&hash| key_builder.build_all(hash))
+            .collect();
+
+        let dist = distributed.clone();
+        let distributed_matched = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tokio::task::block_in_place(|| {
+                handle.block_on(async { dist.match_remote_keys(&candidate_keys).await })
+            })
+        })) {
+            Ok(Ok(matches)) => matches,
+            Ok(Err(e)) => {
+                tracing::warn!("Distributed registry lookup failed: {}", e);
+                return local_matched;
+            }
+            Err(_) => {
+                tracing::warn!("Distributed registry lookup panicked (block_in_place failed)");
+                return local_matched;
+            }
+        };
+
+        if distributed_matched.is_empty() {
+            return local_matched;
+        }
+
+        let mut seen_hashes = std::collections::HashSet::new();
+        let mut unique_matches: Vec<RemoteKey> = Vec::new();
+
+        for key in distributed_matched {
+            if let Some(hash) = key.sequence_hash() {
+                if seen_hashes.insert(hash) {
+                    unique_matches.push(key);
+                }
+            }
+        }
+
+        if let Some(local_registry) = &self.g4_registry {
+            let local_bucket = key_builder.location_for_worker(self.worker_id);
+            let hashes_to_cache: Vec<u64> = unique_matches
+                .iter()
+                .filter(|key| key.location() == local_bucket)
+                .filter_map(|key| key.sequence_hash())
+                .collect();
+
+            if !hashes_to_cache.is_empty() {
+                local_registry.register(&hashes_to_cache);
+            }
+        }
+
+        let mut all_matched = local_matched;
+        all_matched.extend(unique_matches);
+        all_matched
     }
 
+    pub fn key_builder(&self) -> Option<&RemoteKeyBuilder> {
+        self.key_builder.as_ref()
+    }
+
+    pub fn worker_id(&self) -> u32 {
+        self.worker_id
+    }
 }

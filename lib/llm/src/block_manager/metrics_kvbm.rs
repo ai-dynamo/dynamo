@@ -5,8 +5,8 @@ use axum::Router;
 use dynamo_runtime::metrics::prometheus_names::{
     kvbm::{
         DISK_CACHE_HIT_RATE, HOST_CACHE_HIT_RATE, MATCHED_TOKENS, OBJECT_CACHE_HIT_RATE,
-        OFFLOAD_BLOCKS_D2D, OFFLOAD_BLOCKS_D2H, OFFLOAD_BLOCKS_D2O, OFFLOAD_BLOCKS_H2D,
-        ONBOARD_BLOCKS_D2D, ONBOARD_BLOCKS_H2D, ONBOARD_BLOCKS_O2D,
+        OBJECT_READ_FAILURES, OFFLOAD_BLOCKS_D2D, OFFLOAD_BLOCKS_D2H, OFFLOAD_BLOCKS_D2O,
+        OFFLOAD_BLOCKS_H2D, ONBOARD_BLOCKS_D2D, ONBOARD_BLOCKS_H2D, ONBOARD_BLOCKS_O2D,
     },
     sanitize_prometheus_name,
 };
@@ -50,6 +50,9 @@ pub struct KvbmMetrics {
 
     // object cache hit rate (0.0-1.0) from the sliding window
     pub object_cache_hit_rate: Gauge,
+
+    // number of failed object storage read operations (blocks)
+    pub object_read_failures: IntCounter,
 
     shutdown_notify: Option<Arc<Notify>>,
 }
@@ -132,6 +135,13 @@ impl KvbmMetrics {
                 &[],
             )
             .unwrap();
+        let object_read_failures = mr
+            .create_intcounter(
+                OBJECT_READ_FAILURES,
+                "The number of failed object storage read operations (blocks)",
+                &[],
+            )
+            .unwrap();
 
         // early return if no endpoint is needed
         if !create_endpoint {
@@ -147,6 +157,7 @@ impl KvbmMetrics {
                 host_cache_hit_rate,
                 disk_cache_hit_rate,
                 object_cache_hit_rate,
+                object_read_failures,
                 shutdown_notify: None,
             };
         }
@@ -206,6 +217,7 @@ impl KvbmMetrics {
             host_cache_hit_rate,
             disk_cache_hit_rate,
             object_cache_hit_rate,
+            object_read_failures,
             shutdown_notify: Some(notify),
         }
     }
@@ -215,6 +227,11 @@ impl KvbmMetrics {
         self.host_cache_hit_rate.set(host_rate as f64);
         self.disk_cache_hit_rate.set(disk_rate as f64);
         self.object_cache_hit_rate.set(object_rate as f64);
+    }
+
+    /// Record failed object storage read operations
+    pub fn record_object_read_failure(&self, num_blocks: u64) {
+        self.object_read_failures.inc_by(num_blocks);
     }
 }
 

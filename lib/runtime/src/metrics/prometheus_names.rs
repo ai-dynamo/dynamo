@@ -360,6 +360,9 @@ pub mod kvbm {
 
     /// Bytes transferred from object storage (onboard)
     pub const ONBOARD_BYTES_OBJECT: &str = "onboard_bytes_object";
+
+    /// Number of failed object storage read operations (blocks)
+    pub const OBJECT_READ_FAILURES: &str = "object_read_failures";
 }
 
 /// KvStats metrics from LLM workers
