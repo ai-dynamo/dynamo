@@ -17,7 +17,6 @@ const (
 	kindServiceAccount = "ServiceAccount"
 	apiGroupRBAC       = "rbac.authorization.k8s.io"
 	apiGroupCore       = ""
-	apiGroupNvidia     = "nvidia.com"
 )
 
 func GetK8sDiscoveryServiceAccountName(dgdName string) string {
@@ -62,11 +61,6 @@ func GetK8sDiscoveryRole(dgdName string, namespace string) *rbacv1.Role {
 				APIGroups: []string{"discovery.k8s.io"},
 				Resources: []string{"endpointslices"},
 				Verbs:     []string{"get", "list", "watch"},
-			},
-			{
-				APIGroups: []string{apiGroupNvidia},
-				Resources: []string{"dynamoworkermetadatas"},
-				Verbs:     []string{"create", "get", "list", "watch", "update", "patch", "delete"},
 			},
 		},
 	}

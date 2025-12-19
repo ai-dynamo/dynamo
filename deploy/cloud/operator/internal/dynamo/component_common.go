@@ -104,14 +104,6 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 				},
 			},
 		},
-		{
-			Name: "POD_UID",
-			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{
-					FieldPath: "metadata.uid",
-				},
-			},
-		},
 	}
 
 	if context.DiscoveryBackend != "" {
