@@ -190,6 +190,7 @@ vllm serve Qwen/Qwen3-0.6B \
 ```
 
 - **Mitigation (silence)**: set `LMCACHE_LOG_LEVEL=CRITICAL`.
+- **Upstream issue**: [vLLM issue #30996](https://github.com/vllm-project/vllm/issues/30996).
 
 #### vLLM log: `Found PROMETHEUS_MULTIPROC_DIR was set by user`
 
