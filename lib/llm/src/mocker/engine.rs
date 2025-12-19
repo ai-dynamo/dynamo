@@ -238,8 +238,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
     ) -> Result<ManyOut<LLMEngineOutput>, Error> {
         let (request, ctx) = input.into_parts();
 
-        // Extract dp_rank from request field (defaults to 0 if not set)
-        let dp_rank = request.dp_rank.unwrap_or(0);
+        // Extract dp_rank from routing hints (defaults to 0 if not set)
+        let dp_rank = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.dp_rank)
+            .unwrap_or(0);
 
         // Validate dp_rank
         if dp_rank >= self.engine_args.dp_size {

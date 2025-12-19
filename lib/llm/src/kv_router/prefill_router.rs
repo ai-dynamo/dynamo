@@ -72,7 +72,7 @@ impl InnerPrefillRouter {
 ///
 /// Supports regular Dynamo and GAIE integrated mode via query_instance_id state machine:
 /// - GAIE Stage 1: query_instance_id transitions "" -> "prefill" -> "decode", returns only worker IDs
-/// - GAIE Stage 2: target_prefill_worker_id/target_decode_worker_id are set, full execution with specified workers
+/// - GAIE Stage 2: routing.prefill_worker_id/routing.decode_worker_id are set, full execution with specified workers
 /// - Non-GAIE: like GAIE Stage 2 but the worker ids have to be determined.
 pub struct PrefillRouter {
     prefill_router: OnceLock<InnerPrefillRouter>,
@@ -221,7 +221,7 @@ impl PrefillRouter {
 
         // Use pre-selected worker (GAIE Stage 2) or query for best worker
         let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
-            let dp_rank = req.dp_rank.unwrap_or(0);
+            let dp_rank = req.routing.as_ref().and_then(|r| r.dp_rank).unwrap_or(0);
             tracing::debug!(
                 worker_id = id,
                 dp_rank = dp_rank,
@@ -377,13 +377,17 @@ impl PrefillRouter {
             prefill_req
                 .annotations
                 .push(format!("query_instance_id:{}", RequestPhase::Prefill));
-        } else if let Some(prefill_worker_id) = prefill_req.target_prefill_worker_id {
+        } else if let Some(prefill_worker_id) = prefill_req
+            .routing
+            .as_ref()
+            .and_then(|r| r.prefill_worker_id)
+        {
             // GAIE Stage 2: Route to pre-selected prefill worker from the stage 1
             tracing::debug!(
-                target_prefill_worker_id = prefill_worker_id,
+                prefill_worker_id = prefill_worker_id,
                 "GAIE Stage 2: Routing prefill to pre-selected worker"
             );
-            prefill_req.backend_instance_id = Some(prefill_worker_id);
+            prefill_req.routing_mut().backend_instance_id = Some(prefill_worker_id);
         }
     }
 
@@ -456,8 +460,11 @@ impl
         Self::prepare_prefill_for_gaie(&mut prefill_req, is_gaie_stage1);
 
         // Try build_bootstrap_info optimization (skip for GAIE Stage 1 which needs query-only flow)
-        // For GAIE Stage 2, use target_prefill_worker_id if provided
-        let preselected_worker = prefill_req.target_prefill_worker_id;
+        // For GAIE Stage 2, use prefill_worker_id if provided
+        let preselected_worker = prefill_req
+            .routing
+            .as_ref()
+            .and_then(|r| r.prefill_worker_id);
         let prefill_result = if !is_gaie_stage1 {
             if let Some((worker_id, dp_rank, bootstrap_info)) = self
                 .build_bootstrap_info(&prefill_req, preselected_worker)
@@ -466,8 +473,9 @@ impl
                 let bootstrap_room = bootstrap_info.bootstrap_room;
 
                 // Prepare request with bootstrap_room and force routing to specific worker
-                prefill_req.backend_instance_id = Some(worker_id);
-                prefill_req.dp_rank = Some(dp_rank);
+                let routing = prefill_req.routing_mut();
+                routing.backend_instance_id = Some(worker_id);
+                routing.dp_rank = Some(dp_rank);
                 let extra_args = prefill_req
                     .extra_args
                     .get_or_insert_with(|| serde_json::json!({}));
@@ -578,8 +586,10 @@ impl
                 });
 
                 // GAIE Stage 2: Route to pre-selected decode worker if specified
-                if let Some(decode_worker_id) = decode_req.target_decode_worker_id {
-                    decode_req.backend_instance_id = Some(decode_worker_id);
+                if let Some(decode_worker_id) =
+                    decode_req.routing.as_ref().and_then(|r| r.decode_worker_id)
+                {
+                    decode_req.routing_mut().backend_instance_id = Some(decode_worker_id);
                     tracing::debug!(
                         decode_worker_id = decode_worker_id,
                         "GAIE Stage 2: Routing decode to pre-selected worker"

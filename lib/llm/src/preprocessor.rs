@@ -31,7 +31,7 @@ use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
-    MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder,
+    MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
 };
 use crate::tokenizers::Encoding;
 
@@ -237,13 +237,16 @@ impl OpenAIPreprocessor {
         builder.output_options(request.extract_output_options()?);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
-        // Extract backend_instance_id, extra_fields, and worker IDs from nvext if present
+        // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
-            builder.backend_instance_id(nvext.backend_instance_id);
-            builder.extra_fields(nvext.extra_fields.clone());
-            // GAIE Stage 2: Extract targeted worker IDs for disaggregated serving
-            builder.target_prefill_worker_id(nvext.prefill_worker_id);
-            builder.target_decode_worker_id(nvext.decode_worker_id);
+            // Build routing hints from nvext fields
+            let routing = RoutingHints {
+                backend_instance_id: nvext.backend_instance_id,
+                prefill_worker_id: nvext.prefill_worker_id,
+                decode_worker_id: nvext.decode_worker_id,
+                dp_rank: None, // dp_rank is set later in the pipeline
+            };
+            builder.routing(Some(routing));
         }
 
         Ok(builder)

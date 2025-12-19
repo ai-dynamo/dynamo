@@ -661,10 +661,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let context_id = ctx.context().id().to_string();
         // Handle different request types
         let response = match request {
-            RouterRequest::New {
-                tokens,
-                request_extra_info: _,
-            } => {
+            RouterRequest::New { tokens } => {
                 let (best_worker, overlap_blocks) = self
                     .find_best_match(Some(&context_id), &tokens, None, true)
                     .await?;
@@ -743,57 +740,61 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .map(|t| t.phase())
             .unwrap_or(RequestPhase::Aggregated);
 
-        // Get pre-selected worker based on phase
+        // Get pre-selected worker based on phase, with backend_instance_id as fallback
+        let routing = request.routing.as_ref();
         let preselected = match phase {
-            RequestPhase::Prefill => request.target_prefill_worker_id,
-            RequestPhase::Decode => request.target_decode_worker_id,
-            RequestPhase::Aggregated => None,
+            RequestPhase::Prefill => {
+                routing.and_then(|r| r.prefill_worker_id.or(r.backend_instance_id))
+            }
+            RequestPhase::Decode => {
+                routing.and_then(|r| r.decode_worker_id.or(r.backend_instance_id))
+            }
+            RequestPhase::Aggregated => routing.and_then(|r| r.backend_instance_id),
         };
 
         let block_size = self.chooser.block_size() as usize;
-        let (instance_id, dp_rank, overlap_amount) =
-            if let Some(id) = preselected.or(request.backend_instance_id) {
-                // Route to pre-selected or explicitly specified worker
-                let dp_rank = request.dp_rank.unwrap_or(0);
-                tracing::debug!(
-                    worker_id = id,
-                    dp_rank = dp_rank,
-                    ?phase,
-                    "Routing to specified worker"
-                );
+        let (instance_id, dp_rank, overlap_amount) = if let Some(id) = preselected {
+            // Route to pre-selected or explicitly specified worker
+            let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
+            tracing::debug!(
+                worker_id = id,
+                dp_rank = dp_rank,
+                ?phase,
+                "Routing to specified worker"
+            );
 
-                // Compute actual overlap blocks by querying the indexer
-                let block_hashes =
-                    compute_block_hash_for_seq(&request.token_ids, self.chooser.block_size(), None);
-                let overlap_scores = self.chooser.indexer.find_matches(block_hashes).await?;
-                let worker = WorkerWithDpRank::new(id, dp_rank);
-                let overlap_blocks = overlap_scores.scores.get(&worker).copied().unwrap_or(0);
+            // Compute actual overlap blocks by querying the indexer
+            let block_hashes =
+                compute_block_hash_for_seq(&request.token_ids, self.chooser.block_size(), None);
+            let overlap_scores = self.chooser.indexer.find_matches(block_hashes).await?;
+            let worker = WorkerWithDpRank::new(id, dp_rank);
+            let overlap_blocks = overlap_scores.scores.get(&worker).copied().unwrap_or(0);
 
-                if !is_query_only {
-                    self.chooser
-                        .add_request(
-                            context_id.clone(),
-                            &request.token_ids,
-                            overlap_blocks,
-                            worker,
-                        )
-                        .await;
-                }
-                (id, dp_rank, overlap_blocks)
-            } else {
-                // Find the best worker match
-                // Don't update states if this is a query-only request
-                let (best_worker, overlap_amount) = self
-                    .chooser
-                    .find_best_match(
-                        Some(&context_id),
+            if !is_query_only {
+                self.chooser
+                    .add_request(
+                        context_id.clone(),
                         &request.token_ids,
-                        request.router_config_override.as_ref(),
-                        !is_query_only,
+                        overlap_blocks,
+                        worker,
                     )
-                    .await?;
-                (best_worker.worker_id, best_worker.dp_rank, overlap_amount)
-            };
+                    .await;
+            }
+            (id, dp_rank, overlap_blocks)
+        } else {
+            // Find the best worker match
+            // Don't update states if this is a query-only request
+            let (best_worker, overlap_amount) = self
+                .chooser
+                .find_best_match(
+                    Some(&context_id),
+                    &request.token_ids,
+                    request.router_config_override.as_ref(),
+                    !is_query_only,
+                )
+                .await?;
+            (best_worker.worker_id, best_worker.dp_rank, overlap_amount)
+        };
 
         // Record metrics in tracker: KV hit rate and worker ID based on phase
         if let Some(ref tracker) = request.tracker {
@@ -830,7 +831,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         // Route to worker
         let (mut backend_input, context) = request.into_parts();
-        backend_input.dp_rank = Some(dp_rank);
+        backend_input.routing_mut().dp_rank = Some(dp_rank);
         let updated_request = context.map(|_| backend_input);
 
         let mut response_stream = self.inner.direct(updated_request, instance_id).await?;

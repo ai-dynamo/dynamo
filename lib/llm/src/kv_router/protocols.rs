@@ -36,12 +36,9 @@ impl WorkerWithDpRank {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum RouterRequest {
-    // ini
     #[serde(rename = "new")]
     New {
         tokens: Vec<Token>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_extra_info: Option<RequestExtraInfo>,
     },
     MarkPrefill,
     MarkFree,
@@ -49,10 +46,7 @@ pub enum RouterRequest {
 
 impl Default for RouterRequest {
     fn default() -> Self {
-        RouterRequest::New {
-            tokens: vec![],
-            request_extra_info: None,
-        }
+        RouterRequest::New { tokens: vec![] }
     }
 }
 
