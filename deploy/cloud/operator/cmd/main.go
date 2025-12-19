@@ -201,8 +201,8 @@ func main() {
 		"Interval for renewing namespace scope marker lease (namespace-restricted mode only)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
-	flag.StringVar(&discoveryBackend, "discovery-backend", "",
-		"Discovery backend to use: empty string (default, uses ETCD) or 'kubernetes' (uses Kubernetes API)")
+	flag.StringVar(&discoveryBackend, "discovery-backend", "kubernetes",
+		"Discovery backend to use: 'kubernetes' (default, uses Kubernetes API) or 'etcd' (uses ETCD)")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -215,16 +215,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Validate discoverBackend value
-	if discoveryBackend != "" && discoveryBackend != "kubernetes" {
-		setupLog.Error(nil, "invalid discover-backend value, must be empty string or 'kubernetes'", "value", discoveryBackend)
+	// Validate discoveryBackend value
+	if discoveryBackend != "kubernetes" && discoveryBackend != "etcd" {
+		setupLog.Error(nil, "invalid discovery-backend value, must be 'kubernetes' or 'etcd'", "value", discoveryBackend)
 		os.Exit(1)
 	}
-	if discoveryBackend != "" {
-		setupLog.Info("Discovery backend configured", "backend", discoveryBackend)
-	} else {
-		setupLog.Info("Discovery backend configured", "backend", "etcd (default)")
-	}
+	setupLog.Info("Discovery backend configured", "backend", discoveryBackend)
 
 	// Validate modelExpressURL if provided
 	if modelExpressURL != "" {
