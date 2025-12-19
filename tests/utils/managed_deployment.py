@@ -1287,6 +1287,22 @@ self._logger.info(
 
         return await self._hw_fault_manager.remove_node_affinity()
 
+    async def cleanup_cuda_spec_without_restart(self) -> bool:
+        """
+        Clean up CUDA fault injection from deployment spec WITHOUT restarting pods.
+        
+        Used when relying on NVSentinel's node-drainer to evict pods.
+        The spec is cleaned so new pods (after eviction) will be clean.
+        
+        Returns:
+            True if successful
+        """
+        if not self._hw_fault_manager:
+            self._logger.error("[HW Faults] Hardware fault manager not initialized")
+            return False
+
+        return await self._hw_fault_manager.cleanup_cuda_spec_without_restart()
+
     def is_node_cordoned(self, node_name: str) -> bool:
         """
         Check if a node is cordoned (unschedulable).
@@ -1333,6 +1349,9 @@ self._logger.info(
         )
 
         start_time = time.time()
+        last_log_time = 0  # Track when we last logged
+        log_interval = 30  # Log every 30 seconds
+        
         while (time.time() - start_time) < timeout:
             try:
                 assert self._core_api is not None
@@ -1360,9 +1379,11 @@ self._logger.info(
                     return True
 
                 elapsed = int(time.time() - start_time)
-                if elapsed % 30 == 0 and elapsed > 0:
+                # Log progress every 30 seconds
+                if elapsed - last_log_time >= log_interval:
+                    last_log_time = elapsed
                     self._logger.info(
-                        f"[HW Faults] Waiting for pods: {ready_pods}/{total_pods} ready (expecting {expected_pods})"
+                        f"[HW Faults] [{elapsed}s/{timeout}s] Waiting for pods: {ready_pods}/{total_pods} ready (expecting {expected_pods})"
                     )
 
             except Exception as e:
@@ -1398,11 +1419,15 @@ self._logger.info(
                 )
 
                 # Check if any pod is still on the excluded node
-                pods_on_excluded = [
-                    pod.metadata.name
-                    for pod in pods.items
-                    if pod.spec.node_name == exclude_node
-                ]
+                # Note: kubernetes_asyncio uses snake_case (node_name) but kr8s uses camelCase (nodeName)
+                pods_on_excluded = []
+                all_pod_nodes = []
+                for pod in pods.items:
+                    # Try both attribute styles
+                    node = getattr(pod.spec, 'node_name', None) or getattr(pod.spec, 'nodeName', None)
+                    all_pod_nodes.append(f"{pod.metadata.name}={node}")
+                    if node == exclude_node:
+                        pods_on_excluded.append(pod.metadata.name)
 
                 if not pods_on_excluded:
                     self._logger.info(
@@ -1410,9 +1435,13 @@ self._logger.info(
                     )
                     return True
 
-                self._logger.debug(
-                    f"[HW Faults] {len(pods_on_excluded)} pods still on {exclude_node}"
-                )
+                # Debug: show where pods actually are
+                elapsed = int(time.time() - start_time)
+                if elapsed % 30 < 6:  # Log every ~30s
+                    self._logger.info(
+                        f"[HW Faults] [{elapsed}s] Waiting for pods to leave {exclude_node}: {pods_on_excluded}"
+                    )
+                    self._logger.debug(f"[HW Faults] Pod locations: {all_pod_nodes}")
 
             except Exception as e:
                 self._logger.debug(f"[HW Faults] Error checking pods: {e}")
