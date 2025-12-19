@@ -482,7 +482,7 @@ def test_kv_push_router_bindings(
     "store_backend,use_nats_core,request_plane",
     [
         ("etcd", False, "nats"),  # JetStream mode
-        ("etcd", True, "tcp"),  # NATs core mode (wtih gap detection)
+        ("etcd", True, "tcp"),  # NATS core mode (with gap detection)
         ("file", False, "nats"),  # File backend
     ],
     ids=[
