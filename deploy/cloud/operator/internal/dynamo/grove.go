@@ -26,7 +26,7 @@ type GroveMultinodeDeployer struct {
 }
 
 func (d *GroveMultinodeDeployer) GetLeaderHostname(serviceName string) string {
-	return fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-0.$(GROVE_HEADLESS_SERVICE)", serviceName, commonconsts.GroveRoleSuffixLeader)
+	return fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-0.$(GROVE_HEADLESS_SERVICE)", strings.ToLower(serviceName), commonconsts.GroveRoleSuffixLeader)
 }
 
 func (d *GroveMultinodeDeployer) GetNodeRank() (string, bool) {
@@ -46,7 +46,7 @@ func (d *GroveMultinodeDeployer) GetHostNames(serviceName string, numberOfNodes 
 	// Add worker hostnames
 	for i := int32(0); i < numberOfNodes-1; i++ {
 		workerHostname := fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-%d.$(GROVE_HEADLESS_SERVICE)",
-			serviceName, commonconsts.GroveRoleSuffixWorker, i)
+			strings.ToLower(serviceName), commonconsts.GroveRoleSuffixWorker, i)
 		hostnames = append(hostnames, workerHostname)
 	}
 	return hostnames
