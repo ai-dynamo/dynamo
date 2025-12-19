@@ -8,16 +8,16 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-agg-router-kv-approximation
+  name: vllm-agg-router-kv-approx
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-agg-router-kv-approximation
+      dynamoNamespace: vllm-agg-router-kv-approx
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidian/dynamo-dev/biswa:dynamo-v0.7.1.dev.1247fe315-vllm-runtime
           command:
             - python3
           args:
@@ -31,7 +31,7 @@ spec:
           value: kv
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg-router-kv-approximation
+      dynamoNamespace: vllm-agg-router-kv-approx
       componentType: worker
       replicas: 2
       resources:
@@ -39,7 +39,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidian/dynamo-dev/biswa:dynamo-v0.7.1.dev.1247fe315-vllm-runtime
           workingDir: /workspace/examples/backends/vllm
           command:
           - python3
