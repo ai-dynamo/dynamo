@@ -429,6 +429,11 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 ##################################
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+
+# cleanup unnecessary libs
+RUN apt remove -y python3-apt &&\
+    pip uninstall -y termplotlib
+
 # This ARG is still utilized for SGLANG Version extraction
 ARG RUNTIME_IMAGE_TAG
 WORKDIR /workspace
