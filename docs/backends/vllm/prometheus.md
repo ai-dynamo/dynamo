@@ -129,6 +129,12 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector lmcache
 curl -s localhost:8081/metrics | grep "^lmcache:"
 ```
 
+### Troubleshooting
+
+Troubleshooting LMCache-related metrics and logs (including `PrometheusLogger instance already created with different metadata` and `PROMETHEUS_MULTIPROC_DIR` warnings) is documented in:
+
+- [LMCache Integration Guide](LMCache_Integration.md#troubleshooting)
+
 **For complete LMCache configuration and metric details**, see:
 - [LMCache Integration Guide](LMCache_Integration.md) - Setup and configuration
 - [LMCache Observability Documentation](https://docs.lmcache.ai/production/observability/vllm_endpoint.html) - Complete metrics reference
