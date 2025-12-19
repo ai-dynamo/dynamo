@@ -211,16 +211,21 @@ def trtllm_config_test(request):
 
 @pytest.mark.trtllm
 @pytest.mark.e2e
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_deployment(
     trtllm_config_test,
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
+    num_system_ports,
     predownload_models,
 ):
     """
     Test dynamo deployments with different configurations.
     """
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     # Use per-test ports so tests can run safely under pytest-xdist.
     config = dataclasses.replace(
         trtllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port

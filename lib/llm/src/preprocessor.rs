@@ -237,7 +237,6 @@ impl OpenAIPreprocessor {
         builder.output_options(request.extract_output_options()?);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
-        builder.estimated_prefix_hit_num_blocks(None);
         // Extract backend_instance_id, extra_fields, and worker IDs from nvext if present
         if let Some(nvext) = request.nvext() {
             builder.backend_instance_id(nvext.backend_instance_id);
@@ -943,7 +942,10 @@ impl
         let response_generator = request.response_generator(context.id().to_string());
 
         // convert the chat completion request to a common completion request
-        let (common_request, annotations) = self.preprocess_request(&request).await?;
+        let (mut common_request, annotations) = self.preprocess_request(&request).await?;
+
+        // Attach the timing tracker to the request so downstream components can record metrics
+        common_request.tracker = response_generator.tracker();
 
         let mut response_generator = Box::new(response_generator);
 
@@ -1092,7 +1094,10 @@ impl
         let annotations = self.gather_tokens(&request, &mut builder, None)?;
         self.gather_multi_modal_data(&request, &mut builder).await?;
 
-        let common_request = builder.build()?;
+        let mut common_request = builder.build()?;
+
+        // Attach the timing tracker to the request so downstream components can record metrics
+        common_request.tracker = response_generator.tracker();
 
         // update isl
         response_generator.update_isl(common_request.token_ids.len() as u32);

@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::{
-        common::{self, timing::RequestTimingTracker},
-        openai::nvext::{NvExtProvider, NvExtResponse, TimingInfo, WorkerIdInfo},
+        common::{self, timing::RequestTracker},
+        openai::nvext::{NvExtProvider, NvExtResponse, TimingInfo},
     },
     types::TokenIdType,
 };
@@ -44,11 +46,20 @@ impl NvCreateChatCompletionRequest {
     /// # Returns
     /// * [`DeltaGenerator`] configured with model name and response options.
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
-        // Check if client requested timing in extra_fields
-        let enable_timing = self
+        // Enable tracking if:
+        // 1. Client requested timing in extra_fields, OR
+        // 2. query_instance_id annotation is present (needs worker_id tracking for response)
+        let enable_tracking = self
             .nvext()
-            .and_then(|nv| nv.extra_fields.as_ref())
-            .is_some_and(|fields| fields.iter().any(|f| f == "timing"));
+            .map(|nv| {
+                nv.extra_fields
+                    .as_ref()
+                    .is_some_and(|fields| fields.iter().any(|f| f == "timing"))
+                    || nv.annotations.as_ref().is_some_and(|annots| {
+                        annots.iter().any(|a| a.starts_with("query_instance_id"))
+                    })
+            })
+            .unwrap_or(false);
 
         let options = DeltaGeneratorOptions {
             enable_usage: self
@@ -59,7 +70,7 @@ impl NvCreateChatCompletionRequest {
                 .unwrap_or(false),
             enable_logprobs: self.inner.logprobs.unwrap_or(false)
                 || self.inner.top_logprobs.unwrap_or(0) > 0,
-            enable_timing,
+            enable_tracking,
             runtime_config: ModelRuntimeConfig::default(),
         };
 
@@ -74,8 +85,8 @@ pub struct DeltaGeneratorOptions {
     pub enable_usage: bool,
     /// Determines whether log probabilities should be included in the response.
     pub enable_logprobs: bool,
-    /// Determines whether timing information should be included in the response's nvext.
-    pub enable_timing: bool,
+    /// Determines whether request tracking (timing, KV hit rate) should be enabled.
+    pub enable_tracking: bool,
 
     pub runtime_config: ModelRuntimeConfig,
 }
@@ -99,8 +110,8 @@ pub struct DeltaGenerator {
     msg_counter: u64,
     /// Configuration options for response generation.
     options: DeltaGeneratorOptions,
-    /// Optional timing tracker for per-request timing metrics.
-    timing_tracker: Option<RequestTimingTracker>,
+    /// Optional request tracker for per-request metrics (shared with PreprocessedRequest).
+    tracker: Option<Arc<RequestTracker>>,
 }
 
 impl DeltaGenerator {
@@ -133,9 +144,9 @@ impl DeltaGenerator {
 
         let chatcmpl_id = format!("chatcmpl-{request_id}");
 
-        // Create timing tracker if timing is enabled
-        let timing_tracker = if options.enable_timing {
-            Some(RequestTimingTracker::new())
+        // Create request tracker if tracking is enabled
+        let tracker = if options.enable_tracking {
+            Some(Arc::new(RequestTracker::new()))
         } else {
             None
         };
@@ -150,8 +161,13 @@ impl DeltaGenerator {
             usage,
             msg_counter: 0,
             options,
-            timing_tracker,
+            tracker,
         }
+    }
+
+    /// Returns the request tracker if tracking is enabled, for sharing with PreprocessedRequest.
+    pub fn tracker(&self) -> Option<Arc<RequestTracker>> {
+        self.tracker.clone()
     }
 
     /// Updates the prompt token usage count.
@@ -396,16 +412,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         );
 
         // Record first token time (only succeeds on first call due to OnceLock)
-        if let Some(ref tracker) = self.timing_tracker {
+        if let Some(ref tracker) = self.tracker {
             tracker.record_first_token();
         }
 
-        // Extract worker_id and token_ids from disaggregated_params
-        let worker_id_info = delta
-            .disaggregated_params
-            .as_ref()
-            .and_then(|params| params.get("worker_id"))
-            .and_then(|v| serde_json::from_value::<WorkerIdInfo>(v.clone()).ok());
+        // Get worker_id info from tracker (set by KvPushRouter based on phase)
+        let worker_id_info = self.tracker.as_ref().and_then(|t| t.get_worker_info());
 
         let token_ids = delta
             .disaggregated_params
@@ -415,7 +427,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Get timing info if this is the final response (has finish_reason)
         let timing_info: Option<TimingInfo> = if finish_reason.is_some() {
-            self.timing_tracker.as_ref().map(|tracker| {
+            self.tracker.as_ref().map(|tracker| {
                 tracker.record_finish();
                 tracker.get_timing_info()
             })

@@ -1,9 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
+use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::kv_router::{RouterConfigOverride, protocols::RequestExtraInfo};
 #[cfg(feature = "media-nixl")]
@@ -82,10 +85,6 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     pub annotations: Vec<String>,
 
-    /// Estimated number of prefix hit tokens (only used in kv aware routing)
-    #[builder(default)]
-    pub estimated_prefix_hit_num_blocks: Option<u32>,
-
     /// Targeted backend instance ID for the request
     #[builder(default)]
     pub backend_instance_id: Option<u64>,
@@ -123,6 +122,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_extra_info: Option<RequestExtraInfo>,
+    /// Optional request tracker for per-request metrics (shared with DeltaGenerator)
+    #[builder(default)]
+    #[serde(skip)]
+    pub tracker: Option<Arc<RequestTracker>>,
+
     /// Targeted prefill worker ID for disaggregated serving (GAIE Stage 2)
     /// When set, the prefill request will be routed to this specific worker.
     #[builder(default)]

@@ -2,16 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from dataclasses import dataclass
-from typing import Generator
 
 import pytest
 from pytest_httpserver import HTTPServer
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.lora_utils import MinioLoraConfig, MinioService
-from tests.utils.constants import DefaultPort
-from tests.utils.port_utils import allocate_port, allocate_ports, deallocate_ports
 
 # Shared constants for multimodal testing
 IMAGE_SERVER_PORT = 8765
@@ -19,38 +15,6 @@ MULTIMODAL_IMG_PATH = os.path.join(
     WORKSPACE_DIR, "lib/llm/tests/data/media/llm-optimize-deploy-graphic.png"
 )
 MULTIMODAL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic.png"
-
-
-@dataclass(frozen=True)
-class ServicePorts:
-    frontend_port: int
-    system_port1: int
-    system_port2: int
-
-
-@pytest.fixture(scope="function")
-def dynamo_dynamic_ports() -> Generator[ServicePorts, None, None]:
-    """Allocate per-test ports for serve-style deployments.
-
-    - frontend_port: OpenAI-compatible HTTP ingress (dynamo.frontend)
-    - system_port1/system_port2: worker metrics/system ports (used by some scripts)
-
-    Note: some disaggregated launch scripts can spawn more than two workers; if/when
-    serve tests start exercising those scripts, we'll extend this fixture to allocate
-    additional system ports (e.g. system_port3+ / DYN_SYSTEM_PORT3+).
-    """
-
-    frontend_port = allocate_port(DefaultPort.FRONTEND.value)
-    system_ports = allocate_ports(2, DefaultPort.SYSTEM1.value)
-    ports = [frontend_port, *system_ports]
-    try:
-        yield ServicePorts(
-            frontend_port=frontend_port,
-            system_port1=system_ports[0],
-            system_port2=system_ports[1],
-        )
-    finally:
-        deallocate_ports(ports)
 
 
 @pytest.fixture(scope="session")
