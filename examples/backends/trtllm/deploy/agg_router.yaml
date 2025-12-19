@@ -8,6 +8,7 @@ metadata:
 spec:
   services:
     Frontend:
+      envFromSecret: hf-token-secret
       dynamoNamespace: trtllm-agg-router
       componentType: frontend
       replicas: 1

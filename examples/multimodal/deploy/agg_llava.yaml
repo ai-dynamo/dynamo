@@ -9,6 +9,7 @@ spec:
   backendFramework: vllm
   services:
     Frontend:
+      envFromSecret: hf-token-secret
       dynamoNamespace: agg-llava
       componentType: frontend
       replicas: 1

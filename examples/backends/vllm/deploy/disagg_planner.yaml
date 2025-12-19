@@ -8,6 +8,7 @@ metadata:
 spec:
   services:
     Frontend:
+      envFromSecret: hf-token-secret
       dynamoNamespace: vllm-disagg-planner
       componentType: frontend
       replicas: 1

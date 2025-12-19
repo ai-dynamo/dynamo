@@ -90,6 +90,7 @@ spec:
       value: "/models"
   services:
     Frontend:
+      envFromSecret: hf-token-secret
       volumeMounts:
         - name: models
           mountPoint: /models
