@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::engines::ValidateRequest;
+use crate::preprocessor::media::MediaDecoder;
 
 use super::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
@@ -44,6 +45,12 @@ pub struct NvCreateChatCompletionRequest {
     /// Extra args to pass to the chat template rendering context
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
+
+    /// Runtime media decoding parameters.
+    /// When provided, these override the MDC defaults
+    /// Example: `{"video": {"num_frames": 16}}`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_io_kwargs: Option<MediaDecoder>,
 
     /// Catch-all for unsupported fields - checked during validation
     #[serde(flatten, default, skip_serializing)]

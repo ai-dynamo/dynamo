@@ -237,11 +237,13 @@ impl OpenAIPreprocessor {
         builder.output_options(request.extract_output_options()?);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
-        builder.estimated_prefix_hit_num_blocks(None);
-        // Extract backend_instance_id and extra_fields from nvext if present
+        // Extract backend_instance_id, extra_fields, and worker IDs from nvext if present
         if let Some(nvext) = request.nvext() {
             builder.backend_instance_id(nvext.backend_instance_id);
             builder.extra_fields(nvext.extra_fields.clone());
+            // GAIE Stage 2: Extract targeted worker IDs for disaggregated serving
+            builder.target_prefill_worker_id(nvext.prefill_worker_id);
+            builder.target_decode_worker_id(nvext.decode_worker_id);
         }
 
         Ok(builder)
@@ -343,11 +345,10 @@ impl OpenAIPreprocessor {
         #[cfg(feature = "media-nixl")]
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
-            let results = futures::future::join_all(
-                fetch_tasks
-                    .iter()
-                    .map(|(_, content_part)| loader.fetch_and_decode_media_part(content_part)),
-            )
+            let media_io_kwargs = request.media_io_kwargs();
+            let results = futures::future::join_all(fetch_tasks.iter().map(|(_, content_part)| {
+                loader.fetch_and_decode_media_part(content_part, media_io_kwargs)
+            }))
             .await;
 
             for ((type_str, _), result) in fetch_tasks.into_iter().zip(results.into_iter()) {
@@ -801,6 +802,7 @@ impl OpenAIPreprocessor {
     pub fn apply_tool_calling_jail<S>(
         tool_call_parser: Option<String>,
         tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
+        tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
@@ -809,6 +811,13 @@ impl OpenAIPreprocessor {
         use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
 
         let mut builder = JailedStream::builder();
+
+        // Set tool definitions if provided
+        if let Some(tool_definitions) = tool_definitions
+            && !tool_definitions.is_empty()
+        {
+            builder = builder.tool_definitions(tool_definitions);
+        }
 
         // Configure jail based on tool_choice
         match tool_choice {
@@ -932,7 +941,10 @@ impl
         let response_generator = request.response_generator(context.id().to_string());
 
         // convert the chat completion request to a common completion request
-        let (common_request, annotations) = self.preprocess_request(&request).await?;
+        let (mut common_request, annotations) = self.preprocess_request(&request).await?;
+
+        // Attach the timing tracker to the request so downstream components can record metrics
+        common_request.tracker = response_generator.tracker();
 
         let mut response_generator = Box::new(response_generator);
 
@@ -991,11 +1003,23 @@ impl
             has_tools,
         )?;
 
+        // Convert OpenAI tools to parser ToolDefinition format before applying jail
+        let tool_definitions = request.inner.tools.as_ref().map(|tools| {
+            tools
+                .iter()
+                .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
+                    name: tool.function.name.clone(),
+                    parameters: tool.function.parameters.clone(),
+                })
+                .collect()
+        });
+
         // Apply jail conditionally
         let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
             Box::pin(Self::apply_tool_calling_jail(
                 self.tool_call_parser.clone(),
                 request.inner.tool_choice.clone(),
+                tool_definitions,
                 stream,
             ))
         } else {
@@ -1069,7 +1093,10 @@ impl
         let annotations = self.gather_tokens(&request, &mut builder, None)?;
         self.gather_multi_modal_data(&request, &mut builder).await?;
 
-        let common_request = builder.build()?;
+        let mut common_request = builder.build()?;
+
+        // Attach the timing tracker to the request so downstream components can record metrics
+        common_request.tracker = response_generator.tracker();
 
         // update isl
         response_generator.update_isl(common_request.token_ids.len() as u32);

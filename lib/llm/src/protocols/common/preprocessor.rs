@@ -1,14 +1,29 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
+use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::kv_router::RouterConfigOverride;
+use crate::kv_router::{RouterConfigOverride, protocols::RequestExtraInfo};
 #[cfg(feature = "media-nixl")]
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct BootstrapInfo {
+    /// The host address for bootstrap connection
+    pub bootstrap_host: String,
+
+    /// The port for bootstrap connection
+    pub bootstrap_port: u16,
+
+    /// Unique room ID for this request's KV transfer session
+    pub bootstrap_room: u64,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PrefillResult {
@@ -70,10 +85,6 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     pub annotations: Vec<String>,
 
-    /// Estimated number of prefix hit tokens (only used in kv aware routing)
-    #[builder(default)]
-    pub estimated_prefix_hit_num_blocks: Option<u32>,
-
     /// Targeted backend instance ID for the request
     #[builder(default)]
     pub backend_instance_id: Option<u64>,
@@ -86,6 +97,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_result: Option<PrefillResult>,
+
+    /// Bootstrap info for disaggregated serving
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_info: Option<BootstrapInfo>,
 
     /// Data parallel rank for the request (used with data parallelism)
     #[builder(default)]
@@ -101,11 +117,42 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_fields: Option<Vec<String>>,
+
+    /// Multimodal request-level metadata (mm_hash and token offsets)
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_extra_info: Option<RequestExtraInfo>,
+    /// Optional request tracker for per-request metrics (shared with DeltaGenerator)
+    #[builder(default)]
+    #[serde(skip)]
+    pub tracker: Option<Arc<RequestTracker>>,
+
+    /// Targeted prefill worker ID for disaggregated serving (GAIE Stage 2)
+    /// When set, the prefill request will be routed to this specific worker.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_prefill_worker_id: Option<u64>,
+
+    /// Targeted decode worker ID for disaggregated serving (GAIE Stage 2)
+    /// When set, the decode request will be routed to this specific worker.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_decode_worker_id: Option<u64>,
 }
 
 impl PreprocessedRequest {
     pub fn has_annotation(&self, annotation: &str) -> bool {
         self.annotations.contains(&annotation.to_string())
+    }
+
+    /// Get the value of an annotation in the format "key:value"
+    /// Returns None if the annotation is not found or has no value
+    pub fn get_annotation_value(&self, key: &str) -> Option<String> {
+        let prefix = format!("{}:", key);
+        self.annotations
+            .iter()
+            .find(|a| a.starts_with(&prefix))
+            .map(|a| a[prefix.len()..].to_string())
     }
 }
 

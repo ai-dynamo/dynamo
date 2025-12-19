@@ -27,6 +27,7 @@ from .utils import (
     determine_request_receiving_worker,
     start_completion_request,
     validate_completion_response,
+    verify_migration_metrics,
     verify_migration_occurred,
 )
 
@@ -189,7 +190,13 @@ def test_request_migration_trtllm_worker_failure(
                 # Step 7: Verify migration occurred
                 verify_migration_occurred(frontend)
 
+                # Step 8: Verify migration metrics
+                verify_migration_metrics(
+                    frontend.frontend_port, expected_ongoing_request_count=1
+                )
 
+
+@pytest.mark.timeout(290)  # 3x average
 @pytest.mark.skip(reason="TRT-LLM graceful shutdown not yet implemented")
 def test_request_migration_trtllm_graceful_shutdown(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
@@ -245,6 +252,11 @@ def test_request_migration_trtllm_graceful_shutdown(
 
                 # Step 7: Verify migration occurred during graceful shutdown
                 verify_migration_occurred(frontend)
+
+                # Step 8: Verify migration metrics
+                verify_migration_metrics(
+                    frontend.frontend_port, expected_ongoing_request_count=1
+                )
 
 
 @pytest.mark.timeout(185)  # 3x average
@@ -324,6 +336,7 @@ def test_no_request_migration_trtllm_worker_failure(
                     ), f"Unexpected migration message: {e}"
 
 
+@pytest.mark.timeout(185)  # 3x average
 @pytest.mark.skip(reason="TRT-LLM graceful shutdown not yet implemented")
 def test_no_request_migration_trtllm_graceful_shutdown(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::super::ToolDefinition;
 use super::config::JsonParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 use openai_harmony::chat::{Content::Text, Role};
@@ -46,6 +47,7 @@ pub async fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::
 pub async fn parse_tool_calls_harmony_complete(
     text: &str,
     _config: &JsonParserConfig,
+    _tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     let enc = match get_harmony_encoding().await.as_ref() {
         Ok(e) => e,
@@ -212,7 +214,7 @@ mod tests {
     async fn test_parse_tool_calls_harmony_complete_basic() {
         let text = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"format":"celsius","location":"San Francisco"}"#;
         let (tool_calls, normal_content) =
-            parse_tool_calls_harmony_complete(text, &Default::default())
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
         assert_eq!(normal_content, Some("".to_string()));
@@ -226,7 +228,7 @@ mod tests {
     async fn test_parse_tools_harmony_without_start_token() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|message|>{"location":"San Francisco"}<|call|>"#;
         let (tool_calls, normal_content) =
-            parse_tool_calls_harmony_complete(text, &Default::default())
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
         assert_eq!(normal_content, Some(text.trim().to_string()));
@@ -237,7 +239,7 @@ mod tests {
     async fn test_parse_tool_calls_harmony_with_multi_args() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}<|call|>"#;
         let (tool_calls, normal_content) =
-            parse_tool_calls_harmony_complete(text, &Default::default())
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
         assert_eq!(
@@ -255,7 +257,7 @@ mod tests {
     async fn test_parse_tool_calls_harmony_with_normal_text() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco"}<|call|>"#;
         let (tool_calls, normal_content) =
-            parse_tool_calls_harmony_complete(text, &Default::default())
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
         assert_eq!(
@@ -272,7 +274,7 @@ mod tests {
     async fn test_parse_tool_calls_harmony_without_call_token() {
         let text = r#"<|channel|>analysis<|message|>We need to call get_weather function. The user asks "What's the weather like in San Francisco in Celsius?" So location: "San Francisco, CA" unit: "celsius". Let's call function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"San Francisco, CA","unit":"celsius"}"#;
         let (tool_calls, normal_content) =
-            parse_tool_calls_harmony_complete(text, &Default::default())
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
         assert_eq!(normal_content, Some("We need to call get_weather function. The user asks \"What's the weather like in San Francisco in Celsius?\" So location: \"San Francisco, CA\" unit: \"celsius\". Let's call function.".to_string()));
