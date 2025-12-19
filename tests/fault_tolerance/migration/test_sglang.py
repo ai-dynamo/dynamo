@@ -27,6 +27,7 @@ from .utils import (
     determine_request_receiving_worker,
     start_completion_request,
     validate_completion_response,
+    verify_migration_metrics,
     verify_migration_occurred,
 )
 
@@ -203,6 +204,11 @@ def test_request_migration_sglang_worker_failure(
                 # Step 7: Verify migration occurred
                 verify_migration_occurred(frontend)
 
+                # Step 8: Verify migration metrics
+                verify_migration_metrics(
+                    frontend.frontend_port, expected_ongoing_request_count=1
+                )
+
 
 @pytest.mark.timeout(235)  # 3x average
 @pytest.mark.skip(reason="SGLang graceful shutdown not yet implemented")
@@ -272,6 +278,11 @@ def test_request_migration_sglang_graceful_shutdown(
 
                 # Step 7: Verify migration occurred during graceful shutdown
                 verify_migration_occurred(frontend)
+
+                # Step 8: Verify migration metrics
+                verify_migration_metrics(
+                    frontend.frontend_port, expected_ongoing_request_count=1
+                )
 
 
 @pytest.mark.timeout(135)  # 3x average

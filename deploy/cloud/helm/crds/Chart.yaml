@@ -16,5 +16,5 @@ apiVersion: v2
 name: dynamo-crds
 description: A Helm chart for dynamo CRDs
 type: application
-version: 0.7.1
+version: 0.8.0
 dependencies: []

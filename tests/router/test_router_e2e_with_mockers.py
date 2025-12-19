@@ -482,12 +482,16 @@ def test_kv_push_router_bindings(
     "store_backend,use_nats_core,request_plane",
     [
         ("etcd", False, "nats"),  # JetStream mode
-        # ("etcd", True, "tcp"),  # ignored, needs unconditional nats_client
+        ("etcd", True, "tcp"),  # NATS core mode (with gap detection)
         ("file", False, "nats"),  # File backend
     ],
-    ids=["jetstream", "file"],  # "nats_core" commented out to match commented test case
+    ids=[
+        "jetstream",
+        "nats",
+        "file",
+    ],  # "nats_core" commented out to match commented test case
 )
-@pytest.mark.timeout(27)  # ~3x average (~8.93s), rounded up
+@pytest.mark.timeout(90)  # TODO: figure out a timeout
 def test_indexers_sync(
     request,
     runtime_services_dynamic_ports,

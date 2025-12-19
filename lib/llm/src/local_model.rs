@@ -15,7 +15,7 @@ use crate::entrypoint::RouterConfig;
 use crate::mocker::protocols::MockEngineArgs;
 use crate::model_card::ModelDeploymentCard;
 use crate::model_type::{ModelInput, ModelType};
-use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
+use crate::preprocessor::media::{ImageDecoder, MediaDecoder, MediaFetcher};
 use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
@@ -243,7 +243,11 @@ impl LocalModelBuilder {
                 mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
             self.runtime_config.enable_local_indexer = mocker_engine_args.enable_local_indexer;
             self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
-            self.media_decoder = Some(MediaDecoder::default());
+            self.media_decoder = Some(MediaDecoder {
+                image: Some(ImageDecoder::default()),
+                #[cfg(feature = "media-ffmpeg")]
+                video: None,
+            });
             self.media_fetcher = Some(MediaFetcher::default());
         }
 
