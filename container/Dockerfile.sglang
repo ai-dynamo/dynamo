@@ -429,7 +429,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 ##################################
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
-
+# This ARG is still utilized for SGLANG Version extraction
+ARG RUNTIME_IMAGE_TAG
 WORKDIR /workspace
 
 # Install NATS and ETCD
@@ -464,20 +465,21 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
-
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+
+ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        sglang==0.5.6.post2
+        sglang==${SGLANG_VERSION}
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         --requirement /mnt/local_src/container/deps/requirements.txt \
         --requirement /mnt/local_src/container/deps/requirements.test.txt \
-        sglang==0.5.6.post2 && \
+        sglang==${SGLANG_VERSION} && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages --no-cache . && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
@@ -500,11 +502,17 @@ COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
 # Enable forceful shutdown of inflight requests
 ENV SGLANG_FORCE_SHUTDOWN=1
 
+# Our scripting assumes /workspace is where dynamo is located
+# In order to maintain the ability to have sglang and dynamo
+# in the same workspace, symlink /workspace to /sgl-workspace/dynamo
 WORKDIR /sgl-workspace
 USER root
 RUN ln -s /workspace /sgl-workspace/dynamo
 
 USER dynamo
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
+
 ENV PATH=/home/dynamo/.local/bin:$PATH
 
 ###########################################################
