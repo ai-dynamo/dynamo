@@ -25,6 +25,7 @@ from dynamo.llm import compute_block_hash_for_seq_py
 TEST_IMAGE_1 = "http://images.cocodataset.org/test2017/000000155781.jpg"
 TEST_IMAGE_2 = "http://images.cocodataset.org/test2017/000000000001.jpg"
 TEST_IMAGE_3 = "http://images.cocodataset.org/test2017/000000155721.jpg"
+TEST_IMAGE_4 = "https://huggingface.co/datasets/Sayali9141/traffic_signal_images/resolve/main/61.jpg"
 
 
 @dataclass
@@ -66,6 +67,21 @@ def make_mm_request(text: str, image_url: str, max_tokens: int = 10) -> dict:
                 ],
             }
         ],
+        "stream": True,
+        "max_tokens": max_tokens,
+    }
+
+
+def make_multi_image_request(
+    text: str, image_urls: list[str], max_tokens: int = 10
+) -> dict:
+    """Create a multimodal chat completion request with multiple images."""
+    content: list[dict] = [{"type": "text", "text": text}]
+    for url in image_urls:
+        content.append({"type": "image_url", "image_url": {"url": url}})
+    return {
+        "model": "test",
+        "messages": [{"role": "user", "content": content}],
         "stream": True,
         "max_tokens": max_tokens,
     }
@@ -140,6 +156,7 @@ class KvRouterTests:
         self._test_mm_hash_consistency()
         self._test_mm_offset_affects_hash()
         self._test_mm_block_boundary()
+        self._test_mm_multi_image_partial_match()
 
         return self._print_summary()
 
@@ -155,6 +172,7 @@ class KvRouterTests:
         self._test_mm_same_image_cache_hit()
         self._test_mm_different_images_no_cache_hit()
         self._test_text_cache_hit_with_overlap()
+        self._test_mm_multi_image_partial_match()
 
         return self._print_summary()
 
@@ -776,6 +794,152 @@ class KvRouterTests:
                 True,
                 f"OK - Second request added {new_blocks} new blocks. "
                 f"Check logs for 'overlap > 0' (cache hit).",
+            )
+        )
+
+    def _test_mm_multi_image_partial_match(self):
+        """
+        Test: Verify partial cache match with multi-image requests.
+
+        Scenario:
+            Step 1: Send Request A = text + [Image_1, Image_4]
+            Step 2: Send Request A again (identical) - verify full cache hit (0 new blocks)
+            Step 3: Send Request B = text + [Image_1, Image_3] - verify partial match
+                    (Image_3 is different, should add new blocks)
+
+        Expected:
+            - Identical request = no new blocks (full cache hit)
+            - Different second image = new blocks added (partial match)
+        """
+        print("\n[MM-S4] Multi-Image Partial Match Test")
+        print("    Verifying cache behavior with multi-image requests...")
+
+        # Use longer settle time for this test
+        settle_time = self.config.kv_settle_time * 2
+
+        # Request A: text + Image_1 + Image_4
+        payload_a = make_multi_image_request(
+            "Describe these images in detail", [TEST_IMAGE_1, TEST_IMAGE_4]
+        )
+
+        initial = get_tree_info(self.client, self.config.router_url)
+        self.log(f"Initial blocks: {initial['num_blocks']}")
+
+        # Step 1: Send Request A first time
+        self.log("Step 1: Sending Request A (text + Image_1 + Image_4)...")
+        if not send_request(self.client, self.config.api_url, payload_a):
+            self.results.append(
+                RouterTestResult("mm_multi_image_partial", False, "Request A failed")
+            )
+            return
+
+        time.sleep(settle_time)
+
+        after_a1 = get_tree_info(self.client, self.config.router_url)
+        blocks_a1 = after_a1["num_blocks"] - initial["num_blocks"]
+        self.log(
+            f"Blocks after Request A: {after_a1['num_blocks']} (added {blocks_a1})"
+        )
+
+        if blocks_a1 == 0:
+            self.results.append(
+                RouterTestResult(
+                    "mm_multi_image_partial",
+                    False,
+                    "FAIL - Request A added 0 blocks (should populate cache)",
+                )
+            )
+            return
+
+        # Step 2: Send Request A again (identical) - should be full cache hit
+        self.log(
+            "Step 2: Sending Request A again (identical, expect full cache hit)..."
+        )
+        if not send_request(self.client, self.config.api_url, payload_a):
+            self.results.append(
+                RouterTestResult(
+                    "mm_multi_image_partial", False, "Request A (repeat) failed"
+                )
+            )
+            return
+
+        time.sleep(settle_time)
+
+        after_a2 = get_tree_info(self.client, self.config.router_url)
+        blocks_a2 = after_a2["num_blocks"] - after_a1["num_blocks"]
+        self.log(
+            f"Blocks after Request A repeat: {after_a2['num_blocks']} (added {blocks_a2})"
+        )
+
+        # Identical request should add 0 new blocks (full cache hit)
+        if blocks_a2 != 0:
+            self.log(
+                f"WARNING: Identical request added {blocks_a2} blocks (expected 0)"
+            )
+
+        # Step 3: Send Request B with different second image
+        payload_b = make_multi_image_request(
+            "Describe these images in detail", [TEST_IMAGE_1, TEST_IMAGE_3]
+        )
+
+        self.log(
+            "Step 3: Sending Request B (text + Image_1 + Image_3, different 2nd image)..."
+        )
+        if not send_request(self.client, self.config.api_url, payload_b):
+            self.results.append(
+                RouterTestResult("mm_multi_image_partial", False, "Request B failed")
+            )
+            return
+
+        time.sleep(settle_time)
+
+        after_b = get_tree_info(self.client, self.config.router_url)
+        blocks_b = after_b["num_blocks"] - after_a2["num_blocks"]
+        self.log(f"Blocks after Request B: {after_b['num_blocks']} (added {blocks_b})")
+
+        # Analysis:
+        # - If blocks_b > 0: Image_3 created new blocks (correct - different image)
+        # - If blocks_b == 0: Full cache hit (wrong - Image_3 should be different)
+        #
+        # Note: We can't easily verify partial match vs full cache miss because
+        # the tree growth depends on whether routing hit the cached worker.
+        # What we CAN verify is that different images should NOT fully cache hit.
+
+        if blocks_b == 0 and blocks_a2 == 0:
+            # Both identical and different requests added 0 blocks
+            # This suggests Image_3's mm_hash is incorrectly matching Image_4
+            self.results.append(
+                RouterTestResult(
+                    "mm_multi_image_partial",
+                    False,
+                    "FAIL - Request B (different image) added 0 blocks. "
+                    "Image_3 should have different mm_hash than Image_4. "
+                    "Check if mm_hash computation is correct.",
+                )
+            )
+            return
+
+        if blocks_b == 0:
+            # Different image but 0 new blocks - might be timing or routing issue
+            self.results.append(
+                RouterTestResult(
+                    "mm_multi_image_partial",
+                    False,
+                    f"FAIL - Request B added 0 blocks. "
+                    f"Identical request added {blocks_a2}. "
+                    f"This is unexpected - different images should not fully cache hit.",
+                )
+            )
+            return
+
+        # Success: different image added new blocks
+        self.results.append(
+            RouterTestResult(
+                "mm_multi_image_partial",
+                True,
+                f"OK - Request A: {blocks_a1} blocks, A repeat: {blocks_a2}, "
+                f"Request B (diff image): {blocks_b}. "
+                f"Different images correctly create distinct cache entries.",
             )
         )
 

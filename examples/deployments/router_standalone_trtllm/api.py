@@ -44,7 +44,7 @@ def dump_api_debug(
     tokens: list[int],
     block_size: int,
     local_hashes: list[int],
-    mm_hash: int | None,
+    mm_hashes: list[int] | None,
     block_mm_infos: list | None,
     image_urls: list[str] | None,
 ):
@@ -57,7 +57,7 @@ def dump_api_debug(
         f.write(f"\n{'='*60}\n")
         f.write(f"Timestamp: {datetime.datetime.now()}\n")
         f.write(f"Image URLs: {image_urls}\n")
-        f.write(f"mm_hash: {mm_hash}\n")
+        f.write(f"mm_hashes: {mm_hashes}\n")
         f.write(f"block_size: {block_size}\n")
         f.write(f"num_tokens: {len(tokens)}\n")
         f.write(f"tokens (first 50): {tokens[:50]}\n")
@@ -134,8 +134,8 @@ class ProcessedInput:
 
     tokens: list[int]
     mm_input: dict | None  # For multimodal requests
-    mm_hash: int | None
-    image_offsets: list[int] | None  # [start, end]
+    mm_hashes: list[int] | None  # List of mm_hash for each image
+    image_offsets_list: list[list[int]] | None  # List of [start, end] for each image
 
 
 class ServiceAPI:
@@ -229,7 +229,7 @@ class ServiceAPI:
     # -------------------------------------------------------------------------
 
     def _process_multimodal(self, prompt: str, image_urls: list[str]) -> ProcessedInput:
-        """Process multimodal request: load images, compute tokens and mm_hash."""
+        """Process multimodal request: load images, compute tokens and mm_hashes."""
         try:
             # Use "multiple_image" modality when there are multiple images
             modality = "multiple_image" if len(image_urls) > 1 else "image"
@@ -247,27 +247,29 @@ class ServiceAPI:
             processed_prompt = mm_input.get("prompt", prompt)
             multi_modal_data = mm_input.get("multi_modal_data")
 
-            tokens, image_offsets = self._get_mm_tokens(processed_prompt, image_urls)
-            mm_hash = self._compute_mm_hash(multi_modal_data)
+            tokens, image_offsets_list = self._get_mm_tokens(
+                processed_prompt, image_urls
+            )
+            mm_hashes = self._compute_mm_hashes(multi_modal_data)
 
             return ProcessedInput(
                 tokens=tokens,
                 mm_input=mm_input,
-                mm_hash=mm_hash,
-                image_offsets=image_offsets,
+                mm_hashes=mm_hashes,
+                image_offsets_list=image_offsets_list,
             )
         except Exception as e:
             logger.warning(f"MM processing failed: {e}, falling back to text-only")
             return ProcessedInput(
                 tokens=self.tokenizer.encode(prompt),
                 mm_input=None,
-                mm_hash=None,
-                image_offsets=None,
+                mm_hashes=None,
+                image_offsets_list=None,
             )
 
     def _get_mm_tokens(
         self, prompt: str, image_urls: list[str]
-    ) -> tuple[list[int], list[int] | None]:
+    ) -> tuple[list[int], list[list[int]] | None]:
         """Get tokens with visual expansion and find image token positions."""
         if self.processor is None:
             return self.tokenizer.encode(prompt), None
@@ -287,30 +289,52 @@ class ServiceAPI:
 
     def _replace_image_tokens(
         self, tokens: list[int], image_token_id: int, replacement_id: int
-    ) -> tuple[list[int], list[int] | None]:
-        """Replace image tokens and return their positions."""
-        image_start, image_end = None, None
+    ) -> tuple[list[int], list[list[int]] | None]:
+        """Replace image tokens and return their positions as list of [start, end] per image.
+
+        Finds contiguous regions of image tokens. Each contiguous region is assumed
+        to be one image.
+        """
+        image_offsets_list: list[list[int]] = []
+        current_start: int | None = None
 
         for i, t in enumerate(tokens):
             if t == image_token_id:
-                if image_start is None:
-                    image_start = i
-                image_end = i + 1
+                if current_start is None:
+                    current_start = i
                 tokens[i] = replacement_id
+            else:
+                # End of a contiguous image token region
+                if current_start is not None:
+                    image_offsets_list.append([current_start, i])
+                    current_start = None
 
-        if image_start is not None:
-            logger.debug(f"Image tokens: [{image_start}, {image_end})")
-            return tokens, [image_start, image_end]
+        # Handle case where image tokens go to the end
+        if current_start is not None:
+            image_offsets_list.append([current_start, len(tokens)])
+
+        if image_offsets_list:
+            logger.debug(f"Image token regions: {image_offsets_list}")
+            return tokens, image_offsets_list
         return tokens, None
 
-    def _compute_mm_hash(self, multi_modal_data: dict | None) -> int | None:
-        """Compute mm_hash from multimodal data."""
+    def _compute_mm_hashes(self, multi_modal_data: dict | None) -> list[int] | None:
+        """Compute mm_hash for each image in multimodal data.
+
+        Returns:
+            List of mm_hash (one per image), or None if no images.
+        """
         if not multi_modal_data:
             return None
 
         mm_hashes_dict = apply_mm_hashes(multi_modal_data)
         if "image" in mm_hashes_dict and mm_hashes_dict["image"]:
-            return int(mm_hashes_dict["image"][0][:16], 16)
+            # Convert each 256-bit hex digest to 64-bit int
+            mm_hashes = [
+                int(hex_digest[:16], 16) for hex_digest in mm_hashes_dict["image"]
+            ]
+            logger.debug(f"Computed mm_hashes for {len(mm_hashes)} images: {mm_hashes}")
+            return mm_hashes
         return None
 
     # -------------------------------------------------------------------------
@@ -318,28 +342,50 @@ class ServiceAPI:
     # -------------------------------------------------------------------------
 
     def _build_block_mm_infos(
-        self, num_tokens: int, mm_hash: int | None, image_offsets: list[int] | None
+        self,
+        num_tokens: int,
+        mm_hashes: list[int] | None,
+        image_offsets_list: list[list[int]] | None,
     ) -> list[dict | None] | None:
         """Build block_mm_infos for routing hash computation.
 
-        Only blocks that overlap with the image token range get mm_info set.
+        For each block, includes mm_objects for all images that overlap with that block.
+
+        Args:
+            num_tokens: Total number of tokens
+            mm_hashes: List of mm_hash, one per image
+            image_offsets_list: List of [start, end] offsets, one per image
+
+        Returns:
+            List of mm_info dicts (one per block), with None for blocks without images.
         """
-        if mm_hash is None or image_offsets is None:
+        if mm_hashes is None or image_offsets_list is None:
+            return None
+
+        if len(mm_hashes) != len(image_offsets_list):
+            logger.warning(
+                f"mm_hashes ({len(mm_hashes)}) and image_offsets_list "
+                f"({len(image_offsets_list)}) length mismatch"
+            )
             return None
 
         block_size = self.init_params.block_size
         num_blocks = (num_tokens + block_size - 1) // block_size
-        img_start, img_end = image_offsets
-        mm_info = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [image_offsets]}]}
 
         result: list[dict | None] = []
         for block_idx in range(num_blocks):
             block_start = block_idx * block_size
             block_end = block_start + block_size
 
-            # Only set mm_info for blocks that overlap with the image token range
-            if block_end > img_start and block_start < img_end:
-                result.append(mm_info)
+            # Find all images that overlap with this block
+            mm_objects = []
+            for mm_hash, offsets in zip(mm_hashes, image_offsets_list):
+                img_start, img_end = offsets
+                if block_end > img_start and block_start < img_end:
+                    mm_objects.append({"mm_hash": mm_hash, "offsets": [offsets]})
+
+            if mm_objects:
+                result.append({"mm_objects": mm_objects})
             else:
                 result.append(None)
 
@@ -505,8 +551,8 @@ class ServiceAPI:
                     processed = ProcessedInput(
                         tokens=self.tokenizer.encode(prompt),
                         mm_input=None,
-                        mm_hash=None,
-                        image_offsets=None,
+                        mm_hashes=None,
+                        image_offsets_list=None,
                     )
 
                 # Validate tokens
@@ -519,8 +565,11 @@ class ServiceAPI:
 
                 # Compute block hashes for routing
                 block_mm_infos = self._build_block_mm_infos(
-                    len(processed.tokens), processed.mm_hash, processed.image_offsets
+                    len(processed.tokens),
+                    processed.mm_hashes,
+                    processed.image_offsets_list,
                 )
+                logger.debug(f"block_mm_infos: {block_mm_infos}")
                 local_hashes = compute_block_hash_for_seq_py(
                     processed.tokens, self.init_params.block_size, block_mm_infos
                 )
@@ -530,7 +579,7 @@ class ServiceAPI:
                     tokens=processed.tokens,
                     block_size=self.init_params.block_size,
                     local_hashes=local_hashes,
-                    mm_hash=processed.mm_hash,
+                    mm_hashes=processed.mm_hashes,
                     block_mm_infos=block_mm_infos,
                     image_urls=parsed.image_urls,
                 )

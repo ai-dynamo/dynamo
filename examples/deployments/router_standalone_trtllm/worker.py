@@ -158,77 +158,114 @@ class KvEventsPublisher:
 
 def extract_mm_info(
     blocks_data: list[dict], all_token_ids: list[int]
-) -> tuple[dict | None, list[int] | None]:
+) -> tuple[list[int] | None, list[list[int]] | None]:
     """Extract multimodal hash info from TRTLLM block data.
 
+    Handles multiple images by extracting all mm_hashes and matching them
+    to their corresponding image token ranges.
+
     Returns:
-        Tuple of (mm_info dict, image token offsets [start, end)) or (None, None).
+        Tuple of (list of mm_hashes, list of offsets) or (None, None).
+        Each offset is [start, end) for one image's token range.
     """
+    # Collect all mm_hashes from blocks
+    mm_hashes: list[int] = []
     for block in blocks_data:
         mm_keys = block.get("mm_keys", [])
         for mm_key in mm_keys:
             if mm_key.get("type") != "mm_key":
                 continue
-
             hash_hex = mm_key.get("hash", "")
-            if not hash_hex:
-                continue
+            if hash_hex:
+                mm_hash = int(hash_hex[:16], 16)
+                if mm_hash not in mm_hashes:  # Avoid duplicates
+                    mm_hashes.append(mm_hash)
 
-            mm_hash = int(hash_hex[:16], 16)
-            offsets = find_image_token_range(all_token_ids)
+    if not mm_hashes:
+        return None, None
 
-            if offsets:
-                mm_info = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [offsets]}]}
-                return mm_info, offsets
+    # Find all image token ranges
+    image_offsets_list = find_all_image_token_ranges(all_token_ids)
+    if not image_offsets_list:
+        return None, None
 
-    return None, None
+    # Match mm_hashes to image_offsets by order
+    # (assumes mm_hashes appear in same order as images in token sequence)
+    return mm_hashes, image_offsets_list
 
 
-def find_image_token_range(token_ids: list[int]) -> list[int] | None:
-    """Find [start, end) range of image tokens."""
-    start, end = None, None
+def find_all_image_token_ranges(token_ids: list[int]) -> list[list[int]] | None:
+    """Find all [start, end) ranges of contiguous image tokens.
+
+    Returns:
+        List of [start, end) ranges, one per contiguous image token sequence.
+        Returns None if no image tokens found.
+    """
+    ranges: list[list[int]] = []
+    current_start: int | None = None
+
     for i, tid in enumerate(token_ids):
         if tid == IMAGE_TOKEN_ID:
-            if start is None:
-                start = i
-            end = i + 1
+            if current_start is None:
+                current_start = i
+        elif current_start is not None:
+            # End of contiguous sequence
+            ranges.append([current_start, i])
+            current_start = None
 
-    return [start, end] if start is not None else None
+    # Handle sequence ending with image tokens
+    if current_start is not None:
+        ranges.append([current_start, len(token_ids)])
+
+    return ranges if ranges else None
 
 
 def build_per_block_mm_infos(
     num_blocks: int,
     block_size: int,
-    mm_info: dict | None,
-    image_offsets: list[int] | None,
+    mm_hashes: list[int] | None,
+    image_offsets_list: list[list[int]] | None,
 ) -> list[dict | None] | None:
-    """Build per-block mm_infos list, setting mm_info only for blocks containing image tokens.
+    """Build per-block mm_infos list for multiple images.
+
+    Each block that overlaps with an image's token range gets the corresponding
+    mm_info with that image's mm_hash.
 
     Args:
         num_blocks: Number of blocks in the stored event.
         block_size: Number of tokens per block.
-        mm_info: The multimodal info dict (or None if no images).
-        image_offsets: [start, end) token indices of image tokens (or None).
+        mm_hashes: List of mm_hash values, one per image.
+        image_offsets_list: List of [start, end) token ranges, one per image.
 
     Returns:
         List of mm_info (one per block), with None for blocks without image tokens.
         Returns None if no mm_info is provided.
     """
-    if mm_info is None or image_offsets is None:
+    if mm_hashes is None or image_offsets_list is None:
         return None
 
-    img_start, img_end = image_offsets
-    result: list[dict | None] = []
+    if not mm_hashes or not image_offsets_list:
+        return None
 
-    for block_idx in range(num_blocks):
-        block_start = block_idx * block_size
-        block_end = block_start + block_size
+    # Initialize result with None for all blocks
+    result: list[dict | None] = [None] * num_blocks
 
-        # Check if this block overlaps with the image token range
-        if block_end > img_start and block_start < img_end:
-            result.append(mm_info)
-        else:
-            result.append(None)
+    # Process each image
+    for mm_hash, offsets in zip(mm_hashes, image_offsets_list):
+        img_start, img_end = offsets
+
+        for block_idx in range(num_blocks):
+            block_start = block_idx * block_size
+            block_end = block_start + block_size
+
+            # Check if this block overlaps with this image's token range
+            if block_end > img_start and block_start < img_end:
+                if result[block_idx] is None:
+                    result[block_idx] = {"mm_objects": []}
+                # Add this image's mm_object to the block
+                result[block_idx]["mm_objects"].append(
+                    {"mm_hash": mm_hash, "offsets": [offsets]}
+                )
 
     return result
 
@@ -435,19 +472,19 @@ class TrtllmWorker:
             return
 
         parent_hash = data.get("parent_hash")
-        mm_info, image_offsets = extract_mm_info(data["blocks"], all_token_ids)
+        mm_hashes, image_offsets_list = extract_mm_info(data["blocks"], all_token_ids)
 
         block_hashes = [b["block_hash"] for b in blocks]
 
         # Build per-block mm_infos (only blocks with image tokens get mm_info)
         block_mm_infos = build_per_block_mm_infos(
-            len(blocks), self.block_size, mm_info, image_offsets
+            len(blocks), self.block_size, mm_hashes, image_offsets_list
         )
 
         # Debug dump
         dump_worker_kv_event(
             self.worker_id,
-            {"type": "stored", "blocks": len(blocks), "mm_info": mm_info is not None},
+            {"type": "stored", "blocks": len(blocks), "mm_hashes": mm_hashes},
             all_token_ids,
         )
 
