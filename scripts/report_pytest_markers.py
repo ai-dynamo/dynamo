@@ -102,6 +102,10 @@ STUB_MODULES = [
     "aiconfigurator.webapp",
     "aiconfigurator.webapp.components",
     "aiconfigurator.webapp.components.profiling",
+    "boto3",
+    "botocore",
+    "botocore.client",
+    "botocore.exceptions",
 ]
 
 # Project paths for local imports
