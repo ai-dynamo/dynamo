@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.10.0
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -19,7 +18,7 @@
 # properly without needing slow chown -R operations (which can add 2-10 extra
 # minutes).
 #
-# DEVELOPMENT PATHS THAT MUST BE GROUP-WRITABLE (for non-virtualenv containers):
+# DEVELOPMENT PATHS THAT MUST BE GROUP-WRITABLE (for virtualenv containers):
 #   /workspace            - Users create/modify project files
 #   /home/dynamo          - Users create config/cache files
 #   /home/dynamo/.local   - SGLang uses $HOME/.local/lib/python3.10/site-packages for pip install
@@ -31,23 +30,19 @@
 
 # This section contains build arguments that are common and shared with
 # the plain Dockerfile, so they should NOT have a default. The source of truth is from build.sh.
-
 ARG BASE_IMAGE
 ARG BASE_IMAGE_TAG
 
-ARG FRAMEWORK_IMAGE
-ARG FRAMEWORK_IMAGE_TAG
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_MEDIA_NIXL
 ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
-ARG CUDA_VERSION
 
-ARG ARCH=amd64
-ARG ARCH_ALT=x86_64
+ARG RUNTIME_IMAGE="lmsysorg/sglang"
+ARG RUNTIME_IMAGE_TAG="v0.5.6.post2-runtime"
 
-# sccache configuration - inherit from base build
+# SCCACHE configuration
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
@@ -57,6 +52,21 @@ ARG NIXL_UCX_REF
 ARG NIXL_REF
 ARG NIXL_GDRCOPY_REF
 ARG NIXL_LIBFABRIC_REF
+
+# Define general architecture ARGs for supporting both x86 and aarch64 builds.
+#   ARCH: Used for package suffixes (e.g., amd64, arm64)
+#   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
+#
+# Default values are for x86/amd64:
+#   --build-arg ARCH=amd64 --build-arg ARCH_ALT=x86_64
+#
+# For arm64/aarch64, build with:
+#   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
+#
+# NOTE: There isn't an easy way to define one of these values based on the other value
+# without adding if statements everywhere, so just define both as ARGs for now.
+ARG ARCH=amd64
+ARG ARCH_ALT=x86_64
 
 ##################################
 ########## Base Image ############
@@ -217,8 +227,7 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 
 # Set SCCACHE environment variables
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
-    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
 # Build FFmpeg from source
 # Do not delete the source tarball for legal reasons
@@ -415,304 +424,41 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
-########################################################
-########## Framework Development Image ################
-########################################################
-#
-# PURPOSE: Framework development and SGLang/DeepEP/NVSHMEM compilation
-#
-# This stage builds and compiles framework dependencies including:
-# - SGLang inference engine with CUDA support
-# - DeepEP and NVSHMEM
-# - All necessary build tools and compilation dependencies
-# - Framework-level Python packages and extensions
-#
-# Use this stage when you need to:
-# - Build SGLang from source with custom modifications
-# - Develop or debug framework-level components
-# - Create custom builds with specific optimization flags
-#
-#FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS framework
-FROM ${FRAMEWORK_IMAGE}:${FRAMEWORK_IMAGE_TAG} AS framework
+##################################
+########## Runtime Image #########
+##################################
 
-# Declare all ARGs
-ARG BUILD_TYPE=all
-ARG DEEPEP_COMMIT=9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee
-ARG DEEPEP_GB_COMMIT=1b14ad661c7640137fcfe93cccb2694ede1220b0
-ARG CMAKE_BUILD_PARALLEL_LEVEL=2
-ARG SGL_KERNEL_VERSION=0.3.16.post5
-ARG SGLANG_COMMIT=0.5.6
-ARG GDRCOPY_COMMIT=v2.4.4
-ARG NVSHMEM_VERSION=3.3.9
-ARG GRACE_BLACKWELL=false
-ARG ARCH
-ARG ARCH_ALT
-ARG PYTHON_VERSION
-ARG CARGO_BUILD_JOBS
-ARG CUDA_VERSION
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
-# Set all environment variables
-ENV DEBIAN_FRONTEND=noninteractive \
-    TZ=America/Los_Angeles \
-    CUDA_HOME=/usr/local/cuda \
-    GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/ \
-    NVSHMEM_DIR=/sgl-workspace/nvshmem/install \
-    PATH="${PATH}:/usr/local/nvidia/bin" \
-    LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/nvidia/lib:/usr/local/nvidia/lib64" \
-    LANG=en_US.UTF-8 \
-    LANGUAGE=en_US:en \
-    LC_ALL=en_US.UTF-8
+# cleanup unnecessary libs
+RUN apt remove -y python3-apt &&\
+    pip uninstall -y termplotlib
 
-# Combined: Python setup, locale, and all package installation
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa -y \
-    && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # Python (using other python versions as needed)
-        python${PYTHON_VERSION}-dev \
-        python${PYTHON_VERSION}-venv \
-        python${PYTHON_VERSION}-distutils \
-        python3-pip \
-        # Build essentials
-        build-essential \
-        cmake \
-        ninja-build \
-        ccache \
-        patchelf \
-        git \
-        git-lfs \
-        # Core system utilities
-        tzdata \
-        locales \
-        ca-certificates \
-        dkms \
-        kmod \
-        # Command line tools
-        wget \
-        curl \
-        jq \
-        unzip \
-        # Network utilities
-        netcat-openbsd \
-        # SSL and pkg-config
-        libssl-dev \
-        pkg-config \
-        # MPI and NUMA
-        libopenmpi-dev \
-        libnuma1 \
-        libnuma-dev \
-        numactl \
-        # InfiniBand/RDMA
-        libibverbs-dev \
-        libibverbs1 \
-        libibumad3 \
-        librdmacm1 \
-        libnl-3-200 \
-        libnl-route-3-200 \
-        libnl-route-3-dev \
-        libnl-3-dev \
-        ibverbs-providers \
-        infiniband-diags \
-        perftest \
-        # Development libraries
-        libgoogle-glog-dev \
-        libgtest-dev \
-        libjsoncpp-dev \
-        libunwind-dev \
-        libboost-all-dev \
-        libgrpc-dev \
-        libgrpc++-dev \
-        libprotobuf-dev \
-        protobuf-compiler \
-        protobuf-compiler-grpc \
-        pybind11-dev \
-        libhiredis-dev \
-        libcurl4-openssl-dev \
-        libczmq4 \
-        libczmq-dev \
-        libfabric-dev \
-        # Package building tools
-        devscripts \
-        debhelper \
-        fakeroot \
-        check \
-        libsubunit0 \
-        libsubunit-dev \
-    # Set Python alternatives
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
-    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 \
-    && update-alternatives --set python /usr/bin/python${PYTHON_VERSION} \
-    # Set up locale
-    && locale-gen en_US.UTF-8 \
-    # Cleanup
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+# This ARG is still utilized for SGLANG Version extraction
+ARG RUNTIME_IMAGE_TAG
+WORKDIR /workspace
 
-WORKDIR /sgl-workspace
+# Install NATS and ETCD
+COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 
-# GDRCopy installation
-RUN git clone --depth 1 --branch ${GDRCOPY_COMMIT} https://github.com/NVIDIA/gdrcopy.git \
-    && cd gdrcopy/packages \
-    && export CUDA=${CUDA_HOME} \
-    && ./build-deb-packages.sh \
-    && dpkg -i gdrdrv-dkms_*.deb libgdrapi_*.deb gdrcopy-tests_*.deb gdrcopy_*.deb
-
-# Fix DeepEP IBGDA symlink
-RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
+ENV PATH=/usr/local/bin/etcd:$PATH
 
 # Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
-    && mkdir -p /workspace /home/dynamo/.cache /opt/dynamo \
+    && mkdir -p /home/dynamo/.cache /opt/dynamo \
     # Non-recursive chown - only the directories themselves, not contents
-    && chown dynamo:0 /sgl-workspace /workspace /home/dynamo /home/dynamo/.cache /opt/dynamo \
+    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
     # No chmod needed: umask 002 handles new files, COPY --chmod handles copied content
     # Set umask globally for all subsequent RUN commands (must be done as root before USER dynamo)
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
 USER dynamo
-ENV HOME=/home/dynamo
-# This picks up the umask 002 from the /etc/profile.d/00-umask.sh file for subsequent RUN commands
-SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
-
-# Install SGLang (requires CUDA 12.8.1 or 12.9.1). Note that when system-wide packages is not writable,
-# so it gets installed to ~/.local/lib/python<version>/site-packages.
-RUN python3 -m pip install --no-cache-dir --ignore-installed pip==25.3 setuptools==80.9.0 wheel==0.45.1 html5lib==1.1 six==1.17.0 \
-    && git clone --depth 1 --branch v${SGLANG_COMMIT} https://github.com/sgl-project/sglang.git \
-    && cd sglang \
-    && case "$CUDA_VERSION" in \
-        12.8.1) CUINDEX=128 ;; \
-        12.9.1) CUINDEX=129 ;; \
-        *) echo "Error: Unsupported CUDA version for sglang: $CUDA_VERSION (requires 12.8.1 or 12.9.1)" && exit 1 ;; \
-    esac \
-    && python3 -m pip install --no-cache-dir sgl-kernel==${SGL_KERNEL_VERSION} \
-    && python3 -m pip install --no-cache-dir -e "python[${BUILD_TYPE}]" --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} \
-    && python3 -m pip install --no-cache-dir nvidia-nccl-cu12==2.27.6 --force-reinstall --no-deps \
-    && FLASHINFER_LOGGING_LEVEL=warning python3 -m flashinfer --download-cubin
-
-# Download and extract NVSHMEM source, clone DeepEP (use Tom's fork for GB200)
-RUN --mount=type=cache,target=/var/cache/curl,uid=1000,gid=0 \
-    curl --retry 3 --retry-delay 2 -fsSL -o /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz https://developer.download.nvidia.com/compute/redist/nvshmem/${NVSHMEM_VERSION}/source/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
-    && tar -xf /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
-    && mv nvshmem_src nvshmem \
-    && rm -f /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
-    && if [ "$GRACE_BLACKWELL" = true ]; then \
-        git clone --depth 1 https://github.com/fzyzcjy/DeepEP.git \
-        && cd DeepEP \
-        && git fetch --depth 1 origin ${DEEPEP_GB_COMMIT} \
-        && git checkout ${DEEPEP_GB_COMMIT}; \
-    else \
-        git clone --depth 1 https://github.com/deepseek-ai/DeepEP.git \
-        && cd DeepEP \
-        && git fetch --depth 1 origin ${DEEPEP_COMMIT} \
-        && git checkout ${DEEPEP_COMMIT}; \
-    fi \
-    && sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh
-
-# Build and install NVSHMEM library only (without python library)
-RUN cd /sgl-workspace/nvshmem && \
-    if [ "$GRACE_BLACKWELL" = true ]; then CUDA_ARCH="90;100;120"; else CUDA_ARCH="90"; fi && \
-    NVSHMEM_SHMEM_SUPPORT=0 \
-    NVSHMEM_UCX_SUPPORT=0 \
-    NVSHMEM_USE_NCCL=0 \
-    NVSHMEM_MPI_SUPPORT=0 \
-    NVSHMEM_IBGDA_SUPPORT=1 \
-    NVSHMEM_PMIX_SUPPORT=0 \
-    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
-    NVSHMEM_USE_GDRCOPY=1 \
-    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} -DNVSHMEM_BUILD_PYTHON_LIB=OFF && \
-    cmake --build build --target install -j${CMAKE_BUILD_PARALLEL_LEVEL}
-
-# Build nvshmem4py wheels separately (Python 3.10, CUDA 12) to avoid building the python library twice for multiple python versions
-# Need to reconfigure with PYTHON_LIB=ON to add the nvshmem4py subdirectory
-RUN cd /sgl-workspace/nvshmem && \
-    if [ "$GRACE_BLACKWELL" = true ]; then CUDA_ARCH="90;100;120"; else CUDA_ARCH="90"; fi && \
-    NVSHMEM_SHMEM_SUPPORT=0 \
-    NVSHMEM_UCX_SUPPORT=0 \
-    NVSHMEM_USE_NCCL=0 \
-    NVSHMEM_MPI_SUPPORT=0 \
-    NVSHMEM_IBGDA_SUPPORT=1 \
-    NVSHMEM_PMIX_SUPPORT=0 \
-    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
-    NVSHMEM_USE_GDRCOPY=1 \
-    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} -DNVSHMEM_BUILD_PYTHON_LIB=ON && \
-    cmake --build build --target build_nvshmem4py_wheel_cu12_${PYTHON_VERSION} -j${CMAKE_BUILD_PARALLEL_LEVEL}
-
-# Install DeepEP
-RUN cd /sgl-workspace/DeepEP && \
-    NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST="9.0;10.0" pip install --no-build-isolation .
-
-# Copy rust installation from dynamo_base to avoid duplication efforts
-# Pattern: COPY --chmod=775 <path>; RUN chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
-COPY --from=dynamo_base --chown=dynamo:0 --chmod=775 /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base --chown=dynamo:0 --chmod=775 /usr/local/cargo /usr/local/cargo
-RUN chmod g+w /usr/local/rustup /usr/local/cargo
-
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/workspace/target \
-    PATH=/usr/local/cargo/bin:$PATH \
-    CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
-
-# Install essential Python build tools
-RUN python3 -m pip install --no-cache-dir \
-    mooncake-transfer-engine==0.3.6.post1 \
-    scikit-build-core==0.11.6 \
-    setuptools-rust==1.12.0
-
-##################################################
-########## Runtime Image ########################
-##################################################
-#
-# PURPOSE: Production runtime environment
-#
-# This stage creates a production-ready image containing:
-# - Pre-compiled SGLang, DeepEP, and NVSHMEM components
-# - Dynamo runtime libraries and Python packages
-# - Essential runtime dependencies and configurations
-# - Optimized for inference workloads and deployment
-#
-# Use this stage when you need:
-# - Production deployment of Dynamo with SGLang + DeepEP
-# - Minimal runtime footprint without build tools
-# - Ready-to-run inference server environment
-#
-FROM framework AS runtime
-
-WORKDIR /workspace
-
-ARG ARCH
-ARG ARCH_ALT
-ARG PYTHON_VERSION
-
-ENV DYNAMO_HOME=/opt/dynamo
-ENV NVSHMEM_DIR=/sgl-workspace/nvshmem/install
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
-ENV LD_LIBRARY_PATH=\
-${NVSHMEM_DIR}/lib:\
-${NIXL_LIB_DIR}:\
-${NIXL_PLUGIN_DIR}:\
-/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
-/usr/local/nvidia/lib64:\
-${LD_LIBRARY_PATH}
-ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
-
-# Copy NATS and ETCD from dynamo_base, and UCX/NIXL from wheel_builder
-COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
-COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
-COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
-COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
-ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:${HOME}/.local/bin:$PATH
+# Copy attribution files
+COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 
 # Copy ffmpeg
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
@@ -722,60 +468,56 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/; \
     true # in case ffmpeg not enabled
 
-# Install Dynamo wheels from dynamo_base wheelhouse
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
-COPY --chmod=775 --chown=dynamo:0 benchmarks/ /opt/dynamo/benchmarks/
+COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-RUN python3 -m pip install \
-    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-    && cd /opt/dynamo/benchmarks \
-    && python3 -m pip install --no-cache . \
-    && cd - \
-    && rm -rf /opt/dynamo/benchmarks
+
+ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
+RUN --mount=type=bind,source=.,target=/mnt/local_src \
+    pip install --no-cache-dir --break-system-packages \
+        /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+        /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        sglang==${SGLANG_VERSION}
 
 # Install common and test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    python3 -m pip install \
-        --no-cache \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
+RUN --mount=type=bind,source=.,target=/mnt/local_src \
+    pip install --no-cache-dir --break-system-packages \
+        --requirement /mnt/local_src/container/deps/requirements.txt \
+        --requirement /mnt/local_src/container/deps/requirements.test.txt \
+        sglang==${SGLANG_VERSION} && \
+    cd /workspace/benchmarks && \
+    pip install --break-system-packages --no-cache . && \
+    # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
+    chmod -R g+w /workspace/benchmarks && \
+    # Install NVIDIA packages that are needed for DeepEP to work properly
+    # This is done in the upstream runtime image too, but we overrode these packages earlier
+    pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
+        nvidia-nccl-cu12==2.28.3 \
+        nvidia-cudnn-cu12==9.16.0.29 \
+        nvidia-cutlass-dsl==4.3.0
 
-## Copy attribution files and launch banner with correct ownership
-COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
-
-# Copy tests, benchmarks, deploy and components for CI with correct ownership
+# Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
-COPY --chmod=775 --chown=dynamo:0 benchmarks /workspace/benchmarks
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 components/ /workspace/components/
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
 
-# Setup launch banner in common directory accessible to all users
-RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
-    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
+# Enable forceful shutdown of inflight requests
+ENV SGLANG_FORCE_SHUTDOWN=1
 
-# Setup environment for all users
+# Our scripting assumes /workspace is where dynamo is located
+# In order to maintain the ability to have sglang and dynamo
+# in the same workspace, symlink /workspace to /sgl-workspace/dynamo
 USER root
-# Fix directory permissions: COPY --chmod only affects contents, not the directory itself
-RUN chmod g+w /workspace /workspace/* /opt/dynamo /opt/dynamo/* && \
-    chown dynamo:0 /workspace /opt/dynamo/ && \
-    chmod 755 /opt/dynamo/.launch_screen && \
-    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
-    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+RUN ln -s /workspace /sgl-workspace/dynamo
 
 USER dynamo
-
-# Copy tests, benchmarks, deploy and components for CI with correct ownership
 ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-CMD []
+ENV PATH=/home/dynamo/.local/bin:$PATH
 
 ###########################################################
 ########## Development (run.sh, runs as root user) ########
@@ -792,98 +534,63 @@ CMD []
 
 FROM runtime AS dev
 
-ARG WORKSPACE_DIR=/sgl-workspace/dynamo
-ARG PYTHON_VERSION
-
-# NOTE: SGLang uses system Python (not a virtualenv in framework/runtime stages) to align with
-# upstream SGLang Dockerfile: https://github.com/sgl-project/sglang/blob/main/docker/Dockerfile
-# For dev stage, we create a lightweight venv with --system-site-packages to satisfy maturin develop
-# requirements while still accessing all system-installed packages (sglang, torch, deepep, etc.)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN mkdir -p /opt/dynamo/venv && \
-    uv venv /opt/dynamo/venv --python $PYTHON_VERSION --system-site-packages
-
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
+# Don't want ubuntu to be editable, just change uid and gid.
+ARG WORKSPACE_DIR=/workspace
 
 USER root
-# venv permissions are handled by umask 002 set earlier
-
-# Install development tools and utilities
+# Install utilities as root
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends  \
-    # System monitoring and debugging tools
+    # Install utilities
     nvtop \
-    htop \
-    gdb \
-    # Network and system utilities
     wget \
-    iproute2 \
-    net-tools \
-    openssh-client \
-    rsync \
-    lsof \
-    # File and archive utilities
-    zip \
-    tree \
-    # Development and build tools
-    vim \
     tmux \
+    vim \
     git \
-    git-lfs \
+    openssh-client \
+    iproute2 \
+    rsync \
+    zip \
+    unzip \
+    htop \
+    # Build Dependencies
     autoconf \
     automake \
     cmake \
     libtool \
     meson \
-    bear \
-    ccache \
-    less \
-    pkg-config \
-    # Language and development support
+    net-tools \
+    pybind11-dev \
+    # Rust build dependencies
     clang \
     libclang-dev \
-    # Shell and productivity tools
-    zsh \
-    silversearcher-ag \
-    cloc \
-    locales \
-    # sudo for dev stage
-    sudo \
-    # NVIDIA tools dependencies
-    gnupg && \
-    echo "deb https://developer.download.nvidia.com/devtools/repos/ubuntu2004/amd64 /" | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
-    apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub && \
-    apt-get update -y && \
-    apt-get install -y nsight-systems-cli && \
+    protobuf-compiler \
+    pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
-# Install clang-format and clangd
-RUN curl --retry 3 --retry-delay 2 -LSso /usr/local/bin/clang-format https://github.com/muttleyxd/clang-tools-static-binaries/releases/download/master-32d3ac78/clang-format-16_linux-amd64 \
-    && chmod +x /usr/local/bin/clang-format \
-    && curl --retry 3 --retry-delay 2 -L https://github.com/clangd/clangd/releases/download/18.1.3/clangd-linux-18.1.3.zip -o clangd.zip \
-    && unzip clangd.zip \
-    && cp -r clangd_18.1.3/bin/* /usr/local/bin/ \
-    && cp -r clangd_18.1.3/lib/* /usr/local/lib/ \
-    && rm -rf clangd_18.1.3 clangd.zip
+# Set umask for group-writable files in dev stage (runs as root)
+RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
+SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 
+# Set workspace directory variable
+ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
+    DYNAMO_HOME=${WORKSPACE_DIR} \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/workspace/target \
+    PATH=/usr/local/cargo/bin:$PATH
+
+# Copy rust installation from dynamo_base to avoid duplication efforts
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --from=dynamo_base --chmod=775 /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base --chmod=775 /usr/local/cargo /usr/local/cargo
+RUN chmod g+w /usr/local/rustup /usr/local/cargo
+
+# Install maturin, for maturin develop
 # Editable install of dynamo
-COPY --chmod=664 pyproject.toml README.md hatch_build.py /workspace/
-RUN python3 -m pip install --no-deps -e .
-
-# Install Python development packages
-RUN python3 -m pip install --no-cache-dir \
-    maturin[patchelf] \
-    pytest \
-    black \
-    isort \
-    icdiff \
-    scikit_build_core \
-    uv \
-    pre-commit \
-    pandas \
-    matplotlib \
-    tabulate
+COPY pyproject.toml README.md hatch_build.py /workspace/
+RUN pip install maturin[patchelf] && \
+    pip install --no-deps -e .
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

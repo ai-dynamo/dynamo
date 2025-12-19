@@ -164,8 +164,10 @@ runs:
 
         # Run the sanity check script inside the container
         # The script is located in /workspace/deploy/sanity_check.py in runtime containers
+        export WORKSPACE=/workspace
+
         set +e
-        docker run --rm "$IMAGE_TAG" python /workspace/deploy/sanity_check.py --runtime-check --no-gpu-check
+        docker run --rm "$IMAGE_TAG" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
         SANITY_CHECK_EXIT_CODE=$?
         set -e
         if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
