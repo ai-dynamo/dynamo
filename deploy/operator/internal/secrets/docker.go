@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )

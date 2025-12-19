@@ -23,9 +23,9 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
-	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"

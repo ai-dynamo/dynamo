@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/discovery"
 	ctrl "sigs.k8s.io/controller-runtime"

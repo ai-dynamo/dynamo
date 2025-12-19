@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"testing"
 
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 )

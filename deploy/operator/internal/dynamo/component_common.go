@@ -6,7 +6,7 @@
 package dynamo
 
 import (
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 )
