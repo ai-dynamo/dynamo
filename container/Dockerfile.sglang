@@ -496,6 +496,8 @@ ENV SGLANG_FORCE_SHUTDOWN=1
 
 WORKDIR /sgl-workspace
 
+ENV PATH=/home/dynamo/.local/bin:$PATH
+
 ###########################################################
 ########## Development (run.sh, runs as root user) ########
 ###########################################################
