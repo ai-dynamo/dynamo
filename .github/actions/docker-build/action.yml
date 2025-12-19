@@ -165,9 +165,9 @@ runs:
         # Run the sanity check script inside the container
         # The script is located in /workspace/deploy/sanity_check.py in runtime containers
         export WORKSPACE=/workspace
-        if [[ ${{ inputs.framework }} == "sglang" ]]; then
-            WORKSPACE=/sgl-workspace
-        fi
+        # if [[ ${{ inputs.framework }} == "sglang" ]]; then
+        #     WORKSPACE=/sgl-workspace
+        # fi
 
         set +e
         docker run --rm "$IMAGE_TAG" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
