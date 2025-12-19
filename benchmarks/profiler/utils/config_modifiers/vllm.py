@@ -280,6 +280,18 @@ class VllmV1ConfigModifier:
         if "--enable-expert-parallel" not in args:
             args = append_argument(args, "--enable-expert-parallel")
 
+        # DEP with DeepEP low-latency backend has buffer constraints:
+        # nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2
+        # Cap max-num-seqs to 128 to satisfy this constraint
+        DEP_MAX_NUM_SEQS = 128
+        current_max_seqs = None
+        for i, arg in enumerate(args):
+            if arg == "--max-num-seqs" and i + 1 < len(args):
+                current_max_seqs = int(args[i + 1])
+                break
+        if current_max_seqs is None or current_max_seqs > DEP_MAX_NUM_SEQS:
+            args = set_argument_value(args, "--max-num-seqs", str(DEP_MAX_NUM_SEQS))
+
         worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()
 
@@ -394,6 +406,13 @@ class VllmV1ConfigModifier:
         per_gpu_max_tokens = (
             max_num_tokens // dp_size if dp_size > 1 else max_num_tokens
         )
+
+        # DEP with DeepEP low-latency backend has buffer constraints:
+        # nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2
+        # Cap max-num-seqs to 128 to satisfy this constraint
+        DEP_MAX_NUM_SEQS = 128
+        if dp_size > 1 and max_batch_size > DEP_MAX_NUM_SEQS:
+            max_batch_size = DEP_MAX_NUM_SEQS
 
         args = set_argument_value(args, "--max-num-seqs", str(max_batch_size))
         args = set_argument_value(
