@@ -237,9 +237,8 @@ impl OpenAIPreprocessor {
         builder.output_options(request.extract_output_options()?);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
-        // Extract routing hints and extra_fields from nvext if present
+        // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
-            builder.extra_fields(nvext.extra_fields.clone());
             // Build routing hints from nvext fields
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,

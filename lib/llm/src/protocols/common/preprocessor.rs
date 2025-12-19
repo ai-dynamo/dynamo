@@ -132,11 +132,6 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
 
-    /// Extra fields requested to be included in the response's nvext
-    #[builder(default)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra_fields: Option<Vec<String>>,
-
     /// Optional request tracker for per-request metrics (shared with DeltaGenerator)
     #[builder(default)]
     #[serde(skip)]
