@@ -358,6 +358,7 @@ use dynamo_runtime::{Runtime, distributed::DistributedConfig, traits::Distribute
 
 use dynamo_llm::discovery::ModelManager;
 use dynamo_llm::entrypoint::build_routed_pipeline;
+use dynamo_llm::http::service::metrics::Metrics;
 use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::openai::nvext::NvExt;
@@ -1120,11 +1121,14 @@ pub async fn create_worker_selection_pipeline_chat(
         active_prefill_tokens_threshold: None,
         enforce_disagg,
     };
+    // Create metrics for migration tracking (not exposed via /metrics in C bindings)
+    let metrics = Arc::new(Metrics::new());
     let watcher = ModelWatcher::new(
         component.drt().clone(),
         model_manager.clone(),
         router_config,
         None,
+        metrics.clone(),
     );
     let cards = watcher
         .cards_for_model(model_name, Some(namespace), false)
@@ -1225,6 +1229,7 @@ pub async fn create_worker_selection_pipeline_chat(
         hf_tokenizer,
         prefill_chooser,
         enforce_disagg,
+        metrics,
     )
     .await?;
 

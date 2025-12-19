@@ -209,3 +209,87 @@ def verify_migration_occurred(frontend_process: DynamoFrontendProcess) -> None:
     assert (
         "Cannot recreate stream: " not in log_content
     ), "'Cannot recreate stream: ...' error found in logs"
+
+
+def _parse_migration_metric(
+    metrics_text: str, model_name: str, migration_type: str
+) -> int:
+    """
+    Parse the migration metric value from Prometheus metrics text.
+
+    Args:
+        metrics_text: Raw Prometheus metrics text
+        model_name: The model name label value
+        migration_type: The migration_type label value ("ongoing_request" or "new_request")
+
+    Returns:
+        The metric count, or 0 if not found
+    """
+    import re
+
+    # Match pattern like:
+    # dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 1
+    # Labels can be in any order
+    pattern = rf'dynamo_frontend_model_migration_total\{{[^}}]*migration_type="{migration_type}"[^}}]*model="{re.escape(model_name)}"[^}}]*\}}\s+(\d+)'
+    match = re.search(pattern, metrics_text)
+
+    if match:
+        return int(match.group(1))
+
+    # Try with labels in reverse order
+    pattern = rf'dynamo_frontend_model_migration_total\{{[^}}]*model="{re.escape(model_name)}"[^}}]*migration_type="{migration_type}"[^}}]*\}}\s+(\d+)'
+    match = re.search(pattern, metrics_text)
+
+    if match:
+        return int(match.group(1))
+
+    return 0
+
+
+def verify_migration_metrics(
+    frontend_port: int,
+    expected_ongoing_request_count: int = 0,
+    expected_new_request_count: int = 0,
+) -> None:
+    """
+    Verify migration metrics by querying the frontend's /metrics endpoint.
+
+    Args:
+        frontend_port: Port where the frontend is running
+        expected_ongoing_request_count: Expected count of ongoing_request migrations
+        expected_new_request_count: Expected count of new_request migrations
+    """
+    metrics_url = f"http://localhost:{frontend_port}/metrics"
+
+    try:
+        response = requests.get(metrics_url, timeout=1)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        pytest.fail(f"Failed to fetch metrics from {metrics_url}: {e}")
+
+    metrics_text = response.text
+    logger.info(f"Fetched metrics from {metrics_url}")
+
+    # Parse metrics to find migration counts
+    ongoing_count = _parse_migration_metric(
+        metrics_text, FAULT_TOLERANCE_MODEL_NAME, "ongoing_request"
+    )
+    new_request_count = _parse_migration_metric(
+        metrics_text, FAULT_TOLERANCE_MODEL_NAME, "new_request"
+    )
+
+    logger.info(
+        f"Migration metrics - ongoing_request: {ongoing_count}, new_request: {new_request_count}"
+    )
+
+    if expected_ongoing_request_count > 0:
+        assert ongoing_count >= expected_ongoing_request_count, (
+            f"Expected at least {expected_ongoing_request_count} ongoing_request migrations, "
+            f"but got {ongoing_count}"
+        )
+
+    if expected_new_request_count > 0:
+        assert new_request_count >= expected_new_request_count, (
+            f"Expected at least {expected_new_request_count} new_request migrations, "
+            f"but got {new_request_count}"
+        )
