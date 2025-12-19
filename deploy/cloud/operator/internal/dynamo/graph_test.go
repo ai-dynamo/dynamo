@@ -1412,6 +1412,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														},
 													},
 													{
+														Name: "POD_UID",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.uid",
+															},
+														},
+													},
+													{
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
 													},
@@ -1607,6 +1615,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														ValueFrom: &corev1.EnvVarSource{
 															FieldRef: &corev1.ObjectFieldSelector{
 																FieldPath: "metadata.namespace",
+															},
+														},
+													},
+													{
+														Name: "POD_UID",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.uid",
 															},
 														},
 													},
@@ -1991,6 +2007,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 															},
 														},
 													},
+													{
+														Name: "POD_UID",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.uid",
+															},
+														},
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -2172,6 +2196,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 															},
 														},
 													},
+													{
+														Name: "POD_UID",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.uid",
+															},
+														},
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -2324,6 +2356,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														ValueFrom: &corev1.EnvVarSource{
 															FieldRef: &corev1.ObjectFieldSelector{
 																FieldPath: "metadata.namespace",
+															},
+														},
+													},
+													{
+														Name: "POD_UID",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.uid",
 															},
 														},
 													},
@@ -2486,6 +2526,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														ValueFrom: &corev1.EnvVarSource{
 															FieldRef: &corev1.ObjectFieldSelector{
 																FieldPath: "metadata.namespace",
+															},
+														},
+													},
+													{
+														Name: "POD_UID",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.uid",
 															},
 														},
 													},
@@ -2900,6 +2948,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 															},
 														},
 													},
+													{
+														Name: "POD_UID",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.uid",
+															},
+														},
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -3068,6 +3124,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 															},
 														},
 													},
+													{
+														Name: "POD_UID",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.uid",
+															},
+														},
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -3220,6 +3284,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														ValueFrom: &corev1.EnvVarSource{
 															FieldRef: &corev1.ObjectFieldSelector{
 																FieldPath: "metadata.namespace",
+															},
+														},
+													},
+													{
+														Name: "POD_UID",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.uid",
 															},
 														},
 													},
@@ -3389,6 +3461,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														ValueFrom: &corev1.EnvVarSource{
 															FieldRef: &corev1.ObjectFieldSelector{
 																FieldPath: "metadata.namespace",
+															},
+														},
+													},
+													{
+														Name: "POD_UID",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.uid",
 															},
 														},
 													},
@@ -5020,6 +5100,11 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
 								FieldRef: &corev1.ObjectFieldSelector{
 									FieldPath: "metadata.namespace",
+								},
+							}},
+							{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
+								FieldRef: &corev1.ObjectFieldSelector{
+									FieldPath: "metadata.uid",
 								},
 							}},
 						},
