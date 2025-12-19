@@ -27,6 +27,10 @@ dynamo-operator:
   # -- etcd server address for operator state storage (leave empty to use the bundled etcd chart). Format: "http://hostname:port" or "https://hostname:port"
   etcdAddr: ""
 
+  nats:
+    # -- Whether the NATS is enabled
+    enabled: true
+
   # -- URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true).
   modelExpressURL: ""
   # -- Namespace access controls for the operator
