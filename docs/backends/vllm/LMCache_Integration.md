@@ -166,7 +166,7 @@ For detailed information on LMCache metrics, including the complete list of avai
 
 You may see an error like:
 
-```
+```text
 LMCache ERROR: PrometheusLogger instance already created with different metadata. This should not happen except in test
 ```
 
