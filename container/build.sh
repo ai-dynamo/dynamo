@@ -120,6 +120,7 @@ SGLANG_FRAMEWORK_IMAGE="nvcr.io/nvidia/cuda"
 SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
 
 NIXL_REF=${NIXL_REF:-0.7.1}
+NIXL_REPO=${NIXL_REPO:-https://github.com/ai-dynamo/nixl.git}
 NIXL_UCX_REF=${NIXL_UCX_REF:-v1.19.0}
 NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
@@ -439,6 +440,8 @@ show_image_options() {
     if [[ $FRAMEWORK == "TRTLLM" ]]; then
         echo "   Tensorrtllm_Pip_Wheel: '${PRINT_TRTLLM_WHEEL_FILE}'"
     fi
+    echo "   NIXL_REPO: '${NIXL_REPO}'"
+    echo "   NIXL_REF: '${NIXL_REF}'"
     echo "   Build Context: '${BUILD_CONTEXT}'"
     echo "   Build Arguments: '${BUILD_ARGS}'"
     echo "   Framework: '${FRAMEWORK}'"
@@ -480,6 +483,10 @@ show_help() {
     echo "  [--build-context name=path to add build context]"
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
+    echo ""
+    echo "  NIXL Configuration (via environment variables):"
+    echo "        NIXL_REF=<branch/tag>  - NIXL git ref (default: 0.7.1)"
+    echo "        NIXL_REPO=<url>        - NIXL git repo URL (default: https://github.com/ai-dynamo/nixl.git)"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
@@ -560,8 +567,9 @@ elif [[ $FRAMEWORK == "SGLANG" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
 fi
 
-# Add NIXL_REF as a build argument
+# Add NIXL_REF and NIXL_REPO as build arguments
 BUILD_ARGS+=" --build-arg NIXL_REF=${NIXL_REF} "
+BUILD_ARGS+=" --build-arg NIXL_REPO=${NIXL_REPO} "
 
 # Function to build local-dev image with header
 build_local_dev_with_header() {

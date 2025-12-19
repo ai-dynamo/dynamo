@@ -217,7 +217,8 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
                 // Update Prometheus metrics
                 let host_rate = cache_stats_clone.host_hit_rate();
                 let disk_rate = cache_stats_clone.disk_hit_rate();
-                kvbm_metrics_clone.update_cache_hit_rates(host_rate, disk_rate, 0.0);
+                let object_rate = cache_stats_clone.object_hit_rate();
+                kvbm_metrics_clone.update_cache_hit_rates(host_rate, disk_rate, object_rate);
                 // Also log cache hit rates periodically
                 cache_stats_clone.maybe_log();
             }
@@ -783,19 +784,22 @@ impl Slot for VllmConnectorSlot {
             // Convert cached tokens to blocks (rounding up)
             let host_blocks = (self.tokens_cached_from_host + block_size - 1) / block_size;
             let disk_blocks = (self.tokens_cached_from_disk + block_size - 1) / block_size;
+            let object_blocks = (self.tokens_cached_from_g4 + block_size - 1) / block_size;
 
             tracing::debug!(
                 request_id = %self.request_id,
-                "Reporting cache stats: host_blocks={}, disk_blocks={}, total_blocks_queried={}, tokens_from_host={}, tokens_from_disk={}",
+                "Reporting cache stats: host_blocks={}, disk_blocks={}, object_blocks={}, total_blocks_queried={}, tokens_from_host={}, tokens_from_disk={}, tokens_from_g4={}",
                 host_blocks,
                 disk_blocks,
+                object_blocks,
                 self.total_blocks_queried,
                 self.tokens_cached_from_host,
-                self.tokens_cached_from_disk
+                self.tokens_cached_from_disk,
+                self.tokens_cached_from_g4
             );
 
             self.cache_stats
-                .record(host_blocks, disk_blocks, self.total_blocks_queried);
+                .record_with_object(host_blocks, disk_blocks, object_blocks, self.total_blocks_queried);
         }
 
         // Check if there are any pending operations
@@ -1699,21 +1703,33 @@ where
         storage_name
     );
 
-    // Only enable write-through for hashes that passed the dedup filter
-    let (sequence_hashes, write_through) = if g4_enabled && !hashes_to_offload.is_empty() {
-        let filtered_hashes: Vec<u64> = offload_req.sequence_hashes.iter()
-            .filter(|h| hashes_to_offload_set.contains(h))
-            .copied()
-            .collect();
-        (Some(filtered_hashes), true)
+    let (write_through_blocks, sequence_hashes, write_through) = if g4_enabled && !hashes_to_offload.is_empty() {
+        // Filter both block_pairs and sequence_hashes together using the same predicate.
+        // block_pairs[i] corresponds to offload_req.sequence_hashes[i].
+        let (filtered_pairs, filtered_hashes): (Vec<_>, Vec<_>) = block_pairs
+            .iter()
+            .zip(offload_req.sequence_hashes.iter())
+            .filter(|(_, hash)| hashes_to_offload_set.contains(hash))
+            .map(|(pair, hash)| (*pair, *hash))
+            .unzip();
+
+        tracing::debug!(
+            request_id = request_id,
+            operation_id = %operation_id,
+            "G4 write-through: {} of {} blocks need object storage upload",
+            filtered_pairs.len(),
+            block_pairs.len()
+        );
+
+        (filtered_pairs, Some(filtered_hashes), true)
     } else {
-        (None, false)
+        (block_pairs.clone(), None, false)
     };
 
     let block_xfer_req = BlockTransferRequest {
         from_pool: BlockTransferPool::Device,
         to_pool: transfer_pool,
-        blocks: block_pairs,
+        blocks: write_through_blocks,
         connector_req: Some(LeaderTransferRequest {
             request_id: offload_req.request_id.clone(),
             uuid: offload_req.operation_id,
@@ -1847,7 +1863,7 @@ async fn process_onboard_request(
                 host_block_ids.len()
             );
 
-            let notify_receiver = leader
+            let transfer_result = leader
                 .transfer_blocks_request(
                     BlockTransferRequest::new_g4_onboard(
                         sequence_hashes,
@@ -1861,16 +1877,41 @@ async fn process_onboard_request(
                         },
                     ),
                 )
-                .await?;
+                .await;
 
-            notify_receiver.await.map_err(|_| {
-                anyhow::anyhow!("Object→Device transfer completion notification failed")
-            })?;
+            match transfer_result {
+                Ok(notify_receiver) => {
+                    if let Err(e) = notify_receiver.await {
+                        // Record the failure in metrics
+                        kvbm_metrics.record_object_read_failure(num_blocks as u64);
+                        tracing::error!(
+                            request_id = %request_id,
+                            operation_id = %operation_id,
+                            num_blocks = num_blocks,
+                            "Object -> Device transfer notification failed: {:?}",
+                            e
+                        );
+                        return Err(anyhow::anyhow!("Object -> Device transfer completion notification failed"));
+                    }
+                }
+                Err(e) => {
+                    // Record the failure in metrics
+                    kvbm_metrics.record_object_read_failure(num_blocks as u64);
+                    tracing::error!(
+                        request_id = %request_id,
+                        operation_id = %operation_id,
+                        num_blocks = num_blocks,
+                        "Object -> Device transfer request failed: {:?}",
+                        e
+                    );
+                    return Err(e);
+                }
+            }
 
             tracing::debug!(
                 request_id = %request_id,
                 operation_id = %operation_id,
-                "Object→Device transfer completed successfully"
+                "Object -> Device transfer completed successfully"
             );
         }
     }

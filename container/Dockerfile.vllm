@@ -133,10 +133,11 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 # Set environment variables - they'll be empty strings if USE_SCCACHE=false
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    SCCACHE_ENDPOINT=${USE_SCCACHE:+${SCCACHE_S3_ENDPOINT}} \
     CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
     CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
     CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
+# Only set SCCACHE_ENDPOINT if a custom endpoint was provided
+ENV SCCACHE_ENDPOINT=${SCCACHE_S3_ENDPOINT:+${SCCACHE_S3_ENDPOINT}}
 # Install VLLM and related dependencies
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \

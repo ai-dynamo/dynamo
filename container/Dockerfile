@@ -38,6 +38,7 @@ ARG SCCACHE_S3_ENDPOINT=""
 # NIXL configuration
 ARG NIXL_UCX_REF=v1.19.0
 ARG NIXL_REF=0.7.1
+ARG NIXL_REPO=https://github.com/ai-dynamo/nixl.git
 ARG NIXL_GDRCOPY_REF=v2.5.1
 
 ##################################
@@ -56,6 +57,7 @@ ARG SCCACHE_REGION
 ARG SCCACHE_S3_ENDPOINT
 ARG NIXL_UCX_REF
 ARG NIXL_REF
+ARG NIXL_REPO
 ARG NIXL_GDRCOPY_REF
 
 USER root
@@ -75,13 +77,16 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
     fi
 
 # Set SCCACHE environment variables
+# Note: SCCACHE_ENDPOINT is only set if SCCACHE_S3_ENDPOINT has a value
+# An empty SCCACHE_ENDPOINT would break default AWS S3 endpoint resolution
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    SCCACHE_ENDPOINT=${USE_SCCACHE:+${SCCACHE_S3_ENDPOINT}} \
     RUSTC_WRAPPER=${USE_SCCACHE:+sccache} \
     CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
     CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
     CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
+# Only set SCCACHE_ENDPOINT if a custom endpoint was provided
+ENV SCCACHE_ENDPOINT=${SCCACHE_S3_ENDPOINT:+${SCCACHE_S3_ENDPOINT}}
 
 ##################################
 ########## Rust Setup ############
@@ -143,6 +148,7 @@ ARG SCCACHE_REGION
 ARG SCCACHE_S3_ENDPOINT
 ARG NIXL_UCX_REF
 ARG NIXL_REF
+ARG NIXL_REPO
 ARG NIXL_GDRCOPY_REF
 
 WORKDIR /workspace
@@ -204,9 +210,10 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 # Set SCCACHE environment variables
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    SCCACHE_ENDPOINT=${USE_SCCACHE:+${SCCACHE_S3_ENDPOINT}} \
     CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
     CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
+# Only set SCCACHE_ENDPOINT if a custom endpoint was provided
+ENV SCCACHE_ENDPOINT=${SCCACHE_S3_ENDPOINT:+${SCCACHE_S3_ENDPOINT}}
 
 # Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
 ARG AWS_SDK_CPP_VERSION=1.11.581
@@ -305,7 +312,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
+    git clone --depth 1 --branch ${NIXL_REF} "${NIXL_REPO}" nixl && \
     cd nixl && \
     mkdir build && \
     meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
