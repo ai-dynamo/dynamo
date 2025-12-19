@@ -90,7 +90,7 @@ spec:
         {{- end }}
         {{- if .Values.natsAddr }}
           - --natsAddr={{ .Values.natsAddr }}
-        {{- else }}
+        {{- else if and .Values.nats .Values.nats.enabled }}
           - --natsAddr=nats://{{ .Release.Name }}-nats.{{ .Release.Namespace }}.svc.cluster.local:4222
         {{- end }}
         {{- if .Values.etcdAddr }}
