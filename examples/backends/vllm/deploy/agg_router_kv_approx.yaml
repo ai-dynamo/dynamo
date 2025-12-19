@@ -1,14 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+## This example demonstrates KV-aware routing with the --no-kv-events flag.
+## Instead of receiving KV events from workers, the router predicts cache state
+## locally based on routing decisions with TTL-based expiration and pruning.
+## Note: This mode does not require NATS or JetStream during dynamo platform deployment.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-agg-router
+  name: vllm-agg-router-kv-approximation
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-agg-router
+      dynamoNamespace: vllm-agg-router-kv-approximation
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -27,7 +31,7 @@ spec:
           value: kv
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg-router
+      dynamoNamespace: vllm-agg-router-kv-approximation
       componentType: worker
       replicas: 2
       resources:
