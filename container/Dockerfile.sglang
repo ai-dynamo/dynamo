@@ -501,8 +501,10 @@ COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
 ENV SGLANG_FORCE_SHUTDOWN=1
 
 WORKDIR /sgl-workspace
+USER root
 RUN ln -s /workspace /sgl-workspace/dynamo
 
+USER dynamo
 ENV PATH=/home/dynamo/.local/bin:$PATH
 
 ###########################################################
