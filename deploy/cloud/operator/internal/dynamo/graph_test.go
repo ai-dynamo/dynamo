@@ -1993,7 +1993,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "true",
+														Value: "false",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -2186,7 +2186,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "true",
+														Value: "false",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -2950,7 +2950,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "true",
+														Value: "false",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -3130,7 +3130,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "true",
+														Value: "false",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -5138,7 +5138,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: "ANOTHER_CONTAINER_ENV", Value: "true"},
 							{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
 							{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
-							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
+							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 							{Name: commonconsts.DynamoNamespaceEnvVar, Value: ""},
 							{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
