@@ -500,7 +500,8 @@ COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
 # Enable forceful shutdown of inflight requests
 ENV SGLANG_FORCE_SHUTDOWN=1
 
-WORKDIR /workspace
+WORKDIR /sgl-workspace
+RUN ln -s /workspace /sgl-workspace/dynamo
 
 ENV PATH=/home/dynamo/.local/bin:$PATH
 
