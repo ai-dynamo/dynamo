@@ -1,12 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+variable ARCH {
+    default = "amd64"
+}
+variable ARCH_ALT {
+    default = "x86_64"
+}
 variable "DOCKER_REGISTRY" {
     default = ""
 }
 variable "LOCAL_CACHE_DIR" {
-  default = ""
   # Set this to a local directory path to enable local caching
+  default = ""
 }
 variable "POSTFIX_TAG" {
   default = "latest"
@@ -26,8 +32,8 @@ variable "USE_SCCACHE" {
 
 target "_common" {
   args = {
-    ARCH = "amd64"
-    ARCH_ALT = "x86_64"
+    ARCH = "${ARCH}"
+    ARCH_ALT = "${ARCH_ALT}"
     BASE_IMAGE = "nvcr.io/nvidia/cuda-dl-base"
     BASE_IMAGE_TAG = "25.04-cuda12.9-devel-ubuntu24.04"
     ENABLE_KVBM = "true"
@@ -62,23 +68,25 @@ target "base" {
   inherits = ["_common"]
   platforms = ["linux/amd64"]
   tags = [
-    notequal("", DOCKER_REGISTRY) ? "${DOCKER_REGISTRY}:base-${POSTFIX_TAG}" : "${PREFIX_TAG}:base-${POSTFIX_TAG}"
+    notequal("", DOCKER_REGISTRY) ?
+      "${DOCKER_REGISTRY}:base-${POSTFIX_TAG}-${ARCH}"
+      : "${PREFIX_TAG}:base-${POSTFIX_TAG}-${ARCH}"
   ]
   cache-from = concat(
     notequal("", LOCAL_CACHE_DIR) ?
       [{
         type="local",
-        src="${LOCAL_CACHE_DIR}/base-${POSTFIX_TAG}"
+        src="${LOCAL_CACHE_DIR}/base-${POSTFIX_TAG}-${ARCH}"
       }] : [],
     notequal("",DOCKER_REGISTRY) ?
       [{
         type="registry",
-        ref="${DOCKER_REGISTRY}:base-${POSTFIX_TAG}"
+        ref="${DOCKER_REGISTRY}:base-${POSTFIX_TAG}-${ARCH}"
       }] : [],
     notequal("",DOCKER_REGISTRY) ?
       [{
         type="registry",
-        ref="${DOCKER_REGISTRY}:base-latest"
+        ref="${DOCKER_REGISTRY}:base-latest-${ARCH}"
       }] : []
   )
   cache-to = concat(
@@ -88,13 +96,13 @@ target "base" {
         mode="max",
         image-manifest=true,
         oci-mediatypes=true,
-        ref="${DOCKER_REGISTRY}:base-${POSTFIX_TAG}"
+        ref="${DOCKER_REGISTRY}:base-${POSTFIX_TAG}-${ARCH}"
       }] : [],
     notequal("", LOCAL_CACHE_DIR) ?
       [{
         type="local",
         mode="max",
-        dest="${LOCAL_CACHE_DIR}/base-${POSTFIX_TAG}"
+        dest="${LOCAL_CACHE_DIR}/base-${POSTFIX_TAG}-${ARCH}"
       }] : []
   )
 }
@@ -105,7 +113,9 @@ target "wheel_builder" {
   inherits = ["_common"]
   platforms = ["linux/amd64"]
   tags = [
-    notequal("", DOCKER_REGISTRY) ? "${DOCKER_REGISTRY}:wheel_builder-${POSTFIX_TAG}" : "${PREFIX_TAG}:wheel_builder-${POSTFIX_TAG}"
+    notequal("", DOCKER_REGISTRY) ?
+      "${DOCKER_REGISTRY}:wheel_builder-${POSTFIX_TAG}-${ARCH}"
+      : "${PREFIX_TAG}:wheel_builder-${POSTFIX_TAG}-${ARCH}"
   ]
   contexts = {
     base = "target:base"
@@ -114,17 +124,17 @@ target "wheel_builder" {
     notequal("", LOCAL_CACHE_DIR) ?
       [{
         type="local",
-        src="${LOCAL_CACHE_DIR}/wheel_builder-${POSTFIX_TAG}"
+        src="${LOCAL_CACHE_DIR}/wheel_builder-${POSTFIX_TAG}-${ARCH}"
       }] : [],
     notequal("",DOCKER_REGISTRY) ?
       [{
         type="registry",
-        ref="${DOCKER_REGISTRY}:wheel_builder-${POSTFIX_TAG}"
+        ref="${DOCKER_REGISTRY}:wheel_builder-${POSTFIX_TAG}-${ARCH}"
       }] : [],
     notequal("",DOCKER_REGISTRY) ?
       [{
         type="registry",
-        ref="${DOCKER_REGISTRY}:wheel_builder-latest"
+        ref="${DOCKER_REGISTRY}:wheel_builder-latest-${ARCH}"
       }] : []
   )
   cache-to = concat(
@@ -134,13 +144,13 @@ target "wheel_builder" {
         mode="max",
         image-manifest=true,
         oci-mediatypes=true,
-        ref="${DOCKER_REGISTRY}:wheel_builder-${POSTFIX_TAG}"
+        ref="${DOCKER_REGISTRY}:wheel_builder-${POSTFIX_TAG}-${ARCH}"
       }] : [],
     notequal("", LOCAL_CACHE_DIR) ?
       [{
         type="local",
         mode="max",
-        dest="${LOCAL_CACHE_DIR}/wheel_builder-${POSTFIX_TAG}"
+        dest="${LOCAL_CACHE_DIR}/wheel_builder-${POSTFIX_TAG}-${ARCH}"
       }] : []
   )
 }
@@ -151,7 +161,9 @@ target "vllm-runtime" {
   inherits = ["_common"]
   platforms  = ["linux/amd64"]
   tags = [
-    notequal("", DOCKER_REGISTRY) ? "${DOCKER_REGISTRY}:vllm_runtime-${POSTFIX_TAG}" : "${PREFIX_TAG}:vllm_runtime-${POSTFIX_TAG}"
+    notequal("", DOCKER_REGISTRY) ?
+      "${DOCKER_REGISTRY}:vllm_runtime-${POSTFIX_TAG}-${ARCH}"
+      : "${PREFIX_TAG}:vllm_runtime-${POSTFIX_TAG}-${ARCH}"
   ]
   contexts = {
     dynamo_base = "target:base"
@@ -161,17 +173,17 @@ target "vllm-runtime" {
     notequal("", LOCAL_CACHE_DIR) ?
       [{
         type="local",
-        src="${LOCAL_CACHE_DIR}/vllm_runtime-${POSTFIX_TAG}"
+        src="${LOCAL_CACHE_DIR}/vllm_runtime-${POSTFIX_TAG}-${ARCH}"
       }] : [],
     notequal("",DOCKER_REGISTRY) ?
       [{
         type="registry",
-        ref="${DOCKER_REGISTRY}:vllm_runtime-${POSTFIX_TAG}"
+        ref="${DOCKER_REGISTRY}:vllm_runtime-${POSTFIX_TAG}-${ARCH}"
       }] : [],
     notequal("",DOCKER_REGISTRY) ?
       [{
         type="registry",
-        ref="${DOCKER_REGISTRY}:vllm_runtime-latest"
+        ref="${DOCKER_REGISTRY}:vllm_runtime-latest-${ARCH}"
       }] : []
   )
   cache-to = concat(
@@ -181,13 +193,13 @@ target "vllm-runtime" {
         mode="max",
         image-manifest=true,
         oci-mediatypes=true,
-        ref="${DOCKER_REGISTRY}:vllm_runtime-${POSTFIX_TAG}"
+        ref="${DOCKER_REGISTRY}:vllm_runtime-${POSTFIX_TAG}-${ARCH}"
       }] : [],
     notequal("", LOCAL_CACHE_DIR) ?
       [{
         type="local",
         mode="max",
-        dest="${LOCAL_CACHE_DIR}/vllm_runtime-${POSTFIX_TAG}"
+        dest="${LOCAL_CACHE_DIR}/vllm_runtime-${POSTFIX_TAG}-${ARCH}"
       }] : []
   )
 }

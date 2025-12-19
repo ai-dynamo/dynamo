@@ -41,5 +41,7 @@
 **/*safetensors
 container/Dockerfile*
 container/docker-bake.hcl
+docker-cache/
+dist/
 .venv
 .venv-docs
