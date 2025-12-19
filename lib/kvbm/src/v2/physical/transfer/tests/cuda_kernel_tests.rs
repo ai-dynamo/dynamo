@@ -84,6 +84,7 @@ fn test_kernel_incompatible_lw_to_lw() {
         layers,
         stream.as_ref(),
         backend,
+        ctx.cuda_pool(),
     );
 
     assert!(result.is_err(), "Expected error for LW→LW transfer");
@@ -124,6 +125,7 @@ fn test_kernel_compatible_fc_to_lw() {
         layers,
         stream.as_ref(),
         backend,
+        ctx.cuda_pool(),
     );
 
     assert!(
@@ -162,6 +164,7 @@ fn test_kernel_compatible_lw_to_fc() {
         layers,
         stream.as_ref(),
         backend,
+        ctx.cuda_pool(),
     );
 
     assert!(
@@ -200,6 +203,7 @@ fn test_kernel_compatible_fc_to_fc() {
         layers,
         stream.as_ref(),
         backend,
+        ctx.cuda_pool(),
     );
 
     assert!(

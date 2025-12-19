@@ -410,6 +410,12 @@ impl TransferManager {
     ) -> TransferCompleteNotification {
         self.context.register_cuda_event(event)
     }
+
+    /// Get the CUDA memory pool (for testing only).
+    #[cfg(test)]
+    pub(crate) fn cuda_pool(&self) -> &std::sync::Arc<dynamo_memory::CudaMemPool> {
+        self.context.cuda_pool()
+    }
 }
 
 /// Internal registry for local and remote physical layouts with NIXL integration.

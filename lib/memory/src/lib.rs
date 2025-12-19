@@ -14,6 +14,7 @@ pub mod arena;
 pub mod nixl;
 pub mod numa;
 pub mod offset;
+pub mod pool;
 pub mod prelude;
 
 mod device;
@@ -33,6 +34,7 @@ pub use external::ExternalDeviceMemory;
 pub use numa::{NumaNode, is_numa_enabled};
 pub use offset::OffsetBuffer;
 pub use pinned::PinnedStorage;
+pub use pool::{CudaMemPool, CudaMemPoolBuilder};
 pub use system::SystemStorage;
 pub use tensor::{TensorDescriptor, TensorDescriptorExt};
 

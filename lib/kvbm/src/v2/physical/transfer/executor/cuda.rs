@@ -10,6 +10,7 @@ use crate::v2::physical::transfer::context::TransferCompleteNotification;
 use anyhow::{Result, anyhow};
 use cudarc::driver::result as cuda_result;
 use dynamo_kvbm_kernels::{OperationalCopyBackend, OperationalCopyDirection, TensorDataType};
+use dynamo_memory::CudaMemPool;
 use std::ops::Range;
 
 // #[cfg(test)]
@@ -86,6 +87,7 @@ pub fn execute_cuda_transfer(
                 layers.clone(),
                 stream.as_ref(),
                 backend,
+                ctx.cuda_pool(),
             ) {
                 // Fallback to memcpy-based path
                 tracing::debug!(
@@ -125,6 +127,7 @@ pub fn execute_cuda_transfer(
                 layers.clone(),
                 stream.as_ref(),
                 backend,
+                ctx.cuda_pool(),
             ) {
                 // Fallback to memcpy-based path
                 tracing::debug!(
@@ -164,6 +167,7 @@ pub fn execute_cuda_transfer(
                 layers.clone(),
                 stream.as_ref(),
                 backend,
+                ctx.cuda_pool(),
             ) {
                 // Fallback to memcpy-based path
                 tracing::debug!(
@@ -424,10 +428,9 @@ pub(crate) fn try_execute_operational_kernel(
     layers: Range<usize>,
     stream: &cudarc::driver::CudaStream,
     backend: OperationalCopyBackend,
+    pool: &CudaMemPool,
 ) -> Result<()> {
     // Bind CUDA context to current thread before any CUDA operations.
-    // This is necessary because this function may be called from any tokio worker thread,
-    // but malloc_sync() requires the context to be current on the calling thread.
     stream.context().bind_to_thread()?;
 
     // Check compatibility
@@ -494,12 +497,15 @@ pub(crate) fn try_execute_operational_kernel(
         operational_ptrs_host.push(op_base.addr());
     }
 
-    // Allocate device memory for pointer tables
-    let block_ptrs_device_raw =
-        unsafe { cuda_result::malloc_sync(block_ptrs_host.len() * std::mem::size_of::<usize>())? };
-    let op_ptrs_device_raw = unsafe {
-        cuda_result::malloc_sync(operational_ptrs_host.len() * std::mem::size_of::<usize>())?
-    };
+    // Allocate device memory for pointer tables from the pool
+    let block_ptrs_device_raw = pool.alloc_async(
+        block_ptrs_host.len() * std::mem::size_of::<usize>(),
+        stream.cu_stream(),
+    )?;
+    let op_ptrs_device_raw = pool.alloc_async(
+        operational_ptrs_host.len() * std::mem::size_of::<usize>(),
+        stream.cu_stream(),
+    )?;
 
     // Copy pointer tables to device
     unsafe {
@@ -539,11 +545,9 @@ pub(crate) fn try_execute_operational_kernel(
         )
     };
 
-    // Free device allocations
-    unsafe {
-        let _ = cuda_result::free_async(block_ptrs_device_raw, stream.cu_stream());
-        let _ = cuda_result::free_async(op_ptrs_device_raw, stream.cu_stream());
-    }
+    // Free device allocations back to the pool
+    pool.free_async(block_ptrs_device_raw, stream.cu_stream())?;
+    pool.free_async(op_ptrs_device_raw, stream.cu_stream())?;
 
     if status != cudarc::runtime::sys::cudaError::cudaSuccess {
         return Err(anyhow!(
