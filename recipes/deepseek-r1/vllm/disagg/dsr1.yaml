@@ -1,1 +1,218 @@
-/Users/mkosec/work/dynamo-ai-workflows/configs/deepseek-r1/dsr1.yaml
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DeepSeek-R1 vLLM config for SLA profiler
+# Uses args array format (not bash script) for profiler compatibility
+#
+# =============================================================================
+# CHANGELOG
+# =============================================================================
+#
+# v12 (2025-12-18): Add RDMA resources for DEP configs
+#   - Added rdma/shared_ib to extraPodSpec.mainContainer.resources for both workers
+#   - Reason: DEP configs use DeepEP which requires NVSHMEM/IBGDA transport
+#   - Without RDMA resources, NVSHMEM fails with "Peer GPU not accessible"
+#   - This exposes /dev/infiniband/* to pods for inter-node expert routing
+#
+# v11 (2025-12-17): Remove TRITON_CACHE_DIR for multi-node compatibility
+#   - Removed TRITON_CACHE_DIR env var from both workers
+#   - Reason: Shared Triton cache on PVC causes race conditions in multi-node
+#     deployments (TEP 16 across 2 nodes). Workers compete to write/read cache
+#     files, causing FileNotFoundError during torch._inductor compilation.
+#   - Fix: Let Triton handle caching with its default per-process directory.
+#   - Result: TEP 16 profiling succeeded! TTFT=4.5s, ITL=45ms, Prefill=668 tok/s
+#
+# v10 (2025-12-09): Disable DeepGemm entirely
+#   - Set VLLM_USE_DEEP_GEMM=0 and VLLM_MOE_USE_DEEP_GEMM=0
+#   - Reason: With VLLM_USE_DEEP_GEMM_E8M0=0 (v9), DeepGemm hits kernel assertion
+#     failures on DeepSeek-R1's MLA attention shapes (s72, 56). The JIT kernels
+#     don't handle these non-standard dimensions without E8M0.
+#   - Fallback: Uses Triton kernels instead (slower but more flexible)
+#   - Also set gpu-memory-utilization back to 0.85 (was 0.80 in v8)
+#
+# v9 (2025-12-09): Disable E8M0 requantization + fix Triton cache [REVERTED in v11]
+#   - Set VLLM_USE_DEEP_GEMM_E8M0=0
+#   - Reason: OOM during FP8 UE8M0 in-place requantization in DeepGemm warmup
+#   - Added TRITON_CACHE_DIR and VLLM_CACHE_ROOT to worker envs directly
+#   - Reason: torch._inductor was failing to find Triton cache directory
+#   - Result: FAILED - DeepGemm kernel assertion errors (see v10)
+#   - NOTE: TRITON_CACHE_DIR removed in v11 due to multi-node race conditions
+#
+# v8 (2025-12-09): Fix OOM on 16-GPU configurations
+#   - Added --gpu-memory-utilization 0.80 to both workers
+#   - Reason: 16-GPU DEP configs were hitting CUDA OOM during KV cache allocation
+#   - Colleague suggested 0.80-0.84 range for vLLM with DeepSeek-R1
+#
+# v7 (2025-12-09): Fix frontend service naming + cache paths
+#   - Renamed VllmFrontend -> Frontend
+#   - Reason: Profiler expects service named "{deployment}-frontend", was getting
+#     DNS errors trying to connect to the wrong service name
+#   - Moved VLLM_CACHE_ROOT and TRITON_CACHE_DIR to top-level spec.envs
+#   - Reason: torch_compile_cache was being written to ephemeral /home/dynamo/.cache
+#
+# v6 (2025-12-09): Initial working config
+#   - Based on dynamo/recipes/deepseek-r1/vllm/disagg/ examples
+#   - Uses args array format for profiler compatibility (not bash scripts)
+#   - TEP=8 for both prefill and decode workers
+#   - DeepGemm enabled with deepep backends
+#
+# =============================================================================
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-dsr1
+spec:
+  backendFramework: vllm
+  envs:
+    - name: HF_HOME
+      value: /model-cache
+    - name: VLLM_CACHE_ROOT
+      value: /model-cache/.vllm-cache
+  envFromSecret: hf-token-secret
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      dynamoNamespace: vllm-dsr1
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 1800
+            failureThreshold: 60
+    VllmDecodeWorker:
+      dynamoNamespace: vllm-dsr1
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-cache
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        mainContainer:
+          # v12: RDMA resource for DeepEP (exposes /dev/infiniband/*)
+          resources:
+            limits:
+              rdma/shared_ib: "1"
+            requests:
+              rdma/shared_ib: "1"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 600
+          workingDir: /workspace/dynamo
+          env:
+            # v10: Disable DeepGemm entirely - Triton fallback
+            - name: VLLM_USE_DEEP_GEMM
+              value: "0"
+            - name: VLLM_MOE_USE_DEEP_GEMM
+              value: "0"
+            - name: VLLM_ALL2ALL_BACKEND
+              value: deepep_low_latency
+            - name: VLLM_MOE_DP_CHUNK_SIZE
+              value: "512"
+            - name: VLLM_SKIP_P2P_CHECK
+              value: "1"
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+            # v11: Removed TRITON_CACHE_DIR - causes race conditions in multi-node
+            # Let Triton handle caching with default per-process directory
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - /model-cache/deepseek-r1
+            - --served-model-name
+            - deepseek-ai/DeepSeek-R1
+            - --tensor-parallel-size
+            - "8"
+            - --enable-expert-parallel
+            - --no-enable-prefix-caching
+            - --max-model-len
+            - "16384"
+            - --max-num-seqs
+            - "512"
+            # v8: Prevent OOM on 16-GPU configs
+            - --gpu-memory-utilization
+            - "0.85"
+    VllmPrefillWorker:
+      dynamoNamespace: vllm-dsr1
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-cache
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        mainContainer:
+          # v12: RDMA resource for DeepEP (exposes /dev/infiniband/*)
+          resources:
+            limits:
+              rdma/shared_ib: "1"
+            requests:
+              rdma/shared_ib: "1"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 600
+          workingDir: /workspace/dynamo
+          env:
+            # v10: Disable DeepGemm entirely - Triton fallback
+            - name: VLLM_USE_DEEP_GEMM
+              value: "0"
+            - name: VLLM_MOE_USE_DEEP_GEMM
+              value: "0"
+            - name: VLLM_ALL2ALL_BACKEND
+              value: deepep_high_throughput
+            - name: VLLM_MOE_DP_CHUNK_SIZE
+              value: "512"
+            - name: VLLM_SKIP_P2P_CHECK
+              value: "1"
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+            # v11: Removed TRITON_CACHE_DIR - causes race conditions in multi-node
+            # Let Triton handle caching with default per-process directory
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - /model-cache/deepseek-r1
+            - --served-model-name
+            - deepseek-ai/DeepSeek-R1
+            - --is-prefill-worker
+            - --tensor-parallel-size
+            - "8"
+            - --enable-expert-parallel
+            - --no-enable-prefix-caching
+            - --max-model-len
+            - "16384"
+            - --max-num-seqs
+            - "512"
+            # v8: Prevent OOM on 16-GPU configs
+            - --gpu-memory-utilization
+            - "0.85"
