@@ -611,23 +611,27 @@ ${NIXL_PLUGIN_DIR}:\
 ${LD_LIBRARY_PATH}
 
 # Create virtual environment for maturin develop (required by maturin develop command)
-# Match VLLM/TRTLLM dev container behavior
-# Use python3 (3.12) from upstream SGLang image
+# Use --system-site-packages to inherit sglang, torch, etc. from upstream
 RUN mkdir -p /opt/dynamo/venv && \
-    python3 -m venv /opt/dynamo/venv
+    python3 -m venv --system-site-packages /opt/dynamo/venv
 
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
-# Install uv for maturin develop --uv
-COPY --from=dynamo_base /bin/uv /opt/dynamo/venv/bin/uv
+# Copy all packages from runtime stage user site-packages into venv
+# This includes ai-dynamo-runtime, kubernetes, and all other dependencies
+# Use --no-preserve=mode so copied files inherit umask 002 (group-writable)
+RUN cp -r --no-preserve=mode /home/dynamo/.local/lib/python3.12/site-packages/* \
+          /opt/dynamo/venv/lib/python3.12/site-packages/
 
-# Uninstall broken maturin from upstream runtime image, then reinstall properly in venv
-# Editable install of dynamo
+# Install maturin and uv into venv for development
+# Uninstall broken maturin from upstream, then reinstall properly into venv
+COPY --from=dynamo_base /bin/uv /opt/dynamo/venv/bin/uv
+RUN pip install --ignore-installed maturin[patchelf]
+
+# Editable install of dynamo components
 COPY --chown=dynamo:0 --chmod=664 pyproject.toml README.md hatch_build.py /workspace/
-RUN pip uninstall -y maturin && \
-    pip install maturin[patchelf] && \
-    pip install --no-deps -e .
+RUN pip install --no-deps -e .
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
