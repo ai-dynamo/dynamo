@@ -36,13 +36,60 @@ use crate::block_manager::{
 
 use anyhow::Result;
 use async_trait::async_trait;
-use std::{any::Any, sync::Arc};
+use std::{any::Any, future::Future, sync::Arc, time::Duration};
 
 type LocalBlock<S, M> = Block<S, locality::Local, M>;
+
+const RETRY_MAX_ATTEMPTS: u32 = 3;
+const RETRY_INITIAL_BACKOFF_MS: u64 = 100;
+const RETRY_MAX_BACKOFF_MS: u64 = 2000;
+
+async fn with_retry<F, Fut, T>(operation: &str, f: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let mut last_error = None;
+
+    for attempt in 1..=RETRY_MAX_ATTEMPTS {
+        match f().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                last_error = Some(e);
+
+                if attempt >= RETRY_MAX_ATTEMPTS {
+                    break;
+                }
+
+                let backoff_ms = std::cmp::min(
+                    RETRY_INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1),
+                    RETRY_MAX_BACKOFF_MS,
+                );
+
+                tracing::warn!(
+                    "{} failed (attempt {}/{}), retrying in {}ms: {}",
+                    operation,
+                    attempt,
+                    RETRY_MAX_ATTEMPTS,
+                    backoff_ms,
+                    last_error.as_ref().unwrap()
+                );
+
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!(
+        "{} failed after {} retries",
+        operation,
+        RETRY_MAX_ATTEMPTS
+    )))
+}
 type LocalBlockDataList<S> = Vec<LocalBlockData<S>>;
 
-/// A batching wrapper for connector transfers to prevent resource exhaustion.
-/// Splits large transfers into smaller batches that can be handled by the resource pools.
+// A batching wrapper for connector transfers to prevent resource exhaustion.
+// Splits large transfers into smaller batches that can be handled by the resource pools.
 #[derive(Clone, Debug)]
 pub struct ConnectorTransferBatcher {
     max_batch_size: usize,
@@ -67,8 +114,6 @@ impl ConnectorTransferBatcher {
             return handler.execute_transfer_direct(request).await;
         }
 
-        // When batching, we need to slice sequence_hashes to match each batch
-        // sequence_hashes[i] corresponds to blocks[i]
         let hashes = request.sequence_hashes.as_ref();
 
         let write_through = request.write_through;
@@ -81,11 +126,13 @@ impl ConnectorTransferBatcher {
                 let end_idx = start_idx + batch.len();
 
                 // Slice hashes to match this batch (if present)
-                let batch_hashes = hashes.map(|h| {
-                    h.get(start_idx..end_idx)
-                        .map(|slice| slice.to_vec())
-                        .unwrap_or_default()
-                }).filter(|h| !h.is_empty());
+                let batch_hashes = hashes
+                    .map(|h| {
+                        h.get(start_idx..end_idx)
+                            .map(|slice| slice.to_vec())
+                            .unwrap_or_default()
+                    })
+                    .filter(|h| !h.is_empty());
 
                 let batch_request = BlockTransferRequest {
                     from_pool: *request.from_pool(),
@@ -98,9 +145,6 @@ impl ConnectorTransferBatcher {
                 handler.execute_transfer_direct(batch_request)
             })
             .collect();
-
-        // Execute all batches concurrently
-        tracing::debug!("Executing {} batches concurrently", batch_futures.len());
 
         match try_join_all(batch_futures).await {
             Ok(_) => Ok(()),
@@ -115,10 +159,7 @@ impl ConnectorTransferBatcher {
 #[async_trait]
 pub trait BlockTransferHandler: Send + Sync {
     async fn execute_transfer(&self, request: BlockTransferRequest) -> Result<()>;
-
     fn scheduler_client(&self) -> Option<TransferSchedulerClient>;
-
-    /// Enable downcasting to concrete handler types (e.g., for G4 integration).
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -188,7 +229,15 @@ impl BlockTransferDirectHandler for BlockTransferHandlerV1 {
                                     );
                                 }
                                 Err(e) => {
-                                    tracing::warn!("Write-through to object storage failed (non-fatal): {}", e);
+                                    // If we swallow this error, hashes get registered in G4 registry
+                                    // but objects don't exist, causing "NoSuchKey" 404 errors
+                                    // when later trying to onboard from object storage.
+                                    //
+                                    // Trade-off: This means Host cache won't be populated either for
+                                    // these blocks. TODO: Consider returning partial success to allow
+                                    // Host cache to work even when object storage fails.
+                                    tracing::error!("Write-through to object storage failed: {}", e);
+                                    return Err(anyhow::anyhow!("Write-through to object storage failed: {}", e));
                                 }
                             }
                         }
@@ -234,6 +283,7 @@ impl BlockTransferDirectHandler for BlockTransferHandlerV1 {
                     .map(|(_, to)| *to)
                     .collect();
 
+                // No retry for reads - fail fast so caller can recompute
                 self.execute_remote_onboard(&host_block_ids, hashes).await
             }
 
@@ -250,6 +300,7 @@ impl BlockTransferDirectHandler for BlockTransferHandlerV1 {
                     .map(|(_, to)| *to)
                     .collect();
 
+                // No retry for reads - fail fast so caller can recompute
                 self.execute_remote_onboard_to_device(&host_block_ids, &device_block_ids, hashes).await
             }
 
@@ -383,7 +434,7 @@ impl BlockTransferHandlerV1 {
         }
     }
 
-    /// Build remote descriptors from sequence hashes.
+    /// Build remote descriptors from sequence hashes (for offload to this worker's bucket).
     fn build_remote_descriptors(
         bucket: &str,
         hashes: &[u64],
@@ -394,12 +445,23 @@ impl BlockTransferHandlerV1 {
             .collect()
     }
 
+    fn build_remote_descriptors_from_keys(
+        keys: &[crate::block_manager::block::transfer::remote::RemoteKey],
+        block_size: usize,
+    ) -> Vec<RemoteBlockDescriptor> {
+        keys.iter()
+            .map(|key| RemoteBlockDescriptor::new(key.clone(), block_size))
+            .collect()
+    }
+
     async fn execute_write_through(
         &self,
         host_block_ids: &[usize],
         sequence_hashes: &[u64],
     ) -> Result<usize> {
-        self.execute_remote_offload(host_block_ids, sequence_hashes).await?;
+        with_retry("write-through", || async {
+            self.execute_remote_offload(host_block_ids, sequence_hashes).await
+        }).await?;
         Ok(sequence_hashes.len())
     }
 
@@ -469,6 +531,37 @@ impl BlockTransferHandlerV1 {
         Ok(())
     }
 
+    pub async fn execute_remote_onboard_with_keys(
+        &self,
+        host_block_ids: &[usize],
+        remote_keys: &[crate::block_manager::block::transfer::remote::RemoteKey],
+    ) -> Result<()> {
+        use crate::block_manager::block::data::BlockDataViews;
+
+        if host_block_ids.len() != remote_keys.len() {
+            anyhow::bail!("block count mismatch: {} blocks, {} keys",
+                host_block_ids.len(), remote_keys.len());
+        }
+        if remote_keys.is_empty() {
+            return Ok(());
+        }
+
+        let remote_ctx = self.remote_context.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Remote context not configured"))?;
+        let host_blocks = self.host.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Host blocks not configured"))?;
+
+        let block_size = host_blocks[host_block_ids[0]].local_block_view()?.size();
+        let descriptors = Self::build_remote_descriptors_from_keys(remote_keys, block_size);
+        let blocks: Vec<_> = host_block_ids.iter().map(|&id| host_blocks[id].clone()).collect();
+
+        let pipeline = RemoteTransferPipeline::onboard_direct(descriptors);
+        handle_remote_transfer(pipeline, remote_ctx.clone(), &blocks, None::<&[LocalBlockData<DeviceStorage>]>, None)?
+            .wait().await?;
+
+        Ok(())
+    }
+
     async fn execute_remote_onboard_to_device(
         &self,
         host_block_ids: &[usize],
@@ -497,6 +590,47 @@ impl BlockTransferHandlerV1 {
 
         let block_size = host_blocks[host_block_ids[0]].local_block_view()?.size();
         let descriptors = Self::build_remote_descriptors(&bucket, sequence_hashes, block_size);
+
+        let host_batch: Vec<_> = host_block_ids[..n].iter().map(|&id| host_blocks[id].clone()).collect();
+        let device_batch: Vec<_> = device_block_ids[..n].iter().map(|&id| device_blocks[id].clone()).collect();
+
+        let pipeline = RemoteTransferPipeline::onboard_with_bounce(
+            descriptors,
+            (0..n).collect(),
+            (0..n).collect(),
+        );
+        handle_remote_transfer(pipeline, remote_ctx.clone(), &host_batch, Some(&device_batch), None)?
+            .wait().await?;
+
+        Ok(())
+    }
+
+    pub async fn execute_remote_onboard_to_device_with_keys(
+        &self,
+        host_block_ids: &[usize],
+        device_block_ids: &[usize],
+        remote_keys: &[crate::block_manager::block::transfer::remote::RemoteKey],
+    ) -> Result<()> {
+        use crate::block_manager::block::data::BlockDataViews;
+
+        let n = remote_keys.len();
+        if n > host_block_ids.len() || n > device_block_ids.len() {
+            anyhow::bail!("Not enough blocks: need {}, have {} host, {} device",
+                n, host_block_ids.len(), device_block_ids.len());
+        }
+        if n == 0 {
+            return Ok(());
+        }
+
+        let remote_ctx = self.remote_context.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Remote context not configured"))?;
+        let host_blocks = self.host.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Host blocks not configured"))?;
+        let device_blocks = self.device.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Device blocks not configured"))?;
+
+        let block_size = host_blocks[host_block_ids[0]].local_block_view()?.size();
+        let descriptors = Self::build_remote_descriptors_from_keys(remote_keys, block_size);
 
         let host_batch: Vec<_> = host_block_ids[..n].iter().map(|&id| host_blocks[id].clone()).collect();
         let device_batch: Vec<_> = device_block_ids[..n].iter().map(|&id| device_blocks[id].clone()).collect();
