@@ -47,17 +47,17 @@ Below is a summary of the general file structure for the framework Dockerfile st
 |  /${FRAMEWORK_INSTALL} | Built framework (→ runtime)
 | **STAGE: runtime** | **FROM ${RUNTIME_IMAGE}** |
 |  /usr/local/cuda/{bin,include,nvvm}/ | COPY from dynamo_base |
-|  /usr/bin/nats-server | COPY from dynamo_runtime |
-|  /usr/local/bin/etcd/ | COPY from dynamo_runtime |
-|  /usr/local/ucx/ | COPY from dynamo_runtime |
+|  /usr/bin/nats-server | COPY from dynamo_base |
+|  /usr/local/bin/etcd/ | COPY from dynamo_base |
+|  /usr/local/ucx/ | COPY from wheel_builder |
 |  /opt/nvidia/nvda_nixl/ | COPY from wheel_builder |
 |  /opt/dynamo/wheelhouse/ | COPY from wheel_builder |
 |  /opt/dynamo/venv/ | COPY from framework |
 |  /opt/vllm/ | COPY from framework |
 |  /workspace/{tests,examples,deploy}/ |COPY from build context |
 | **STAGE: dev** | **FROM runtime** |
-|  /usr/local/rustup/ | COPY from dynamo_runtime |
-|  /usr/local/cargo/ | COPY from dynamo_runtime |
+|  /usr/local/rustup/ | COPY from dynamo_base |
+|  /usr/local/cargo/ | COPY from dynamo_base |
 </details>
 
 ### Why Containerization?
@@ -90,6 +90,8 @@ The `build.sh` and `run.sh` scripts are convenience wrappers that simplify commo
 | **Rust Toolchain** | None (uses pre-built wheels) | System install (`/usr/local/rustup`, `/usr/local/cargo`) | System install (`/usr/local/rustup`, `/usr/local/cargo`) |
 | **Cargo Target** | None | `/workspace/target` | `/workspace/target` |
 | **Python Env** | venv (`/opt/dynamo/venv`) for vllm/trtllm, system site-packages for sglang | venv (`/opt/dynamo/venv`) for vllm/trtllm, system site-packages for sglang | venv (`/opt/dynamo/venv`) for vllm/trtllm, system site-packages for sglang |
+
+**Note (SGLang)**: SGLang runtime uses system site-packages, but the `dev` image creates `/opt/dynamo/venv` (and `local-dev` inherits it from `dev`) for build tooling like `maturin`.
 
 ## Usage Guidelines
 
