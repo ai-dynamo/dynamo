@@ -561,6 +561,18 @@ impl KvRouter {
         self.block_size
     }
 
+    /// Compute the overlap blocks for a given token sequence and worker.
+    /// This queries the indexer to find how many blocks are already cached.
+    pub async fn get_overlap_blocks(
+        &self,
+        tokens: &[u32],
+        worker: WorkerWithDpRank,
+    ) -> Result<u32, KvRouterError> {
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
+        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
+        Ok(overlap_scores.scores.get(&worker).copied().unwrap_or(0))
+    }
+
     /// Get the disaggregated endpoint for a worker, if available.
     /// Used to look up bootstrap host/port for prefill workers.
     pub async fn get_disaggregated_endpoint(

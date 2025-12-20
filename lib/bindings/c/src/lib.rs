@@ -756,6 +756,9 @@ pub unsafe extern "C" fn dynamo_free_worker_selection_result(
 /// Add a request to the router's bookkeeping after worker selection.
 /// Call this from GAIE Stage 1 after `dynamo_query_worker_selection_and_annotate`.
 ///
+/// This function computes the overlap_blocks internally by querying the indexer,
+/// so the caller doesn't need to provide it.
+///
 /// # Safety
 /// - `pipeline` must be a valid, non-null pointer from `dynamo_create_worker_selection_pipeline`
 /// - `request_id_c_str` must be a valid NUL-terminated UTF-8 C string
@@ -767,7 +770,6 @@ pub unsafe extern "C" fn dynamo_router_add_request(
     request_id_c_str: *const c_char,
     token_ids: *const u32,
     token_count: usize,
-    overlap_blocks: u32,
     worker_id: u64,
     dp_rank: u32,
 ) -> DynamoLlmResult {
@@ -791,7 +793,7 @@ pub unsafe extern "C" fn dynamo_router_add_request(
         return DynamoLlmResult::ERR;
     };
 
-    let tokens = if token_count > 0 && !token_ids.is_null() {
+    let tokens: Vec<u32> = if token_count > 0 && !token_ids.is_null() {
         unsafe { std::slice::from_raw_parts(token_ids, token_count) }.to_vec()
     } else {
         Vec::new()
@@ -800,9 +802,28 @@ pub unsafe extern "C" fn dynamo_router_add_request(
     let kv_router = kv_router.clone();
     let fut = async move {
         let worker = dynamo_llm::kv_router::protocols::WorkerWithDpRank::new(worker_id, dp_rank);
+
+        // Compute overlap_blocks using the public method
+        let overlap_blocks = match kv_router.get_overlap_blocks(&tokens, worker).await {
+            Ok(overlap) => overlap,
+            Err(e) => {
+                tracing::warn!(error = ?e, "Failed to compute overlap, using 0");
+                0
+            }
+        };
+
         kv_router
-            .add_request(request_id, &tokens, overlap_blocks, worker)
+            .add_request(request_id.clone(), &tokens, overlap_blocks, worker)
             .await;
+
+        tracing::debug!(
+            request_id = %request_id,
+            worker_id = worker_id,
+            dp_rank = dp_rank,
+            overlap_blocks = overlap_blocks,
+            token_count = tokens.len(),
+            "Added request to router bookkeeping"
+        );
     };
 
     pl.wk.runtime().secondary().block_on(fut);
