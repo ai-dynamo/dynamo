@@ -368,11 +368,7 @@ impl BlockManagerBuilder {
         }
 
         if let Some((engine_ep, output_ep, engine_source)) = self.consolidator_config {
-            config_builder = config_builder.consolidator_config(KvEventConsolidatorConfig::new(
-                engine_ep,
-                output_ep.unwrap_or_else(|| "tcp://*:5558".to_string()),
-                engine_source,
-            ));
+            config_builder = config_builder.consolidator_config(engine_ep, output_ep, engine_source);
         }
 
         let config = config_builder.build()?;

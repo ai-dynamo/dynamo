@@ -46,6 +46,7 @@ RUNTIME=nvidia
 WORKDIR=/workspace
 NETWORK=host
 USER=
+GROUP_ADD_STRING=
 
 get_options() {
     while :; do
@@ -327,6 +328,18 @@ get_options() {
         USER_STRING="--user ${USER}"
     fi
 
+    # If we override the user, Docker drops supplementary groups from the image.
+    # Add root group (GID 0) back so group-writable directories owned by root remain writable,
+    # avoiding expensive `chown -R ...` fixes on large mounted workspaces.
+    GROUP_ADD_STRING=""
+    if [[ -n "${USER}" ]]; then
+        # Extract just the UID part (before any colon)
+        USER_UID="${USER%%:*}"
+        if [[ "${USER_UID}" != "root" && "${USER_UID}" != "0" ]]; then
+            GROUP_ADD_STRING="--group-add 0"
+        fi
+    fi
+
     REMAINING_ARGS=("$@")
 }
 
@@ -393,6 +406,7 @@ ${RUN_PREFIX} docker run \
     --ipc host \
     ${PRIVILEGED_STRING} \
     ${USER_STRING} \
+    ${GROUP_ADD_STRING} \
     ${NAME_STRING} \
     ${ENTRYPOINT_STRING} \
     ${IMAGE} \

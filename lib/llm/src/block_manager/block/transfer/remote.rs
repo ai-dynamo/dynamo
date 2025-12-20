@@ -12,13 +12,14 @@
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use super::TransferError;
 
 /// Kind of remote storage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RemoteStorageKind {
     Object,
     Disk,
@@ -31,7 +32,7 @@ pub enum RemoteStorageKind {
 /// - Remote disk: path + offset/key
 ///
 /// The key must be serializable for registry storage and network transmission.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RemoteKey {
     /// Object storage (S3, GCS, Azure Blob, MinIO, etc.)
     Object(ObjectKey),
@@ -40,7 +41,7 @@ pub enum RemoteKey {
 }
 
 /// Key for object storage - bucket + object identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ObjectKey {
     /// Bucket/container name
     pub bucket: String,
@@ -72,7 +73,7 @@ impl ObjectKey {
 }
 
 /// Key for remote disk storage - path + identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DiskKey {
     /// Base path (mount point, share path, etc.)
     pub path: String,
@@ -136,6 +137,32 @@ impl RemoteKey {
             RemoteKey::Object(obj) => obj.as_hash(),
             RemoteKey::Disk(disk) => u64::from_str_radix(&disk.key, 16).ok(),
         }
+    }
+
+    /// Get the location (bucket for Object, path for Disk).
+    pub fn location(&self) -> &str {
+        match self {
+            RemoteKey::Object(obj) => &obj.bucket,
+            RemoteKey::Disk(disk) => &disk.path,
+        }
+    }
+
+    /// Get the key portion (object key or disk key).
+    pub fn key_str(&self) -> &str {
+        match self {
+            RemoteKey::Object(obj) => &obj.key,
+            RemoteKey::Disk(disk) => &disk.key,
+        }
+    }
+
+    /// Create object key from sequence hash (common pattern).
+    pub fn object_from_hash(bucket: impl Into<String>, hash: u64) -> Self {
+        RemoteKey::Object(ObjectKey::from_hash(bucket, hash))
+    }
+
+    /// Create disk key from sequence hash.
+    pub fn disk_from_hash(path: impl Into<String>, hash: u64) -> Self {
+        RemoteKey::Disk(DiskKey::from_hash(path, hash))
     }
 }
 

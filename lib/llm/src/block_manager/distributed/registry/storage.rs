@@ -6,6 +6,7 @@
 //! This module provides the `MokaStorage` implementation for multi-bucket registry.
 //! Each entry is keyed by (bucket_id, sequence_hash).
 
+use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -13,6 +14,7 @@ use moka::sync::Cache;
 
 use super::protocol::{BucketId, SequenceHash};
 use super::types::ObjectKey;
+use crate::block_manager::block::transfer::remote::RemoteKey;
 
 /// Lease information for a hash being offloaded.
 ///
@@ -248,6 +250,62 @@ impl MokaStorage {
     pub fn lease_count(&self) -> usize {
         self.leases.iter().filter(|e| !e.value().is_expired()).count()
     }
+
+    /// Convert RemoteKey to internal RegistryKey.
+    ///
+    /// Uses hash of the location (bucket/path) as bucket_id.
+    fn remote_key_to_registry_key(remote_key: &RemoteKey) -> RegistryKey {
+        let bucket_id = hash_string(remote_key.location());
+        let sequence_hash = remote_key.sequence_hash().unwrap_or(0);
+        RegistryKey::new(bucket_id, sequence_hash)
+    }
+
+    /// Check which RemoteKeys exist in the registry.
+    ///
+    /// Returns the subset of keys that exist.
+    pub fn match_remote_keys(&self, keys: &[RemoteKey]) -> Vec<RemoteKey> {
+        keys.iter()
+            .filter(|key| {
+                let rkey = Self::remote_key_to_registry_key(key);
+                self.cache.contains_key(&rkey)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Match contiguous prefix of RemoteKeys.
+    ///
+    /// Stops at first key that doesn't exist.
+    pub fn match_remote_prefix(&self, keys: &[RemoteKey]) -> Vec<RemoteKey> {
+        keys.iter()
+            .take_while(|key| {
+                let rkey = Self::remote_key_to_registry_key(key);
+                self.cache.contains_key(&rkey)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Register a RemoteKey as existing.
+    pub fn insert_remote_key(&self, key: &RemoteKey) {
+        let rkey = Self::remote_key_to_registry_key(key);
+        let seq_hash = key.sequence_hash().unwrap_or(0);
+        self.cache.insert(rkey, seq_hash);
+    }
+
+    /// Check if a RemoteKey exists in the registry.
+    #[allow(dead_code)]
+    pub fn contains_remote_key(&self, key: &RemoteKey) -> bool {
+        let rkey = Self::remote_key_to_registry_key(key);
+        self.cache.contains_key(&rkey)
+    }
+}
+
+/// Hash a string to u64 for use as bucket_id.
+fn hash_string(s: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[cfg(test)]

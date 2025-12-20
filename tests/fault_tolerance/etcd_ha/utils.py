@@ -15,39 +15,27 @@ import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.engine_process import FRONTEND_PORT
+from tests.utils.managed_process import (
+    DynamoFrontendProcess as BaseDynamoFrontendProcess,
+)
 from tests.utils.managed_process import ManagedProcess
 
 logger = logging.getLogger(__name__)
 
 
-class DynamoFrontendProcess(ManagedProcess):
-    """Process manager for Dynamo frontend with ETCD HA support"""
+class DynamoFrontendProcess(BaseDynamoFrontendProcess):
+    """Process manager for Dynamo frontend with ETCD HA support."""
 
-    def __init__(self, request, etcd_endpoints: list):
-        command = ["python", "-m", "dynamo.frontend"]
-
-        # Set debug logging and ETCD endpoints
-        env = os.environ.copy()
-        env["DYN_LOG"] = "debug"
-        env["ETCD_ENDPOINTS"] = ",".join(etcd_endpoints)
-        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
-        env.pop("DYN_SYSTEM_PORT", None)
-
-        log_dir = f"{request.node.name}_frontend"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            pass
-
+    def __init__(self, request, etcd_endpoints: list[str]):
+        extra_env = {
+            "DYN_LOG": "debug",
+            "ETCD_ENDPOINTS": ",".join(etcd_endpoints),
+        }
         super().__init__(
-            command=command,
-            env=env,
-            display_output=True,
+            request,
+            router_mode="round-robin",
+            extra_env=extra_env,
             terminate_existing=True,
-            log_dir=log_dir,
         )
 
 
