@@ -856,17 +856,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
         let stream_context = response_stream.context();
 
-        // If EPP handled bookkeeping via GAIE hooks, just forward the stream without wrapping
-        if is_epp_routed_stage2 {
-            return Ok(ResponseStream::new(
-                Box::pin(response_stream),
-                stream_context,
-            ));
-        }
-
         let chooser = self.chooser.clone();
         let context_for_monitoring = stream_context.clone();
 
+        // TODO: For GAIE workflows, move mark_prefill_completed to a sidecar since GAIE
+        // does not support a hook for the first token generated event. Currently we still
+        // call it here in the stream wrapper for both GAIE and non-GAIE flows.
+        // The free() call is skipped for GAIE since it's handled by the cleanup plugin.
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut prefill_marked = false;
 
@@ -896,8 +892,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }
             }
 
-            if let Err(e) = chooser.free(&context_id).await {
-                tracing::warn!("Failed to free request {context_id}: {e}");
+            // Skip free() for EPP-routed requests - cleanup is handled by GAIE cleanup plugin
+            if !is_epp_routed_stage2 {
+                if let Err(e) = chooser.free(&context_id).await {
+                    tracing::warn!("Failed to free request {context_id}: {e}");
+                }
             }
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
