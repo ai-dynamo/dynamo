@@ -276,6 +276,8 @@ fn register_llm<'p>(
         ModelInput::Tensor => llm_rs::model_type::ModelInput::Tensor,
     };
 
+    let is_tensor_based = model_type.inner.supports_tensor();
+
     let model_type_obj = model_type.inner;
 
     let inner_path = model_path.to_string();
@@ -323,7 +325,33 @@ fn register_llm<'p>(
         .or_else(|| Some(source_path.clone()));
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        // Resolve the model path (local or fetch from HuggingFace)
+        // For TensorBased models, skip HuggingFace downloads and register directly
+        if is_tensor_based {
+            let model_name = model_name.unwrap_or_else(|| source_path.clone());
+            let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
+            card.model_type = model_type_obj;
+            card.model_input = model_input;
+            card.user_data = user_data_json;
+
+            if let Some(cfg) = runtime_config {
+                card.runtime_config = cfg.inner;
+            }
+
+            // Register the Model Deployment Card via discovery interface
+            let discovery = endpoint.inner.drt().discovery();
+            let spec = rs::discovery::DiscoverySpec::from_model(
+                endpoint.inner.component().namespace().name().to_string(),
+                endpoint.inner.component().name().to_string(),
+                endpoint.inner.name().to_string(),
+                &card,
+            )
+            .map_err(to_pyerr)?;
+            discovery.register(spec).await.map_err(to_pyerr)?;
+
+            return Ok(());
+        }
+
+        // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace)
         let model_path = if fs::exists(&source_path)? {
             PathBuf::from(&source_path)
         } else {
@@ -545,8 +573,15 @@ impl DistributedRuntime {
 
         let runtime_config = DistributedConfig {
             store_backend: selected_kv_store,
-            // We only need NATS here to monitor it's metrics, so only if it's our request plane.
-            nats_config: if request_plane.is_nats() {
+            // NATS is used for more than just the NATS request-plane:
+            // - KV router events (JetStream or NATS core + local indexer)
+            // - inter-router replica sync (NATS core)
+            //
+            // If a NATS server is configured via env, enable the client regardless of request plane.
+            nats_config: if request_plane.is_nats()
+                || std::env::var(dynamo_runtime::config::environment_names::nats::NATS_SERVER)
+                    .is_ok()
+            {
                 Some(dynamo_runtime::transports::nats::ClientOptions::default())
             } else {
                 None
@@ -594,6 +629,84 @@ impl DistributedRuntime {
     fn child_token(&self) -> CancellationToken {
         let inner = self.inner.runtime().child_token();
         CancellationToken { inner }
+    }
+
+    /// Register an async Python callback for /engine/{route_name}
+    ///
+    /// Args:
+    ///     route_name: Route path (e.g., "start_profile" → /engine/start_profile)
+    ///     callback: Async function with signature: async def(body: dict) -> dict
+    ///
+    /// Example:
+    /// ```python
+    /// async def start_profile(body: dict) -> dict:
+    ///     await engine.start_profile(**body)
+    ///     return {"status": "ok"}
+    ///
+    /// runtime.register_engine_route("start_profile", start_profile)
+    /// ```
+    #[pyo3(signature = (route_name, callback))]
+    fn register_engine_route(
+        &self,
+        py: Python<'_>,
+        route_name: String,
+        callback: PyObject,
+    ) -> PyResult<()> {
+        // Capture TaskLocals at registration time when Python's event loop is running.
+        // This is needed because later, when the callback is invoked from an HTTP request,
+        // we'll be on a Rust thread without a running Python event loop.
+        let locals =
+            Arc::new(pyo3_async_runtimes::tokio::get_current_locals(py).map_err(to_pyerr)?);
+        let callback = Arc::new(callback);
+
+        // Wrap Python async callback in Rust async closure
+        let rust_callback: rs::engine_routes::EngineRouteCallback =
+            Arc::new(move |body: serde_json::Value| {
+                let callback = callback.clone();
+                let locals = locals.clone();
+
+                // Return a boxed future
+                Box::pin(async move {
+                    // Acquire GIL to call Python callback and convert coroutine to future
+                    let py_future = Python::with_gil(|py| {
+                        // Convert body to Python dict
+                        let py_body = pythonize::pythonize(py, &body).map_err(|e| {
+                            anyhow::anyhow!("Failed to convert request body to Python: {}", e)
+                        })?;
+
+                        // Call Python async function to get a coroutine
+                        let coroutine = callback.call1(py, (py_body,)).map_err(|e| {
+                            anyhow::anyhow!("Failed to call Python callback: {}", e)
+                        })?;
+
+                        // Use the TaskLocals captured at registration time
+                        pyo3_async_runtimes::into_future_with_locals(
+                            &locals,
+                            coroutine.into_bound(py),
+                        )
+                        .map_err(|e| {
+                            anyhow::anyhow!("Failed to convert coroutine to future: {}", e)
+                        })
+                    })?;
+
+                    // Await the Python coroutine (GIL is released during await)
+                    let py_result = py_future
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Python callback failed: {}", e))?;
+
+                    // Convert result back to serde_json::Value
+                    Python::with_gil(|py| {
+                        pythonize::depythonize::<serde_json::Value>(py_result.bind(py))
+                            .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))
+                    })
+                })
+            });
+
+        self.inner
+            .engine_routes()
+            .register(&route_name, rust_callback);
+        tracing::debug!("Registered engine route: /engine/{}", route_name);
+        Ok(())
     }
 
     // This is used to pass the DistributedRuntime from the dynamo-runtime bindings

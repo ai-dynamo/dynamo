@@ -52,7 +52,8 @@ python -m dynamo.frontend --router-mode kv &
 
 # Start a single vLLM worker (aggregated prefill and decode)
 export OTEL_SERVICE_NAME=dynamo-worker-vllm
-python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager \
+--otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" &
 
 wait
 ```
@@ -89,13 +90,17 @@ python -m dynamo.frontend --router-mode kv &
 
 # Run decode worker, make sure to wait for start up
 export OTEL_SERVICE_NAME=dynamo-worker-decode
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
+    --model Qwen/Qwen3-0.6B \
+    --enforce-eager \
+    --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" &
 
 # Run prefill worker, make sure to wait for start up
 export OTEL_SERVICE_NAME=dynamo-worker-prefill
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --enforce-eager \
+    --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" \
     --is-prefill-worker &
 ```
 

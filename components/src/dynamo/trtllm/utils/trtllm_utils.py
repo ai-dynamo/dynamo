@@ -58,8 +58,10 @@ class Config:
         self.tool_call_parser: Optional[str] = None
         self.dump_config_to: Optional[str] = None
         self.custom_jinja_template: Optional[str] = None
+        self.dyn_endpoint_types: str = "chat,completions"
         self.store_kv: str = ""
         self.request_plane: str = ""
+        self.enable_local_indexer: bool = False
 
     def __str__(self) -> str:
         return (
@@ -92,7 +94,8 @@ class Config:
             f"dump_config_to={self.dump_config_to}, "
             f"custom_jinja_template={self.custom_jinja_template}, "
             f"store_kv={self.store_kv}, "
-            f"request_plane={self.request_plane}"
+            f"request_plane={self.request_plane}, "
+            f"enable_local_indexer={self.enable_local_indexer}"
         )
 
 
@@ -283,6 +286,12 @@ def cmd_line_args():
         help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
     )
     parser.add_argument(
+        "--dyn-endpoint-types",
+        type=str,
+        default="chat,completions",
+        help="Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Default: 'chat,completions'. Use 'completions' for models without chat templates.",
+    )
+    parser.add_argument(
         "--store-kv",
         type=str,
         choices=["etcd", "file", "mem"],
@@ -293,8 +302,15 @@ def cmd_line_args():
         "--request-plane",
         type=str,
         choices=["nats", "http", "tcp"],
-        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    )
+    parser.add_argument(
+        "--enable-local-indexer",
+        type=str,
+        choices=["true", "false"],
+        default=os.environ.get("DYN_LOCAL_INDEXER", "false"),
+        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     )
 
     args = parser.parse_args()
@@ -355,8 +371,10 @@ def cmd_line_args():
     config.reasoning_parser = args.dyn_reasoning_parser
     config.tool_call_parser = args.dyn_tool_call_parser
     config.dump_config_to = args.dump_config_to
+    config.dyn_endpoint_types = args.dyn_endpoint_types
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
+    config.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
 
     # Handle custom jinja template path expansion (environment variables and home directory)
     if args.custom_jinja_template:

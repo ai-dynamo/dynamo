@@ -143,9 +143,10 @@ For multinode deployments, the operator modifies probes based on the backend fra
 
 The operator automatically selects between two deployment modes based on parallelism configuration:
 
-**Ray-Based Mode** (when `world_size > GPUs_per_node`):
-- **Worker nodes**: All probes (liveness, readiness, startup) are removed
-- **Leader nodes**: All probes remain active
+**Tensor/Pipeline Parallel Mode** (when `world_size > GPUs_per_node`):
+- Uses Ray for distributed execution (`--distributed-executor-backend ray`)
+- **Leader nodes**: Starts Ray head and runs vLLM; all probes remain active
+- **Worker nodes**: Run Ray agents only; all probes (liveness, readiness, startup) are removed
 
 **Data Parallel Mode** (when `world_size × data_parallel_size > GPUs_per_node`):
 - **Worker nodes**: All probes (liveness, readiness, startup) are removed
@@ -247,7 +248,7 @@ Default container ports are configured based on component type:
 ## Backend-Specific Configurations
 
 ### VLLM
-- **Ray Head Port**: 6379 (for Ray-based multinode deployments)
+- **Ray Head Port**: 6379 (for Ray cluster coordination in multinode TP/PP deployments)
 - **Data Parallel RPC Port**: 13445 (for data parallel multinode deployments)
 
 ### SGLang

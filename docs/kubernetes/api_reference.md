@@ -37,6 +37,7 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 - [DynamoComponentDeployment](#dynamocomponentdeployment)
 - [DynamoGraphDeployment](#dynamographdeployment)
 - [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
+- [DynamoGraphDeploymentScalingAdapter](#dynamographdeploymentscalingadapter)
 - [DynamoModel](#dynamomodel)
 
 
@@ -45,7 +46,9 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 
 
 
-
+Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
+with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+for migration guidance. This field will be removed in a future API version.
 
 
 
@@ -55,13 +58,33 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ |  |  |  |
-| `minReplicas` _integer_ |  |  |  |
-| `maxReplicas` _integer_ |  |  |  |
-| `behavior` _[HorizontalPodAutoscalerBehavior](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#horizontalpodautoscalerbehavior-v2-autoscaling)_ |  |  |  |
-| `metrics` _[MetricSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#metricspec-v2-autoscaling) array_ |  |  |  |
+| `enabled` _boolean_ | Deprecated: This field is ignored. |  |  |
+| `minReplicas` _integer_ | Deprecated: This field is ignored. |  |  |
+| `maxReplicas` _integer_ | Deprecated: This field is ignored. |  |  |
+| `behavior` _[HorizontalPodAutoscalerBehavior](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#horizontalpodautoscalerbehavior-v2-autoscaling)_ | Deprecated: This field is ignored. |  |  |
+| `metrics` _[MetricSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#metricspec-v2-autoscaling) array_ | Deprecated: This field is ignored. |  |  |
 
 
+
+
+#### ComponentKind
+
+_Underlying type:_ _string_
+
+ComponentKind represents the type of underlying Kubernetes resource.
+
+_Validation:_
+- Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet]
+
+_Appears in:_
+- [ServiceReplicaStatus](#servicereplicastatus)
+
+| Field | Description |
+| --- | --- |
+| `PodClique` | ComponentKindPodClique represents a PodClique resource.<br /> |
+| `PodCliqueScalingGroup` | ComponentKindPodCliqueScalingGroup represents a PodCliqueScalingGroup resource.<br /> |
+| `Deployment` | ComponentKindDeployment represents a Deployment resource.<br /> |
+| `LeaderWorkerSet` | ComponentKindLeaderWorkerSet represents a LeaderWorkerSet resource.<br /> |
 
 
 #### ConfigMapKeySelector
@@ -165,7 +188,7 @@ _Appears in:_
 | `dynamoNamespace` _string_ | DynamoNamespace is deprecated and will be removed in a future version.<br />The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component |  | Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
-| `autoscaling` _[Autoscaling](#autoscaling)_ | Autoscaling config for this component (replica range, target utilization, etc.). |  |  |
+| `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
@@ -176,8 +199,9 @@ _Appears in:_
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
 | `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
 | `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
-| `replicas` _integer_ | Replicas is the desired number of Pods for this component when autoscaling is not used. |  |  |
+| `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled (default), this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
+| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled (default), replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  |  |
 
 
 #### DynamoComponentDeploymentSpec
@@ -202,7 +226,7 @@ _Appears in:_
 | `dynamoNamespace` _string_ | DynamoNamespace is deprecated and will be removed in a future version.<br />The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component |  | Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
-| `autoscaling` _[Autoscaling](#autoscaling)_ | Autoscaling config for this component (replica range, target utilization, etc.). |  |  |
+| `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
@@ -213,8 +237,9 @@ _Appears in:_
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
 | `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
 | `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
-| `replicas` _integer_ | Replicas is the desired number of Pods for this component when autoscaling is not used. |  |  |
+| `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled (default), this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
+| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled (default), replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  |  |
 
 
 #### DynamoGraphDeployment
@@ -284,7 +309,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />This is a high-level identifier for easy reference in kubectl output and logs.<br />The controller automatically sets this value in profilingConfig.config.deployment.model. |  | Required: \{\} <br /> |
-| `backend` _string_ | Backend specifies the inference backend to use.<br />The controller automatically sets this value in profilingConfig.config.engine.backend. |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
+| `backend` _string_ | Backend specifies the inference backend for profiling.<br />The controller automatically sets this value in profilingConfig.config.engine.backend.<br />Profiling runs on real GPUs or via AIC simulation to collect performance data. |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
+| `useMocker` _boolean_ | UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of<br />a real backend deployment. When true, the deployment uses simulated engines that<br />don't require GPUs, using the profiling data to simulate realistic timing behavior.<br />Mocker is available in all backend images and useful for large-scale experiments.<br />Profiling still runs against the real backend (specified above) to collect performance data. | false |  |
 | `enableGpuDiscovery` _boolean_ | EnableGpuDiscovery controls whether the profiler should automatically discover GPU<br />resources from the Kubernetes cluster nodes. When enabled, the profiler will override<br />any manually specified hardware configuration (min_num_gpus_per_engine, max_num_gpus_per_engine,<br />num_gpus_per_node) with values detected from the cluster.<br />Requires cluster-wide node access permissions - only available with cluster-scoped operators. | false | Optional: \{\} <br /> |
 | `profilingConfig` _[ProfilingConfigSpec](#profilingconfigspec)_ | ProfilingConfig provides the complete configuration for the profiling job.<br />This configuration is passed directly to the profiler.<br />The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).<br />Note: deployment.model and engine.backend are automatically set from the high-level<br />modelName and backend fields and should not be specified in this config. |  | Required: \{\} <br /> |
 | `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, only the spec is generated and stored in status.<br />Users can then manually create a DGD using the generated spec. | false |  |
@@ -310,8 +336,85 @@ _Appears in:_
 | `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec.<br />Used to detect spec changes and enforce immutability after profiling starts. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.<br />Conditions are merged by type on patch updates. |  |  |
 | `profilingResults` _string_ | ProfilingResults contains a reference to the ConfigMap holding profiling data.<br />Format: "configmap/<name>" |  | Optional: \{\} <br /> |
-| `generatedDeployment` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | GeneratedDeployment contains the full generated DynamoGraphDeployment specification<br />including metadata, based on profiling results. Users can extract this to create<br />a DGD manually, or it's used automatically when autoApply is true.<br />Stored as RawExtension to preserve all fields including metadata. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
+| `generatedDeployment` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | GeneratedDeployment contains the full generated DynamoGraphDeployment specification<br />including metadata, based on profiling results. Users can extract this to create<br />a DGD manually, or it's used automatically when autoApply is true.<br />Stored as RawExtension to preserve all fields including metadata.<br />For mocker backends, this contains the mocker DGD spec. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
 | `deployment` _[DeploymentStatus](#deploymentstatus)_ | Deployment tracks the auto-created DGD when AutoApply is true.<br />Contains name, namespace, state, and creation status of the managed DGD. |  | Optional: \{\} <br /> |
+
+
+#### DynamoGraphDeploymentScalingAdapter
+
+
+
+DynamoGraphDeploymentScalingAdapter provides a scaling interface for individual services
+within a DynamoGraphDeployment. It implements the Kubernetes scale
+subresource, enabling integration with HPA, KEDA, and custom autoscalers.
+
+The adapter acts as an intermediary between autoscalers and the DGD,
+ensuring that only the adapter controller modifies the DGD's service replicas.
+This prevents conflicts when multiple autoscaling mechanisms are in play.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
+| `kind` _string_ | `DynamoGraphDeploymentScalingAdapter` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[DynamoGraphDeploymentScalingAdapterSpec](#dynamographdeploymentscalingadapterspec)_ |  |  |  |
+| `status` _[DynamoGraphDeploymentScalingAdapterStatus](#dynamographdeploymentscalingadapterstatus)_ |  |  |  |
+
+
+#### DynamoGraphDeploymentScalingAdapterSpec
+
+
+
+DynamoGraphDeploymentScalingAdapterSpec defines the desired state of DynamoGraphDeploymentScalingAdapter
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentScalingAdapter](#dynamographdeploymentscalingadapter)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicas` _integer_ | Replicas is the desired number of replicas for the target service.<br />This field is modified by external autoscalers (HPA/KEDA/Planner) or manually by users. |  | Minimum: 0 <br />Required: \{\} <br /> |
+| `dgdRef` _[DynamoGraphDeploymentServiceRef](#dynamographdeploymentserviceref)_ | DGDRef references the DynamoGraphDeployment and the specific service to scale. |  | Required: \{\} <br /> |
+
+
+#### DynamoGraphDeploymentScalingAdapterStatus
+
+
+
+DynamoGraphDeploymentScalingAdapterStatus defines the observed state of DynamoGraphDeploymentScalingAdapter
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentScalingAdapter](#dynamographdeploymentscalingadapter)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicas` _integer_ | Replicas is the current number of replicas for the target service.<br />This is synced from the DGD's service replicas and is required for the scale subresource. |  |  |
+| `selector` _string_ | Selector is a label selector string for the pods managed by this adapter.<br />Required for HPA compatibility via the scale subresource. |  |  |
+| `lastScaleTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | LastScaleTime is the last time the adapter scaled the target service. |  |  |
+
+
+#### DynamoGraphDeploymentServiceRef
+
+
+
+DynamoGraphDeploymentServiceRef identifies a specific service within a DynamoGraphDeployment
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentScalingAdapterSpec](#dynamographdeploymentscalingadapterspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name of the DynamoGraphDeployment |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `serviceName` _string_ | ServiceName is the key name of the service within the DGD's spec.services map to scale |  | MinLength: 1 <br />Required: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentSpec
@@ -348,6 +451,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `state` _string_ | State is a high-level textual status of the graph deployment lifecycle. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
+| `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  |  |
 
 
 #### DynamoModel
@@ -638,6 +742,46 @@ _Appears in:_
 | `claims` _[ResourceClaim](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourceclaim-v1-core) array_ | Claims specifies resource claims for dynamic resource allocation |  |  |
 
 
+#### ScalingAdapter
+
+
+
+ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
+for replica management. When enabled (default), the DGDSA owns the replicas field and
+external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `disable` _boolean_ | Disable indicates whether the ScalingAdapter should be disabled for this service.<br />When false (default), a DGDSA is created and owns the replicas field.<br />When true, no DGDSA is created and replicas can be modified directly in the DGD. | false |  |
+
+
+#### ServiceReplicaStatus
+
+
+
+ServiceReplicaStatus contains replica information for a single service.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `componentKind` _[ComponentKind](#componentkind)_ | ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet"). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br /> |
+| `componentName` _string_ | ComponentName is the name of the underlying resource. |  |  |
+| `replicas` _integer_ | Replicas is the total number of non-terminated replicas.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
+| `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
+| `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br /> |
+| `availableReplicas` _integer_ | AvailableReplicas is the number of available replicas.<br />For Deployment: replicas ready for >= minReadySeconds.<br />For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.<br />Not available for PodClique or LeaderWorkerSet.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br /> |
+
+
 #### SharedMemorySpec
 
 
@@ -820,9 +964,10 @@ For multinode deployments, the operator modifies probes based on the backend fra
 
 The operator automatically selects between two deployment modes based on parallelism configuration:
 
-**Ray-Based Mode** (when `world_size > GPUs_per_node`):
-- **Worker nodes**: All probes (liveness, readiness, startup) are removed
-- **Leader nodes**: All probes remain active
+**Tensor/Pipeline Parallel Mode** (when `world_size > GPUs_per_node`):
+- Uses Ray for distributed execution (`--distributed-executor-backend ray`)
+- **Leader nodes**: Starts Ray head and runs vLLM; all probes remain active
+- **Worker nodes**: Run Ray agents only; all probes (liveness, readiness, startup) are removed
 
 **Data Parallel Mode** (when `world_size × data_parallel_size > GPUs_per_node`):
 - **Worker nodes**: All probes (liveness, readiness, startup) are removed
@@ -924,7 +1069,7 @@ Default container ports are configured based on component type:
 ## Backend-Specific Configurations
 
 ### VLLM
-- **Ray Head Port**: 6379 (for Ray-based multinode deployments)
+- **Ray Head Port**: 6379 (for Ray cluster coordination in multinode TP/PP deployments)
 - **Data Parallel RPC Port**: 13445 (for data parallel multinode deployments)
 
 ### SGLang

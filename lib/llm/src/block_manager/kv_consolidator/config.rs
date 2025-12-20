@@ -14,6 +14,7 @@ pub struct KvEventConsolidatorConfig {
     pub engine_event_endpoint: String,
 
     /// ZMQ endpoint to publish consolidated events (e.g., "tcp://*:5558")
+    /// Worker-side publishers subscribe to this and add worker_id before forwarding to NATS
     pub consolidated_event_endpoint: String,
 
     /// Engine source for events (vLLM or TensorRT-LLM)
@@ -40,6 +41,24 @@ impl KvEventConsolidatorConfig {
             engine_event_endpoint,
             consolidated_event_endpoint,
             engine_source,
+        }
+    }
+
+    /// Create config for vLLM
+    pub fn new_vllm(engine_event_endpoint: String, consolidated_event_endpoint: String) -> Self {
+        Self {
+            engine_event_endpoint,
+            consolidated_event_endpoint,
+            engine_source: EventSource::Vllm,
+        }
+    }
+
+    /// Create config for TensorRT-LLM
+    pub fn new_trtllm(engine_event_endpoint: String, consolidated_event_endpoint: String) -> Self {
+        Self {
+            engine_event_endpoint,
+            consolidated_event_endpoint,
+            engine_source: EventSource::Trtllm,
         }
     }
 }

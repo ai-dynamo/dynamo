@@ -127,7 +127,6 @@ fn build_agent(
             obj_param_pairs.push(("region".to_string(), region.clone()));
         }
 
-        // Credentials from ObjectStorageConfig (unified DYN_KVBM_OBJECT_* vars)
         if let Some(access_key) = &config.access_key {
             obj_param_pairs.push(("access_key".to_string(), access_key.clone()));
         }
