@@ -586,11 +586,52 @@ COPY --from=dynamo_base --chmod=775 /usr/local/rustup /usr/local/rustup
 COPY --from=dynamo_base --chmod=775 /usr/local/cargo /usr/local/cargo
 RUN chmod g+w /usr/local/rustup /usr/local/cargo
 
-# Install maturin, for maturin develop
-# Editable install of dynamo
-COPY pyproject.toml README.md hatch_build.py /workspace/
-RUN pip install maturin[patchelf] && \
-    pip install --no-deps -e .
+ARG ARCH
+ARG ARCH_ALT
+
+# Copy UCX and NIXL libraries for dev stage compilation
+# The upstream SGLang runtime image doesn't include NIXL, but cargo build needs to link against
+# -lnixl, -lnixl_build, and -lnixl_common. Runtime stage doesn't need this since it uses pre-built
+# wheels, but dev stage needs it for maturin develop and cargo build from source.
+COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
+COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
+COPY --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. /opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/
+
+# Set NIXL environment variables for compilation
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
+
+# Update LD_LIBRARY_PATH to include NIXL libraries for the linker
+ENV LD_LIBRARY_PATH=\
+${NIXL_LIB_DIR}:\
+${NIXL_PLUGIN_DIR}:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+${LD_LIBRARY_PATH}
+
+# Create virtual environment for maturin develop (required by maturin develop command)
+# Use --system-site-packages to inherit sglang, torch, etc. from upstream
+RUN mkdir -p /opt/dynamo/venv && \
+    python3 -m venv --system-site-packages /opt/dynamo/venv
+
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
+
+# Copy all packages from runtime stage user site-packages into venv
+# This includes ai-dynamo-runtime, kubernetes, and all other dependencies
+# Use --no-preserve=mode so copied files inherit umask 002 (group-writable)
+RUN cp -r --no-preserve=mode /home/dynamo/.local/lib/python3.12/site-packages/* \
+          /opt/dynamo/venv/lib/python3.12/site-packages/
+
+# Install maturin and uv into venv for development
+# Uninstall broken maturin from upstream, then reinstall properly into venv
+COPY --from=dynamo_base /bin/uv /opt/dynamo/venv/bin/uv
+RUN pip install --ignore-installed maturin[patchelf]
+
+# Editable install of dynamo components
+COPY --chown=dynamo:0 --chmod=664 pyproject.toml README.md hatch_build.py /workspace/
+RUN pip install --no-deps -e .
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
