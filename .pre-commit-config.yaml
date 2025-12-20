@@ -85,3 +85,16 @@ repos:
 # NOTE: pyright may be able to find other classes of errors not covered above,
 # but would require some configuring and venv setup to properly eliminate noise
 # and give it visiblity into all the local and third_party packages expected.
+- repo: local
+  hooks:
+    - id: pytest-marker-report
+      name: Report pytest markers (static + inherited)
+      entry: python3 scripts/report_pytest_markers.py
+      language: python
+      pass_filenames: false
+      additional_dependencies:
+        - pytest
+        - tomli
+        - pydantic
+        - filelock
+        - pyyaml

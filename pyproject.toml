@@ -199,6 +199,7 @@ markers = [
     "parallel: marks tests that can run in parallel with pytest-xdist",
     "nightly: marks tests to run nightly",
     "weekly: marks tests to run weekly",
+    "release: marks tests to run on release pipelines",
     "gpu_0: marks tests that don't require GPU",
     "gpu_1: marks tests to run on GPU",
     "gpu_2: marks tests to run on 2GPUs",
@@ -209,6 +210,7 @@ markers = [
     "unit: marks tests as unit tests",
     "stress: marks tests as stress tests",
     "performance: marks tests as performance tests",
+    "benchmark: marks tests as benchmark tests",
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
@@ -222,7 +224,15 @@ markers = [
     "model: model id used by a test or parameter",
     "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
     "k8s: marks tests as requiring Kubernetes",
-    "fault_tolerance: marks tests as fault tolerance tests"
+    "fault_tolerance: marks tests as fault tolerance tests",
+    # Built-in markers
+    "skip: skip this test",
+    "skipif: skip if condition is true",
+    "xfail: expected failure",
+    "usefixtures: use fixtures",
+    "parametrize: parameterized test",
+    "filterwarnings: filter warnings",
+    "asyncio: asyncio test marker"
 ]
 
 # Linting/formatting
