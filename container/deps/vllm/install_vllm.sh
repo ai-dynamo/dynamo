@@ -156,11 +156,12 @@ elif [[ "$CUDA_VERSION_MAJOR" == "13" ]]; then
         echo "⚠ Skipping LMCache on ARM64 (compatibility issues, missing aarch64 wheels)"
         echo "Building vLLM from source for ${ARCH} architecture..."
         echo "Try to install specific PyTorch and other dependencies first"
-        uv pip install --index-strategy=unsafe-best-match --index https://download.pytorch.org/whl/ -r requirements/cuda.txt
-        uv pip install setuptools_scm # required to build vLLM from source
-        MAX_JOBS=${MAX_JOBS} uv pip install -v --no-build-isolation .
+        uv pip install --index-strategy=unsafe-best-match --index https://download.pytorch.org/whl/ \
+            -r requirements/cuda.txt \
+            -r requirements/build.txt
         uv pip uninstall cupy-cuda12x # remove cupy-cuda12x installed by vllm - bug in vllm packaging
         uv pip install cupy-cuda13x
+        MAX_JOBS=${MAX_JOBS} uv pip install -v --no-build-isolation .
     fi
 else
     echo "❌ Unsupported CUDA version for vLLM installation: ${CUDA_VERSION}"
