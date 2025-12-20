@@ -73,7 +73,6 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
-                self.pick_with_webui = False
                 # Provide minimal model_info to avoid HF queries
                 self.model_info = ModelInfo(
                     model_size=16384.0,
@@ -117,7 +116,6 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
-                self.pick_with_webui = False
                 self.model_info = ModelInfo(
                     model_size=16384.0,
                     architecture="TestArchitecture",
@@ -182,7 +180,6 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
-                self.pick_with_webui = False
                 self.model_info = ModelInfo(
                     model_size=16384.0,
                     architecture="TestArchitecture",
@@ -236,7 +233,6 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
-                self.pick_with_webui = False
                 self.model_info = ModelInfo(
                     model_size=65536.0,
                     architecture="TestMoEArchitecture",
@@ -313,7 +309,6 @@ class TestProfileSLADryRun:
                 # Set to 0 to trigger auto-generation path
                 self.num_gpus_per_node = 0
                 self.deploy_after_profile = False
-                self.pick_with_webui = False
                 self.enable_gpu_discovery = True
 
         return Args()
@@ -381,7 +376,6 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 0
                 self.deploy_after_profile = False
-                self.pick_with_webui = False
                 self.enable_gpu_discovery = True
 
         return Args()
@@ -449,7 +443,6 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 0
                 self.deploy_after_profile = False
-                self.pick_with_webui = False
                 self.enable_gpu_discovery = True
 
         return Args()

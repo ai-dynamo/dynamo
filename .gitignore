@@ -77,9 +77,6 @@ llm_engine.h
 ### Ruff ###
 .ruff_cache/
 
-### MyPy ###
-.mypy_cache/
-
 ### Python ###
 __pycache__/
 *.py[cod]

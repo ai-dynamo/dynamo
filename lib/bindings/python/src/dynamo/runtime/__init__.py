@@ -26,7 +26,7 @@ def dynamo_worker():
         @wraps(func)
         async def wrapper(*args, **kwargs):
             loop = asyncio.get_running_loop()
-            request_plane = os.environ.get("DYN_REQUEST_PLANE", "tcp")
+            request_plane = os.environ.get("DYN_REQUEST_PLANE", "nats")
             runtime = DistributedRuntime(loop, "etcd", request_plane)
 
             await func(runtime, *args, **kwargs)

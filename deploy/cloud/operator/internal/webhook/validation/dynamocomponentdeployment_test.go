@@ -47,6 +47,11 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
 					DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						Replicas: &validReplicas,
+						Autoscaling: &nvidiacomv1alpha1.Autoscaling{
+							Enabled:     true,
+							MinReplicas: 1,
+							MaxReplicas: 10,
+						},
 					},
 					BackendFramework: "sglang",
 				},
@@ -68,6 +73,26 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "spec.replicas must be non-negative",
+		},
+		{
+			name: "invalid autoscaling",
+			deployment: &nvidiacomv1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deployment",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						Autoscaling: &nvidiacomv1alpha1.Autoscaling{
+							Enabled:     true,
+							MinReplicas: 5,
+							MaxReplicas: 3,
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.autoscaling.maxReplicas must be > minReplicas",
 		},
 		{
 			name: "invalid ingress",

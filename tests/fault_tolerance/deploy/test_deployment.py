@@ -1,15 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import asyncio
 import logging
 import multiprocessing
-import os
 import re
-import signal
+import time
 from contextlib import contextmanager
-from multiprocessing.context import SpawnProcess
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 
@@ -20,12 +17,11 @@ from tests.fault_tolerance.deploy.parse_results import process_overflow_recovery
 from tests.fault_tolerance.deploy.scenarios import (
     OVERFLOW_SUFFIX,
     RECOVERY_SUFFIX,
-    Failure,
     Load,
-    Scenario,
+    TokenOverflowFailure,
     scenarios,
 )
-from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
+from tests.utils.managed_deployment import ManagedDeployment
 
 
 @pytest.fixture
@@ -59,18 +55,18 @@ def scenario(scenario_name, client_type):
 
 @contextmanager
 def _clients(
-    logger: logging.Logger,
-    log_dir: str,
-    deployment_spec: DeploymentSpec,
-    namespace: str,
-    model: str,
+    logger,
+    request,
+    deployment_spec,
+    namespace,
+    model,
     load_config: Load,
 ):
     """Start client processes using factory pattern for client selection.
 
     Args:
         logger: Logger instance
-        log_dir: Log directory for output logs and client logs/artifacts
+        request: Pytest request fixture
         deployment_spec: Deployment specification
         namespace: Kubernetes namespace
         model: Model name to test
@@ -83,7 +79,7 @@ def _clients(
         f"Starting {load_config.clients} clients using '{load_config.client_type}' client"
     )
 
-    procs: list[SpawnProcess] = []
+    procs = []
     ctx = multiprocessing.get_context("spawn")
 
     # Determine retry_delay_or_rate based on client type
@@ -93,9 +89,6 @@ def _clients(
     else:
         # AI-Perf client uses retry_delay between attempts (default 5s)
         retry_delay_or_rate = 5
-
-    # Check if this is a continuous load test (rolling upgrade scenarios)
-    continuous_load = getattr(load_config, "continuous_load", False)
 
     # Check if this is a mixed token test (overflow + recovery)
     # If mixed_token_test is True, run two phases; otherwise run normally
@@ -115,14 +108,13 @@ def _clients(
                     deployment_spec,
                     namespace,
                     model,
-                    f"{log_dir}{OVERFLOW_SUFFIX}",
+                    request.node.name + OVERFLOW_SUFFIX,
                     i,
                     load_config.overflow_request_count,  # 15 overflow requests
                     load_config.overflow_token_length,  # 2x max_seq_len tokens
                     load_config.output_token_length,
                     load_config.max_retries,
                     retry_delay_or_rate,
-                    continuous_load,
                 ),
             )
             proc_overflow.start()
@@ -136,7 +128,7 @@ def _clients(
         logger.info("Overflow requests completed. Starting recovery phase...")
 
         # Second phase: Send normal requests to test recovery
-        procs_recovery: list[SpawnProcess] = []
+        procs_recovery = []
         for i in range(load_config.clients):
             proc_normal = ctx.Process(
                 target=client_func,
@@ -144,7 +136,7 @@ def _clients(
                     deployment_spec,
                     namespace,
                     model,
-                    f"{log_dir}{RECOVERY_SUFFIX}",
+                    request.node.name + RECOVERY_SUFFIX,
                     i,
                     load_config.normal_request_count,  # 15 normal requests
                     load_config.input_token_length,  # Normal token count
@@ -169,14 +161,13 @@ def _clients(
                         deployment_spec,
                         namespace,
                         model,
-                        log_dir,
+                        request.node.name,
                         i,
                         load_config.requests_per_client,
                         load_config.input_token_length,
                         load_config.output_token_length,
                         load_config.max_retries,
                         retry_delay_or_rate,
-                        continuous_load,  # Pass continuous_load flag
                     ),
                 )
             )
@@ -191,50 +182,65 @@ def _clients(
         logger.debug(f"{proc} joined")
 
 
-def _terminate_client_processes(
-    client_procs: list[SpawnProcess],
-    logger: logging.Logger,
-):
-    """
-    Terminate client processes.
-    """
-    # Send SIGINT to client processes to stop continuous load
-    if client_procs:
-        logger.info(f"Sending SIGINT to {len(client_procs)} client processes...")
-        for proc in client_procs:
-            if proc.is_alive():
-                try:
-                    if proc.pid is not None:
-                        logger.debug(f"Sending SIGINT to client process {proc.pid}")
-                        os.kill(proc.pid, signal.SIGINT)
-                    else:
-                        raise ValueError(f"Process {proc} has no PID")
-                except ProcessLookupError:
-                    logger.debug(f"Process {proc.pid} already terminated")
-                except Exception as e:
-                    logger.warning(f"Failed to send SIGINT to process {proc.pid}: {e}")
-        logger.info(
-            "SIGINT sent to all client processes, waiting for graceful shutdown..."
-        )
-    else:
-        logger.warning("No client processes provided to terminate")
+def _inject_failures(failures, logger, deployment: ManagedDeployment):  # noqa: F811
+    """Inject failures and return info about affected pods.
 
-
-async def _inject_failures(
-    failures: list[Failure],
-    logger: logging.Logger,
-    deployment: ManagedDeployment,
-) -> dict[str, list]:  # noqa: F811
+    Returns:
+        Dict mapping failure info to list of affected pod names
+        Example: {"VllmDecodeWorker:delete_pod": ["pod-abc123", "pod-xyz789"]}
+    """
     affected_pods: dict[str, list] = {}
 
     for failure in failures:
-        await asyncio.sleep(failure.time)
+        time.sleep(failure.time)
+
+        # Handle TokenOverflowFailure differently - it's a client-side injection
+        if isinstance(failure, TokenOverflowFailure):
+            # The actual overflow is handled by the client configuration
+            # which uses the input_token_length from the Load config
+            # This is just logging for visibility
+            continue
+
+        pods = deployment.get_pods(failure.pod_name)[failure.pod_name]
+
+        num_pods = len(pods)
+
+        if not pods:
+            continue
+
+        replicas = failure.replicas
+
+        if not replicas:
+            replicas = num_pods
 
         logger.info(f"Injecting failure for: {failure}")
 
-        affected_pods[failure.get_failure_key()] = await failure.execute(
-            deployment, logger
-        )
+        # Track which pods were affected by this failure
+        failure_key = f"{failure.pod_name}:{failure.command}"
+        if failure_key not in affected_pods:
+            affected_pods[failure_key] = []
+
+        for x in range(replicas):
+            pod = pods[x % num_pods]
+
+            # Capture the exact pod name before we kill it
+            pod_name = pod.name
+            affected_pods[failure_key].append(pod_name)
+
+            logger.info(f"Target pod for failure: {pod_name}")
+
+            if failure.command == "delete_pod":
+                deployment.get_pod_logs(failure.pod_name, pod, ".before_delete")
+                logger.info(f"Deleting pod: {pod_name}")
+                pod.delete(force=True)
+            else:
+                processes = deployment.get_processes(pod)
+                for process in processes:
+                    if failure.command in process.command:
+                        logger.info(
+                            f"Terminating {failure.pod_name} Pid {process.pid} Command {process.command} in pod {pod_name}"
+                        )
+                        process.kill(failure.signal)
 
     return affected_pods
 
@@ -439,12 +445,11 @@ def results_summary():
 @pytest.mark.slow
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_fault_scenario(
-    scenario: Scenario,  # noqa: F811
+    scenario,  # noqa: F811
     request,
-    image: str,
-    namespace: str,
+    image,
+    namespace,
     validation_context,  # noqa: F811  # Shared context for passing data to validation
-    skip_service_restart: bool,
 ):
     """
     Test dynamo serve deployments with injected failures
@@ -463,7 +468,6 @@ async def test_fault_scenario(
     if image:
         scenario.deployment.set_image(image)
 
-    model: Optional[str] = None
     if scenario.model:
         scenario.deployment.set_model(scenario.model)
         model = scenario.model
@@ -496,7 +500,6 @@ async def test_fault_scenario(
         namespace=namespace,
         log_dir=request.node.name,
         deployment_spec=scenario.deployment,
-        skip_service_restart=skip_service_restart,
     ) as deployment:
         # Populate shared context for validation
         validation_context["deployment"] = deployment
@@ -504,17 +507,14 @@ async def test_fault_scenario(
 
         with _clients(
             logger,
-            request.node.name,
+            request,
             scenario.deployment,
             namespace,
             model,
             scenario.load,  # Pass entire Load config object
-        ) as client_procs:
+        ):
             # Inject failures and capture which pods were affected
-            affected_pods = await _inject_failures(
-                scenario.failures, logger, deployment
-            )
-            logger.info(f"Affected pods during test: {affected_pods}")
+            affected_pods = _inject_failures(scenario.failures, logger, deployment)
+            validation_context["affected_pods"] = affected_pods
 
-            if scenario.load.continuous_load:
-                _terminate_client_processes(client_procs, logger)
+            logger.info(f"Affected pods during test: {affected_pods}")

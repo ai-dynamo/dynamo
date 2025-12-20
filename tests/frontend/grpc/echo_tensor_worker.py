@@ -53,12 +53,15 @@ async def echo_tensor_worker(runtime: DistributedRuntime):
     )
     assert model_config == retrieved_model_config
 
-    # Use register_llm for tensor-based backends (skips HuggingFace downloads)
+    # [gluo FIXME] register_llm will attempt to load a LLM model,
+    # which is not well-defined for Tensor yet. Currently provide
+    # a valid model name to pass the registration.
     await register_llm(
         ModelInput.Tensor,
         ModelType.TensorBased,
         endpoint,
-        "echo",  # model_path (used as display name for tensor-based models)
+        "Qwen/Qwen3-0.6B",
+        "echo",
         runtime_config=runtime_config,
     )
 

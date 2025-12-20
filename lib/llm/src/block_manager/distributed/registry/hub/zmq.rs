@@ -24,9 +24,8 @@ use tracing::{error, info, warn};
 
 use super::super::config::RegistryHubConfig;
 use super::super::protocol::{
-    decode_can_offload, decode_match_remote_keys, decode_match_sequence, decode_message_type,
-    decode_register, decode_register_remote_keys, encode_match_remote_keys_response,
-    encode_match_response, MessageType,
+    decode_can_offload, decode_match_sequence, decode_message_type,
+    decode_register, encode_match_response, MessageType,
 };
 use super::super::storage::MokaStorage;
 use super::super::traits::RegistryHub;
@@ -300,40 +299,6 @@ impl ZmqRegistryHub {
 
                 Some(encode_match_response(&matched))
             }
-            MessageType::MatchRemoteKeys => {
-                let keys = decode_match_remote_keys(data)?;
-                stats.total_match_queries.fetch_add(1, Ordering::Relaxed);
-
-                info!(
-                    target: "kvbm_distributed_registry",
-                    num_keys = keys.len(),
-                    "HUB_MATCH_REMOTE_KEYS: count={}",
-                    keys.len()
-                );
-
-                // Match RemoteKeys across all buckets
-                let matched = storage.match_remote_keys(&keys);
-
-                for key in &matched {
-                    info!(
-                        target: "kvbm_distributed_registry",
-                        location = %key.location(),
-                        key = %key.key_str(),
-                        "HUB_REMOTE_KEY_HIT: location={} key={}",
-                        key.location(), key.key_str()
-                    );
-                }
-
-                info!(
-                    target: "kvbm_distributed_registry",
-                    queried = keys.len(),
-                    matched = matched.len(),
-                    "HUB_MATCH_REMOTE_KEYS_RESULT: queried={} matched={}",
-                    keys.len(), matched.len()
-                );
-
-                Some(encode_match_remote_keys_response(&matched))
-            }
             _ => {
                 warn!("Unexpected message type on query socket: {:?}", msg_type);
                 None
@@ -537,9 +502,7 @@ impl ZmqRegistryHub {
                         Some(Ok(msg)) => {
                             for frame in msg.iter() {
                                 let data = frame.as_ref();
-                                let msg_type = decode_message_type(data);
-
-                                if msg_type == Some(MessageType::Register) {
+                                if decode_message_type(data) == Some(MessageType::Register) {
                                     if let Some((bucket_id, entries)) = decode_register(data) {
                                         let count = entries.len();
                                         let prev_total = stats.total_registered.fetch_add(count as u64, Ordering::Relaxed);
@@ -584,35 +547,6 @@ impl ZmqRegistryHub {
                                                 hub_stats.dedup_ratio() * 100.0
                                             );
                                         }
-                                    }
-                                } else if msg_type == Some(MessageType::RegisterRemoteKeys) {
-                                    // Handle RemoteKey registration
-                                    if let Some(keys) = decode_register_remote_keys(data) {
-                                        let count = keys.len();
-                                        let prev_total = stats.total_registered.fetch_add(count as u64, Ordering::Relaxed);
-
-                                        // Insert each RemoteKey
-                                        for key in &keys {
-                                            info!(
-                                                target: "kvbm_distributed_registry",
-                                                location = %key.location(),
-                                                key_str = %key.key_str(),
-                                                "HUB_REGISTER_REMOTE_KEY: location={} key={}",
-                                                key.location(), key.key_str()
-                                            );
-                                            storage.insert_remote_key(key);
-                                        }
-
-                                        info!(
-                                            target: "kvbm_distributed_registry",
-                                            count = count,
-                                            total_registered = prev_total + count as u64,
-                                            storage_len = storage.len(),
-                                            "HUB_REGISTER_REMOTE_KEYS_BATCH: {} keys (total: {}, storage: {})",
-                                            count,
-                                            prev_total + count as u64,
-                                            storage.len(),
-                                        );
                                     }
                                 }
                             }

@@ -7,6 +7,8 @@ import (
 )
 
 const (
+	HPACPUDefaultAverageUtilization = 80
+
 	DefaultUserId = "default"
 	DefaultOrgId  = "default"
 

@@ -4,13 +4,14 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+pub use async_nats::service::endpoint::Stats as EndpointStats;
 use derive_builder::Builder;
 use derive_getters::Dissolve;
 use educe::Educe;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    component::{Endpoint, Instance, TransportType},
+    component::{Endpoint, Instance, TransportType, service::EndpointStatsHandler},
     distributed::RequestPlaneMode,
     pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint},
     protocols::EndpointId,
@@ -28,6 +29,11 @@ pub struct EndpointConfig {
     /// Endpoint handler
     #[educe(Debug(ignore))]
     handler: Arc<dyn PushWorkHandler>,
+
+    /// Stats handler
+    #[educe(Debug(ignore))]
+    #[builder(default, private)]
+    _stats_handler: Option<EndpointStatsHandler>,
 
     /// Additional labels for metrics
     #[builder(default, setter(into))]
@@ -50,6 +56,13 @@ impl EndpointConfigBuilder {
         Self::default().endpoint(endpoint)
     }
 
+    pub fn stats_handler<F>(self, handler: F) -> Self
+    where
+        F: FnMut(EndpointStats) -> serde_json::Value + Send + Sync + 'static,
+    {
+        self._stats_handler(Some(Box::new(handler)))
+    }
+
     /// Register an async engine in the local endpoint registry for direct in-process calls
     pub fn register_local_engine(
         self,
@@ -67,18 +80,45 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
-        let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
-            self.build_internal()?.dissolve();
+        let (
+            endpoint,
+            handler,
+            stats_handler,
+            metrics_labels,
+            graceful_shutdown,
+            health_check_payload,
+        ) = self.build_internal()?.dissolve();
         let connection_id = endpoint.drt().connection_id();
         let endpoint_id = endpoint.id();
 
         tracing::debug!("Starting endpoint: {endpoint_id}");
+
+        let service_name = endpoint.component.service_name();
 
         let metrics_labels: Option<Vec<(&str, &str)>> = metrics_labels
             .as_ref()
             .map(|v| v.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect());
         // Add metrics to the handler. The endpoint provides additional information to the handler.
         handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
+
+        // Insert the stats handler. depends on NATS.
+        if let Some(stats_handler) = stats_handler {
+            let registry = endpoint.drt().component_registry().inner.lock().await;
+            let handler_map = registry
+                .stats_handlers
+                .get(&service_name)
+                .cloned()
+                .expect("no stats handler registry; this is unexpected");
+            // There is something wrong with the stats handler map I think.
+            // Here the connection_id is included, but in component/service.rs add_stats_service it uses service_name,
+            // no connection id so it's per-endpoint not per-instance. Doesn't match.
+            // To not block current refactor I am keeping previous behavior, but I think needs
+            // investigation.
+            handler_map.lock().insert(
+                nats::instance_subject(&endpoint_id, connection_id),
+                stats_handler,
+            );
+        }
 
         // This creates a child token of the runtime's endpoint_shutdown_token. That token is
         // cancelled first as part of graceful shutdown. See Runtime::shutdown.
@@ -88,6 +128,30 @@ impl EndpointConfigBuilder {
 
         let request_plane_mode = endpoint.drt().request_plane();
         tracing::info!("Endpoint starting with request plane mode: {request_plane_mode}",);
+
+        // Register health check target in SystemHealth if provided
+        if let Some(health_check_payload) = &health_check_payload {
+            // Build transport based on request plane mode
+            let transport = build_transport_type(request_plane_mode, &endpoint_id, connection_id);
+
+            let instance = Instance {
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+                namespace: endpoint_id.namespace.clone(),
+                instance_id: connection_id,
+                transport,
+            };
+            tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
+            let guard = system_health.lock();
+            guard.register_health_check_target(
+                &endpoint.name,
+                instance,
+                health_check_payload.clone(),
+            );
+            if let Some(notifier) = guard.get_endpoint_health_check_notifier(&endpoint.name) {
+                handler.set_endpoint_health_check_notifier(notifier)?;
+            }
+        }
 
         // Register with graceful shutdown tracker if needed
         if graceful_shutdown {
@@ -113,32 +177,8 @@ impl EndpointConfigBuilder {
         let component_name_for_task = endpoint_id.component.clone();
         let endpoint_name_for_task = endpoint_id.name.clone();
 
-        // Get the unified request plane server
+        // Get the unified request plane server (works for all transport types)
         let server = endpoint.drt().request_plane_server().await?;
-
-        // Register health check target in SystemHealth if provided
-        if let Some(health_check_payload) = &health_check_payload {
-            // Build transport based on request plane mode
-            let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
-
-            let instance = Instance {
-                component: endpoint_id.component.clone(),
-                endpoint: endpoint_id.name.clone(),
-                namespace: endpoint_id.namespace.clone(),
-                instance_id: connection_id,
-                transport,
-            };
-            tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
-            let guard = system_health.lock();
-            guard.register_health_check_target(
-                &endpoint.name,
-                instance,
-                health_check_payload.clone(),
-            );
-            if let Some(notifier) = guard.get_endpoint_health_check_notifier(&endpoint.name) {
-                handler.set_endpoint_health_check_notifier(notifier)?;
-            }
-        }
 
         tracing::info!(
             endpoint = %endpoint_name_for_task,
@@ -198,7 +238,7 @@ impl EndpointConfigBuilder {
         let discovery = endpoint.drt().discovery();
 
         // Build transport for discovery service based on request plane mode
-        let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
+        let transport = build_transport_type(request_plane_mode, &endpoint_id, connection_id);
 
         let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
             namespace: endpoint_id.namespace.clone(),
@@ -232,14 +272,11 @@ impl EndpointConfigBuilder {
 /// - HTTP: Uses full URL path including endpoint name (e.g., http://host:port/v1/rpc/endpoint_name)
 /// - TCP: Includes endpoint name for routing (e.g., host:port/endpoint_name)
 /// - NATS: Uses subject-based addressing (unique per endpoint)
-///
-/// # Errors
-/// Returns an error if TCP mode is used but the TCP server hasn't been started yet.
-fn build_transport_type_inner(
+pub fn build_transport_type(
     mode: RequestPlaneMode,
     endpoint_id: &EndpointId,
     connection_id: u64,
-) -> Result<TransportType> {
+) -> TransportType {
     match mode {
         RequestPlaneMode::Http => {
             let http_host = crate::utils::get_http_rpc_host_from_env();
@@ -255,54 +292,23 @@ fn build_transport_type_inner(
                 endpoint_id.name
             );
 
-            Ok(TransportType::Http(http_endpoint))
+            TransportType::Http(http_endpoint)
         }
         RequestPlaneMode::Tcp => {
             let tcp_host = crate::utils::get_tcp_rpc_host_from_env();
-            // If a fixed port is explicitly configured, use it directly (no init ordering dependency).
-            // Otherwise, use the actual bound port (set by TCP server after binding when port 0 is used).
             let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
+                .unwrap_or(9999);
 
             // Include endpoint name for proper TCP routing
             // TCP client parses this format and adds x-endpoint-path header for server-side routing
             let tcp_endpoint = format!("{}:{}/{}", tcp_host, tcp_port, endpoint_id.name);
 
-            Ok(TransportType::Tcp(tcp_endpoint))
+            TransportType::Tcp(tcp_endpoint)
         }
-        RequestPlaneMode::Nats => Ok(TransportType::Nats(nats::instance_subject(
-            endpoint_id,
-            connection_id,
-        ))),
-    }
-}
-
-/// Build transport type, ensuring TCP server is initialized when needed.
-///
-/// In TCP mode with an OS-assigned port (`DYN_TCP_RPC_PORT` unset or invalid), the server must bind
-/// before we can construct a correct transport address. This helper ensures that initialization
-/// occurs, then delegates to the internal builder.
-pub async fn build_transport_type(
-    endpoint: &Endpoint,
-    endpoint_id: &EndpointId,
-    connection_id: u64,
-) -> Result<TransportType> {
-    let mode = endpoint.drt().request_plane();
-
-    if mode == RequestPlaneMode::Tcp {
-        // Only force server init when we *don't* have a valid explicit port.
-        let has_fixed_port = std::env::var("DYN_TCP_RPC_PORT")
-            .ok()
-            .and_then(|p| p.parse::<u16>().ok())
-            .is_some();
-
-        if !has_fixed_port {
-            // Ensure request plane server is initialized before building transport.
-            let _ = endpoint.drt().request_plane_server().await?;
+        RequestPlaneMode::Nats => {
+            TransportType::Nats(nats::instance_subject(endpoint_id, connection_id))
         }
     }
-
-    build_transport_type_inner(mode, endpoint_id, connection_id)
 }

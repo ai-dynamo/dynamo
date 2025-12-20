@@ -34,7 +34,6 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
-                stop_reason: None,
                 logprobs: None,
             };
 
@@ -74,7 +73,6 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
                 logprobs: None,
             };
 
@@ -118,7 +116,6 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
-                stop_reason: None,
                 logprobs: None,
             };
 
@@ -161,7 +158,6 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: None,
-                        stop_reason: None,
                         logprobs: None,
                     }
                 })
@@ -206,7 +202,6 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: Some(FinishReason::Stop),
-                        stop_reason: None,
                         logprobs: None,
                     }
                 })
@@ -2045,8 +2040,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_jailed_stream_qwen3_coder_multiple_params() {
-        use dynamo_parsers::tool_calling::ToolDefinition;
-
         let chunks = vec![
             create_mock_response_chunk("Let me search for that. ".to_string(), 0),
             create_mock_response_chunk(
@@ -2056,23 +2049,9 @@ mod tests {
             create_mock_response_chunk(" Searching now.".to_string(), 0),
         ];
 
-        // Define the web_search tool with its parameters
-        let tool_defs = vec![ToolDefinition {
-            name: "web_search".to_string(),
-            parameters: Some(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "max_results": {"type": "integer"},
-                    "filter": {"type": "string"},
-                },
-            })),
-        }];
-
         let input_stream = stream::iter(chunks);
         let jail = JailedStream::builder()
             .tool_call_parser("qwen3_coder")
-            .tool_definitions(tool_defs)
             .build();
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
@@ -2344,7 +2323,6 @@ mod parallel_jail_tests {
                         reasoning_content: None,
                     },
                     finish_reason: None,
-                    stop_reason: None,
                     logprobs: None,
                 }
             })
@@ -2414,13 +2392,6 @@ mod parallel_jail_tests {
         for (i, (expected_name, expected_args)) in expected_tool_calls.iter().enumerate() {
             let tool_call = &all_tool_calls[i];
             assert!(tool_call.id.is_some(), "Tool call {} should have an ID", i);
-
-            assert_eq!(
-                tool_call.index, i as u32,
-                "Tool call {} should have index {}, got {}",
-                i, i, tool_call.index
-            );
-
             assert_eq!(
                 tool_call.r#type,
                 Some(dynamo_async_openai::types::ChatCompletionToolType::Function),

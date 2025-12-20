@@ -43,6 +43,7 @@ use super::{DistributedRuntime, Runtime, traits::*, transports::nats::Slug, util
 
 use crate::pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint};
 use crate::protocols::EndpointId;
+use crate::service::ComponentNatsServerPrometheusMetrics;
 use async_nats::{
     rustls::quic,
     service::{Service, ServiceExt},
@@ -51,6 +52,7 @@ use derive_builder::Builder;
 use derive_getters::Getters;
 use educe::Educe;
 use serde::{Deserialize, Serialize};
+use service::EndpointStatsHandler;
 use std::{collections::HashMap, hash::Hash, sync::Arc};
 use validator::{Validate, ValidationError};
 
@@ -77,6 +79,8 @@ pub enum TransportType {
 #[derive(Default)]
 pub struct RegistryInner {
     pub(crate) services: HashMap<String, Service>,
+    pub(crate) stats_handlers:
+        HashMap<String, Arc<parking_lot::Mutex<HashMap<String, EndpointStatsHandler>>>>,
 }
 
 #[derive(Clone)]
@@ -275,38 +279,10 @@ impl ComponentBuilder {
 
     pub fn build(self) -> Result<Component, anyhow::Error> {
         let component = self.build_internal()?;
-        // If this component is using NATS, register the NATS service and wait for completion.
-        // This prevents a race condition where serve_endpoint() tries to look up the service
-        // before it's registered in the component registry.
+        // If this component is using NATS, gather it's metrics
         let drt = component.drt();
         if drt.request_plane().is_nats() {
-            let mut rx = drt.register_nats_service(component.clone());
-            // Wait synchronously for the NATS service registration to complete.
-            // Uses block_in_place() to safely call blocking_recv() from async contexts.
-            // This temporarily moves the current task off the runtime thread to allow
-            // blocking without deadlocking the runtime.
-            let result = tokio::task::block_in_place(|| rx.blocking_recv());
-            match result {
-                Some(Ok(())) => {
-                    tracing::debug!(
-                        component = component.service_name(),
-                        "NATS service registration completed"
-                    );
-                }
-                Some(Err(e)) => {
-                    return Err(anyhow::anyhow!(
-                        "NATS service registration failed for component '{}': {}",
-                        component.service_name(),
-                        e
-                    ));
-                }
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "NATS service registration channel closed unexpectedly for component '{}'",
-                        component.service_name()
-                    ));
-                }
-            }
+            drt.start_stats_service(component.clone());
         }
         Ok(component)
     }

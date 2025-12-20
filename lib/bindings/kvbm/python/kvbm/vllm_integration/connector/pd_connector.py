@@ -4,18 +4,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Type
 
 from kvbm.vllm_integration.connector.dynamo_connector import DynamoConnector
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorHandshakeMetadata,
-    KVConnectorRole,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
     MultiKVConnectorMetadata,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
-    NixlAgentMetadata,
-    NixlConnector,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnector
 from vllm.v1.core.sched.output import SchedulerOutput
 
 # Optional import for LMCache support
@@ -35,7 +29,6 @@ if TYPE_CHECKING:
         LMCacheConnectorV1,
     )
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 
@@ -53,15 +46,8 @@ class PdConnector(MultiConnector):
     - The second connector must be NIXL and will be used by decode worker to get KV blocks from prefill worker.
     """
 
-    def __init__(
-        self,
-        vllm_config: "VllmConfig",
-        role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig",
-    ):
-        super().__init__(
-            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
-        )
+    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+        super().__init__(vllm_config=vllm_config, role=role)
         if len(self._connectors) != 2:
             raise ValueError(
                 f"PdConnector requires exactly two connectors (got {len(self._connectors)})"
@@ -90,43 +76,7 @@ class PdConnector(MultiConnector):
     # Worker-side methods
     # ==============================
 
-    def set_xfer_handshake_metadata(
-        self, metadata: dict[int, KVConnectorHandshakeMetadata]
-    ) -> None:
-        """
-        Propagate handshake metadata to child connectors.
-
-        This is required for NIXL connector to start its handshake listener
-        which decode workers connect to for KV transfer coordination.
-        """
-        for c in self._connectors:
-            c.set_xfer_handshake_metadata(metadata)
-
-    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
-        """
-        Get the KVConnector handshake metadata from the NIXL connector.
-
-        This metadata is used for out-of-band connector handshake between
-        P/D workers. The NIXL connector (second connector) provides this
-        metadata so decode workers can connect for KV transfer coordination.
-
-        Returns:
-            NixlAgentMetadata from the NIXL connector, or None if not available.
-        """
-        # Get handshake metadata from the NIXL connector (second connector)
-        nixl_connector = self._connectors[1]
-        metadata = nixl_connector.get_handshake_metadata()
-        if metadata is not None and not isinstance(metadata, NixlAgentMetadata):
-            raise TypeError(
-                f"Expected NixlAgentMetadata from NIXL connector, "
-                f"got {type(metadata).__name__}"
-            )
-        return metadata
-
     def bind_connector_metadata(self, connector_metadata: PdConnectorMetadata) -> None:
-        # Must call super() to set _connector_metadata so has_connector_metadata() returns True
-        # This is required for save_kv_layer to be called during the forward pass
-        super().bind_connector_metadata(connector_metadata)
         assert isinstance(connector_metadata, PdConnectorMetadata)
         if connector_metadata.extra_async_saves:
             self._extra_async_saves.update(connector_metadata.extra_async_saves)

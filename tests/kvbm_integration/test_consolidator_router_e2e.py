@@ -6,8 +6,8 @@
 E2E test for KV Event Consolidator with Router integration.
 
 This test validates that:
-1. vLLM/TensorRT-LLM with KVBM correctly emits KV events to the consolidator
-2. The consolidator correctly deduplicates events from engine and KVBM
+1. vLLM with KVBM correctly emits KV events to the consolidator
+2. The consolidator correctly deduplicates events from vLLM and KVBM
 3. The router receives and processes consolidated events without warnings
 
 """
@@ -22,34 +22,12 @@ from pathlib import Path
 
 import pytest
 import requests
-import yaml
 
 from tests.kvbm_integration.common import ApiTester, check_logs_for_patterns
 from tests.utils.managed_process import ManagedProcess
 
-
-# Check if engines are available and build list of available engines
-# Use find_spec first (fast check), then verify import works (functional check)
-def _check_engine_available(module_name: str) -> bool:
-    """Check if an engine module is available and importable."""
-    if importlib.util.find_spec(module_name) is None:
-        return False
-    try:
-        importlib.import_module(module_name)
-        return True
-    except ImportError:
-        return False
-
-
-HAS_VLLM = _check_engine_available("vllm")
-HAS_TRTLLM = _check_engine_available("tensorrt_llm")
-
-# Build list of available engines for parameterization
-AVAILABLE_ENGINES = []
-if HAS_VLLM:
-    AVAILABLE_ENGINES.append("vllm")
-if HAS_TRTLLM:
-    AVAILABLE_ENGINES.append("trtllm")
+# Check if vLLM is available
+HAS_VLLM = importlib.util.find_spec("vllm") is not None
 
 # Test markers
 pytestmark = [
@@ -57,7 +35,8 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.gpu_1,
-    pytest.mark.skipif(not (HAS_VLLM or HAS_TRTLLM), reason="requires vllm or trtllm"),
+    pytest.mark.nightly,
+    pytest.mark.skipif(not HAS_VLLM, reason="requires vllm"),
 ]
 
 logger = logging.getLogger(__name__)
@@ -75,32 +54,8 @@ def test_directory(request):
     # Cleanup handled by pytest (logs are kept for debugging)
 
 
-def create_trtllm_config(test_directory: Path) -> Path:
-    """Create TensorRT-LLM config YAML file with KVBM connector configuration."""
-    config_path = test_directory / "trtllm_config.yaml"
-    config = {
-        "backend": "pytorch",
-        "cuda_graph_config": None,
-        "kv_cache_config": {
-            "enable_partial_reuse": False,
-            "free_gpu_memory_fraction": 0.01,
-        },
-        "build_config": {
-            "max_seq_len": 4096,
-        },
-        "kv_connector_config": {
-            "connector_module": "kvbm.trtllm_integration.connector",
-            "connector_scheduler_class": "DynamoKVBMConnectorLeader",
-            "connector_worker_class": "DynamoKVBMConnectorWorker",
-        },
-    }
-    with open(config_path, "w") as f:
-        yaml.dump(config, f)
-    return config_path
-
-
-def extract_consolidator_stats(log_path: Path, engine: str = "vllm") -> dict:
-    """Extract consolidator event statistics from engine logs."""
+def extract_consolidator_stats(log_path: Path) -> dict:
+    """Extract consolidator event statistics from vLLM logs."""
     stats = {
         "store_events": 0,
         "remove_events": 0,
@@ -175,7 +130,7 @@ def wait_for_worker_registration(
             health_data = response.json()
             if health_data.get("instances"):
                 elapsed = time.time() - start_time
-                logger.info(f"Worker registered after {elapsed:.1f}s")
+                logger.info(f"vLLM worker registered after {elapsed:.1f}s")
                 return True
         except Exception as e:
             logger.debug(f"Health check failed: {e}")
@@ -183,8 +138,8 @@ def wait_for_worker_registration(
         time.sleep(poll_interval)
 
     elapsed = time.time() - start_time
-    logger.error(f"Worker failed to register after {elapsed:.1f}s")
-    logger.error("Check worker logs for initialization errors")
+    logger.error(f"vLLM worker failed to register after {elapsed:.1f}s")
+    logger.error("Check vLLM logs for initialization errors")
     return False
 
 
@@ -244,51 +199,24 @@ def frontend_server(test_directory, runtime_services):
     logger.info("Frontend server stopped")
 
 
-@pytest.fixture(params=AVAILABLE_ENGINES)
-def engine_type(request):
-    """Parameterize test to run with available engines only."""
-    return request.param
-
-
 @pytest.fixture
-def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
-    """Start LLM worker (vLLM or TensorRT-LLM) with KVBM connector and KV Event Consolidator."""
+def vllm_worker(frontend_server, test_directory, runtime_services):
+    """Start vLLM worker with KVBM connector and KV Event Consolidator."""
     model_id = os.environ.get("CONSOLIDATOR_MODEL_ID", "Qwen/Qwen3-0.6B")
-    engine = engine_type
 
-    logger.info(
-        f"Starting {engine.upper()} worker with KVBM connector and model {model_id}"
-    )
+    logger.info(f"Starting vLLM worker with KVBM connector and model {model_id}")
 
-    # Build command based on engine type
-    if engine == "vllm":
-        command = [
-            "python",
-            "-m",
-            "dynamo.vllm",
-            "--model",
-            model_id,
-            "--connector",
-            "kvbm",
-            "--enforce-eager",  # For faster startup in tests
-        ]
-    else:  # trtllm
-        # Create TensorRT-LLM config file with KVBM connector
-        config_path = create_trtllm_config(test_directory)
-        command = [
-            "python",
-            "-m",
-            "dynamo.trtllm",
-            "--model-path",
-            model_id,
-            "--served-model-name",
-            model_id,
-            "--extra-engine-args",
-            str(
-                config_path.absolute()
-            ),  # Use absolute path to avoid working directory issues
-            "--publish-events-and-metrics",
-        ]
+    # vLLM worker command - consolidator is auto-enabled with KVBM
+    command = [
+        "python",
+        "-m",
+        "dynamo.vllm",
+        "--model",
+        model_id,
+        "--connector",
+        "kvbm",
+        "--enforce-eager",  # For faster startup in tests
+    ]
 
     # Environment
     env = os.environ.copy()
@@ -303,14 +231,10 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
         }
     )
 
-    # Set ZMQ port for TensorRT-LLM consolidator
-    if engine == "trtllm":
-        env["DYN_KVBM_TRTLLM_ZMQ_PORT"] = "20081"
-
-    # Create separate log directory for worker to avoid conflicts with frontend
-    worker_log_dir = test_directory / engine
-    worker_log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = worker_log_dir / "python.log.txt"
+    # Create separate log directory for vllm to avoid conflicts with frontend
+    vllm_log_dir = test_directory / "vllm"
+    vllm_log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = vllm_log_dir / "python.log.txt"
 
     # Create managed process and start via context manager
     with ManagedProcess(
@@ -320,12 +244,10 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
         timeout=300,  # Increased timeout for model loading and consolidator init
         working_dir=str(test_directory),
         display_output=False,
-        log_dir=str(worker_log_dir),  # Separate log directory
+        log_dir=str(vllm_log_dir),  # Separate log directory
         terminate_existing=False,
-    ) as worker_process:
-        logger.info(
-            f"Waiting for {engine.upper()} worker and consolidator to initialize..."
-        )
+    ) as vllm_process:
+        logger.info("Waiting for vLLM worker and consolidator to initialize...")
 
         # Wait for worker to register with frontend
         worker_registered = wait_for_worker_registration(frontend_server["base_url"])
@@ -337,30 +259,29 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
         time.sleep(5)
 
         # Verify consolidator started by checking logs
-        stats = extract_consolidator_stats(log_file, engine)
+        stats = extract_consolidator_stats(log_file)
         if not stats["consolidator_started"]:
             logger.warning("Consolidator may not have started - check logs")
         else:
             logger.info("Consolidator detected in logs")
 
         yield {
-            "process": worker_process,
+            "process": vllm_process,
             "model_id": model_id,
             "log_file": log_file,
             "consolidator_stats": stats,
-            "engine": engine,
         }
 
     # Cleanup happens automatically via context manager __exit__
-    logger.info(f"{engine.upper()} worker stopped")
+    logger.info("vLLM worker stopped")
 
 
 @pytest.fixture
-def tester(frontend_server, llm_worker):
+def tester(frontend_server, vllm_worker):
     """Provides a test client that sends requests to frontend."""
     return ApiTester(
         base_url=frontend_server["base_url"],
-        model_id=llm_worker["model_id"],
+        model_id=vllm_worker["model_id"],
     )
 
 
@@ -377,17 +298,12 @@ class TestConsolidatorRouterE2E:
         r"fatal",
     ]
 
-    def assert_no_errors_in_logs(
-        self, worker_log: Path, frontend_log: Path, engine: str = "vllm"
-    ):
-        """Helper to check both worker and frontend logs for errors."""
-        engine_name = engine.upper()
-        worker_errors = check_logs_for_patterns(
-            worker_log, self.ERROR_PATTERNS, f"{engine_name} Worker"
+    def assert_no_errors_in_logs(self, vllm_log: Path, frontend_log: Path):
+        """Helper to check both vLLM and frontend logs for errors."""
+        vllm_errors = check_logs_for_patterns(
+            vllm_log, self.ERROR_PATTERNS, "vLLM Worker"
         )
-        assert (
-            not worker_errors
-        ), f"Errors in {engine_name} Worker logs: {worker_errors}"
+        assert not vllm_errors, f"Errors in vLLM Worker logs: {vllm_errors}"
 
         frontend_errors = check_logs_for_patterns(
             frontend_log, self.ERROR_PATTERNS, "Frontend/Router"
@@ -420,15 +336,14 @@ class TestConsolidatorRouterE2E:
         logger.info(f"Concurrent requests: {successes}/{num_requests} succeeded")
         return successes, results
 
-    def test_basic_consolidator_flow(self, tester, llm_worker, frontend_server):
+    def test_basic_consolidator_flow(self, tester, vllm_worker, frontend_server):
         """
         Test basic consolidator flow:
         1. Send requests
         2. Verify consolidator starts and processes events
         3. Verify router receives events without errors
         """
-        engine = llm_worker["engine"]
-        logger.info(f"TEST: Basic Consolidator Flow ({engine.upper()})")
+        logger.info("TEST: Basic Consolidator Flow")
 
         # Send 3 requests to frontend
         requests_data = [
@@ -447,9 +362,9 @@ class TestConsolidatorRouterE2E:
         # Wait for logs to flush
         time.sleep(5)
 
-        # Check worker logs for consolidator
-        worker_log = llm_worker["log_file"]
-        consolidator_stats = extract_consolidator_stats(worker_log, engine)
+        # Check vLLM worker logs for consolidator
+        vllm_log = vllm_worker["log_file"]
+        consolidator_stats = extract_consolidator_stats(vllm_log)
 
         logger.info(f"Consolidator stats: {consolidator_stats}")
 
@@ -459,12 +374,12 @@ class TestConsolidatorRouterE2E:
         assert consolidator_stats["published_events"] > 0, "No events published"
 
         # Check for errors in logs
-        self.assert_no_errors_in_logs(worker_log, frontend_server["log_file"], engine)
+        self.assert_no_errors_in_logs(vllm_log, frontend_server["log_file"])
 
-        logger.info(f"Basic consolidator flow test passed ({engine.upper()})")
+        logger.info("Basic consolidator flow test passed")
 
     def test_consolidator_handles_concurrent_requests(
-        self, tester, llm_worker, frontend_server
+        self, tester, vllm_worker, frontend_server
     ):
         """
         Test consolidator under concurrent load:
@@ -472,8 +387,7 @@ class TestConsolidatorRouterE2E:
         2. Verify no crashes or critical errors
         3. Verify all events processed
         """
-        engine = llm_worker["engine"]
-        logger.info(f"TEST: Concurrent Request Handling ({engine.upper()})")
+        logger.info("TEST: Concurrent Request Handling")
 
         # Send 10 concurrent requests
         num_requests = 10
@@ -494,27 +408,27 @@ class TestConsolidatorRouterE2E:
 
         # Check for errors in logs
         self.assert_no_errors_in_logs(
-            llm_worker["log_file"], frontend_server["log_file"], engine
+            vllm_worker["log_file"], frontend_server["log_file"]
         )
 
         # Verify events were processed
-        stats = extract_consolidator_stats(llm_worker["log_file"], engine)
+        stats = extract_consolidator_stats(vllm_worker["log_file"])
         assert stats["store_events"] > 0, "No events processed during concurrent load"
 
-        logger.info(f"Concurrent request handling test passed ({engine.upper()})")
+        logger.info("Concurrent request handling test passed")
 
     def test_store_deduplication_across_sources(
-        self, tester, llm_worker, frontend_server
+        self, tester, vllm_worker, frontend_server
     ):
         """
-        Test STORE event deduplication across engine (G1) and KVBM (G2/G3):
+        Test STORE event deduplication across vLLM (G1) and KVBM (G2/G3):
 
         When a block is stored in G1 (GPU), it's automatically offloaded
-        to G2 (CPU) and G3 (Disk). This triggers STORE events from both engine and KVBM.
+        to G2 (CPU) and G3 (Disk). This triggers STORE events from both vLLM and KVBM.
 
         Test Scenario:
-        1. Send requests → blocks stored in engine (G1)
-        2. Consolidator receives engine STORE events → queues them for publishing
+        1. Send requests → blocks stored in vLLM (G1)
+        2. Consolidator receives vLLM STORE events → queues them for publishing
         3. KVBM replicates blocks to G2/G3 → emits STORE events
         4. Consolidator sees blocks already exist → logs DEDUP message → does NOT publish again
         5. Result: Router receives ONE STORE event per unique block (from step 2)
@@ -523,8 +437,7 @@ class TestConsolidatorRouterE2E:
         even though the block exists in multiple storage tiers (G1, G2, G3).
         KVBM replications are deduplicated and don't trigger duplicate router updates.
         """
-        engine = llm_worker["engine"]
-        logger.info(f"Starting STORE deduplication test ({engine.upper()})")
+        logger.info("Starting STORE deduplication test")
 
         # Send requests to generate STORE events
         logger.info("Sending concurrent requests to generate STORE events")
@@ -541,69 +454,60 @@ class TestConsolidatorRouterE2E:
 
         # Phase 2: Analyze consolidator logs
         logger.info("Phase 2: Analyzing STORE event deduplication")
-        worker_log = llm_worker["log_file"]
-        log_content = worker_log.read_text()
+        vllm_log = vllm_worker["log_file"]
+        log_content = vllm_log.read_text()
 
-        # Count STORE events - order-agnostic approach
-        # First source stores (will publish) - could be engine or KVBM depending on timing
-        first_source_stores = len(
+        # Count STORE events received from vLLM (first source = will publish)
+        vllm_stores = len(
             re.findall(
-                r"stored in first source \w+.*will publish STORE event", log_content
+                r"stored in first source Vllm.*will publish STORE event", log_content
             )
         )
 
-        # Second source stores (DEDUP) - could be engine or KVBM depending on timing
-        # Pattern: "DEDUP: Block ... added to source X"
-        dedup_stores = len(
+        # Count STORE events received from KVBM (they appear as DEDUP messages)
+        kvbm_stores = len(
             re.findall(
-                r"DEDUP: Block \d+ \(seq_hash=\d+\) added to source \w+", log_content
+                r"DEDUP: Block \d+ \(seq_hash=\d+\) added to source Kvbm", log_content
             )
         )
 
         # Count total STORE events received (from both sources)
-        total_stores_received = first_source_stores + dedup_stores
+        total_stores_received = vllm_stores + kvbm_stores
 
         # Count STORE events actually published to router
         published_stores = len(re.findall(r"will publish STORE event", log_content))
 
-        logger.info(
-            f"STORE events from first source (will publish): {first_source_stores}"
-        )
-        logger.info(f"STORE events from second source (DEDUP): {dedup_stores}")
+        logger.info(f"STORE events received from vLLM: {vllm_stores}")
+        logger.info(f"STORE events received from KVBM: {kvbm_stores}")
         logger.info(f"Total STORE events received: {total_stores_received}")
         logger.info(f"STORE events published to router: {published_stores}")
 
         # Assertions:
-        # 1. We should receive STORE events from both sources (order doesn't matter)
-        assert (
-            first_source_stores > 0
-        ), f"Expected STORE events from first source (could be {engine.upper()} or KVBM)"
-        assert (
-            dedup_stores > 0
-        ), "Expected DEDUP STORE events from second source (proves deduplication working)"
+        # 1. We should receive STORE events from both vLLM and KVBM
+        assert vllm_stores > 0, "Expected STORE events from vLLM"
+        assert kvbm_stores > 0, "Expected STORE events from KVBM (replication to G2/G3)"
 
-        # 2. Published stores should equal first source stores
-        #    (each unique block is published once when first stored, regardless of which source)
+        # 2. Published stores should approximately equal vLLM stores
+        #    (each unique block is published once when first stored in vLLM)
         assert (
-            published_stores == first_source_stores
-        ), f"Expected published events ({published_stores}) to equal first-source stores ({first_source_stores})"
+            published_stores == vllm_stores
+        ), f"Expected published events ({published_stores}) to equal vLLM stores ({vllm_stores})"
 
-        # 3. Total stores should be first source + second source (each block stored in both)
+        # 3. Total stores should be vLLM + KVBM (each block stored in both)
         assert (
-            total_stores_received == first_source_stores + dedup_stores
-        ), f"Total should be first-source ({first_source_stores}) + second-source ({dedup_stores})"
+            total_stores_received == vllm_stores + kvbm_stores
+        ), f"Total should be vLLM ({vllm_stores}) + KVBM ({kvbm_stores})"
 
         # 4. Check for errors in logs
-        self.assert_no_errors_in_logs(worker_log, frontend_server["log_file"], engine)
+        self.assert_no_errors_in_logs(vllm_log, frontend_server["log_file"])
 
-        logger.info(f"STORE deduplication test passed ({engine.upper()})")
+        logger.info("STORE deduplication test passed")
 
-    @pytest.mark.parametrize("engine_type", AVAILABLE_ENGINES)
     def test_remove_deduplication_across_sources(
-        self, test_directory, runtime_services, engine_type
+        self, test_directory, runtime_services
     ):
         """
-        Test REMOVE event deduplication across G1 (engine GPU), G2 (KVBM CPU), G3 (KVBM disk):
+        Test REMOVE event deduplication across G1 (vLLM GPU), G2 (KVBM CPU), G3 (KVBM disk):
 
         When blocks are stored in G1 (GPU), they are AUTOMATICALLY
         replicated to G2 (CPU) and G3 (Disk) simultaneously.
@@ -611,16 +515,14 @@ class TestConsolidatorRouterE2E:
         Test Scenario:
         1. Configure very small GPU cache (30 blocks) and slightly larger KVBM caches (50 blocks each)
         2. Send 25 requests with 100 tokens each → blocks stored in G1 AND offloaded to G2/G3
-        3. GPU fills up (30 blocks) → blocks evicted from G1 → consolidator receives REMOVE from engine
+        3. GPU fills up (30 blocks) → blocks evicted from G1 → consolidator receives REMOVE from vLLM
            → consolidator sees blocks still exist in G2/G3 → does NOT publish REMOVE to router
         4. Some blocks only exist in G1 (not replicated) → when evicted → published to router
 
         This verifies: REMOVE is only sent to router when a block is removed from ALL sources.
         Deduplication prevents unnecessary REMOVE events when blocks are still cached in G2/G3.
         """
-
-        engine = engine_type
-        logger.info(f"Starting REMOVE deduplication test ({engine.upper()})")
+        logger.info("Starting REMOVE deduplication test")
 
         # Start frontend with router
         frontend_command = [
@@ -659,47 +561,25 @@ class TestConsolidatorRouterE2E:
         ) as _frontend_process:
             logger.info(f"Frontend started on port {FRONTEND_PORT}")
 
-            # Start worker with constrained GPU blocks but larger KVBM blocks
+            # Start vLLM worker with constrained GPU blocks but larger KVBM blocks
             model_id = os.environ.get("CONSOLIDATOR_MODEL_ID", "Qwen/Qwen3-0.6B")
 
-            # Build command based on engine type
-            if engine == "vllm":
-                worker_command = [
-                    "python",
-                    "-m",
-                    "dynamo.vllm",
-                    "--model",
-                    model_id,
-                    "--connector",
-                    "kvbm",
-                    "--enforce-eager",
-                    "--enable-prefix-caching",
-                    "--num-gpu-blocks-override",
-                    "30",  # Very small GPU cache to force evictions
-                ]
-            else:  # trtllm
-                # Create TensorRT-LLM config file with KVBM connector
-                # Use small GPU cache (0.01 = 1% of GPU memory) to force evictions
-                # This ensures blocks will be evicted from GPU while still in KVBM
-                # Small enough to trigger evictions but large enough to handle sequence requirements
-                config_path = create_trtllm_config(test_directory)
-                worker_command = [
-                    "python",
-                    "-m",
-                    "dynamo.trtllm",
-                    "--model-path",
-                    model_id,
-                    "--served-model-name",
-                    model_id,
-                    "--extra-engine-args",
-                    str(
-                        config_path.absolute()
-                    ),  # Use absolute path to avoid working directory issues
-                    "--publish-events-and-metrics",
-                ]
+            vllm_command = [
+                "python",
+                "-m",
+                "dynamo.vllm",
+                "--model",
+                model_id,
+                "--connector",
+                "kvbm",
+                "--enforce-eager",
+                "--enable-prefix-caching",
+                "--num-gpu-blocks-override",
+                "30",  # Very small GPU cache to force evictions
+            ]
 
-            worker_env = os.environ.copy()
-            worker_env.update(
+            vllm_env = os.environ.copy()
+            vllm_env.update(
                 {
                     "RUST_BACKTRACE": "1",
                     "NATS_SERVER": "nats://localhost:4222",
@@ -710,25 +590,21 @@ class TestConsolidatorRouterE2E:
                 }
             )
 
-            # Set ZMQ port for TensorRT-LLM consolidator
-            if engine == "trtllm":
-                worker_env["DYN_KVBM_TRTLLM_ZMQ_PORT"] = "20081"
-
-            worker_log_dir = test_directory / engine
-            worker_log_dir.mkdir(parents=True, exist_ok=True)
-            worker_log = worker_log_dir / "python.log.txt"
+            vllm_log_dir = test_directory / "vllm"
+            vllm_log_dir.mkdir(parents=True, exist_ok=True)
+            vllm_log = vllm_log_dir / "python.log.txt"
 
             with ManagedProcess(
-                command=worker_command,
-                env=worker_env,
+                command=vllm_command,
+                env=vllm_env,
                 health_check_urls=[],
                 timeout=300,
                 working_dir=str(test_directory),
                 display_output=False,
-                log_dir=str(worker_log_dir),
+                log_dir=str(vllm_log_dir),
                 terminate_existing=False,
-            ) as _worker_process:
-                logger.info(f"Waiting for {engine.upper()} worker to initialize...")
+            ) as _vllm_process:
+                logger.info("Waiting for vLLM worker to initialize...")
 
                 # Wait for worker to register with frontend
                 worker_registered = wait_for_worker_registration(
@@ -736,9 +612,7 @@ class TestConsolidatorRouterE2E:
                 )
 
                 if not worker_registered:
-                    pytest.fail(
-                        f"{engine.upper()} worker failed to register with frontend"
-                    )
+                    pytest.fail("vLLM worker failed to register with frontend")
 
                 # Additional wait for consolidator to fully initialize
                 time.sleep(5)
@@ -750,47 +624,30 @@ class TestConsolidatorRouterE2E:
 
                 # Phase 1: Send requests to fill GPU cache
                 logger.info("Phase 1: Filling GPU cache with diverse prompts")
-                num_requests = 100
-                for i in range(num_requests):
+                for i in range(25):  # Send enough requests to trigger GPU eviction
                     prompt = f"Tell me a unique story about topic {i}. Make it very long and detailed with many paragraphs."
                     response = tester.send_chat_request(
                         messages=[{"role": "user", "content": prompt}],
                         max_tokens=100,  # Increase tokens to use more blocks per request
                     )
                     assert "content" in response["choices"][0]["message"]
-                    logger.info(f"Request {i+1}/{num_requests} completed")
+                    logger.info(f"Request {i+1}/25 completed")
 
-                # Wait for requests to complete and blocks to be freed
-                # With GUARANTEED_NO_EVICT, blocks are freed when requests complete (not evicted)
-                # We need to wait long enough for requests to finish and blocks to be freed
-                # For vLLM with FIFO, evictions happen immediately when cache fills.
-                wait_time = 5 if engine == "trtllm" else 5
-                logger.info(
-                    f"Waiting {wait_time}s for requests to complete and blocks to be freed..."
-                )
-                time.sleep(wait_time)
+                # Wait for evictions to settle
+                time.sleep(5)
 
                 # Phase 2: Analyze consolidator logs
                 logger.info("Phase 2: Analyzing consolidator deduplication behavior")
-                log_content = worker_log.read_text()
+                log_content = vllm_log.read_text()
 
-                # Count blocks removed but still in another source (deduplication working!)
-                # Order-agnostic: checks for any removal where block still exists in another source
-                # Pattern: "removed from source X, still in Y source(s): [sources]"
-                removes_but_still_in_other_source = len(
-                    re.findall(
-                        r"removed from source \w+, still in \d+ source\(s\)",
-                        log_content,
-                    )
+                # Count blocks removed from vLLM but still in KVBM (deduplication working!)
+                vllm_removes_but_in_kvbm = len(
+                    re.findall(r"removed from source Vllm, still in.*Kvbm", log_content)
                 )
 
-                # Count blocks removed from last source (will publish REMOVE)
-                # Order-agnostic: checks for any removal from last source, regardless of which source
-                removes_from_last_source = len(
-                    re.findall(
-                        r"removed from last source \w+.*will publish REMOVE event",
-                        log_content,
-                    )
+                # Count blocks removed from vLLM as last source (no KVBM copy)
+                vllm_removes_last_source = len(
+                    re.findall(r"removed from last source Vllm", log_content)
                 )
 
                 # Count REMOVE events actually published to router
@@ -799,31 +656,24 @@ class TestConsolidatorRouterE2E:
                 )
 
                 logger.info(
-                    f"Blocks removed but still in another source (deduplication working): {removes_but_still_in_other_source}"
+                    f"Blocks removed from vLLM (G1) but still in KVBM (G2/G3): {vllm_removes_but_in_kvbm}"
                 )
                 logger.info(
-                    f"Blocks removed from last source (will publish): {removes_from_last_source}"
+                    f"Blocks removed from vLLM as last source: {vllm_removes_last_source}"
                 )
                 logger.info(f"REMOVE events published to router: {published_removes}")
 
                 # Assertions:
-                # 1. We should see removals where blocks still exist in another source
+                # 1. We should see GPU evictions where blocks still exist in KVBM
                 #    This proves deduplication is working (REMOVE not sent to router yet)
-                #    Order doesn't matter - could be engine→KVBM or KVBM→engine
                 assert (
-                    removes_but_still_in_other_source > 0
-                ), f"Expected removals where blocks still exist in another source (deduplication working) for {engine.upper()}"
+                    vllm_removes_but_in_kvbm > 0
+                ), "Expected GPU evictions where blocks still exist in KVBM (deduplication working)"
 
                 # 2. REMOVE events should be published for last-source removals
-                #    Order doesn't matter - could be engine or KVBM as last source
                 assert (
                     published_removes > 0
                 ), "Expected REMOVE events to be published for last-source removals"
 
-                # 3. Published removes should equal removes from last source
-                assert (
-                    published_removes == removes_from_last_source
-                ), f"Expected published REMOVE events ({published_removes}) to equal last-source removals ({removes_from_last_source})"
-
                 # 3. Check for errors in logs
-                self.assert_no_errors_in_logs(worker_log, frontend_log, engine)
+                self.assert_no_errors_in_logs(vllm_log, frontend_log)

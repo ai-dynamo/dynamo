@@ -121,6 +121,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
 								commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamographdeployment",
 							},
+							Autoscaling: nil,
 						},
 					},
 				},
@@ -152,6 +153,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Custom: map[string]string{},
 								},
 							},
+							Autoscaling: nil,
 						},
 					},
 				},
@@ -227,6 +229,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
 								commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamographdeployment",
 							},
+							Autoscaling: nil,
 						},
 					},
 				},
@@ -258,6 +261,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Custom: map[string]string{},
 								},
 							},
+							Autoscaling: nil,
 						},
 					},
 				},
@@ -337,6 +341,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
 								commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamographdeployment",
 							},
+							Autoscaling: nil,
 							Ingress: &v1alpha1.IngressSpec{
 								Enabled: true,
 								Host:    "test-dynamographdeployment",
@@ -372,6 +377,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Custom: map[string]string{},
 								},
 							},
+							Autoscaling: nil,
 						},
 					},
 				},
@@ -459,6 +465,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
 								commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamographdeployment",
 							},
+							Autoscaling: nil,
 							Envs: []corev1.EnvVar{
 								{
 									Name:  "DYN_DEPLOYMENT_CONFIG",
@@ -496,6 +503,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Custom: map[string]string{},
 								},
 							},
+							Autoscaling: nil,
 							Envs: []corev1.EnvVar{
 								{
 									Name:  "DYN_DEPLOYMENT_CONFIG",
@@ -591,6 +599,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
 								commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamographdeployment",
 							},
+							Autoscaling: nil,
 							ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 								MainContainer: &corev1.Container{
 									Command: []string{"sh", "-c"},
@@ -635,6 +644,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 									Custom: map[string]string{},
 								},
 							},
+							Autoscaling: nil,
 							Envs: []corev1.EnvVar{
 								{
 									Name:  "TEST_ENV",
@@ -1297,7 +1307,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Name: "frontend",
 								Labels: map[string]string{
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-frontend",
-									commonconsts.KubeLabelDynamoComponent:           "Frontend",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
 									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
@@ -1412,14 +1421,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														},
 													},
 													{
-														Name: "POD_UID",
-														ValueFrom: &corev1.EnvVarSource{
-															FieldRef: &corev1.ObjectFieldSelector{
-																FieldPath: "metadata.uid",
-															},
-														},
-													},
-													{
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
 													},
@@ -1430,10 +1431,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  commonconsts.DynamoComponentEnvVar,
 														Value: commonconsts.ComponentTypeFrontend,
-													},
-													{
-														Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
-														Value: "kubernetes",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -1486,7 +1483,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Labels: map[string]string{
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-planner",
-									commonconsts.KubeLabelDynamoComponent:           "Planner",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
@@ -1587,10 +1583,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: commonconsts.ComponentTypePlanner,
 													},
 													{
-														Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
-														Value: "kubernetes",
-													},
-													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
 														Value: "test-dynamo-graph-deployment",
 													},
@@ -1623,14 +1615,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														ValueFrom: &corev1.EnvVarSource{
 															FieldRef: &corev1.ObjectFieldSelector{
 																FieldPath: "metadata.namespace",
-															},
-														},
-													},
-													{
-														Name: "POD_UID",
-														ValueFrom: &corev1.EnvVarSource{
-															FieldRef: &corev1.ObjectFieldSelector{
-																FieldPath: "metadata.uid",
 															},
 														},
 													},
@@ -1900,9 +1884,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
 									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
-									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker",
+									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-ldr",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
-									commonconsts.KubeLabelDynamoComponent:           "worker",
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
@@ -1988,14 +1971,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: commonconsts.ComponentTypeWorker,
 													},
 													{
-														Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
-														Value: "kubernetes",
-													},
-													{
-														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "false",
-													},
-													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
 														Value: "test-dynamo-graph-deployment",
 													},
@@ -2016,14 +1991,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														ValueFrom: &corev1.EnvVarSource{
 															FieldRef: &corev1.ObjectFieldSelector{
 																FieldPath: "metadata.namespace",
-															},
-														},
-													},
-													{
-														Name: "POD_UID",
-														ValueFrom: &corev1.EnvVarSource{
-															FieldRef: &corev1.ObjectFieldSelector{
-																FieldPath: "metadata.uid",
 															},
 														},
 													},
@@ -2092,9 +2059,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
 									commonconsts.KubeLabelDynamoSubComponentType:    "test-sub-component",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
-									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker",
+									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-wkr",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
-									commonconsts.KubeLabelDynamoComponent:           "worker",
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
@@ -2181,14 +2147,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: commonconsts.ComponentTypeWorker,
 													},
 													{
-														Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
-														Value: "kubernetes",
-													},
-													{
-														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "false",
-													},
-													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
 														Value: "test-dynamo-graph-deployment",
 													},
@@ -2209,14 +2167,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														ValueFrom: &corev1.EnvVarSource{
 															FieldRef: &corev1.ObjectFieldSelector{
 																FieldPath: "metadata.namespace",
-															},
-														},
-													},
-													{
-														Name: "POD_UID",
-														ValueFrom: &corev1.EnvVarSource{
-															FieldRef: &corev1.ObjectFieldSelector{
-																FieldPath: "metadata.uid",
 															},
 														},
 													},
@@ -2250,7 +2200,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-frontend",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
-									commonconsts.KubeLabelDynamoComponent:           "Frontend",
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
 								},
 								Annotations: map[string]string{},
@@ -2352,10 +2301,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: commonconsts.ComponentTypeFrontend,
 													},
 													{
-														Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
-														Value: "kubernetes",
-													},
-													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
 														Value: "test-dynamo-graph-deployment",
 													},
@@ -2376,14 +2321,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														ValueFrom: &corev1.EnvVarSource{
 															FieldRef: &corev1.ObjectFieldSelector{
 																FieldPath: "metadata.namespace",
-															},
-														},
-													},
-													{
-														Name: "POD_UID",
-														ValueFrom: &corev1.EnvVarSource{
-															FieldRef: &corev1.ObjectFieldSelector{
-																FieldPath: "metadata.uid",
 															},
 														},
 													},
@@ -2421,7 +2358,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Name: "planner",
 								Labels: map[string]string{
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-planner",
-									commonconsts.KubeLabelDynamoComponent:           "Planner",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
@@ -2522,10 +2458,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: commonconsts.ComponentTypePlanner,
 													},
 													{
-														Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
-														Value: "kubernetes",
-													},
-													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
 														Value: "test-dynamo-graph-deployment",
 													},
@@ -2550,14 +2482,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														ValueFrom: &corev1.EnvVarSource{
 															FieldRef: &corev1.ObjectFieldSelector{
 																FieldPath: "metadata.namespace",
-															},
-														},
-													},
-													{
-														Name: "POD_UID",
-														ValueFrom: &corev1.EnvVarSource{
-															FieldRef: &corev1.ObjectFieldSelector{
-																FieldPath: "metadata.uid",
 															},
 														},
 													},
@@ -2855,8 +2779,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 							{
 								Name: "worker-ldr",
 								Labels: map[string]string{
-									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker",
-									commonconsts.KubeLabelDynamoComponent:           "worker",
+									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-ldr",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
@@ -2898,7 +2821,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"ray start --head --port=6379 && python3 -m dynamo.vllm --custom-flag custom-value --tensor-parallel-size 4 --pipeline-parallel-size 1 --distributed-executor-backend ray",
+													"ray start --head --port=6379 && python3 -m dynamo.vllm --custom-flag custom-value --tensor-parallel-size 4 --pipeline-parallel-size 1",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -2945,14 +2868,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: commonconsts.ComponentTypeWorker,
 													},
 													{
-														Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
-														Value: "kubernetes",
-													},
-													{
-														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "false",
-													},
-													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
 														Value: "test-dynamo-graph-deployment",
 													},
@@ -2973,14 +2888,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														ValueFrom: &corev1.EnvVarSource{
 															FieldRef: &corev1.ObjectFieldSelector{
 																FieldPath: "metadata.namespace",
-															},
-														},
-													},
-													{
-														Name: "POD_UID",
-														ValueFrom: &corev1.EnvVarSource{
-															FieldRef: &corev1.ObjectFieldSelector{
-																FieldPath: "metadata.uid",
 															},
 														},
 													},
@@ -3036,8 +2943,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Labels: map[string]string{
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
-									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker",
-									commonconsts.KubeLabelDynamoComponent:           "worker",
+									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-worker-wkr",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
 									"nvidia.com/label1":                             "label1",
@@ -3125,14 +3031,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: commonconsts.ComponentTypeWorker,
 													},
 													{
-														Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
-														Value: "kubernetes",
-													},
-													{
-														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "false",
-													},
-													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
 														Value: "test-dynamo-graph-deployment",
 													},
@@ -3153,14 +3051,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														ValueFrom: &corev1.EnvVarSource{
 															FieldRef: &corev1.ObjectFieldSelector{
 																FieldPath: "metadata.namespace",
-															},
-														},
-													},
-													{
-														Name: "POD_UID",
-														ValueFrom: &corev1.EnvVarSource{
-															FieldRef: &corev1.ObjectFieldSelector{
-																FieldPath: "metadata.uid",
 															},
 														},
 													},
@@ -3194,7 +3084,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-frontend",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
-									commonconsts.KubeLabelDynamoComponent:           "Frontend",
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
 								},
 								Annotations: map[string]string{},
@@ -3296,10 +3185,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: commonconsts.ComponentTypeFrontend,
 													},
 													{
-														Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
-														Value: "kubernetes",
-													},
-													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
 														Value: "test-dynamo-graph-deployment",
 													},
@@ -3320,14 +3205,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														ValueFrom: &corev1.EnvVarSource{
 															FieldRef: &corev1.ObjectFieldSelector{
 																FieldPath: "metadata.namespace",
-															},
-														},
-													},
-													{
-														Name: "POD_UID",
-														ValueFrom: &corev1.EnvVarSource{
-															FieldRef: &corev1.ObjectFieldSelector{
-																FieldPath: "metadata.uid",
 															},
 														},
 													},
@@ -3366,7 +3243,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Labels: map[string]string{
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-planner",
-									commonconsts.KubeLabelDynamoComponent:           "Planner",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
@@ -3473,10 +3349,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: commonconsts.ComponentTypePlanner,
 													},
 													{
-														Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
-														Value: "kubernetes",
-													},
-													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
 														Value: "test-dynamo-graph-deployment",
 													},
@@ -3501,14 +3373,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														ValueFrom: &corev1.EnvVarSource{
 															FieldRef: &corev1.ObjectFieldSelector{
 																FieldPath: "metadata.namespace",
-															},
-														},
-													},
-													{
-														Name: "POD_UID",
-														ValueFrom: &corev1.EnvVarSource{
-															FieldRef: &corev1.ObjectFieldSelector{
-																FieldPath: "metadata.uid",
 															},
 														},
 													},
@@ -5012,7 +4876,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 		wantEnvVar       string
 	}{
 		{
-			name: "Kubernetes discovery backend should set env var to kubernetes",
+			name: "Discover backend should be set",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: map[string]string{
 					commonconsts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes",
@@ -5021,39 +4885,29 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 			wantEnvVar: "kubernetes",
 		},
 		{
-			name: "Kubernetes discovery from controller config should set env var to kubernetes",
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Annotations: map[string]string{},
-			},
-			controllerConfig: controller_common.Config{
-				DiscoveryBackend: "kubernetes",
-			},
-			wantEnvVar: "kubernetes",
-		},
-		{
-			name: "Etcd discovery backend annotation should not set env var",
+			name: "Discover backend should override the controller config",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: map[string]string{
-					commonconsts.KubeAnnotationDynamoDiscoveryBackend: "etcd",
+					commonconsts.KubeAnnotationDynamoDiscoveryBackend: "test",
 				},
 			},
 			controllerConfig: controller_common.Config{
-				DiscoveryBackend: "kubernetes",
+				DiscoveryBackend: "etcd",
 			},
-			wantEnvVar: "", // etcd is the runtime default, no env var needed
+			wantEnvVar: "test",
 		},
 		{
-			name: "Etcd discovery from controller config should not set env var",
+			name: "Discover backend should be set by the controller config",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: map[string]string{},
 			},
 			controllerConfig: controller_common.Config{
 				DiscoveryBackend: "etcd",
 			},
-			wantEnvVar: "", // etcd is the runtime default, no env var needed
+			wantEnvVar: "etcd",
 		},
 		{
-			name: "Empty discovery backend defaults to kubernetes",
+			name: "Discover backend empty string",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: map[string]string{
 					commonconsts.KubeAnnotationDynamoDiscoveryBackend: "",
@@ -5062,12 +4916,10 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 			controllerConfig: controller_common.Config{
 				DiscoveryBackend: "",
 			},
-			wantEnvVar: "kubernetes", // empty defaults to kubernetes
 		},
 		{
-			name:       "Discovery backend not set defaults to kubernetes",
-			component:  &v1alpha1.DynamoComponentDeploymentSharedSpec{},
-			wantEnvVar: "kubernetes", // not set defaults to kubernetes
+			name:      "Discover backend not set",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 		},
 	}
 	secretsRetriever := &mockSecretsRetriever{}
@@ -5137,8 +4989,6 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: "ANOTHER_COMPONENTENV", Value: "true"},
 							{Name: "ANOTHER_CONTAINER_ENV", Value: "true"},
 							{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
-							{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
-							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 							{Name: commonconsts.DynamoNamespaceEnvVar, Value: ""},
 							{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
@@ -5153,11 +5003,6 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
 								FieldRef: &corev1.ObjectFieldSelector{
 									FieldPath: "metadata.namespace",
-								},
-							}},
-							{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
-								FieldRef: &corev1.ObjectFieldSelector{
-									FieldPath: "metadata.uid",
 								},
 							}},
 						},

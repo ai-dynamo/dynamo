@@ -24,11 +24,9 @@ use tracing::{debug, warn};
 
 use super::super::config::RegistryClientConfig;
 use super::super::protocol::{
-    bucket_id_from_name, decode_can_offload_response_v2, decode_match_remote_keys_response,
-    decode_match_response, encode_can_offload, encode_match_remote_keys, encode_match_sequence,
-    encode_register, encode_register_remote_keys, BucketId, OffloadStatus, SequenceHash,
+    bucket_id_from_name, decode_can_offload_response_v2, decode_match_response, encode_can_offload,
+    encode_match_sequence, encode_register, BucketId, OffloadStatus, SequenceHash,
 };
-use crate::block_manager::block::transfer::remote::RemoteKey;
 use super::super::storage::MokaStorage;
 use super::super::traits::DistributedRegistry;
 use super::super::types::{ObjectKey, OffloadResult};
@@ -429,97 +427,6 @@ impl DistributedRegistry for ZmqRegistryClient {
         );
 
         Ok(matched)
-    }
-
-    async fn match_remote_keys(&self, keys: &[RemoteKey]) -> Result<Vec<RemoteKey>> {
-        if keys.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        tracing::debug!(
-            target: "kvbm_distributed_registry",
-            num_keys = keys.len(),
-            "MATCH_REMOTE_KEYS: count={}",
-            keys.len()
-        );
-
-        let request = encode_match_remote_keys(keys);
-        let response = self.query(request).await?;
-
-        let matched = decode_match_remote_keys_response(&response)
-            .ok_or_else(|| anyhow!("Invalid match_remote_keys response"))?;
-
-        for key in &matched {
-            tracing::debug!(
-                target: "kvbm_distributed_registry",
-                location = %key.location(),
-                key_str = %key.key_str(),
-                "MATCH_REMOTE_KEY_HIT: location={} key={}",
-                key.location(), key.key_str()
-            );
-        }
-
-        tracing::debug!(
-            target: "kvbm_distributed_registry",
-            queried = keys.len(),
-            matched = matched.len(),
-            "MATCH_REMOTE_KEYS_RESULT: queried={} matched={}",
-            keys.len(), matched.len()
-        );
-
-        Ok(matched)
-    }
-
-    async fn match_remote_keys_prefix(&self, keys: &[RemoteKey]) -> Result<Vec<RemoteKey>> {
-        if keys.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Query all and then take the contiguous prefix
-        // Note: The hub could also implement this directly for efficiency
-        let matched = self.match_remote_keys(keys).await?;
-
-        // Build a set of matched keys for fast lookup
-        let matched_set: std::collections::HashSet<_> = matched.iter().collect();
-
-        // Find contiguous prefix
-        let prefix: Vec<RemoteKey> = keys
-            .iter()
-            .take_while(|key| matched_set.contains(key))
-            .cloned()
-            .collect();
-
-        Ok(prefix)
-    }
-
-    async fn register_remote_keys(&self, keys: &[RemoteKey]) -> Result<()> {
-        if keys.is_empty() {
-            return Ok(());
-        }
-
-        for key in keys {
-            tracing::debug!(
-                target: "kvbm_distributed_registry",
-                location = %key.location(),
-                key_str = %key.key_str(),
-                "REGISTER_REMOTE_KEY: location={} key={}",
-                key.location(), key.key_str()
-            );
-        }
-
-        // Send registration to hub
-        let encoded = encode_register_remote_keys(keys);
-        let mut msg = VecDeque::new();
-        msg.push_back(Message::from(encoded));
-        let mut socket = self.pub_socket.lock().await;
-        socket.send(Multipart(msg)).await?;
-
-        tracing::debug!(
-            "Registered {} remote keys",
-            keys.len()
-        );
-
-        Ok(())
     }
 
     async fn flush(&self) -> Result<()> {

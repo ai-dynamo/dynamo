@@ -146,10 +146,7 @@ async fn engine_for(
     match out_opt {
         Output::Auto => {
             // Auto-discover backends
-            Ok(EngineConfig::Dynamic {
-                model: Box::new(local_model),
-                engine_factory: None,
-            })
+            Ok(EngineConfig::Dynamic(Box::new(local_model)))
         }
         Output::Echo => Ok(EngineConfig::InProcessText {
             model: Box::new(local_model),

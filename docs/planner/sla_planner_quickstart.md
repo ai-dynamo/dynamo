@@ -179,25 +179,6 @@ kubectl port-forward svc/trtllm-disagg-frontend 8000:8000 -n $NAMESPACE
 curl http://localhost:8000/v1/models
 ```
 
-### Step 5 (Optional): Access the Planner Grafana Dashboard
-
-If you want to monitor the SLA Planner's decision-making in real-time, you can deploy the Planner Grafana dashboard.
-
-```bash
-kubectl apply -n monitoring -f deploy/observability/k8s/grafana-planner-dashboard-configmap.yaml
-```
-
-Follow the instructions in [Dynamo Metrics Collection on Kubernetes](../kubernetes/observability/metrics.md) to access the Grafana UI and select the **Dynamo Planner Dashboard**.
-
-The dashboard displays:
-- **Worker Counts & GPU Usage**: Current prefill/decode worker counts and cumulative GPU hours
-- **Observed Metrics**: Real-time TTFT, ITL, request rate, and sequence lengths from Prometheus
-- **Predicted Metrics**: Planner's load predictions and recommended replica counts
-- **Correction Factors**: How the planner adjusts predictions based on observed vs expected performance
-
-> [!TIP]
-> Use the **Namespace** dropdown at the top of the dashboard to filter metrics for your specific deployment namespace.
-
 ## DGDR Configuration Details
 
 ### Required Fields
@@ -354,29 +335,6 @@ profilingConfig:
 For details about the profiling process, performance plots, and interpolation data, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla_driven_profiling.md#profiling-process-details).
 
 ## Advanced Topics
-
-### Mocker Deployment
-
-Instead of a real DGD that uses GPU resources, you can deploy a mocker deployment that uses simulated engines rather than GPUs. Mocker is available in all backend images and uses profiling data to simulate realistic GPU timing behavior. It is useful for:
-- Large-scale experiments without GPU resources
-- Testing Planner behavior and infrastructure
-- Validating deployment configurations
-
-To deploy mocker instead of the real backend, set `useMocker: true`:
-
-```yaml
-spec:
-  model: <model-name>
-  backend: trtllm  # Real backend for profiling (vllm, sglang, or trtllm)
-  useMocker: true  # Deploy mocker instead of real backend
-
-  profilingConfig:
-    profilerImage: "nvcr.io/nvidia/dynamo/trtllm-runtime:<image-tag>"
-    ...
-  autoApply: true
-```
-
-Profiling still runs against the real backend (via GPUs or AIC) to collect performance data. The mocker deployment then uses this data to simulate realistic timing behavior.
 
 ### DGDR Immutability
 

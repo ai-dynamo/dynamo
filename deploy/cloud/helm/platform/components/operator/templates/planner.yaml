@@ -39,9 +39,6 @@ rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamocomponentdeployments", "dynamographdeployments"]
   verbs: ["get", "list", "create", "update", "patch"]
-- apiGroups: ["nvidia.com"]
-  resources: ["dynamographdeploymentscalingadapters/scale"]
-  verbs: ["patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -71,7 +68,4 @@ rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamocomponentdeployments", "dynamographdeployments"]
   verbs: ["get", "list", "create", "update", "patch"]
-- apiGroups: ["nvidia.com"]
-  resources: ["dynamographdeploymentscalingadapters/scale"]
-  verbs: ["patch"]
 {{- end }}

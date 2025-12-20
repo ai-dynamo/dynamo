@@ -2,41 +2,52 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import os
 import re
+import shutil
 import socket
 import threading
 import time
-from typing import Any, Callable, Dict, cast
+from typing import Any, Callable, Dict
 
 import pytest
 import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
-from tests.utils.managed_process import (
-    DynamoFrontendProcess as BaseDynamoFrontendProcess,
-)
+from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess
 
 logger = logging.getLogger(__name__)
 
 
-class DynamoFrontendProcess(BaseDynamoFrontendProcess):
-    """Fault-tolerance frontend wrapper (keeps env settings from the historical helper)."""
+class DynamoFrontendProcess(ManagedProcess):
+    """Process manager for Dynamo frontend"""
 
     def __init__(self, request):
-        extra_env = {
-            "DYN_REQUEST_PLANE": request.getfixturevalue("request_plane"),
-            "DYN_LOG": "debug",
-            # These tests expect full control over requests sent to workers. The canary
-            # health check can inject extra requests and cause intermittent failures.
-            "DYN_HEALTH_CHECK_ENABLED": "false",
-        }
+        command = ["python", "-m", "dynamo.frontend"]
+
+        # Set debug logging environment
+        env = os.environ.copy()
+        env["DYN_LOG"] = "debug"
+        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
+        env.pop("DYN_SYSTEM_PORT", None)
+
+        log_dir = f"{request.node.name}_frontend"
+
+        # Clean up any existing log directory from previous runs
+        try:
+            shutil.rmtree(log_dir)
+            logger.info(f"Cleaned up existing log directory: {log_dir}")
+        except FileNotFoundError:
+            # Directory doesn't exist, which is fine
+            pass
+
         super().__init__(
-            request,
-            frontend_port=0,  # allocate a free port (xdist-safe)
-            router_mode="round-robin",
-            extra_env=extra_env,
-            terminate_existing=False,
+            command=command,
+            env=env,
+            display_output=True,
+            terminate_existing=True,
+            log_dir=log_dir,
         )
 
 
@@ -158,15 +169,12 @@ class CancellableRequest:
         return self.response
 
 
-def send_completion_request(
-    prompt: str, max_tokens: int, frontend_port: int
-) -> CancellableRequest:
+def send_completion_request(prompt: str, max_tokens: int) -> CancellableRequest:
     """Send a completion request to the frontend
 
     Args:
         prompt: The prompt for completion
         max_tokens: Maximum tokens to generate
-        frontend_port: Port where the frontend is running
 
     Returns:
         A CancellableRequest object that can be explicitly cancelled
@@ -186,7 +194,7 @@ def send_completion_request(
     # Return a cancellable request object
     cancellable_req = CancellableRequest()
     cancellable_req.post(
-        f"http://localhost:{frontend_port}/v1/completions",
+        f"http://localhost:{FRONTEND_PORT}/v1/completions",
         headers=headers,
         json=payload,
     )
@@ -194,14 +202,13 @@ def send_completion_request(
 
 
 def send_chat_completion_request(
-    prompt: str, max_tokens: int, frontend_port: int, stream: bool = False
+    prompt: str, max_tokens: int, stream: bool = False
 ) -> CancellableRequest:
     """Send a chat completion request to the frontend
 
     Args:
         prompt: The prompt for chat completion
         max_tokens: Maximum tokens to generate
-        frontend_port: Port where the frontend is running
         stream: Whether to stream the response
 
     Returns:
@@ -223,7 +230,7 @@ def send_chat_completion_request(
     # Return a cancellable request object
     cancellable_req = CancellableRequest()
     cancellable_req.post(
-        f"http://localhost:{frontend_port}/v1/chat/completions",
+        f"http://localhost:{FRONTEND_PORT}/v1/chat/completions",
         headers=headers,
         json=payload,
         stream=stream,
@@ -232,14 +239,12 @@ def send_chat_completion_request(
 
 
 def send_cancellable_request(
-    frontend_port: int,
     request_type: str = "completion",
     use_long_prompt: bool = False,
 ) -> CancellableRequest:
     """Send a request that can be manually cancelled.
 
     Args:
-        frontend_port: Port where the frontend is running
         request_type: Type of request - "completion", "chat_completion", or "chat_completion_stream"
         use_long_prompt: Whether to use an extremely long prompt
 
@@ -251,11 +256,11 @@ def send_cancellable_request(
         prompt += " Make sure it is" + " long" * 16000 + "!"
 
     if request_type == "completion":
-        return send_completion_request(prompt, 16384, frontend_port)
+        return send_completion_request(prompt, 16384)
     elif request_type == "chat_completion":
-        return send_chat_completion_request(prompt, 16384, frontend_port, stream=False)
+        return send_chat_completion_request(prompt, 16384, stream=False)
     elif request_type == "chat_completion_stream":
-        return send_chat_completion_request(prompt, 16384, frontend_port, stream=True)
+        return send_chat_completion_request(prompt, 16384, stream=True)
     else:
         raise ValueError(f"Unknown request type: {request_type}")
 
@@ -273,15 +278,12 @@ def read_streaming_responses(
     Raises:
         pytest.fail if stream ends before expected_count responses
     """
-    response_raw = cancellable_req.get_response()
-    if response_raw is None:
-        pytest.fail("Failed to get streaming response: response is None")
-    if response_raw.status_code != 200:
+    response = cancellable_req.get_response()
+    if not response or response.status_code != 200:
         pytest.fail(
-            f"Failed to get streaming response: status_code={response_raw.status_code}"
+            f"Failed to get streaming response: status_code={response.status_code if response else 'None'}"
         )
 
-    response = cast(requests.Response, response_raw)  # Type narrowing after checks
     response_count = 0
     for line in response.iter_lines():
         response_count += 1

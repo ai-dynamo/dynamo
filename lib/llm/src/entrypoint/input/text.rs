@@ -114,7 +114,6 @@ async fn main_loop(
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
-            media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
 

@@ -84,6 +84,38 @@ This includes the specific commit [vllm-project/vllm#19790](https://github.com/v
 > [!IMPORTANT]
 > Below we provide simple shell scripts that run the components for each configuration. Each shell script runs `python3 -m dynamo.frontend` to start the ingress and uses `python3 -m dynamo.vllm` to start the vLLM workers. You can also run each command in separate terminals for better log visibility.
 
+This figure shows an overview of the major components to deploy:
+
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'fontSize':'10px', 'primaryColor':'#2e8b57', 'primaryTextColor':'#fff', 'primaryBorderColor':'#333', 'lineColor':'#81b1db', 'secondaryColor':'#b35900', 'tertiaryColor':'#808080', 'edgeLabelBackground':'transparent'}}}%%
+graph TD
+    %% Node Definitions with custom shapes
+    HTTP[HTTP]
+    ROUTER[Router]
+    PREFILL[vLLM Prefill Worker]
+    DECODE[vLLM Decode Worker]
+
+    %% Class Definitions for color
+    classDef worker_style fill:#2e8b57,stroke:#333,stroke-width:2px,color:#fff;
+    classDef router_style fill:#b35900,stroke:#333,stroke-width:2px,color:#fff;
+
+    %% Applying classes to nodes
+    class PREFILL,DECODE worker_style
+    class ROUTER router_style
+
+    %% Request/Response flow
+    HTTP <--> |"request/response"| ROUTER
+    ROUTER --> |"1. send to prefill"| PREFILL
+    PREFILL --> |"2. return NIXL metadata"| ROUTER
+    ROUTER --> |"3. send with metadata"| DECODE
+    DECODE --> |"4. stream response"| ROUTER
+
+    %% KV Events publishing
+    PREFILL -.-> |"publish kv events"| ROUTER
+```
+
+Note: The above architecture illustrates all the components. The final components that get spawned depend upon the chosen deployment pattern.
+
 ### Aggregated Serving
 
 ```bash
@@ -132,13 +164,6 @@ bash launch/dep.sh
 ## Advanced Examples
 
 Below we provide a selected list of advanced deployments. Please open up an issue if you'd like to see a specific example!
-
-### Speculative Decoding with Aggregated Serving (Meta-Llama-3.1-8B-Instruct + Eagle3)
-
-Run **Meta-Llama-3.1-8B-Instruct** with **Eagle3** as a draft model using **aggregated speculative decoding** on a single node.
-This setup demonstrates how to use Dynamo to create an instance using Eagle-based speculative decoding under the **VLLM aggregated serving framework** for faster inference while maintaining accuracy.
-
-**Guide:** [Speculative Decoding Quickstart](./speculative_decoding.md)
 
 ### Kubernetes Deployment
 

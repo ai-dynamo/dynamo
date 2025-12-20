@@ -389,7 +389,6 @@ fn create_response_with_linear_probs(
             reasoning_content: None,
         },
         finish_reason: Some(FinishReason::Stop),
-        stop_reason: None,
         logprobs: Some(ChatChoiceLogprobs {
             content: Some(token_logprobs),
             refusal: None,
@@ -469,7 +468,6 @@ fn create_multi_choice_response(
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
                 logprobs: Some(ChatChoiceLogprobs {
                     content: Some(token_logprobs),
                     refusal: None,

@@ -89,8 +89,6 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::environment_names::logging as env_logging;
 
-use dynamo_config::env_is_truthy;
-
 /// Default log level
 const DEFAULT_FILTER_LEVEL: &str = "info";
 
@@ -132,9 +130,11 @@ impl Default for LoggingConfig {
     }
 }
 
-/// Check if OTLP trace exporting is enabled (accepts: "1", "true", "on", "yes" - case insensitive)
+/// Check if OTLP trace exporting is enabled (set OTEL_EXPORT_ENABLED to "1" to enable)
 fn otlp_exporter_enabled() -> bool {
-    env_is_truthy(env_logging::otlp::OTEL_EXPORT_ENABLED)
+    std::env::var(env_logging::otlp::OTEL_EXPORT_ENABLED)
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 /// Get the service name from environment or use default
@@ -1292,18 +1292,11 @@ pub mod tests {
                 // 1. Extract the dynamically generated trace ID and validate consistency
                 // All logs should have the same trace_id since they're part of the same trace
                 // Skip any initialization logs that don't have trace_id (e.g., OTLP setup messages)
-                //
-                // Note: This test can fail if logging was already initialized by another test running
-                // in parallel. Logging initialization is global (Once) and can only happen once per process.
-                // If no trace_id is found, skip validation gracefully.
-                let Some(trace_id) = lines
+                let trace_id = lines
                     .iter()
                     .find_map(|log_line| log_line.get("trace_id").and_then(|v| v.as_str()))
-                    .map(|s| s.to_string())
-                else {
-                    // Skip test if logging was already initialized - we can't control the output format
-                    return Ok(());
-                };
+                    .expect("At least one log line should have a trace_id")
+                    .to_string();
 
                 // Verify trace_id is not a zero/invalid ID
                 assert_ne!(

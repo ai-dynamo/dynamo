@@ -8,7 +8,6 @@ use crate::{
     discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
-    http::service::metrics::Metrics,
     kv_router::{KvPushRouter, KvRouter, PrefillRouter},
     migration::Migration,
     model_card::ModelDeploymentCard,
@@ -59,18 +58,12 @@ pub async fn prepare_engine(
     engine_config: EngineConfig,
 ) -> anyhow::Result<PreparedEngine> {
     match engine_config {
-        EngineConfig::Dynamic {
-            model: local_model, ..
-        } => {
+        EngineConfig::Dynamic(local_model) => {
             let model_manager = Arc::new(ModelManager::new());
-            // Create metrics for migration tracking (not exposed via /metrics in Dynamic engine mode)
-            let metrics = Arc::new(Metrics::new());
             let watch_obj = Arc::new(ModelWatcher::new(
                 distributed_runtime.clone(),
                 model_manager.clone(),
                 RouterConfig::default(),
-                None,
-                metrics,
             ));
             let discovery = distributed_runtime.discovery();
             let discovery_stream = discovery
@@ -178,7 +171,6 @@ pub async fn build_routed_pipeline<Req, Resp>(
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
-    metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -203,7 +195,6 @@ where
         hf_tokenizer,
         prefill_chooser,
         enforce_disagg,
-        metrics,
     )
     .await
 }
@@ -219,7 +210,6 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
-    metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -234,7 +224,7 @@ where
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
-    let migration = Migration::from_mdc(card, metrics).into_operator();
+    let migration = Migration::from_mdc(card).into_operator();
 
     // For KV routing, use the client from the chooser to ensure shared state
     let router_client = if router_mode == RouterMode::KV {
@@ -247,10 +237,7 @@ where
     };
 
     // Get threshold value and wrap monitor for PushRouter
-    // Note: PushRouter uses active_decode_blocks_threshold for its internal logic
-    let threshold_value = worker_monitor
-        .as_ref()
-        .map(|m| m.active_decode_blocks_threshold());
+    let threshold_value = worker_monitor.as_ref().map(|m| m.threshold());
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
@@ -284,13 +271,13 @@ where
     // Link with prefill chooser including backward edge for response flow
     let engine = frontend
         .link(preprocessor_op.forward_edge())?
-        .link(migration.forward_edge())?
         .link(backend.forward_edge())?
+        .link(migration.forward_edge())?
         .link(prefill_op.forward_edge())?
         .link(service_backend)?
         .link(prefill_op.backward_edge())?
-        .link(backend.backward_edge())?
         .link(migration.backward_edge())?
+        .link(backend.backward_edge())?
         .link(preprocessor_op.backward_edge())?
         .link(frontend)?;
 

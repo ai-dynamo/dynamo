@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig};
+use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -90,8 +90,6 @@ impl SchedulingRequest {
 pub struct KvScheduler {
     request_tx: tokio::sync::mpsc::Sender<SchedulingRequest>,
     slots: Arc<ActiveSequencesMultiWorker>,
-    /// Worker runtime configs for looking up disaggregated endpoints
-    workers_with_configs: Arc<RwLock<HashMap<WorkerId, Option<ModelRuntimeConfig>>>>,
 }
 
 impl KvScheduler {
@@ -135,7 +133,7 @@ impl KvScheduler {
         let slots_monitor = slots.clone();
         let mut instance_ids_monitor_rx = instance_ids_rx.clone();
         let mut configs_monitor_rx = runtime_configs_rx.clone();
-        let monitor_cancel_token = component.drt().child_token();
+        let monitor_cancel_token = component.drt().primary_token();
         tokio::spawn(async move {
             tracing::trace!("workers monitoring task started");
             loop {
@@ -289,11 +287,7 @@ impl KvScheduler {
             tracing::trace!("background endpoint subscriber shutting down");
         });
 
-        Ok(KvScheduler {
-            request_tx,
-            slots,
-            workers_with_configs,
-        })
+        Ok(KvScheduler { request_tx, slots })
     }
 
     pub async fn schedule(
@@ -350,17 +344,6 @@ impl KvScheduler {
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots.free(&request_id.to_string()).await
-    }
-
-    pub async fn get_disaggregated_endpoint(
-        &self,
-        worker_id: WorkerId,
-    ) -> Option<DisaggregatedEndpoint> {
-        let workers = self.workers_with_configs.read().await;
-        workers
-            .get(&worker_id)
-            .and_then(|config| config.as_ref())
-            .and_then(|config| config.disaggregated_endpoint.clone())
     }
 
     pub async fn get_potential_loads(

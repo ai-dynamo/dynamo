@@ -20,6 +20,8 @@ package common
 type DeploymentStrategy string
 
 const (
-	DeploymentStrategyRollingUpdate DeploymentStrategy = "RollingUpdate"
-	DeploymentStrategyRecreate      DeploymentStrategy = "Recreate"
+	DeploymentStrategyRollingUpdate               DeploymentStrategy = "RollingUpdate"
+	DeploymentStrategyRecreate                    DeploymentStrategy = "Recreate"
+	DeploymentStrategyRampedSlowRollout           DeploymentStrategy = "RampedSlowRollout"
+	DeploymentStrategyBestEffortControlledRollout DeploymentStrategy = "BestEffortControlledRollout"
 )

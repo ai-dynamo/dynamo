@@ -17,7 +17,6 @@ use super::super::protocol::{bucket_id_from_name, SequenceHash};
 use super::super::storage::MokaStorage;
 use super::super::traits::DistributedRegistry;
 use super::super::types::{ObjectKey, OffloadResult};
-use crate::block_manager::block::transfer::remote::RemoteKey;
 
 /// Local in-process registry.
 ///
@@ -144,37 +143,6 @@ impl DistributedRegistry for LocalRegistry {
 
     async fn flush(&self) -> Result<()> {
         // No-op for local registry
-        Ok(())
-    }
-
-    async fn match_remote_keys(&self, keys: &[RemoteKey]) -> Result<Vec<RemoteKey>> {
-        let matched = self.storage.match_remote_keys(keys);
-        trace!(
-            "LocalRegistry: match_remote_keys {} of {}",
-            matched.len(),
-            keys.len()
-        );
-        Ok(matched)
-    }
-
-    async fn match_remote_keys_prefix(&self, keys: &[RemoteKey]) -> Result<Vec<RemoteKey>> {
-        let matched = self.storage.match_remote_prefix(keys);
-        trace!(
-            "LocalRegistry: match_remote_keys_prefix {} of {}",
-            matched.len(),
-            keys.len()
-        );
-        Ok(matched)
-    }
-
-    async fn register_remote_keys(&self, keys: &[RemoteKey]) -> Result<()> {
-        for key in keys {
-            self.storage.insert_remote_key(key);
-        }
-        trace!(
-            "LocalRegistry: registered {} remote keys",
-            keys.len()
-        );
         Ok(())
     }
 }

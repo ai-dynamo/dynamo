@@ -135,26 +135,16 @@ impl PushEndpoint {
 
         // await for all inflight requests to complete if graceful shutdown
         if self.graceful_shutdown {
-            let inflight_count = inflight.load(Ordering::SeqCst);
-            if inflight_count > 0 {
-                tracing::info!(
-                    endpoint_name = endpoint_name_local.as_str(),
-                    inflight_count = inflight_count,
-                    "Waiting for inflight NATS requests to complete"
-                );
-                while inflight.load(Ordering::SeqCst) > 0 {
-                    notify.notified().await;
-                }
-                tracing::info!(
-                    endpoint_name = endpoint_name_local.as_str(),
-                    "All inflight NATS requests completed"
-                );
-            }
-        } else {
             tracing::info!(
-                endpoint_name = endpoint_name_local.as_str(),
-                "Skipping graceful shutdown, not waiting for inflight requests"
+                "Waiting for {} inflight requests to complete",
+                inflight.load(Ordering::SeqCst)
             );
+            while inflight.load(Ordering::SeqCst) > 0 {
+                notify.notified().await;
+            }
+            tracing::info!("All inflight requests completed");
+        } else {
+            tracing::info!("Skipping graceful shutdown, not waiting for inflight requests");
         }
 
         Ok(())

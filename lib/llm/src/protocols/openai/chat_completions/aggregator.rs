@@ -12,7 +12,6 @@ use crate::protocols::{
     openai::ParsingOptions,
 };
 
-use dynamo_async_openai::types::StopReason;
 use dynamo_runtime::engine::DataStream;
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
@@ -50,8 +49,6 @@ struct DeltaChoice {
     role: Option<dynamo_async_openai::types::Role>,
     /// The reason the completion was finished (if applicable).
     finish_reason: Option<dynamo_async_openai::types::FinishReason>,
-    /// The stop string or token that triggered the stop condition.
-    stop_reason: Option<StopReason>,
     /// Optional log probabilities for the chat choice.
     logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
     // Optional tool calls for the chat choice.
@@ -162,7 +159,6 @@ impl DeltaAggregator {
                                     text: "".to_string(),
                                     role: choice.delta.role,
                                     finish_reason: None,
-                                    stop_reason: None,
                                     logprobs: None,
                                     tool_calls: None,
                                     reasoning_content: None,
@@ -206,11 +202,6 @@ impl DeltaAggregator {
                         // Update finish reason if provided.
                         if let Some(finish_reason) = choice.finish_reason {
                             state_choice.finish_reason = Some(finish_reason);
-                        }
-
-                        // Update stop reason if provided.
-                        if let Some(stop_reason) = choice.stop_reason {
-                            state_choice.stop_reason = Some(stop_reason);
                         }
 
                         // Update logprobs
@@ -305,7 +296,6 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
             },
             index: delta.index,
             finish_reason,
-            stop_reason: delta.stop_reason,
             logprobs: delta.logprobs,
         }
     }
@@ -418,7 +408,6 @@ mod tests {
             index,
             delta,
             finish_reason,
-            stop_reason: None,
             logprobs,
         };
 
@@ -637,7 +626,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
-                    stop_reason: None,
                     logprobs: None,
                 },
                 dynamo_async_openai::types::ChatChoiceStream {
@@ -651,7 +639,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
-                    stop_reason: None,
                     logprobs: None,
                 },
             ],

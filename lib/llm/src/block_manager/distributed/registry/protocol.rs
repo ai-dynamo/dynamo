@@ -15,7 +15,6 @@
 //! the local registry format (crate::tokens::SequenceHash).
 
 use super::types::ObjectKey;
-use crate::block_manager::block::transfer::remote::RemoteKey;
 
 /// Sequence hash type - u64 to match local registry
 pub type SequenceHash = u64;
@@ -86,29 +85,25 @@ impl WireEntry {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageType {
+    /// Register hashes after object store (worker → hub, fire-and-forget).
     /// Payload: [bucket_id: 4][count: 2][entries: (hash, key) × count]
     Register = 1,
 
+    /// Check which hashes can be offloaded (worker → hub).
     /// Payload: [bucket_id: 4][count: 2][hashes × count]
     CanOffload = 2,
 
+    /// Match sequence hashes (worker → hub).
     /// Payload: [bucket_id: 4][count: 2][hashes × count]
     MatchSequence = 3,
 
+    /// Response: which hashes can be offloaded (hub → worker).
     /// Payload: [count: 2][statuses × count]
     CanOffloadResponse = 5,
 
+    /// Response: matched hashes with object keys (hub → worker).
     /// Payload: [count: 2][entries: (hash, key) × count]
     MatchResponse = 6,
-
-    /// Payload: bincode-serialized Vec<RemoteKey>
-    MatchRemoteKeys = 7,
-
-    /// Payload: bincode-serialized Vec<RemoteKey>
-    MatchRemoteKeysResponse = 8,
-
-    /// Payload: bincode-serialized Vec<RemoteKey>
-    RegisterRemoteKeys = 9,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -121,9 +116,6 @@ impl TryFrom<u8> for MessageType {
             3 => Ok(Self::MatchSequence),
             5 => Ok(Self::CanOffloadResponse),
             6 => Ok(Self::MatchResponse),
-            7 => Ok(Self::MatchRemoteKeys),
-            8 => Ok(Self::MatchRemoteKeysResponse),
-            9 => Ok(Self::RegisterRemoteKeys),
             _ => Err(()),
         }
     }
@@ -300,38 +292,17 @@ pub fn encode_match_response(entries: &[(SequenceHash, ObjectKey)]) -> Vec<u8> {
     buf
 }
 
+// =============================================================================
+// DECODING
+// =============================================================================
 
-pub fn encode_match_remote_keys(keys: &[RemoteKey]) -> Vec<u8> {
-    let payload = bincode::serde::encode_to_vec(keys, bincode::config::standard())
-        .expect("Failed to serialize RemoteKeys");
-    let mut buf = Vec::with_capacity(1 + payload.len());
-    buf.push(MessageType::MatchRemoteKeys as u8);
-    buf.extend_from_slice(&payload);
-    buf
-}
-
-pub fn encode_match_remote_keys_response(keys: &[RemoteKey]) -> Vec<u8> {
-    let payload = bincode::serde::encode_to_vec(keys, bincode::config::standard())
-        .expect("Failed to serialize RemoteKeys");
-    let mut buf = Vec::with_capacity(1 + payload.len());
-    buf.push(MessageType::MatchRemoteKeysResponse as u8);
-    buf.extend_from_slice(&payload);
-    buf
-}
-
-pub fn encode_register_remote_keys(keys: &[RemoteKey]) -> Vec<u8> {
-    let payload = bincode::serde::encode_to_vec(keys, bincode::config::standard())
-        .expect("Failed to serialize RemoteKeys");
-    let mut buf = Vec::with_capacity(1 + payload.len());
-    buf.push(MessageType::RegisterRemoteKeys as u8);
-    buf.extend_from_slice(&payload);
-    buf
-}
-
+/// Decode message type from buffer.
 pub fn decode_message_type(data: &[u8]) -> Option<MessageType> {
     data.first().and_then(|&b| MessageType::try_from(b).ok())
 }
 
+/// Decode a REGISTER message.
+/// Returns (bucket_id, entries).
 pub fn decode_register(data: &[u8]) -> Option<(BucketId, Vec<(SequenceHash, ObjectKey)>)> {
     // Header: 1 type + 8 bucket_id + 2 count = 11 bytes
     if data.len() < 11 || data[0] != MessageType::Register as u8 {
@@ -354,7 +325,10 @@ pub fn decode_register(data: &[u8]) -> Option<(BucketId, Vec<(SequenceHash, Obje
     Some((bucket_id, entries))
 }
 
+/// Decode a CAN_OFFLOAD query.
+/// Returns (bucket_id, hashes).
 pub fn decode_can_offload(data: &[u8]) -> Option<(BucketId, Vec<SequenceHash>)> {
+    // Header: 1 type + 8 bucket_id + 2 count = 11 bytes
     if data.len() < 11 || data[0] != MessageType::CanOffload as u8 {
         return None;
     }
@@ -363,7 +337,10 @@ pub fn decode_can_offload(data: &[u8]) -> Option<(BucketId, Vec<SequenceHash>)> 
     Some((bucket_id, hashes))
 }
 
+/// Decode a MATCH_SEQUENCE query.
+/// Returns (bucket_id, hashes).
 pub fn decode_match_sequence(data: &[u8]) -> Option<(BucketId, Vec<SequenceHash>)> {
+    // Header: 1 type + 8 bucket_id + 2 count = 11 bytes
     if data.len() < 11 || data[0] != MessageType::MatchSequence as u8 {
         return None;
     }
@@ -372,12 +349,16 @@ pub fn decode_match_sequence(data: &[u8]) -> Option<(BucketId, Vec<SequenceHash>
     Some((bucket_id, hashes))
 }
 
+/// Decode a CAN_OFFLOAD_RESPONSE with lease support.
+///
+/// Returns a vector of (OffloadStatus) for each hash queried.
 pub fn decode_can_offload_response_v2(data: &[u8]) -> Option<Vec<OffloadStatus>> {
     if data.len() < 3 || data[0] != MessageType::CanOffloadResponse as u8 {
         return None;
     }
     let count = u16::from_le_bytes(data[1..3].try_into().ok()?) as usize;
 
+    // New format: 1 byte per status
     if data.len() == 3 + count {
         let mut result = Vec::with_capacity(count);
         for i in 0..count {
@@ -407,6 +388,9 @@ pub fn decode_can_offload_response_v2(data: &[u8]) -> Option<Vec<OffloadStatus>>
     None
 }
 
+/// Decode a CAN_OFFLOAD_RESPONSE (legacy bool format).
+///
+/// For backwards compatibility. Use `decode_can_offload_response_v2` for full lease support.
 pub fn decode_can_offload_response(data: &[u8]) -> Option<Vec<bool>> {
     let statuses = decode_can_offload_response_v2(data)?;
     Some(
@@ -417,11 +401,13 @@ pub fn decode_can_offload_response(data: &[u8]) -> Option<Vec<bool>> {
     )
 }
 
+/// Decode a MATCH_RESPONSE.
 pub fn decode_match_response(data: &[u8]) -> Option<Vec<(SequenceHash, ObjectKey)>> {
     if data.len() < 3 || data[0] != MessageType::MatchResponse as u8 {
         return None;
     }
     let count = u16::from_le_bytes(data[1..3].try_into().ok()?) as usize;
+    // Entry: 8 hash + 8 key = 16 bytes
     if data.len() != 3 + count * WireEntry::SIZE {
         return None;
     }
@@ -436,6 +422,7 @@ pub fn decode_match_response(data: &[u8]) -> Option<Vec<(SequenceHash, ObjectKey
     Some(entries)
 }
 
+/// Helper: decode hash list from `[count: 2][hashes: count × 8]`.
 fn decode_hash_list(data: &[u8]) -> Option<Vec<SequenceHash>> {
     if data.len() < 2 {
         return None;
@@ -452,33 +439,6 @@ fn decode_hash_list(data: &[u8]) -> Option<Vec<SequenceHash>> {
         hashes.push(hash);
     }
     Some(hashes)
-}
-
-pub fn decode_match_remote_keys(data: &[u8]) -> Option<Vec<RemoteKey>> {
-    if data.len() < 2 || data[0] != MessageType::MatchRemoteKeys as u8 {
-        return None;
-    }
-    bincode::serde::decode_from_slice(&data[1..], bincode::config::standard())
-        .map(|(keys, _)| keys)
-        .ok()
-}
-
-pub fn decode_match_remote_keys_response(data: &[u8]) -> Option<Vec<RemoteKey>> {
-    if data.len() < 2 || data[0] != MessageType::MatchRemoteKeysResponse as u8 {
-        return None;
-    }
-    bincode::serde::decode_from_slice(&data[1..], bincode::config::standard())
-        .map(|(keys, _)| keys)
-        .ok()
-}
-
-pub fn decode_register_remote_keys(data: &[u8]) -> Option<Vec<RemoteKey>> {
-    if data.len() < 2 || data[0] != MessageType::RegisterRemoteKeys as u8 {
-        return None;
-    }
-    bincode::serde::decode_from_slice(&data[1..], bincode::config::standard())
-        .map(|(keys, _)| keys)
-        .ok()
 }
 
 #[cfg(test)]

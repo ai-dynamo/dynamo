@@ -42,10 +42,13 @@ func NewDynamoComponentDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoC
 func (v *DynamoComponentDeploymentValidator) Validate() (admission.Warnings, error) {
 	// Validate shared spec fields using SharedSpecValidator
 	sharedValidator := NewSharedSpecValidator(&v.deployment.Spec.DynamoComponentDeploymentSharedSpec, "spec")
+	if err := sharedValidator.Validate(); err != nil {
+		return nil, err
+	}
 
 	// DCD-specific validation would go here (currently none)
 
-	return sharedValidator.Validate()
+	return nil, nil
 }
 
 // ValidateUpdate performs stateful validation comparing old and new DynamoComponentDeployment.

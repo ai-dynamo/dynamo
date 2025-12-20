@@ -12,7 +12,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::protocol::SequenceHash;
 use super::types::{HubStats, ObjectKey, OffloadResult};
-use crate::block_manager::block::transfer::remote::RemoteKey;
 
 /// Distributed registry client trait.
 ///
@@ -47,6 +46,10 @@ use crate::block_manager::block::transfer::remote::RemoteKey;
 /// ```
 #[async_trait]
 pub trait DistributedRegistry: Send + Sync {
+    // =========================================================================
+    // REGISTRATION (after storing to object)
+    // =========================================================================
+
     /// Register sequence hashes after storing to object storage.
     ///
     /// The object key is assumed to be the same as the sequence hash
@@ -61,6 +64,10 @@ pub trait DistributedRegistry: Send + Sync {
         bucket_name: &str,
         entries: &[(SequenceHash, ObjectKey)],
     ) -> Result<()>;
+
+    // =========================================================================
+    // OFFLOAD CHECK (deduplication before storing to object)
+    // =========================================================================
 
     /// Check which sequence hashes can be offloaded to object storage.
     ///
@@ -84,6 +91,10 @@ pub trait DistributedRegistry: Send + Sync {
         bucket_name: &str,
         hashes: &[SequenceHash],
     ) -> Result<OffloadResult>;
+
+    // =========================================================================
+    // MATCHING (find what can be loaded from object)
+    // =========================================================================
 
     /// Match sequence hashes against registry.
     ///
@@ -129,6 +140,10 @@ pub trait DistributedRegistry: Send + Sync {
 
     /// Blocking version of match_sequence_hashes for use in sync contexts.
     ///
+    /// This uses tokio's block_in_place + block_on pattern to safely call
+    /// the async method from a sync context. Requires a multi-threaded runtime.
+    ///
+    /// Returns just the hashes (not the object keys) for simpler integration.
     fn match_sequence_hashes_blocking(
         &self,
         bucket_name: &str,
@@ -154,34 +169,6 @@ pub trait DistributedRegistry: Send + Sync {
         .map_err(|_| anyhow::anyhow!("block_in_place failed (single-threaded runtime?)"))?
         .map(|matches| matches.into_iter().map(|(h, _)| h).collect())
     }
-
-    /// Match RemoteKeys against the registry.
-    ///
-    /// Unlike `match_sequence_hashes`, this searches across multiple buckets
-    /// using full `RemoteKey`s (bucket + key pairs). Returns the subset that exist.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Generate candidate keys for all workers
-    /// let candidates: Vec<RemoteKey> = hashes.iter()
-    ///     .flat_map(|&hash| key_builder.build_all(hash))
-    ///     .collect();
-    ///
-    /// // Find which actually exist
-    /// let matched = registry.match_remote_keys(&candidates).await?;
-    /// // matched contains RemoteKeys with correct bucket info for fetching
-    /// ```
-    async fn match_remote_keys(&self, keys: &[RemoteKey]) -> Result<Vec<RemoteKey>>;
-
-    /// Match contiguous prefix of RemoteKeys.
-    ///
-    /// Stops at first key not found. Returns RemoteKeys that exist.
-    async fn match_remote_keys_prefix(&self, keys: &[RemoteKey]) -> Result<Vec<RemoteKey>>;
-
-    /// Register RemoteKeys as existing in the distributed registry.
-    ///
-    /// Called after successfully storing blocks to remote storage.
-    async fn register_remote_keys(&self, keys: &[RemoteKey]) -> Result<()>;
 }
 
 /// Registry hub trait (runs on leader/coordinator).

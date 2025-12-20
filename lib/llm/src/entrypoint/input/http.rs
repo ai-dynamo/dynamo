@@ -7,7 +7,7 @@ use crate::{
     discovery::{ModelManager, ModelUpdate, ModelWatcher},
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
-    entrypoint::{EngineConfig, EngineFactoryCallback, RouterConfig, input::common},
+    entrypoint::{EngineConfig, RouterConfig, input::common},
     http::service::service_v2::{self, HttpService},
     namespace::is_global_namespace,
     types::openai::{
@@ -61,19 +61,16 @@ pub async fn run(
     );
 
     let http_service = match engine_config {
-        EngineConfig::Dynamic {
-            ref model,
-            ref engine_factory,
-        } => {
+        EngineConfig::Dynamic(_) => {
             // This allows the /health endpoint to query store for active instances
             http_service_builder = http_service_builder.store(distributed_runtime.store().clone());
             let http_service = http_service_builder.build()?;
 
-            let router_config = model.router_config();
+            let router_config = engine_config.local_model().router_config();
             // Listen for models registering themselves, add them to HTTP service
             // Check if we should filter by namespace (based on the local model's namespace)
             // Get namespace from the model, fallback to endpoint_id namespace if not set
-            let namespace = model.namespace().unwrap_or("");
+            let namespace = engine_config.local_model().namespace().unwrap_or("");
             let target_namespace = if is_global_namespace(namespace) {
                 None
             } else {
@@ -86,7 +83,6 @@ pub async fn run(
                 target_namespace,
                 Arc::new(http_service.clone()),
                 http_service.state().metrics_clone(),
-                engine_factory.clone(),
             )
             .await?;
             http_service
@@ -198,15 +194,8 @@ async fn run_watcher(
     target_namespace: Option<String>,
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
-    engine_factory: Option<EngineFactoryCallback>,
 ) -> anyhow::Result<()> {
-    let mut watch_obj = ModelWatcher::new(
-        runtime.clone(),
-        model_manager,
-        router_config,
-        engine_factory,
-        metrics.clone(),
-    );
+    let mut watch_obj = ModelWatcher::new(runtime.clone(), model_manager, router_config);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery

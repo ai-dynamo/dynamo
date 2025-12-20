@@ -129,12 +129,6 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector lmcache
 curl -s localhost:8081/metrics | grep "^lmcache:"
 ```
 
-### Troubleshooting
-
-Troubleshooting LMCache-related metrics and logs (including `PrometheusLogger instance already created with different metadata` and `PROMETHEUS_MULTIPROC_DIR` warnings) is documented in:
-
-- [LMCache Integration Guide](LMCache_Integration.md#troubleshooting)
-
 **For complete LMCache configuration and metric details**, see:
 - [LMCache Integration Guide](LMCache_Integration.md) - Setup and configuration
 - [LMCache Observability Documentation](https://docs.lmcache.ai/production/observability/vllm_endpoint.html) - Complete metrics reference
@@ -142,7 +136,7 @@ Troubleshooting LMCache-related metrics and logs (including `PrometheusLogger in
 ## Implementation Details
 
 - vLLM v1 uses multiprocess metrics collection via `prometheus_client.multiprocess`
-- `PROMETHEUS_MULTIPROC_DIR`: (optional). By default, Dynamo automatically manages this environment variable, setting it to a temporary directory where multiprocess metrics are stored as memory-mapped files. Each worker process writes its metrics to separate files in this directory, which are aggregated when `/metrics` is scraped. Users only need to set this explicitly where complete control over the metrics directory is required.
+- `PROMETHEUS_MULTIPROC_DIR`: vLLM sets this environment variable to a temporary directory where multiprocess metrics are stored as memory-mapped files. Each worker process writes its metrics to separate files in this directory, which are aggregated when `/metrics` is scraped.
 - Dynamo uses `MultiProcessCollector` to aggregate metrics from all worker processes
 - Metrics are filtered by the `vllm:` and `lmcache:` prefixes before being exposed (when LMCache is enabled)
 - The integration uses Dynamo's `register_engine_metrics_callback()` function with the global `REGISTRY`

@@ -37,12 +37,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Enable tracing if requested
-TRACE_ARGS=()
 if [ "$ENABLE_OTEL" = true ]; then
     export DYN_LOGGING_JSONL=true
     export OTEL_EXPORT_ENABLED=1
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
-    TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
 
 # run ingress
@@ -61,5 +59,4 @@ python3 -m dynamo.sglang \
   --tp 1 \
   --trust-remote-code \
   --use-sglang-tokenizer \
-  --enable-metrics \
-  "${TRACE_ARGS[@]}"
+  --enable-metrics

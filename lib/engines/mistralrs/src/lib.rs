@@ -413,7 +413,6 @@ impl
                                 },
                                 logprobs: None,
                                 finish_reason,
-                                stop_reason: None,
                             }],
                             model: c.model,
                             created: c.created as u32,

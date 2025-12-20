@@ -1,13 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Parallelization: Hermetic test (xdist-safe via dynamic ports).
-# Tested on: Linux (Ubuntu 24.04 container), Intel(R) Core(TM) i9-14900K, 32 vCPU.
-# Combined pre_merge wall time (this file + test_tensor_mocker_engine.py):
-# - Serialized: 87.48s.
-# - Parallel (-n auto): 25.27s (62.21s saved, 3.46x).
-# GPU Requirement: gpu_0 (CPU-only, tensor echo worker does not use GPU)
-
 """Test gRPC parameter passing with tensor models."""
 
 import logging
@@ -23,10 +16,27 @@ from tests.utils.managed_process import ManagedProcess
 logger = logging.getLogger(__name__)
 
 
-class EchoTensorWorkerProcess(ManagedProcess):
-    def __init__(self, request, system_port: int):
-        self.system_port = system_port
+class DynamoFrontendProcess(ManagedProcess):
+    def __init__(self, request):
+        command = ["python", "-m", "dynamo.frontend", "--kserve-grpc-server"]
+        log_dir = f"{request.node.name}_frontend"
+        shutil.rmtree(log_dir, ignore_errors=True)
 
+        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
+        env = os.environ.copy()
+        env.pop("DYN_SYSTEM_PORT", None)
+
+        super().__init__(
+            command=command,
+            env=env,
+            display_output=True,
+            terminate_existing=True,
+            log_dir=log_dir,
+        )
+
+
+class EchoTensorWorkerProcess(ManagedProcess):
+    def __init__(self, request):
         command = [
             "python3",
             os.path.join(os.path.dirname(__file__), "echo_tensor_worker.py"),
@@ -35,9 +45,7 @@ class EchoTensorWorkerProcess(ManagedProcess):
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
-        env["DYN_SYSTEM_PORT"] = str(system_port)
-        # Each test gets its own Etcd/NATS from runtime_services_dynamic_ports,
-        # so no namespace conflicts - use default "tensor" namespace
+        env["DYN_SYSTEM_PORT"] = "8083"
 
         log_dir = f"{request.node.name}_worker"
         shutil.rmtree(log_dir, ignore_errors=True)
@@ -47,29 +55,22 @@ class EchoTensorWorkerProcess(ManagedProcess):
             env=env,
             health_check_urls=[
                 (
-                    f"http://localhost:{system_port}/health",
+                    "http://localhost:8083/health",
                     lambda r: r.json().get("status") == "ready",
                 )
             ],
             timeout=300,
             display_output=True,
             log_dir=log_dir,
-            terminate_existing=False,
         )
 
 
-@pytest.fixture(scope="function")
-def start_services_with_echo_tensor_worker(request, start_services_with_grpc):
-    """Start echo tensor worker with the shared gRPC frontend.
-
-    Function-scoped to allow parallel test execution.
-    Each test gets its own gRPC frontend + echo tensor worker on unique ports.
-    No namespace conflicts because runtime_services_dynamic_ports provides isolated Etcd/NATS.
-    """
-    frontend_port, system_port = start_services_with_grpc
-    with EchoTensorWorkerProcess(request, system_port):
-        logger.info(f"Echo Tensor Worker started for test on port {frontend_port}")
-        yield frontend_port
+@pytest.fixture()
+def start_services(request, runtime_services):
+    """Start frontend and worker with fresh etcd/nats."""
+    with DynamoFrontendProcess(request):
+        with EchoTensorWorkerProcess(request):
+            yield
 
 
 def extract_params(param_map) -> dict:
@@ -91,8 +92,7 @@ def extract_params(param_map) -> dict:
 
 @pytest.mark.e2e
 @pytest.mark.pre_merge
-@pytest.mark.gpu_0  # Echo tensor worker is CPU-only (no GPU required)
-@pytest.mark.parallel
+@pytest.mark.gpu_1
 @pytest.mark.parametrize(
     "request_params",
     [
@@ -102,17 +102,14 @@ def extract_params(param_map) -> dict:
     ],
     ids=["no_params", "numeric_param", "mixed_params"],
 )
-def test_request_parameters(
-    file_storage_backend, start_services_with_echo_tensor_worker, request_params
-):
+def test_request_parameters(file_storage_backend, start_services, request_params):
     """Test gRPC request-level parameters are echoed through tensor models.
 
     The worker acts as an identity function: echoes input tensors unchanged and
     returns all request parameters plus a "processed" flag to verify the complete
     parameter flow through the gRPC frontend.
     """
-    frontend_port = start_services_with_echo_tensor_worker
-    client = grpcclient.InferenceServerClient(f"localhost:{frontend_port}")
+    client = grpcclient.InferenceServerClient("localhost:8000")
 
     input_data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
     inputs = [grpcclient.InferInput("INPUT", input_data.shape, "FP32")]
@@ -121,7 +118,6 @@ def test_request_parameters(
     response = client.infer("echo", inputs=inputs, parameters=request_params)
 
     output_data = response.as_numpy("INPUT")
-    assert output_data is not None, "Expected response to include output tensor 'INPUT'"
     assert np.array_equal(input_data, output_data)
 
     response_msg = response.get_response()

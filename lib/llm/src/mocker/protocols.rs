@@ -120,10 +120,6 @@ pub struct MockEngineArgs {
     #[serde(skip)]
     #[builder(default = "Arc::new(PerfModel::default())")]
     pub perf_model: Arc<PerfModel>,
-
-    /// Enable worker-local KV indexer for tracking this worker's own KV cache state
-    #[builder(default = "false")]
-    pub enable_local_indexer: bool,
 }
 
 impl Default for MockEngineArgs {
@@ -162,7 +158,6 @@ impl MockEngineArgs {
             "is_prefill",
             "is_decode",
             "planner_profile_data",
-            "enable_local_indexer",
         ]
         .iter()
         .cloned()
@@ -242,12 +237,6 @@ impl MockEngineArgs {
             && let Some(num) = value.as_f64()
         {
             builder = builder.startup_time(Some(num));
-        }
-
-        if let Some(value) = extra_args.get("enable_local_indexer")
-            && let Some(enabled) = value.as_bool()
-        {
-            builder = builder.enable_local_indexer(enabled);
         }
 
         // Parse worker type from is_prefill and is_decode flags

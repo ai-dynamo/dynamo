@@ -36,8 +36,8 @@ async def distributed_runtime():
     runtime.shutdown()
 
 
-@pytest.mark.timeout(5)  # Expected: ~1s, timeout set to 5x for safety
-def test_radix_tree_binding():
+@pytest.mark.asyncio
+async def test_radix_tree_binding(distributed_runtime):
     """Test RadixTree binding directly with store event and find matches"""
     import json
 
@@ -102,12 +102,13 @@ def test_radix_tree_binding():
     )
 
 
-@pytest.mark.timeout(5)  # Expected: ~1s, timeout set to 5x for safety
+@pytest.mark.asyncio
 @pytest.mark.parametrize("num_threads", [2, 3, 5, 128])
 @pytest.mark.parametrize("prepopulate_worker_ids", [True, False])
 @pytest.mark.parametrize("expiration_duration_secs", [None])
 @pytest.mark.parametrize("is_threaded", [True, False])
-def test_radix_tree_thread_safety(
+async def test_radix_tree_thread_safety(
+    distributed_runtime,
     num_threads,
     prepopulate_worker_ids,
     expiration_duration_secs,
@@ -204,7 +205,6 @@ def test_radix_tree_thread_safety(
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(5)  # Expected: ~1s, timeout set to 5x for safety
 async def test_event_handler(distributed_runtime):
     kv_block_size = 32
     namespace = "kv_test"
@@ -247,7 +247,6 @@ async def test_event_handler(distributed_runtime):
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(5)  # Expected: ~1s, timeout set to 5x for safety
 async def test_approx_kv_indexer(distributed_runtime):
     """Test ApproxKvIndexer with TTL-based block tracking"""
     kv_block_size = 32

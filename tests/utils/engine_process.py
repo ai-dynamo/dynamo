@@ -10,15 +10,12 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from tests.utils.constants import DefaultPort
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import BasePayload, check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_PORT = (
-    DefaultPort.FRONTEND.value
-)  # Do NOT use this in tests! Use allocate_port() instead.
+FRONTEND_PORT = 8000
 
 
 class EngineResponseError(Exception):
@@ -46,7 +43,7 @@ class EngineConfig:
     script_name: Optional[str] = None
     command: Optional[List[str]] = None
     script_args: Optional[List[str]] = None
-    frontend_port: int = DefaultPort.FRONTEND.value
+    models_port: int = 8000
     timeout: int = 600
     delayed_start: int = 0
     env: Dict[str, str] = field(default_factory=dict)
@@ -177,12 +174,9 @@ class EngineProcess(ManagedProcess):
             working_dir=config.directory,
             health_check_ports=[],
             health_check_urls=[
+                (f"http://localhost:{config.models_port}/v1/models", check_models_api),
                 (
-                    f"http://localhost:{config.frontend_port}/v1/models",
-                    check_models_api,
-                ),
-                (
-                    f"http://localhost:{config.frontend_port}/health",
+                    f"http://localhost:{config.models_port}/health",
                     check_health_generate,
                 ),
             ],

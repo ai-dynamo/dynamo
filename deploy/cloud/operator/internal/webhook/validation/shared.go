@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 // SharedSpecValidator validates DynamoComponentDeploymentSharedSpec fields.
@@ -42,45 +41,61 @@ func NewSharedSpecValidator(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSha
 }
 
 // Validate performs validation on the shared spec fields.
-// Returns warnings (e.g., deprecation notices) and error if validation fails.
-func (v *SharedSpecValidator) Validate() (admission.Warnings, error) {
+// Returns an error if validation fails.
+func (v *SharedSpecValidator) Validate() error {
 	// Validate replicas if specified
 	if v.spec.Replicas != nil && *v.spec.Replicas < 0 {
-		return nil, fmt.Errorf("%s.replicas must be non-negative", v.fieldPath)
+		return fmt.Errorf("%s.replicas must be non-negative", v.fieldPath)
+	}
+
+	// Validate autoscaling configuration if specified
+	if v.spec.Autoscaling != nil {
+		if err := v.validateAutoscaling(); err != nil {
+			return err
+		}
 	}
 
 	// Validate ingress configuration if enabled
 	if v.spec.Ingress != nil && v.spec.Ingress.Enabled {
 		if err := v.validateIngress(); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	// Validate volume mounts
 	if err := v.validateVolumeMounts(); err != nil {
-		return nil, err
+		return err
 	}
 
 	// Validate shared memory
 	if v.spec.SharedMemory != nil {
 		if err := v.validateSharedMemory(); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	// Collect warnings (e.g., deprecation notices)
-	var warnings admission.Warnings
+	return nil
+}
 
-	// Check for deprecated autoscaling field
-	//nolint:staticcheck // SA1019: Intentionally checking deprecated field to warn users
-	if v.spec.Autoscaling != nil {
-		warnings = append(warnings, fmt.Sprintf(
-			"%s.autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter "+
-				"with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md",
-			v.fieldPath))
+// validateAutoscaling validates the autoscaling configuration.
+func (v *SharedSpecValidator) validateAutoscaling() error {
+	autoscaling := v.spec.Autoscaling
+
+	if !autoscaling.Enabled {
+		return nil
 	}
 
-	return warnings, nil
+	// Validate minReplicas
+	if autoscaling.MinReplicas < 1 {
+		return fmt.Errorf("%s.autoscaling.minReplicas must be >= 1", v.fieldPath)
+	}
+
+	// Validate maxReplicas
+	if autoscaling.MaxReplicas <= autoscaling.MinReplicas {
+		return fmt.Errorf("%s.autoscaling.maxReplicas must be > minReplicas", v.fieldPath)
+	}
+
+	return nil
 }
 
 // validateIngress validates the ingress configuration.

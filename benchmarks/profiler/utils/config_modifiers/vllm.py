@@ -123,8 +123,7 @@ class VllmV1ConfigModifier:
             args = break_arguments(args)
 
             # remove --is-prefill-worker flag
-            if "--is-prefill-worker" in args:
-                args.remove("--is-prefill-worker")
+            args.remove("--is-prefill-worker")
 
             # disable prefix caching
             if "--enable-prefix-caching" in args:

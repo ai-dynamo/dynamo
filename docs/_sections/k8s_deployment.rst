@@ -10,4 +10,3 @@ Deployment Guide
    Webhooks <../kubernetes/webhooks>
    Minikube Setup <../kubernetes/deployment/minikube>
    Managing Models with DynamoModel <../kubernetes/deployment/dynamomodel-guide>
-   Autoscaling <../kubernetes/autoscaling>

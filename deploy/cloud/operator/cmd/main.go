@@ -201,26 +201,29 @@ func main() {
 		"Interval for renewing namespace scope marker lease (namespace-restricted mode only)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
-	flag.StringVar(&discoveryBackend, "discovery-backend", "kubernetes",
-		"Discovery backend to use: 'kubernetes' (default, uses Kubernetes API) or 'etcd' (uses ETCD)")
+	flag.StringVar(&discoveryBackend, "discovery-backend", "",
+		"Discovery backend to use: empty string (default, uses ETCD) or 'kubernetes' (uses Kubernetes API)")
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	if restrictedNamespace == "" && plannerClusterRoleName == "" {
 		setupLog.Error(nil, "planner-cluster-role-name is required in cluster-wide mode")
 		os.Exit(1)
 	}
 
-	// Validate discoveryBackend value
-	if discoveryBackend != "kubernetes" && discoveryBackend != "etcd" {
-		setupLog.Error(nil, "invalid discovery-backend value, must be 'kubernetes' or 'etcd'", "value", discoveryBackend)
+	// Validate discoverBackend value
+	if discoveryBackend != "" && discoveryBackend != "kubernetes" {
+		setupLog.Error(nil, "invalid discover-backend value, must be empty string or 'kubernetes'", "value", discoveryBackend)
 		os.Exit(1)
 	}
-	setupLog.Info("Discovery backend configured", "backend", discoveryBackend)
+	if discoveryBackend != "" {
+		setupLog.Info("Discovery backend configured", "backend", discoveryBackend)
+	} else {
+		setupLog.Info("Discovery backend configured", "backend", "etcd (default)")
+	}
 
 	// Validate modelExpressURL if provided
 	if modelExpressURL != "" {
@@ -274,6 +277,7 @@ func main() {
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -571,16 +575,6 @@ func main() {
 		RBACManager:           rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeployment")
-		os.Exit(1)
-	}
-
-	if err = (&controller.DynamoGraphDeploymentScalingAdapterReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("dgdscalingadapter"),
-		Config:   ctrlConfig,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DGDScalingAdapter")
 		os.Exit(1)
 	}
 

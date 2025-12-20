@@ -165,7 +165,6 @@ async def client(runtime, namespace):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 async def test_client_context_cancel(temp_file_store, server, client):
     _, handler = server
     context = Context()
@@ -199,7 +198,6 @@ async def test_client_context_cancel(temp_file_store, server, client):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 async def test_client_loop_break(temp_file_store, server, client):
     _, handler = server
     stream = await client.generate("_generate_until_context_cancelled")
@@ -232,7 +230,6 @@ async def test_client_loop_break(temp_file_store, server, client):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 async def test_server_context_cancel(temp_file_store, server, client):
     _, handler = server
     stream = await client.generate("_generate_and_cancel_context")
@@ -257,7 +254,6 @@ async def test_server_context_cancel(temp_file_store, server, client):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 async def test_server_raise_cancelled(temp_file_store, server, client):
     _, handler = server
     stream = await client.generate("_generate_and_raise_cancelled")
@@ -286,7 +282,6 @@ async def test_server_raise_cancelled(temp_file_store, server, client):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 async def test_client_context_already_cancelled(temp_file_store, server, client):
     _, handler = server
     context = Context()
@@ -309,7 +304,6 @@ async def test_client_context_already_cancelled(temp_file_store, server, client)
 
 @pytest.mark.forked
 @pytest.mark.asyncio
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 async def test_client_context_cancel_before_await_request(
     temp_file_store, server, client
 ):

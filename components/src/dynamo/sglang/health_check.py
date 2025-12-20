@@ -53,9 +53,7 @@ class SglangHealthCheckPayload(HealthCheckPayload):
     Provides SGLang defaults and inherits environment override support from base class.
     """
 
-    def __init__(
-        self, engine: Optional[sgl.Engine] = None, use_text_input: bool = False
-    ) -> None:
+    def __init__(self, engine: Optional[sgl.Engine] = None) -> None:
         """Initialize SGLang health check payload with model-specific BOS token.
 
         Args:
@@ -64,6 +62,7 @@ class SglangHealthCheckPayload(HealthCheckPayload):
         bos_token_id = _get_bos_token_id_from_engine(engine)
 
         self.default_payload = {
+            "token_ids": [bos_token_id],
             "stop_conditions": {
                 "max_tokens": 1,  # Generate only 1 token
                 "ignore_eos": False,
@@ -76,12 +75,6 @@ class SglangHealthCheckPayload(HealthCheckPayload):
             "eos_token_ids": [],
             "annotations": [],
         }
-
-        if use_text_input:
-            self.default_payload["prompt"] = "Test"
-        else:
-            self.default_payload["token_ids"] = [bos_token_id]
-
         super().__init__()
 
 
@@ -91,9 +84,7 @@ class SglangPrefillHealthCheckPayload(HealthCheckPayload):
     The prefill handler expects a wrapped structure with 'request' and 'sampling_params'.
     """
 
-    def __init__(
-        self, engine: Optional[sgl.Engine] = None, use_text_input: bool = False
-    ) -> None:
+    def __init__(self, engine: Optional[sgl.Engine] = None) -> None:
         """Initialize SGLang prefill health check payload with proper wrapped structure.
 
         Args:
@@ -102,7 +93,9 @@ class SglangPrefillHealthCheckPayload(HealthCheckPayload):
         bos_token_id = _get_bos_token_id_from_engine(engine)
 
         self.default_payload = {
-            "request": {},
+            "request": {
+                "token_ids": [bos_token_id],
+            },
             "sampling_params": {
                 "max_new_tokens": 1,  # Generate only 1 token
                 "temperature": 0.0,
@@ -111,10 +104,4 @@ class SglangPrefillHealthCheckPayload(HealthCheckPayload):
                 "ignore_eos": False,
             },
         }
-
-        if use_text_input:
-            self.default_payload["request"]["prompt"] = "Test"  # type: ignore
-        else:
-            self.default_payload["request"]["token_ids"] = [bos_token_id]  # type: ignore
-
         super().__init__()

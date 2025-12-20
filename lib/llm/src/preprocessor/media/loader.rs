@@ -104,11 +104,11 @@ impl MediaLoader {
     pub async fn fetch_and_decode_media_part(
         &self,
         oai_content_part: &ChatCompletionRequestUserMessageContentPart,
-        media_io_kwargs: Option<&MediaDecoder>,
+        // TODO: request-level options
     ) -> Result<RdmaMediaDataDescriptor> {
         #[cfg(not(feature = "media-nixl"))]
         anyhow::bail!(
-            "NIXL is not supported, cannot decode and register media data {oai_content_part:?} with media_io_kwargs {media_io_kwargs:?}"
+            "NIXL is not supported, cannot decode and register media data {oai_content_part:?}"
         );
 
         #[cfg(feature = "media-nixl")]
@@ -116,41 +116,16 @@ impl MediaLoader {
             // fetch the media, decode and NIXL-register
             let decoded = match oai_content_part {
                 ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
-                    let mdc_decoder =
-                        self.media_decoder.image.as_ref().ok_or_else(|| {
-                            anyhow::anyhow!("Model does not support image inputs")
-                        })?;
-
                     let url = &image_part.image_url.url;
                     self.check_if_url_allowed(url)?;
                     let data = EncodedMediaData::from_url(url, &self.http_client).await?;
-
-                    // Use runtime decoder if provided, with MDC limits enforced
-                    let decoder =
-                        mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.image.as_ref()));
-                    decoder.decode_async(data).await?
+                    self.media_decoder.image_decoder.decode_async(data).await?
                 }
                 ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
-                    #[cfg(not(feature = "media-ffmpeg"))]
-                    anyhow::bail!(
-                        "Video decoding requires the 'media-ffmpeg' feature to be enabled"
-                    );
-
-                    #[cfg(feature = "media-ffmpeg")]
-                    {
-                        let mdc_decoder = self.media_decoder.video.as_ref().ok_or_else(|| {
-                            anyhow::anyhow!("Model does not support video inputs")
-                        })?;
-
-                        let url = &video_part.video_url.url;
-                        self.check_if_url_allowed(url)?;
-                        let data = EncodedMediaData::from_url(url, &self.http_client).await?;
-
-                        // Use runtime decoder if provided, with MDC limits enforced
-                        let decoder = mdc_decoder
-                            .with_runtime(media_io_kwargs.and_then(|k| k.video.as_ref()));
-                        decoder.decode_async(data).await?
-                    }
+                    let url = &video_part.video_url.url;
+                    self.check_if_url_allowed(url)?;
+                    EncodedMediaData::from_url(url, &self.http_client).await?;
+                    anyhow::bail!("Video decoding is not supported yet");
                 }
                 ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
                     anyhow::bail!("Audio decoding is not supported yet");
@@ -166,7 +141,6 @@ impl MediaLoader {
 
 #[cfg(all(test, feature = "media-nixl"))]
 mod tests {
-    use super::super::decoders::ImageDecoder;
     use super::super::rdma::DataType;
     use super::*;
     use dynamo_async_openai::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
@@ -185,27 +159,21 @@ mod tests {
             .create_async()
             .await;
 
-        let media_decoder = MediaDecoder {
-            image: Some(ImageDecoder::default()),
-            #[cfg(feature = "media-ffmpeg")]
-            video: None,
-        };
+        let media_decoder = MediaDecoder::default();
         let fetcher = MediaFetcher {
             allow_direct_ip: true,
             allow_direct_port: true,
             ..Default::default()
         };
 
-        let loader: MediaLoader = MediaLoader::new(media_decoder, Some(fetcher)).unwrap();
+        let loader: MediaLoader = MediaLoader::new(media_decoder, fetcher).unwrap();
 
         let image_url = ImageUrl::from(format!("{}/llm-optimize-deploy-graphic.png", server.url()));
         let content_part = ChatCompletionRequestUserMessageContentPart::ImageUrl(
             ChatCompletionRequestMessageContentPartImage { image_url },
         );
 
-        let result = loader
-            .fetch_and_decode_media_part(&content_part, None)
-            .await;
+        let result = loader.fetch_and_decode_media_part(&content_part).await;
 
         let descriptor = match result {
             Ok(descriptor) => descriptor,

@@ -192,7 +192,6 @@ def client(
     max_retries,
     max_request_rate,
     retry_delay=1,
-    continuous_load=False,
 ):
     """Legacy custom client for fault tolerance testing.
 
@@ -212,11 +211,7 @@ def client(
         max_retries: Maximum retry attempts per request
         max_request_rate: Maximum requests per second (for rate limiting)
         retry_delay: Delay in seconds between retries
-        continuous_load: If True, use continuous load instead of fixed request count
     """
-    if continuous_load:
-        raise ValueError("Continuous load is not supported for legacy client")
-
     logger = logging.getLogger(f"CLIENT: {index}")
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -233,7 +228,7 @@ def client(
             for i in range(requests_per_client):
                 # Get available pods
                 pods = managed_deployment.get_pods(
-                    [managed_deployment.frontend_service_name]
+                    managed_deployment.frontend_service_name
                 )
                 port = 0
                 pod_name = None

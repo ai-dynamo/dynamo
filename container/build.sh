@@ -119,8 +119,8 @@ SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 SGLANG_FRAMEWORK_IMAGE="nvcr.io/nvidia/cuda"
 SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
 
-NIXL_REF=0.7.1
-NIXL_UCX_REF=v1.19.0
+NIXL_REF=${NIXL_REF:-0.7.1}
+NIXL_UCX_REF=${NIXL_UCX_REF:-v1.19.0}
 NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
 NO_CACHE=""
@@ -129,6 +129,7 @@ NO_CACHE=""
 USE_SCCACHE=""
 SCCACHE_BUCKET=""
 SCCACHE_REGION=""
+SCCACHE_S3_ENDPOINT=""
 
 get_options() {
     while :; do
@@ -320,6 +321,14 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
+        --sccache-endpoint)
+            if [ "$2" ]; then
+                SCCACHE_S3_ENDPOINT=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
         --vllm-max-jobs)
             # Set MAX_JOBS for vLLM compilation (only used by Dockerfile.vllm)
             if [ "$2" ]; then
@@ -438,6 +447,9 @@ show_image_options() {
         echo "   sccache Bucket: '${SCCACHE_BUCKET}'"
         echo "   sccache Region: '${SCCACHE_REGION}'"
 
+        if [ -n "$SCCACHE_S3_ENDPOINT" ]; then
+            echo "   sccache S3 Endpoint: '${SCCACHE_S3_ENDPOINT}'"
+        fi
         if [ -n "$SCCACHE_S3_KEY_PREFIX" ]; then
             echo "   sccache S3 Key Prefix: '${SCCACHE_S3_KEY_PREFIX}'"
         fi
@@ -472,12 +484,20 @@ show_help() {
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
+    echo "  [--sccache-endpoint S3 endpoint URL for sccache (e.g., http://localhost:9000)]"
     echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
     echo "  [--no-tag-latest do not add latest-{framework} tag to built image]"
     echo ""
-    echo "  Note: When using --use-sccache, AWS credentials must be set:"
+    echo "  Note: When using --use-sccache, AWS/MinIO credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
     echo "        export AWS_SECRET_ACCESS_KEY=your_secret_key"
+    echo ""
+    echo "  Example with MinIO:"
+    echo "        export AWS_ACCESS_KEY_ID=minioadmin"
+    echo "        export AWS_SECRET_ACCESS_KEY=minioadmin"
+    echo "        ./build.sh --use-sccache --sccache-bucket mybucket \\"
+    echo "                   --sccache-region us-east-1 \\"
+    echo "                   --sccache-endpoint http://localhost:9000"
     exit 0
 }
 
@@ -836,6 +856,9 @@ if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --build-arg USE_SCCACHE=true"
     BUILD_ARGS+=" --build-arg SCCACHE_BUCKET=${SCCACHE_BUCKET}"
     BUILD_ARGS+=" --build-arg SCCACHE_REGION=${SCCACHE_REGION}"
+    if [ -n "$SCCACHE_S3_ENDPOINT" ]; then
+        BUILD_ARGS+=" --build-arg SCCACHE_S3_ENDPOINT=${SCCACHE_S3_ENDPOINT}"
+    fi
     BUILD_ARGS+=" --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID"
     BUILD_ARGS+=" --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY"
 fi
@@ -882,10 +905,10 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         # Use BuildKit for enhanced metadata
         if [ -z "$RUN_PREFIX" ]; then
             if docker buildx version &>/dev/null; then
-                docker buildx build --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                docker buildx build --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
                 BUILD_EXIT_CODE=${PIPESTATUS[0]}
             else
-                DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
                 BUILD_EXIT_CODE=${PIPESTATUS[0]}
             fi
 
@@ -893,7 +916,7 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
                 exit ${BUILD_EXIT_CODE}
             fi
         else
-            $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+            $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
         fi
 
         # Start framework build

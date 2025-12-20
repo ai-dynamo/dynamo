@@ -33,6 +33,9 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-8B
+            - --gpu-memory-utilization
+            - "0.3"
+            - --disable-log-requests
             - --max-model-len
             - "32000"
             - --enforce-eager
@@ -63,6 +66,9 @@ spec:
             - --model
             - Qwen/Qwen3-8B
             - --is-prefill-worker
+            - --gpu-memory-utilization
+            - "0.3"
+            - --disable-log-requests
             - --max-model-len
             - "32000"
             - --enforce-eager

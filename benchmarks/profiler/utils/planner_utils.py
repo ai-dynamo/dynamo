@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import argparse
-from typing import Any
 
 from dynamo.planner.utils.planner_argparse import create_sla_planner_parser
 
@@ -80,48 +79,19 @@ def _build_action_kwargs(
     return kwargs
 
 
-def _get_planner_defaults() -> dict[str, Any]:
-    """
-    Get default values for all planner arguments from the planner parser.
-
-    Returns:
-        Dictionary mapping argument names (with dashes) to their default values
-    """
-    planner_parser = create_sla_planner_parser()
-    defaults = {}
-    for action in planner_parser._actions:
-        if action.dest == "help" or not action.option_strings:
-            continue
-        # Convert dest (underscores) to arg name (dashes)
-        arg_name = action.dest.replace("_", "-")
-        defaults[arg_name] = action.default
-    return defaults
-
-
-def _format_arg_for_command_line(
-    arg_name: str, value, defaults: dict[str, Any] | None = None
-) -> list[str]:
+def _format_arg_for_command_line(arg_name: str, value) -> list[str]:
     """
     Format an argument name and value for command line usage.
 
     Args:
         arg_name: The argument name (without dashes)
         value: The argument value
-        defaults: Optional dict of default values. If provided and value matches
-                  the default, the arg is skipped (allows operator env vars to take effect)
 
     Returns:
         List of command-line argument strings (empty list if value is None or False bool)
     """
     if value is None:
         return []
-
-    # Skip args that match their default values
-    # This allows the operator's injected env vars to take effect
-    # (e.g., PLANNER_PROMETHEUS_PORT=9085 won't be overridden by --prometheus-port=0)
-    if defaults is not None and arg_name in defaults:
-        if value == defaults[arg_name]:
-            return []
 
     if isinstance(value, bool):
         # For boolean flags, only add if True
@@ -134,10 +104,7 @@ def _format_arg_for_command_line(
 
 
 def _collect_args_from_namespace(
-    args: argparse.Namespace,
-    arg_names: list[str],
-    prefix_to_strip: str = "",
-    defaults: dict[str, Any] | None = None,
+    args: argparse.Namespace, arg_names: list[str], prefix_to_strip: str = ""
 ) -> list[str]:
     """
     Collect and format command-line arguments from a namespace for given attribute names.
@@ -146,7 +113,6 @@ def _collect_args_from_namespace(
         args: The argparse Namespace containing parsed arguments
         arg_names: List of attribute names to collect from the namespace
         prefix_to_strip: Optional prefix to remove from attribute names before formatting
-        defaults: Optional dict of default values. Args matching defaults are skipped.
 
     Returns:
         List of formatted command-line argument strings
@@ -159,7 +125,7 @@ def _collect_args_from_namespace(
             arg_name = attr_name[len(prefix_to_strip) :].replace("_", "-")
         else:
             arg_name = attr_name.replace("_", "-")
-        result.extend(_format_arg_for_command_line(arg_name, value, defaults))
+        result.extend(_format_arg_for_command_line(arg_name, value))
     return result
 
 
@@ -216,9 +182,6 @@ def build_planner_args_from_namespace(
     Automatically detects shared arguments between profile_sla and planner,
     and uses profile_sla values for those.
 
-    Args that match their default values are skipped, allowing the operator's
-    injected environment variables to take effect (e.g., PLANNER_PROMETHEUS_PORT).
-
     Args:
         args: Parsed arguments namespace
         prefix: Prefix used for planner arguments
@@ -227,10 +190,6 @@ def build_planner_args_from_namespace(
         List of planner command-line arguments
     """
     planner_args = []
-
-    # Get default values to skip args that match defaults
-    # This allows operator-injected env vars to take effect
-    defaults = _get_planner_defaults()
 
     # Auto-detect shared arguments by comparing planner parser with args namespace
     planner_parser = create_sla_planner_parser()
@@ -245,16 +204,12 @@ def build_planner_args_from_namespace(
     shared_arg_dests = {dest for dest in planner_arg_dests if hasattr(args, dest)}
 
     # Add shared arguments from profile_sla (without prefix)
-    planner_args.extend(
-        _collect_args_from_namespace(args, list(shared_arg_dests), defaults=defaults)
-    )
+    planner_args.extend(_collect_args_from_namespace(args, list(shared_arg_dests)))
 
     # Get all planner-prefixed attributes from args (planner-specific only)
     prefixed_attrs = [attr for attr in dir(args) if attr.startswith(prefix)]
     planner_args.extend(
-        _collect_args_from_namespace(
-            args, prefixed_attrs, prefix_to_strip=prefix, defaults=defaults
-        )
+        _collect_args_from_namespace(args, prefixed_attrs, prefix_to_strip=prefix)
     )
 
     return planner_args

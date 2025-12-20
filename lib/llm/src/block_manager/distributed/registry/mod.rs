@@ -119,7 +119,6 @@ pub mod client;
 pub mod config;
 pub mod external;
 pub mod hub;
-pub mod key_builder;
 pub mod object_registry;
 pub mod protocol;
 pub(crate) mod storage;
@@ -145,9 +144,6 @@ pub use external::{ExternalRegistry, RegistryKey, SequenceHashRegistry, SharedEx
 
 // Re-export ObjectRegistry
 pub use object_registry::ObjectRegistry;
-
-// Re-export key builder
-pub use key_builder::RemoteKeyBuilder;
 
 use std::sync::Arc;
 

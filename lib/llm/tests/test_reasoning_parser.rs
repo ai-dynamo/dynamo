@@ -24,7 +24,6 @@ fn create_mock_response_chunk(
             reasoning_content,
         },
         finish_reason: None,
-        stop_reason: None,
         logprobs: None,
     };
 
@@ -485,9 +484,7 @@ mod tests {
 
         // Step 2: Apply tool calling jail transformation
         let tool_parsed_stream = OpenAIPreprocessor::apply_tool_calling_jail(
-            Some("nemotron_deci".to_string()),
-            None, // No tool_choice in this test
-            None, // No tool_definitions in this test
+            "nemotron_deci".to_string(),
             reasoning_parsed_stream,
         );
 
@@ -599,9 +596,7 @@ mod tests {
         let reasoning_parsed_stream = stream::iter(debug_chunks);
 
         let tool_parsed_stream = OpenAIPreprocessor::apply_tool_calling_jail(
-            Some("harmony".to_string()),
-            None, // No tool_choice in this test
-            None, // No tool_definitions in this test
+            "harmony".to_string(),
             reasoning_parsed_stream,
         );
 

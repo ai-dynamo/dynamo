@@ -15,7 +15,7 @@ import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.inputs.data import TokensPrompt
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
 
 import dynamo.nixl_connect as connect
@@ -142,7 +142,7 @@ class VllmBaseWorker:
             vllm_config=vllm_config,
             usage_context=usage_context,
             stat_loggers=[self.stats_logger],
-            enable_log_requests=self.engine_args.enable_log_requests,
+            disable_log_requests=self.engine_args.disable_log_requests,
             disable_log_stats=self.engine_args.disable_log_stats,
         )
 
@@ -251,6 +251,7 @@ class VllmPDWorker(VllmBaseWorker):
         # We'll needs this to move data between this worker and remote workers efficiently.
         parsed_namespace, _, _ = parse_endpoint(self.endpoint)
         self._connector = connect.Connector()
+        await self._connector.initialize()
 
         self.image_loader = ImageLoader()
 

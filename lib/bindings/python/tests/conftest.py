@@ -402,34 +402,8 @@ def temp_file_store():
         yield tmpdir
 
 
-@pytest.fixture
-def store_kv(request):
-    """
-    KV store for runtime. Defaults to "file".
-
-    To iterate over multiple stores in a test:
-        @pytest.mark.parametrize("store_kv", ["file", "etcd"], indirect=True)
-        async def test_example(runtime):
-            ...
-    """
-    return getattr(request, "param", "file")
-
-
-@pytest.fixture
-def request_plane(request):
-    """
-    Request plane for runtime. Defaults to "nats".
-
-    To iterate over multiple transports in a test:
-        @pytest.mark.parametrize("request_plane", ["tcp", "nats"], indirect=True)
-        async def test_example(runtime):
-            ...
-    """
-    return getattr(request, "param", "nats")
-
-
 @pytest.fixture(scope="function", autouse=False)
-async def runtime(request, store_kv, request_plane):
+async def runtime(request):
     """
     Create a DistributedRuntime for testing.
 
@@ -439,14 +413,6 @@ async def runtime(request, store_kv, request_plane):
 
     Without @pytest.mark.forked in isolated mode, you will get "Worker already initialized"
     errors when multiple tests try to create runtimes in the same process.
-
-    The store_kv and request_plane can be customized by overriding their fixtures
-    or using @pytest.mark.parametrize with indirect=True:
-
-        @pytest.mark.forked
-        @pytest.mark.parametrize("store_kv", ["etcd"], indirect=True)
-        async def test_with_etcd(runtime):
-            ...
     """
     # Check if the test is marked with @pytest.mark.forked (only in isolated mode)
     if ENABLE_ISOLATED_ETCD_AND_NATS:
@@ -469,6 +435,6 @@ This is required because DistributedRuntime is a process-level singleton.
             )
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, store_kv, request_plane)
+    runtime = DistributedRuntime(loop, "file", "nats")
     yield runtime
     runtime.shutdown()
