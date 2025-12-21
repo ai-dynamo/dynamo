@@ -94,8 +94,8 @@ jobs:
       id: route-buildkit-workers
       shell: bash
       run: |
-        ./scripts/route_buildkit.sh --amd
-        ./scripts/route_buildkit.sh --arm
+        .github/scripts/route_buildkit.sh --amd
+        .github/scripts/route_buildkit.sh --arm
     outputs:
       vllm_amd64: ${{ steps.route-buildkit-workers.outputs.vllm_amd64 }}
       vllm_arm64: ${{ steps.route-buildkit-workers.outputs.vllm_arm64 }}
@@ -117,11 +117,11 @@ jobs:
     name: vllm (${{ matrix.platform.arch }})
     runs-on: builder-cpu-amd-runner
     steps:
-      - name: Output Node Name
+      - name: define buildkit builders
         shell: bash
         run: |
           echo ${{ needs.detect-buildkit-workers.outputs[format('vllm_{0}', matrix.platform.arch)] }}
-          # docker buildx create --use --name ${{ env.BUILDER_NAME }} --driver remote ${{ needs.detect-buildkit-workers.outputs[format('vllm_{0}', matrix.platform.arch)] }}
+          #docker buildx create --use --name ${{ env.BUILDER_NAME }} --driver remote ${{ needs.detect-buildkit-workers.outputs[format('vllm_{0}', matrix.platform.arch)] }}
       # - name: Checkout code
       #   uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
       #   with:
