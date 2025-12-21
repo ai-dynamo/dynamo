@@ -89,10 +89,6 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
 
-    - name: debuggin
-      shell: bash
-      run: |
-        sleep 3600
 
     - name: Route Buildkit Workers
       id: route-buildkit-workers
@@ -125,6 +121,7 @@ jobs:
         shell: bash
         run: |
           echo ${{ needs.detect-buildkit-workers.outputs[format('vllm_{0}', matrix.platform.arch)] }}
+          # docker buildx create --use --name ${{ env.BUILDER_NAME }} --driver remote ${{ needs.detect-buildkit-workers.outputs[format('vllm_{0}', matrix.platform.arch)] }}
       # - name: Checkout code
       #   uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
       #   with:
