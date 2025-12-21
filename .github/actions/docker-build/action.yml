@@ -52,17 +52,7 @@ inputs:
   dynamo_base_image:
     description: 'Pre-built Dynamo base image to use instead of building from scratch'
     required: false
-  multi_arch_build:
-    description: 'Enable multi-arch build'
-    required: false
-    default: 'false'
-  multi_arch_push:
-    description: 'Push multi-arch build to registry'
-    required: false
-    default: 'false'
-  use_ci_registry:
-    description: 'Use CI registry instead of default registry'
-    required: false
+
 outputs:
   image_tag:
     description: 'Image Tag'
@@ -71,24 +61,23 @@ outputs:
 runs:
   using: "composite"
   steps:
-    # - name: Set up Docker Buildx
-    #   uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
-    #   with:
-    #     driver: docker-container
-    #     # Enable BuildKit for enhanced metadata
-    #     buildkitd-flags: --debug
-    # - name: Cleanup
-    #   if: always()
-    #   shell: bash
-    #   run: |
-    #     docker system prune -af
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
+      with:
+        driver: docker-container
+        # Enable BuildKit for enhanced metadata
+        buildkitd-flags: --debug
+    - name: Cleanup
+      if: always()
+      shell: bash
+      run: |
+        docker system prune -af
     - name: Build image
       id: build
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.ci_token }}
         AWS_DEFAULT_REGION: ${{ inputs.aws_default_region }}
-        MULTI_ARCH_BUILD: ${{ inputs.multi_arch_build }}
         SCCACHE_S3_BUCKET:  ${{ inputs.sccache_s3_bucket }}
         AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
@@ -121,17 +110,10 @@ runs:
         # Set base cache args and set --cache-to if this is a main commit
         EXTRA_ARGS=""
         EXTRA_ARGS="--cache-to type=inline "
-        if [ "$MULTI_ARCH_BUILD" = "true" ]; then
-          CACHE_PLATFORM="multi-arch"
-          EXTRA_ARGS+=" --multi-arch"
-        else
-          CACHE_PLATFORM="${PLATFORM##*/}"
-        fi
-        EXTRA_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${CACHE_PLATFORM}-cache "
-        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-${CACHE_PLATFORM} "
-
+        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache "
+        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-${PLATFORM##*/} "
         if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-          EXTRA_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${CACHE_PLATFORM}-cache,mode=max "
+          EXTRA_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache,mode=max "
         fi
 
         echo "$EXTRA_ARGS"
@@ -154,27 +136,14 @@ runs:
         if [ -n "${{ inputs.enable_kvbm }}" ]; then
           EXTRA_ARGS+=" --build-arg ENABLE_KVBM=${{ inputs.enable_kvbm }}"
         fi
-        if [ "$MULTI_ARCH_PUSH" = "true" ]; then
-          EXTRA_ARGS+=" --push"
-        else
-          #EXTRA_ARGS+=" --load"
-          EXTRA_ARGS+=" "
-        fi
-
-
-        if [ "${{ inputs.use_ci_registry }}" == "true" ]; then
-          REGISTRY="${ECR_HOSTNAME}"
-        else
-          REGISTRY="nvcr.io"
-        fi
 
         # Execute build and capture output (show on console AND save to file)
         ./container/build.sh --tag "$IMAGE_TAG" \
-          --registry $REGISTRY \
           --target ${{ inputs.target }} \
           --vllm-max-jobs 10 \
           --framework ${{ inputs.framework }} \
           --platform ${{ inputs.platform }} \
+          --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
           --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
 
@@ -195,8 +164,10 @@ runs:
 
     #     # Run the sanity check script inside the container
     #     # The script is located in /workspace/deploy/sanity_check.py in runtime containers
+    #     export WORKSPACE=/workspace
+
     #     set +e
-    #     docker run --rm "$IMAGE_TAG" python /workspace/deploy/sanity_check.py --runtime-check --no-gpu-check
+    #     docker run --rm "$IMAGE_TAG" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
     #     SANITY_CHECK_EXIT_CODE=$?
     #     set -e
     #     if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
@@ -346,4 +317,3 @@ runs:
     #     name: build-metrics-${{ inputs.framework }}-${{ inputs.target }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
     #     path: build-metrics/build-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
     #     retention-days: 7
-

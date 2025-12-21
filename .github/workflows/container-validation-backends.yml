@@ -120,39 +120,48 @@ jobs:
       - name: define buildkit builders
         shell: bash
         run: |
-          echo ${{ needs.detect-buildkit-workers.outputs[format('vllm_{0}', matrix.platform.arch)] }}
-          #docker buildx create --use --name ${{ env.BUILDER_NAME }} --driver remote ${{ needs.detect-buildkit-workers.outputs[format('vllm_{0}', matrix.platform.arch)] }}
-      # - name: Checkout code
-      #   uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
-      #   with:
-      #     lfs: true
-      #     ref: main
-      # - name: Docker Login
-      #   uses: ./.github/actions/docker-login
-      #   with:
-      #     ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      # - name: Build Container
-      #   id: build-image
-      #   uses: ./.github/actions/docker-build
-      #   with:
-      #     framework: vllm
-      #     target: runtime
-      #     platform: 'linux/${{ matrix.platform.arch }}'
-      #     base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
-      #     runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-      #     cuda_version: ${{ matrix.platform.arch == 'arm64' && '12.9' || '' }}
-      #     torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
-      #     ci_token: ${{ secrets.CI_TOKEN }}
-      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #     sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      #     aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      #     aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          ADDRS="${{ needs.detect-buildkit-workers.outputs[format('vllm_{0}', matrix.platform.arch)] }}"
+          IFS=',' read -ra ADDR_LIST <<< "$ADDRS"
+          FIRST=true
+          for addr in "${ADDR_LIST[@]}"; do
+            if $FIRST; then
+              docker buildx create --use --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
+              FIRST=false
+            else
+              docker buildx create --append --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
+            fi
+          done
+          docker buildx inspect --bootstrap
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
+        with:
+          lfs: true
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build Container
+        id: build-image
+        uses: ./.github/actions/docker-build
+        with:
+          framework: vllm
+          target: runtime
+          platform: 'linux/${{ matrix.platform.arch }}'
+          base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
+          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
+          cuda_version: ${{ matrix.platform.arch == 'arm64' && '12.9' || '' }}
+          torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
 
   # cleanup-cluster-builder:

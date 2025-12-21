@@ -107,22 +107,29 @@ VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
 VLLM_BASE_IMAGE_TAG="25.04-cuda12.9-devel-ubuntu24.04"
+VLLM_BASE_IMAGE_TAG_CU13="25.11-cuda13.0-devel-ubuntu24.04"
+VLLM_RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
+VLLM_RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
+VLLM_RUNTIME_IMAGE_TAG_CU13="13.0.2-runtime-ubuntu24.04"
 
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-SGLANG_CUDA_VERSION="12.9.1"
-# This is for Dockerfile
-SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
-# This is for Dockerfile.sglang. Unlike the other frameworks, it is using a different base image
-SGLANG_FRAMEWORK_IMAGE="nvcr.io/nvidia/cuda"
-SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
 
-NIXL_REF=0.7.1
-NIXL_UCX_REF=v1.19.0
-NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
+SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+SGLANG_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
+SGLANG_CUDA_VERSION="12.9.1"
+SGLANG_PYTHON_VERSION="3.10"
+
+PYTHON_VERSION="3.12"
+
+NIXL_REF=0.8.0
+NIXL_UCX_REF=v1.20.0-rc1
 NIXL_GDRCOPY_REF=v2.5.1
+NIXL_LIBFABRIC_REF=v2.3.0
+
+# AWS EFA installer version
+EFA_VERSION=1.45.1
 
 NO_CACHE=""
 
@@ -134,10 +141,6 @@ ENABLE_KVBM=false
 USE_SCCACHE=""
 SCCACHE_BUCKET=""
 SCCACHE_REGION=""
-
-# Multi-arch build configuration
-MULTI_ARCH=""
-PUSH_IMAGE=""
 
 get_options() {
     while :; do
@@ -157,6 +160,16 @@ get_options() {
         --framework)
             if [ "$2" ]; then
                 FRAMEWORK=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --cuda-version)
+            if [ "$2" ]; then
+                echo "INFO: Setting CUDA_VERSION to $2"
+                CUDA_VERSION=$2
+                BUILD_ARGS+=" --build-arg CUDA_VERSION=$2 "
                 shift
             else
                 missing_requirement "$1"
@@ -304,7 +317,7 @@ get_options() {
             ENABLE_MEDIA_FFMPEG=true
             ;;
         --make-efa)
-            NIXL_UCX_REF=$NIXL_UCX_EFA_REF
+            MAKE_EFA=true
             ;;
         --use-sccache)
             USE_SCCACHE=true
@@ -317,7 +330,6 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-
         --sccache-region)
             if [ "$2" ]; then
                 SCCACHE_REGION=$2
@@ -335,10 +347,9 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-        --registry)
-            # Override the default registry
+        --efa-version)
             if [ "$2" ]; then
-                REGISTRY=$2
+                EFA_VERSION=$2
                 shift
             else
                 missing_requirement "$1"
@@ -346,12 +357,6 @@ get_options() {
             ;;
         --no-tag-latest)
             NO_TAG_LATEST=true
-            ;;
-        --multi-arch)
-            MULTI_ARCH=true
-            ;;
-        --push)
-            PUSH_IMAGE=true
             ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
@@ -366,19 +371,10 @@ get_options() {
         shift
     done
 
-    # Handle registry override if specified
-    if [ -n "$REGISTRY" ]; then
-        TRTLLM_BASE_IMAGE="${TRTLLM_BASE_IMAGE/nvcr.io/$REGISTRY}"
-        VLLM_BASE_IMAGE="${VLLM_BASE_IMAGE/nvcr.io/$REGISTRY}"
-        NONE_BASE_IMAGE="${NONE_BASE_IMAGE/nvcr.io/$REGISTRY}"
-        SGLANG_BASE_IMAGE="${SGLANG_BASE_IMAGE/nvcr.io/$REGISTRY}"
-        SGLANG_FRAMEWORK_IMAGE="${SGLANG_FRAMEWORK_IMAGE/nvcr.io/$REGISTRY}"
-    fi
-
     # Validate that --uid and --gid are only used with local-dev target
     if [[ -n "${CUSTOM_UID:-}" || -n "${CUSTOM_GID:-}" ]]; then
-        if [[ "${TARGET:-}" != "local-dev" ]]; then
-            error "ERROR: --uid and --gid can only be used with --target local-dev"
+        if [[ "${TARGET:-}" != "local-dev" && "${TARGET:-}" != "local-dev-aws" ]]; then
+            error "ERROR: --uid and --gid can only be used with --target local-dev or --target local-dev-aws"
         fi
     fi
 
@@ -396,11 +392,20 @@ get_options() {
         if [ -z "$BASE_IMAGE_TAG" ]; then
             BASE_IMAGE_TAG=${FRAMEWORK}_BASE_IMAGE_TAG
             BASE_IMAGE_TAG=${!BASE_IMAGE_TAG}
+            echo "INFO: Using default base image tag for $FRAMEWORK: $BASE_IMAGE_TAG"
         fi
 
         if [ -z "$BASE_IMAGE" ]; then
             BASE_IMAGE=${FRAMEWORK}_BASE_IMAGE
             BASE_IMAGE=${!BASE_IMAGE}
+        fi
+
+        if [[ $FRAMEWORK == "VLLM" ]] && [[ $CUDA_VERSION == "13."* ]]; then
+            BASE_IMAGE_TAG=$VLLM_BASE_IMAGE_TAG_CU13
+            BUILD_ARGS+=" --build-arg BASE_IMAGE_TAG=${VLLM_BASE_IMAGE_TAG_CU13} "
+            RUNTIME_IMAGE_TAG=$VLLM_RUNTIME_IMAGE_TAG_CU13
+            BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${VLLM_RUNTIME_IMAGE_TAG_CU13} "
+            echo "INFO: Overriding base image tag for vLLM with CUDA 13: $BASE_IMAGE_TAG AND RUNTIME_IMAGE_TAG: $RUNTIME_IMAGE_TAG"
         fi
 
         if [ -z "$BASE_IMAGE" ]; then
@@ -438,15 +443,6 @@ get_options() {
             error "ERROR: --sccache-region is required when --use-sccache is specified"
         fi
     fi
-
-    # Handle multi-arch build configuration
-    if [ "$MULTI_ARCH" = true ]; then
-        PLATFORM="--platform linux/amd64,linux/arm64"
-        echo "INFO: Multi-arch build enabled, using platform: $PLATFORM"
-        if [ "$PUSH_IMAGE" != true ]; then
-            echo "WARNING: Multi-arch builds cannot use --load. Use --push to push to a registry."
-        fi
-    fi
 }
 
 
@@ -462,13 +458,6 @@ show_image_options() {
     echo "   Build Context: '${BUILD_CONTEXT}'"
     echo "   Build Arguments: '${BUILD_ARGS}'"
     echo "   Framework: '${FRAMEWORK}'"
-    echo "   Dockerfile: '${DOCKERFILE}'"
-    if [ "$MULTI_ARCH" = true ]; then
-        echo "   Multi-Arch: Enabled (linux/amd64,linux/arm64)"
-    fi
-    if [ "$PUSH_IMAGE" = true ]; then
-        echo "   Push: Enabled"
-    fi
     if [ "$USE_SCCACHE" = true ]; then
         echo "   sccache: Enabled"
         echo "   sccache Bucket: '${SCCACHE_BUCKET}'"
@@ -502,7 +491,7 @@ show_help() {
     echo "  [--dry-run print docker commands without running]"
     echo "  [--build-context name=path to add build context]"
     echo "  [--release-build perform a release build]"
-    echo "  [--make-efa Enables EFA support for NIXL]"
+    echo "  [--make-efa Adds AWS EFA layer on top of the built image (works with any target)]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
     echo "  [--enable-media-nixl Enable media processing with NIXL support (default: true for frameworks, false for none)]"
     echo "  [--enable-media-ffmpeg Enable media processing with FFMPEG support (default: true for frameworks, false for none)]"
@@ -510,10 +499,8 @@ show_help() {
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
     echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
+    echo "  [--efa-version AWS EFA installer version (default: 1.45.1)]"
     echo "  [--no-tag-latest do not add latest-{framework} tag to built image]"
-    echo "  [--multi-arch build for both amd64 and arm64 platforms (uses Dockerfile.*-multi)]"
-    echo "  [--push push the built image to a registry (required for multi-arch builds)]"
-    echo "  [--registry registry URL to replace nvcr.io in base images]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -533,9 +520,8 @@ error() {
 get_options "$@"
 
 # Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64
-# Skip for multi-arch builds as the -multi Dockerfiles use TARGETARCH
 ARCH="amd64"
-if [[ "$MULTI_ARCH" != "true" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
+if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     ARCH="arm64"
     BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
 fi
@@ -545,8 +531,7 @@ DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA:-$(git rev-parse HEAD)}
 BUILD_ARGS+=" --build-arg DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA "
 
 # Special handling for vLLM on ARM64 - set required defaults if not already specified by user
-# Skip for multi-arch builds as the -multi Dockerfiles handle this automatically
-if [[ $FRAMEWORK == "VLLM" ]] && [[ "$MULTI_ARCH" != "true" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
+if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     # Set base image tag to CUDA 12.9 if using the default value (user didn't override)
     if [ "$BASE_IMAGE_TAG" == "$VLLM_BASE_IMAGE_TAG" ]; then
         BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
@@ -558,45 +543,25 @@ if [[ $FRAMEWORK == "VLLM" ]] && [[ "$MULTI_ARCH" != "true" ]] && [[ "$PLATFORM"
         BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=12.9.0-runtime-ubuntu24.04 "
         echo "INFO: Automatically setting RUNTIME_IMAGE_TAG=12.9.0-runtime-ubuntu24.04 for vLLM ARM64"
     fi
-
-    if [[ "$BUILD_ARGS" != *"CUDA_VERSION"* ]]; then
-        BUILD_ARGS+=" --build-arg CUDA_VERSION=129 "
-        echo "INFO: Automatically setting CUDA_VERSION=129 for vLLM ARM64"
-    fi
-
-    if [[ "$BUILD_ARGS" != *"TORCH_BACKEND"* ]]; then
-        BUILD_ARGS+=" --build-arg TORCH_BACKEND=cu129 "
-        echo "INFO: Automatically setting TORCH_BACKEND=cu129 for vLLM ARM64"
-    fi
-
 fi
 
 # Update DOCKERFILE if framework is VLLM
-# Use -multi Dockerfiles for multi-arch builds when available
 if [[ $FRAMEWORK == "VLLM" ]]; then
-    if [[ "$MULTI_ARCH" == "true" ]]; then
-        DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm-multi
-    else
-        DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
-    fi
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
 elif [[ $FRAMEWORK == "TRTLLM" ]]; then
-    if [[ "$MULTI_ARCH" == "true" ]]; then
-        DOCKERFILE=${SOURCE_DIR}/Dockerfile.trtllm-multi
-    else
-        DOCKERFILE=${SOURCE_DIR}/Dockerfile.trtllm
-    fi
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile.trtllm
 elif [[ $FRAMEWORK == "NONE" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile
 elif [[ $FRAMEWORK == "SGLANG" ]]; then
-    if [[ "$MULTI_ARCH" == "true" ]]; then
-        DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang-multi
-    else
-        DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
-    fi
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
 fi
 
 # Add NIXL_REF as a build argument
 BUILD_ARGS+=" --build-arg NIXL_REF=${NIXL_REF} "
+# Add NIXL_LIBFABRIC_REF as a build argument
+BUILD_ARGS+=" --build-arg NIXL_LIBFABRIC_REF=${NIXL_LIBFABRIC_REF} "
+# Add EFA_VERSION as a build argument
+BUILD_ARGS+=" --build-arg EFA_VERSION=${EFA_VERSION} "
 
 # Function to build local-dev image
 build_local_dev_with_header() {
@@ -655,6 +620,46 @@ build_local_dev_with_header() {
     # Calculate relative path from current PWD to run.sh
     run_path="$(python3 -c "import os; print(os.path.relpath('$run_abs_path', '$PWD'))")"
     echo "  $run_path --image $last_tag --mount-workspace ..."
+}
+
+# Function to build AWS EFA images from base runtime or dev images
+build_aws_with_header() {
+    local base_image="$1"
+    local tags="$2"
+    local aws_target="$3"  # runtime-aws or dev-aws
+    local success_msg="$4"
+
+    DOCKERFILE_AWS="${SOURCE_DIR}/Dockerfile.aws"
+
+    if [[ ! -f "$DOCKERFILE_AWS" ]]; then
+        echo "ERROR: Dockerfile.aws not found at: $DOCKERFILE_AWS"
+        exit 1
+    fi
+
+    echo ""
+    echo "Building AWS EFA image from base: $base_image"
+    echo "Target stage: $aws_target"
+
+    # Show the docker command being executed if not in dry-run mode
+    if [ -z "$RUN_PREFIX" ]; then
+        set -x
+    fi
+
+    $RUN_PREFIX docker build --progress=plain \
+        --build-arg BASE_IMAGE="$base_image" \
+        --build-arg EFA_VERSION="${EFA_VERSION}" \
+        --target "$aws_target" \
+        --file "$DOCKERFILE_AWS" \
+        $PLATFORM \
+        $tags \
+        "$SOURCE_DIR" || {
+        { set +x; } 2>/dev/null
+        echo "ERROR: Failed to build AWS EFA image"
+        exit 1
+    }
+
+    { set +x; } 2>/dev/null
+    echo "$success_msg"
 }
 
 
@@ -904,13 +909,10 @@ fi
 
 if [[ $FRAMEWORK == "SGLANG" ]]; then
     echo "Customizing Python, CUDA, and framework images for sglang images"
-    BUILD_ARGS+=" --build-arg PYTHON_VERSION=3.10"
+    BUILD_ARGS+=" --build-arg PYTHON_VERSION=${SGLANG_PYTHON_VERSION}"
     BUILD_ARGS+=" --build-arg CUDA_VERSION=${SGLANG_CUDA_VERSION}"
-    # Unlike the other two frameworks, SGLang's framework image is different from the base image, so we need to set it explicitly.
-    BUILD_ARGS+=" --build-arg FRAMEWORK_IMAGE=${SGLANG_FRAMEWORK_IMAGE}"
-    BUILD_ARGS+=" --build-arg FRAMEWORK_IMAGE_TAG=${SGLANG_FRAMEWORK_IMAGE_TAG}"
 else
-    BUILD_ARGS+=" --build-arg PYTHON_VERSION=3.12"
+    BUILD_ARGS+=" --build-arg PYTHON_VERSION=${PYTHON_VERSION}"
 fi
 # Add sccache build arguments
 if [ "$USE_SCCACHE" = true ]; then
@@ -920,8 +922,8 @@ if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID"
     BUILD_ARGS+=" --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY"
 fi
-if [[ "$MULTI_ARCH" != "true" ]] && [[ "$PLATFORM" == *"linux/arm64"* && "${FRAMEWORK}" == "SGLANG" ]]; then
-    # Add arguments required for sglang blackwell build (single-platform arm64 only)
+if [[ "$PLATFORM" == *"linux/arm64"* && "${FRAMEWORK}" == "SGLANG" ]]; then
+    # Add arguments required for sglang blackwell build
     BUILD_ARGS+=" --build-arg GRACE_BLACKWELL=true --build-arg BUILD_TYPE=blackwell_aarch64"
 fi
 LATEST_TAG=""
@@ -940,26 +942,11 @@ BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
 mkdir -p "${BUILD_LOG_DIR}"
 SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
 
-# Set push flag if requested
-PUSH_FLAG=""
-if [ "$PUSH_IMAGE" = true ]; then
-    PUSH_FLAG="--push"
-fi
-
-echo "*********************"
-echo "$RUN_PREFIX docker buildx build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE $PUSH_FLAG $MULTI_ARCH_FLAG"
-echo "*********************"
-
-
 # Use BuildKit for enhanced metadata
 if docker buildx version &>/dev/null; then
-
-    $RUN_PREFIX docker buildx build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE $PUSH_FLAG $MULTI_ARCH_FLAG 2>&1 | tee "${SINGLE_BUILD_LOG}"
+    $RUN_PREFIX docker buildx build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
     BUILD_EXIT_CODE=${PIPESTATUS[0]}
 else
-    if [ "$PUSH_IMAGE" = true ]; then
-        error "ERROR: --push requires docker buildx. Please install docker buildx."
-    fi
     $RUN_PREFIX DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
     BUILD_EXIT_CODE=${PIPESTATUS[0]}
 fi
@@ -968,32 +955,74 @@ if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
     exit ${BUILD_EXIT_CODE}
 fi
 
-# Handle local-dev target
-if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
-    # Use the first tag name (TAG) if available, otherwise use latest
-    if [[ -n "$TAG" ]]; then
-        DEV_IMAGE=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
+# Handle --make-efa flag: add AWS EFA layer on top of the built image
+# This runs BEFORE local-dev so the flow is: dev -> dev-aws -> local-dev-aws
+if [[ "${MAKE_EFA:-}" == "true" ]]; then
+    # Get the base image that was just built (dev or runtime)
+    BASE_IMAGE_FOR_EFA=$(echo "$TAG" | sed 's/--tag //')
+
+    # Determine the EFA stage based on the target
+    # runtime target -> runtime-aws stage
+    # dev/local-dev target -> dev-aws stage
+    if [[ "${TARGET:-dev}" == "runtime" ]]; then
+        EFA_STAGE="runtime-aws"
     else
-        DEV_IMAGE="dynamo:latest-${FRAMEWORK,,}"
+        EFA_STAGE="dev-aws"
     fi
 
-    # Build local-dev tags from existing tags
-    LOCAL_DEV_TAGS=""
+    # Build AWS tags by appending -aws to existing tags
+    AWS_TAGS=""
     if [[ -n "$TAG" ]]; then
-        # Extract tag name, remove any existing -local-dev suffix, then add -local-dev
-        TAG_NAME=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
-        LOCAL_DEV_TAGS+=" --tag ${TAG_NAME}-local-dev"
+        AWS_TAG=$(echo "$TAG" | sed 's/--tag //')
+        AWS_TAGS+=" --tag ${AWS_TAG}-aws"
     fi
-
     if [[ -n "$LATEST_TAG" ]]; then
-        # Extract tag name, remove any existing -local-dev suffix, then add -local-dev
-        LATEST_TAG_NAME=$(echo "$LATEST_TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
-        LOCAL_DEV_TAGS+=" --tag ${LATEST_TAG_NAME}-local-dev"
+        AWS_LATEST_TAG=$(echo "$LATEST_TAG" | sed 's/--tag //')
+        AWS_TAGS+=" --tag ${AWS_LATEST_TAG}-aws"
     fi
 
-    # Extract first tag for success message
-    FIRST_TAG=$(echo "$LOCAL_DEV_TAGS" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
-    build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built $FIRST_TAG" "Building Local-Dev Image"
+    build_aws_with_header "$BASE_IMAGE_FOR_EFA" "$AWS_TAGS" "$EFA_STAGE" "Successfully built ${EFA_STAGE} image"
+fi
+
+# Handle local-dev build
+if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
+    if [[ "${MAKE_EFA:-}" == "true" ]]; then
+        # With EFA: build local-dev-aws from dev-aws
+        DEV_AWS_IMAGE=$(echo "$AWS_TAGS" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
+
+        LOCAL_DEV_AWS_TAGS=""
+        if [[ -n "$TAG" ]]; then
+            TAG_NAME=$(echo "$TAG" | sed 's/--tag //')
+            LOCAL_DEV_AWS_TAGS+=" --tag ${TAG_NAME}-local-dev-aws"
+        fi
+        if [[ -n "$LATEST_TAG" ]]; then
+            LATEST_TAG_NAME=$(echo "$LATEST_TAG" | sed 's/--tag //')
+            LOCAL_DEV_AWS_TAGS+=" --tag ${LATEST_TAG_NAME}-local-dev-aws"
+        fi
+
+        build_local_dev_with_header "$DEV_AWS_IMAGE" "$LOCAL_DEV_AWS_TAGS" "Successfully built local-dev-aws image" "Building Local-Dev-AWS Image"
+    else
+        # Without EFA: build regular local-dev from dev
+        if [[ -n "$TAG" ]]; then
+            DEV_IMAGE=$(echo "$TAG" | sed 's/--tag //')
+        else
+            DEV_IMAGE="dynamo:latest-${FRAMEWORK,,}"
+        fi
+
+        LOCAL_DEV_TAGS=""
+        if [[ -n "$TAG" ]]; then
+            TAG_NAME=$(echo "$TAG" | sed 's/--tag //')
+            LOCAL_DEV_TAGS+=" --tag ${TAG_NAME}-local-dev"
+        fi
+        if [[ -n "$LATEST_TAG" ]]; then
+            LATEST_TAG_NAME=$(echo "$LATEST_TAG" | sed 's/--tag //')
+            LOCAL_DEV_TAGS+=" --tag ${LATEST_TAG_NAME}-local-dev"
+        fi
+
+        # Extract first tag for success message
+        FIRST_TAG=$(echo "$LOCAL_DEV_TAGS" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
+        build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built $FIRST_TAG" "Building Local-Dev Image"
+    fi
 fi
 
 
