@@ -164,6 +164,109 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
 
+  # sglang-main:
+  #   needs: detect-buildkit-workers
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64 }
+  #         - { arch: arm64  }
+  #   name: sglang (${{ matrix.platform.arch }})
+  #   runs-on: builder-cpu-amd-runner
+  #   steps:
+  #     - name: define buildkit builders
+  #       shell: bash
+  #       run: |
+  #         ADDRS="${{ needs.detect-buildkit-workers.outputs[format('sglang_{0}', matrix.platform.arch)] }}"
+  #         IFS=',' read -ra ADDR_LIST <<< "$ADDRS"
+  #         FIRST=true
+  #         for addr in "${ADDR_LIST[@]}"; do
+  #           if $FIRST; then
+  #             docker buildx create --use --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
+  #             FIRST=false
+  #           else
+  #             docker buildx create --append --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
+  #           fi
+  #         done
+  #         docker buildx inspect --bootstrap
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Docker Login
+  #       uses: ./.github/actions/docker-login
+  #       with:
+  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #     - name: Build Container
+  #       id: build-image
+  #       uses: ./.github/actions/docker-build
+  #       with:
+  #         framework: sglang
+  #         target: runtime
+  #         platform: 'linux/${{ matrix.platform.arch }}'
+  #         ci_token: ${{ secrets.CI_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  # trtllm-main:
+  #   needs: detect-buildkit-workers
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64 }
+  #         - { arch: arm64  }
+  #   name: trtllm (${{ matrix.platform.arch }})
+  #   runs-on: builder-cpu-amd-runner
+  #   steps:
+  #     - name: define buildkit builders
+  #       shell: bash
+  #       run: |
+  #         ADDRS="${{ needs.detect-buildkit-workers.outputs[format('trtllm_{0}', matrix.platform.arch)] }}"
+  #         IFS=',' read -ra ADDR_LIST <<< "$ADDRS"
+  #         FIRST=true
+  #         for addr in "${ADDR_LIST[@]}"; do
+  #           if $FIRST; then
+  #             docker buildx create --use --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
+  #             FIRST=false
+  #           else
+  #             docker buildx create --append --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
+  #           fi
+  #         done
+  #         docker buildx inspect --bootstrap
+  #     - name: Checkout code
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Docker Login
+  #       uses: ./.github/actions/docker-login
+  #       with:
+  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #     - name: Build Container
+  #       id: build-image
+  #       uses: ./.github/actions/docker-build
+  #       with:
+  #         framework: trtllm
+  #         target: runtime
+  #         platform: 'linux/${{ matrix.platform.arch }}'
+  #         ci_token: ${{ secrets.CI_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+
   # cleanup-cluster-builder:
   #   name: Cleanup Builder
   #   runs-on: builder-cpu-amd-runner
