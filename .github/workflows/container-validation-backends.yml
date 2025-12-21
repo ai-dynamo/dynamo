@@ -62,19 +62,19 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
 
-    # - name: debuggin
-    #   shell: bash
-    #   run: |
-    #     sleep 3600
+    - name: debuggin
+      shell: bash
+      run: |
+        sleep 3600
 
-    - name: Define buildkit builders
-      uses: ./.github/actions/define-buildkit-builders
-      with:
-        builder_name: ${{ env.BUILDER_NAME }}
-        replicas: '1'
-        linux_amd64: 'false'
-        linux_arm64: 'true'
-        linux_amd64_gpu: 'true'
+    # - name: Define buildkit builders
+    #   uses: ./.github/actions/define-buildkit-builders
+    #   with:
+    #     builder_name: ${{ env.BUILDER_NAME }}
+    #     replicas: '1'
+    #     linux_amd64: 'false'
+    #     linux_arm64: 'true'
+    #     linux_amd64_gpu: 'true'
 
   #   - name: Bootstrap buildkit builder
   #     shell: bash
@@ -84,33 +84,33 @@ jobs:
 
 
 
-  cleanup-cluster-builder:
-    name: Cleanup Builder
-    runs-on: builder-cpu-amd-runner
-    needs: [ vllm, sglang, trtllm]
-    # needs: [operator]
-    if: always()
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  # cleanup-cluster-builder:
+  #   name: Cleanup Builder
+  #   runs-on: builder-cpu-amd-runner
+  #   needs: [ vllm, sglang, trtllm]
+  #   # needs: [operator]
+  #   if: always()
+  #   steps:
+  #   - name: Checkout code
+  #     uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
 
-    - name: debuggin
-      shell: bash
-      run: |
-        sleep 3600
+  #   - name: debuggin
+  #     shell: bash
+  #     run: |
+  #       sleep 3600
 
-    - name: Define buildkit builders
-      uses: ./.github/actions/define-buildkit-builders
-      with:
-        builder_name: ${{ env.BUILDER_NAME }}
-        replicas: '1'
-        linux_amd64: 'false'
-        linux_arm64: 'true'
-        linux_amd64_gpu: 'true'
-    - name: Cleanup Buildkit Builder
-      shell: bash
-      run: |
-        docker buildx rm ${{ env.BUILDER_NAME }} || true
+    # - name: Define buildkit builders
+    #   uses: ./.github/actions/define-buildkit-builders
+    #   with:
+    #     builder_name: ${{ env.BUILDER_NAME }}
+    #     replicas: '1'
+    #     linux_amd64: 'false'
+    #     linux_arm64: 'true'
+    #     linux_amd64_gpu: 'true'
+    # - name: Cleanup Buildkit Builder
+    #   shell: bash
+    #   run: |
+    #     docker buildx rm ${{ env.BUILDER_NAME }} || true
 
 
   # operator:
