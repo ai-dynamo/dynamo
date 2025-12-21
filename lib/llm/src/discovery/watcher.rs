@@ -21,6 +21,7 @@ use dynamo_runtime::{
 use crate::{
     backend::Backend,
     entrypoint::{self, EngineFactoryCallback, RouterConfig},
+    http::service::metrics::Metrics,
     kv_router::PrefillRouter,
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
@@ -54,6 +55,7 @@ pub struct ModelWatcher {
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
     engine_factory: Option<EngineFactoryCallback>,
+    metrics: Arc<Metrics>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -70,6 +72,7 @@ impl ModelWatcher {
         model_manager: Arc<ModelManager>,
         router_config: RouterConfig,
         engine_factory: Option<EngineFactoryCallback>,
+        metrics: Arc<Metrics>,
     ) -> ModelWatcher {
         Self {
             manager: model_manager,
@@ -78,6 +81,7 @@ impl ModelWatcher {
             notify_on_model: Notify::new(),
             model_update_tx: None,
             engine_factory,
+            metrics,
         }
     }
 
@@ -451,6 +455,7 @@ impl ModelWatcher {
                         tokenizer_hf.clone(),
                         prefill_chooser.clone(),
                         self.router_config.enforce_disagg,
+                        self.metrics.clone(),
                     )
                     .await
                     .context("build_routed_pipeline")?
@@ -484,6 +489,7 @@ impl ModelWatcher {
                     tokenizer_hf,
                     prefill_chooser,
                     self.router_config.enforce_disagg,
+                    self.metrics.clone(),
                 )
                 .await
                 .context("build_routed_pipeline_with_preprocessor")?;

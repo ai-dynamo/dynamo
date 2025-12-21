@@ -825,10 +825,11 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Name:    commonconsts.MainContainerName,
 										Image:   "test-image:latest",
 										Command: []string{"/bin/sh", "-c"},
-										Args:    []string{"ray start --head --port=6379 && some dynamo command --tensor-parallel-size 4 --pipeline-parallel-size 1"},
+										Args:    []string{"ray start --head --port=6379 && some dynamo command --tensor-parallel-size 4 --pipeline-parallel-size 1 --distributed-executor-backend ray"},
 										Env: []corev1.EnvVar{
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
-											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
+											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
@@ -843,6 +844,11 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
 												FieldRef: &corev1.ObjectFieldSelector{
 													FieldPath: "metadata.namespace",
+												},
+											}},
+											{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
+												FieldRef: &corev1.ObjectFieldSelector{
+													FieldPath: "metadata.uid",
 												},
 											}},
 											{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"},
@@ -957,7 +963,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Args:    []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
 										Env: []corev1.EnvVar{
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
-											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
+											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
@@ -972,6 +979,11 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
 												FieldRef: &corev1.ObjectFieldSelector{
 													FieldPath: "metadata.namespace",
+												},
+											}},
+											{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
+												FieldRef: &corev1.ObjectFieldSelector{
+													FieldPath: "metadata.uid",
 												},
 											}},
 											{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"},

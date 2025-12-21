@@ -8,6 +8,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig, input::common},
     grpc::service::kserve,
+    http::service::metrics::Metrics,
     namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -110,7 +111,9 @@ async fn run_watcher(
     router_config: RouterConfig,
     target_namespace: Option<String>,
 ) -> anyhow::Result<()> {
-    let watch_obj = ModelWatcher::new(runtime.clone(), model_manager, router_config, None);
+    // Create metrics for migration tracking (not exposed via /metrics in gRPC mode)
+    let metrics = Arc::new(Metrics::new());
+    let watch_obj = ModelWatcher::new(runtime.clone(), model_manager, router_config, None, metrics);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
