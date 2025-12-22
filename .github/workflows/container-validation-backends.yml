@@ -48,7 +48,7 @@ jobs:
 
   # backend-status-check:
   #   runs-on: ubuntu-latest
-  #   needs: [vllm, sglang, trtllm, operator]
+  #   needs: [ operator, build-and-test-framework, run-pytests]
   #   if: always()
   #   steps:
   #     - name: "Check all dependent jobs"
@@ -107,7 +107,7 @@ jobs:
       general_arm64: ${{ steps.route-buildkit-workers.outputs.general_arm64 }}
 
 
-  builder:
+  build-and-test-framework:
     needs: detect-buildkit-workers
     strategy:
       fail-fast: false
@@ -168,166 +168,33 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
 
-  # vllm-main:
-  #   needs: detect-buildkit-workers
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       platform:
-  #         - { arch: amd64 }
-  #         - { arch: arm64  }
-  #   name: vllm (${{ matrix.platform.arch }})
-  #   runs-on: builder-cpu-amd-runner
-  #   steps:
-  #     - name: define buildkit builders
-  #       shell: bash
-  #       run: |
-  #         ADDRS="${{ needs.detect-buildkit-workers.outputs[format('vllm_{0}', matrix.platform.arch)] }}"
-  #         IFS=',' read -ra ADDR_LIST <<< "$ADDRS"
-  #         FIRST=true
-  #         for addr in "${ADDR_LIST[@]}"; do
-  #           if $FIRST; then
-  #             docker buildx create --use --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
-  #             FIRST=false
-  #           else
-  #             docker buildx create --append --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
-  #           fi
-  #         done
-  #         docker buildx inspect --bootstrap
-  #     - name: Checkout code
-  #       uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
-  #       with:
-  #         lfs: true
-  #     - name: Docker Login
-  #       uses: ./.github/actions/docker-login
-  #       with:
-  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-  #     - name: Build Container
-  #       id: build-image
-  #       uses: ./.github/actions/docker-build
-  #       with:
-  #         framework: vllm
-  #         target: runtime
-  #         platform: 'linux/${{ matrix.platform.arch }}'
-  #         base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
-  #         runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-  #         cuda_version: ${{ matrix.platform.arch == 'arm64' && '12.9' || '' }}
-  #         torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
-  #         ci_token: ${{ secrets.CI_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-
-  # sglang-main:
-  #   needs: detect-buildkit-workers
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       platform:
-  #         - { arch: amd64 }
-  #         - { arch: arm64  }
-  #   name: sglang (${{ matrix.platform.arch }})
-  #   runs-on: builder-cpu-amd-runner
-  #   steps:
-  #     - name: define buildkit builders
-  #       shell: bash
-  #       run: |
-  #         ADDRS="${{ needs.detect-buildkit-workers.outputs[format('sglang_{0}', matrix.platform.arch)] }}"
-  #         IFS=',' read -ra ADDR_LIST <<< "$ADDRS"
-  #         FIRST=true
-  #         for addr in "${ADDR_LIST[@]}"; do
-  #           if $FIRST; then
-  #             docker buildx create --use --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
-  #             FIRST=false
-  #           else
-  #             docker buildx create --append --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
-  #           fi
-  #         done
-  #         docker buildx inspect --bootstrap
-  #     - name: Checkout repository
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-  #     - name: Docker Login
-  #       uses: ./.github/actions/docker-login
-  #       with:
-  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-  #     - name: Build Container
-  #       id: build-image
-  #       uses: ./.github/actions/docker-build
-  #       with:
-  #         framework: sglang
-  #         target: runtime
-  #         platform: 'linux/${{ matrix.platform.arch }}'
-  #         ci_token: ${{ secrets.CI_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-  # trtllm-main:
-  #   needs: detect-buildkit-workers
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       platform:
-  #         - { arch: amd64 }
-  #         - { arch: arm64  }
-  #   name: trtllm (${{ matrix.platform.arch }})
-  #   runs-on: builder-cpu-amd-runner
-  #   steps:
-  #     - name: define buildkit builders
-  #       shell: bash
-  #       run: |
-  #         ADDRS="${{ needs.detect-buildkit-workers.outputs[format('trtllm_{0}', matrix.platform.arch)] }}"
-  #         IFS=',' read -ra ADDR_LIST <<< "$ADDRS"
-  #         FIRST=true
-  #         for addr in "${ADDR_LIST[@]}"; do
-  #           if $FIRST; then
-  #             docker buildx create --use --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
-  #             FIRST=false
-  #           else
-  #             docker buildx create --append --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
-  #           fi
-  #         done
-  #         docker buildx inspect --bootstrap
-  #     - name: Checkout code
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-  #     - name: Docker Login
-  #       uses: ./.github/actions/docker-login
-  #       with:
-  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-  #     - name: Build Container
-  #       id: build-image
-  #       uses: ./.github/actions/docker-build
-  #       with:
-  #         framework: trtllm
-  #         target: runtime
-  #         platform: 'linux/${{ matrix.platform.arch }}'
-  #         ci_token: ${{ secrets.CI_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
+  run-pytests:
+    needs: build-and-test-framework
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+        framework:
+          - { name: vllm }
+          - { name: sglang }
+          - { name: trtllm }
+    name: ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: main
+      - name: Run tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+          pytest_marks: "pre_merge and ${{ matrix.framework.name }} and (gpu_0 or gpu_1)"
+          framework: "${{ matrix.framework.name }}"
+          test_type: "pre_merge"
+          platform_arch: ${{ matrix.platform.arch }}
 
   operator-main:
     needs: detect-buildkit-workers
@@ -406,514 +273,11 @@ jobs:
               -t dynamo-operator:latest .
 
 
-  # cleanup-cluster-builder:
-  #   name: Cleanup Builder
-  #   runs-on: builder-cpu-amd-runner
-  #   needs: [ vllm, sglang, trtllm]
-  #   # needs: [operator]
-  #   if: always()
-  #   steps:
-  #   - name: Checkout code
-  #     uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-
-  #   - name: debuggin
-  #     shell: bash
-  #     run: |
-  #       sleep 3600
-
-    # - name: Define buildkit builders
-    #   uses: ./.github/actions/define-buildkit-builders
-    #   with:
-    #     builder_name: ${{ env.BUILDER_NAME }}
-    #     replicas: '1'
-    #     linux_amd64: 'false'
-    #     linux_arm64: 'true'
-    #     linux_amd64_gpu: 'true'
-    # - name: Cleanup Buildkit Builder
-    #   shell: bash
-    #   run: |
-    #     docker buildx rm ${{ env.BUILDER_NAME }} || true
-
-
-  # operator:
-  #   # needs: changed-files
-  #   # needs: [create-buildkit-builders]
-  #   # if: needs.changed-files.outputs.has_code_changes == 'true'
-  #   # strategy:
-  #   #   fail-fast: false
-  #     # matrix:
-  #     #   platform:
-  #     #     - { arch: amd64, runner: cpu-amd-m5-2xlarge }
-  #     #     - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-  #   name: Building operator
-  #   runs-on: builder-cpu-amd-runner
-  #   env:
-  #     BUILD_PLATFORMS: linux/amd64,linux/arm64
-  #   steps:
-  #     - name: Output Node Name
-  #       shell: bash
-  #       run: |
-  #         echo ${K8S_NODE_NAME}
-  #     - name: Checkout code
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-
-  #     - name: Define buildkit builders
-  #       uses: ./.github/actions/define-buildkit-builders
-  #       with:
-  #         builder_name: ${{ env.BUILDER_NAME }}-operator
-  #         replicas: '1'
-  #         linux_amd64: 'true'
-  #         linux_arm64: 'true'
-  #         linux_amd64_gpu: 'false'
-
-  #     - name: Docker Login
-  #       uses: ./.github/actions/docker-login
-  #       with:
-  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-  #     # - name: debuggin
-  #     #   shell: bash
-  #     #   run: |
-  #     #     sleep 3600
-  #     - name: Linter
-  #       shell: bash
-  #       env:
-  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #       run: |
-  #         cd deploy/cloud/operator
-  #         docker buildx build --platform ${{ env.BUILD_PLATFORMS }} --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-  #     - name: Tester
-  #       shell: bash
-  #       env:
-  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #       run: |
-  #         cd deploy/cloud/operator
-  #         docker buildx build --platform ${{ env.BUILD_PLATFORMS }}  --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-  #     - name: Set up Go
-  #       uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-  #       with:
-  #         go-version: '1.24'
-  #     - name: Check for uncommitted changes
-  #       shell: bash
-  #       env:
-  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #       run: |
-  #         sudo apt-get update && sudo apt-get install -y make
-  #         cd deploy/cloud/operator
-  #         make check
-  #     - name: Build Container
-  #       id: build-image
-  #       shell: bash
-  #       env:
-  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #       run: |
-  #         cd deploy/cloud/operator
-  #         docker buildx build \
-  #             --platform ${{ env.BUILD_PLATFORMS }} \
-  #             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-  #             -f Dockerfile \
-  #             -t dynamo-operator:latest .
-  #     # - name: Docker Tag and Push # todo: originally it was loading in the previous step and then tag tand  puhing
-  #     #   uses: ./.github/actions/docker-tag-push
-  #     #   with:
-  #     #     local_image: dynamo-operator:latest
-  #     #     push_tags: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
-  #     #     aws_push: 'false'
-  #     #     azure_push: 'true'
-  #     #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-
-  #     - name: Cleanup Buildkit Builder
-  #       shell: bash
-  #       if: always()
-  #       run: |
-  #         docker buildx rm ${{ env.BUILDER_NAME }}-operator || true
-
-
-
-  # vllm:
-  #   # needs: changed-files
-  #   # if: needs.changed-files.outputs.has_code_changes == 'true'
-  #   # strategy:
-  #   #   fail-fast: false
-  #   #   matrix:
-  #   #     platform:
-  #   #       - { arch: amd64, runner: gpu-l40-amd64 }
-  #   #       - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-  #   name: vllm builder multi-arch
-  #   runs-on: builder-cpu-amd-runner
-  #   needs: [create-buildkit-builders]
-  #   steps:
-  #     - name: Checkout code
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-  #     - name: Define buildkit builders
-  #       uses: ./.github/actions/define-buildkit-builders
-  #       with:
-  #         builder_name: ${{ env.BUILDER_NAME }}
-  #         replicas: '1'
-  #         linux_amd64: 'false'
-  #         linux_arm64: 'true'
-  #         linux_amd64_gpu: 'true'
-  #     - name: Docker Login
-  #       uses: ./.github/actions/docker-login
-  #       with:
-  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-  #     - name: Build Container
-  #       id: build-image
-  #       uses: ./.github/actions/docker-build
-  #       with:
-  #         framework: vllm
-  #         target: runtime
-  #         multi_arch_build: 'true'
-  #         multi_arch_push: 'false'
-  #         ci_token: ${{ secrets.CI_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  #         use_ci_registry: 'true'
-  #     # - name: Docker Tag and Push
-  #     #   uses: ./.github/actions/docker-tag-push
-  #     #   with:
-  #     #     local_image: ${{ steps.build-image.outputs.image_tag }}
-  #     #     push_tags: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
-  #     #     conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-vllm-{0}', matrix.platform.arch) || '' }}
-  #     #     aws_push: 'true'
-  #     #     azure_push: 'true'
-  #     #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #     #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #     #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #     # - name: Run tests
-  #     #   if: ${{ matrix.platform.arch != 'arm64' }}
-  #     #   uses: ./.github/actions/pytest
-  #     #   with:
-  #     #     image_tag: ${{ steps.build-image.outputs.image_tag }}
-  #     #     pytest_marks: "pre_merge and vllm and (gpu_0 or gpu_1)"
-  #     #     framework: "vllm"
-  #     #     test_type: "pre_merge"
-  #     #     platform_arch: ${{ matrix.platform.arch }}
-
-  # sglang:
-  #   name: sglang builder multi-arch
-  #   runs-on: builder-cpu-amd-runner
-  #   needs: [create-buildkit-builders]
-  #   steps:
-  #     - name: Output Node Name
-  #       shell: bash
-  #       run: |
-  #         echo ${K8S_NODE_NAME}
-  #     - name: Checkout code
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-  #     - name: Define buildkit builders
-  #       uses: ./.github/actions/define-buildkit-builders
-  #       with:
-  #         builder_name: ${{ env.BUILDER_NAME }}
-  #         replicas: '1'
-  #         linux_amd64: 'false'
-  #         linux_arm64: 'true'
-  #         linux_amd64_gpu: 'true'
-
-  #     - name: Docker Login
-  #       uses: ./.github/actions/docker-login
-  #       with:
-  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-  #     - name: Build Container
-  #       id: build-image
-  #       uses: ./.github/actions/docker-build
-  #       with:
-  #         framework: sglang
-  #         target: runtime
-  #         multi_arch_build: 'true'
-  #         multi_arch_push: 'false'
-  #         push: 'false'
-  #         ci_token: ${{ secrets.CI_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  #         use_ci_registry: 'true'
-  #     # - name: Docker Tag and Push
-  #     #   uses: ./.github/actions/docker-tag-push
-  #     #   with:
-  #     #     local_image: ${{ steps.build-image.outputs.image_tag }}
-  #     #     push_tags: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
-  #     #     conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-sglang-{0}', matrix.platform.arch) || '' }}
-  #     #     aws_push: 'true'
-  #     #     azure_push: 'true'
-  #     #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #     #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #     #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #     # - name: Run tests
-  #     #   if: ${{ matrix.platform.arch != 'arm64' }}
-  #     #   uses: ./.github/actions/pytest
-  #     #   with:
-  #     #     image_tag: ${{ steps.build-image.outputs.image_tag }}
-  #     #     pytest_marks: "pre_merge and sglang and (gpu_0 or gpu_1)"
-  #     #     framework: "sglang"
-  #     #     test_type: "pre_merge"
-  #     #     platform_arch: ${{ matrix.platform.arch }}
-
-  # trtllm:
-  #   name: trtllm builder multi-arch
-  #   runs-on: builder-cpu-amd-runner
-  #   needs: [create-buildkit-builders]
-  #   steps:
-  #     - name: Output Node Name
-  #       shell: bash
-  #       run: |
-  #         echo ${K8S_NODE_NAME}
-  #     - name: Checkout code
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-  #     - name: Define buildkit builders
-  #       uses: ./.github/actions/define-buildkit-builders
-  #       with:
-  #         builder_name: ${{ env.BUILDER_NAME }}
-  #         replicas: '1'
-  #         linux_amd64: 'false'
-  #         linux_arm64: 'true'
-  #         linux_amd64_gpu: 'true'
-  #     - name: Docker Login
-  #       uses: ./.github/actions/docker-login
-  #       with:
-  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-  #     - name: Build Container
-  #       id: build-image
-  #       uses: ./.github/actions/docker-build
-  #       with:
-  #         framework: trtllm
-  #         target: runtime
-  #         multi_arch_build: 'true'
-  #         multi_arch_push: 'false'
-  #         push: 'false'
-  #         ci_token: ${{ secrets.CI_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  #         use_ci_registry: 'true'
-  #     # - name: Docker Tag and Push
-  #     #   uses: ./.github/actions/docker-tag-push
-  #     #   with:
-  #     #     local_image: ${{ steps.build-image.outputs.image_tag }}
-  #     #     push_tags: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
-  #     #     conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-trtllm-{0}', matrix.platform.arch) || '' }}
-  #     #     aws_push: 'true'
-  #     #     azure_push: 'true'
-  #     #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #     #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #     #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #     # - name: Run tests
-  #     #   if: ${{ matrix.platform.arch != 'arm64' }}
-  #     #   uses: ./.github/actions/pytest
-  #     #   with:
-  #     #     image_tag: ${{ steps.build-image.outputs.image_tag }}
-  #     #     pytest_marks: "pre_merge and trtllm and (gpu_0 or gpu_1)"
-  #     #     framework: "trtllm"
-  #     #     test_type: "pre_merge"
-  #     #     platform_arch: ${{ matrix.platform.arch }}
-
-  # deploy-test-fault-tolerance:
-  #   runs-on: cpu-amd-m5-2xlarge
-  #   if: needs.changed-files.outputs.has_code_changes == 'true'
-  #   needs: [changed-files, operator, vllm, trtllm, sglang]
-  #   permissions:
-  #     contents: read
-  #   strategy:
-  #     fail-fast: false
-  #     # Run matrix jobs sequentially to prevent a Helm race condition
-  #     # Parallel jobs conflict on ClusterRole ownership when installing the chart.
-  #     # Error: ClusterRole "...-operator" exists... cannot be imported... current value is "...-ft-vllm"
-  #     max-parallel: 1
-  #     matrix:
-  #       framework:
-  #         - { name: vllm, test_scenario: vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
-  #         - { name: trtllm, test_scenario: trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
-  #         - { name: sglang, test_scenario: sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
-  #   name: deploy-test-fault-tolerance (${{ matrix.framework.name }})
-  #   env:
-  #     DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-  #   steps:
-  #     - name: Output Node Name
-  #       shell: bash
-  #       run: |
-  #         echo ${K8S_NODE_NAME}
-  #     - name: Checkout code
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-  #     - name: Set namespace
-  #       run: |
-  #         # Set namespace using test scenario
-  #         export FRAMEWORK=${{ matrix.framework.name }}
-  #         echo "NAMESPACE=gh-id-${{ github.run_id }}-ft-${FRAMEWORK}" >> $GITHUB_ENV
-  #         set -x
-
-  #         # Setup kubeconfig
-  #         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-  #         chmod 600 .kubeconfig
-  #         export KUBECONFIG=$(pwd)/.kubeconfig
-  #         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-  #         kubectl config current-context
-  #     - name: Deploy Operator
-  #       run: |
-  #         set -x
-  #         export KUBECONFIG=$(pwd)/.kubeconfig
-
-  #         # Create a namespace for this job
-  #         echo "Creating an ephemeral namespace..."
-  #         kubectl delete namespace $NAMESPACE || true
-  #         kubectl create namespace $NAMESPACE || true
-  #         echo "Attaching the labels for secrets and cleanup"
-  #         kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
-
-  #         # Set the namespace as default
-  #         kubectl config set-context --current --namespace=$NAMESPACE
-
-  #         # Check if Istio is installed
-  #         kubectl get pods -n istio-system
-  #         # Check if default storage class exists
-  #         kubectl get storageclass
-
-  #         # Install Helm chart
-  #         export VIRTUAL_ENV=/opt/dynamo/venv
-  #         export KUBE_NS=$NAMESPACE
-  #         export ISTIO_ENABLED=true
-  #         export ISTIO_GATEWAY=istio-system/ingress-alb
-  #         export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
-  #         export DYNAMO_CLOUD=https://${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
-
-  #         # Install dynamo env secrets
-  #         kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
-  #         # Create docker pull secret for operator image
-  #         kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
-  #         # Install helm dependencies
-  #         helm repo add bitnami https://charts.bitnami.com/bitnami
-  #         cd deploy/cloud/helm/platform/
-  #         helm dep build .
-  #         # Install platform with namespace restriction for single profile testing
-  #         helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
-  #           --set dynamo-operator.namespaceRestriction.enabled=true \
-  #           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
-  #           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-  #           --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
-  #           --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
-  #           --timeout 10m --wait
-  #         # Wait for all deployments to be ready
-  #         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
-  #         cd -
-
-  #         export KUBECONFIG=$(pwd)/.kubeconfig
-  #         kubectl config set-context --current --namespace=$NAMESPACE
-  #     - name: Run Fault Tolerance Tests
-  #       id: run-ft-tests
-  #       run: |
-  #         set -x
-  #         export KUBECONFIG=$(pwd)/.kubeconfig
-  #         export NAMESPACE=$NAMESPACE
-  #         export FRAMEWORK=${{ matrix.framework.name }}
-  #         export IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
-
-  #         echo "Running fault tolerance test: ${{ matrix.framework.test_scenario }}"
-  #         echo "Using namespace: $NAMESPACE"
-  #         echo "Using image: $IMAGE"
-
-  #         # Install python3-venv package if not already installed
-  #         sudo apt-get update && sudo apt-get install -y python3-venv
-
-  #         # Set up Python virtual environment and install test dependencies
-  #         python3 -m venv venv
-  #         source venv/bin/activate
-  #         pip install --upgrade pip
-  #         pip install -r container/deps/requirements.test.txt
-  #         pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
-
-  #         # Create test-results directory
-  #         mkdir -p test-results
-
-  #         # Run the pytest command with JUnit XML output
-  #         set +e  # Don't exit on test failures
-  #         pytest tests/fault_tolerance/deploy/test_deployment.py \
-  #           -m 'k8s and fault_tolerance' \
-  #           -k '${{ matrix.framework.test_scenario }}' \
-  #           -s -v \
-  #           --namespace ${NAMESPACE} \
-  #           --image ${IMAGE} \
-  #           --client-type legacy \
-  #           --junitxml=test-results/pytest_ft_report.xml \
-  #           --tb=short
-
-  #         TEST_EXIT_CODE=$?
-  #         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
-  #         echo "🧪 Fault tolerance tests completed with exit code: ${TEST_EXIT_CODE}"
-
-      #     exit ${TEST_EXIT_CODE}
-      # - name: Process Fault Tolerance Test Results
-      #   if: always()
-      #   run: |
-      #     set -x
-
-  #         # Rename JUnit XML with unique naming if it exists
-  #         if [ -f "test-results/pytest_ft_report.xml" ]; then
-  #           mv "test-results/pytest_ft_report.xml" "test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml"
-  #           echo "✅ JUnit XML report renamed with unique identifier"
-  #         else
-  #           echo "⚠️  JUnit XML report not found"
-  #         fi
-
-  #     - name: Upload Fault Tolerance Test Results
-  #       uses: actions/upload-artifact@v4
-  #       if: always()
-  #       with:
-  #         name: test-results-${{ matrix.framework.name }}-fault_tolerance-amd64-${{ github.run_id }}-${{ job.check_run_id }}
-  #         path: test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml
-  #         retention-days: 7
-
-  #     - name: Cleanup
-  #       if: always()
-  #       timeout-minutes: 5
-  #       run: |
-  #         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-  #         chmod 600 .kubeconfig
-  #         export KUBECONFIG=$(pwd)/.kubeconfig
-  #         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-
-  #         # For debugging purposes, list all the resources before we uninstall
-  #         kubectl get all
-
-  #         echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
-  #         kubectl delete dynamographdeployments --all -n $NAMESPACE || true
-
-  #         # Uninstall the helm chart
-  #         helm ls
-  #         helm uninstall dynamo-platform || true
-
-  #         echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
-  #         kubectl delete namespace $NAMESPACE || true
-  #         echo "Namespace $NAMESPACE completed."
 
   # deploy-operator:
   #   runs-on: cpu-amd-m5-2xlarge
   #   if: needs.changed-files.outputs.has_code_changes == 'true'
-  #   needs: [changed-files, operator, vllm, sglang, trtllm]
+  #   needs: [changed-files, operator, build-and-test-framework, run-pytests]
   #   env:
   #     DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
   #   outputs:
@@ -990,7 +354,7 @@ jobs:
   #   runs-on: cpu-amd-m5-2xlarge
   #   # Run if push to main, or manually triggered
   #   if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-  #   needs: [changed-files, deploy-operator, vllm]
+  #   needs: [changed-files, deploy-operator]
   #   permissions:
   #     contents: read
   #   strategy:
@@ -1034,36 +398,36 @@ jobs:
   #       export KUBECONFIG=$(pwd)/.kubeconfig
   #       kubectl config set-context --current --namespace=$NAMESPACE
 
-  # #       # Redirect all output to a log file while still showing it
-  # #       exec > >(tee -a test-output.log) 2>&1
+  #       # Redirect all output to a log file while still showing it
+  #       exec > >(tee -a test-output.log) 2>&1
 
-  # #       cd examples/backends/$FRAMEWORK
-  # #       export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
-  # #       export KUBE_NS=$NAMESPACE
-  # #       export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
-  # #       echo "GRAPH_NAME=${GRAPH_NAME}" >> $GITHUB_ENV
-  # #       # Update the deployment file in-place
-  # #       yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE
+  #       cd examples/backends/$FRAMEWORK
+  #       export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
+  #       export KUBE_NS=$NAMESPACE
+  #       export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
+  #       echo "GRAPH_NAME=${GRAPH_NAME}" >> $GITHUB_ENV
+  #       # Update the deployment file in-place
+  #       yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE
 
-  # #       # Debug: Show updated deployment file
-  # #       echo "=== UPDATED DEPLOYMENT FILE ==="
-  # #       cat $DEPLOYMENT_FILE
+  #       # Debug: Show updated deployment file
+  #       echo "=== UPDATED DEPLOYMENT FILE ==="
+  #       cat $DEPLOYMENT_FILE
 
-  # #       # Apply the updated file
-  # #       kubectl apply -n $KUBE_NS -f $DEPLOYMENT_FILE
+  #       # Apply the updated file
+  #       kubectl apply -n $KUBE_NS -f $DEPLOYMENT_FILE
 
-  # #       # --- Wait for all pods in the dynamo graph deployment to be ready ---
-  # #       sleep 20
-  # #       # Get the deployment name from the file
-  # #       export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
-  # #       echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
-  # #       # Wait for all pods with the deployment label to be ready
-  # #       kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1800s
+  #       # --- Wait for all pods in the dynamo graph deployment to be ready ---
+  #       sleep 20
+  #       # Get the deployment name from the file
+  #       export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
+  #       echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
+  #       # Wait for all pods with the deployment label to be ready
+  #       kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1800s
 
-  # #       # Debug: Show final pod statuses for the deployment
-  # #       echo "=== FINAL POD STATUSES ==="
-  # #       kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $KUBE_NS -o wide
-  # #       echo ""
+  #       # Debug: Show final pod statuses for the deployment
+  #       echo "=== FINAL POD STATUSES ==="
+  #       kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $KUBE_NS -o wide
+  #       echo ""
 
   #       kubectl get all -n $KUBE_NS
   #       export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} -l nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} | tail -n1 | awk '{print $1}')
@@ -1163,9 +527,9 @@ jobs:
   #       export KUBECONFIG=$(pwd)/.kubeconfig
   #       kubectl config set-context --current --namespace=$NAMESPACE
 
-        # For debugging purposes, list all the resources before we delete
-        # kubectl get dynamographdeployments
-        # kubectl get all
+  #       # For debugging purposes, list all the resources before we delete
+  #       kubectl get dynamographdeployments
+  #       kubectl get all
 
   #       echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
   #       kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE || true
@@ -1179,7 +543,7 @@ jobs:
   # deploy-test-vllm-disagg-router:
   #   runs-on: cpu-amd-m5-2xlarge
   #   if: needs.changed-files.outputs.has_code_changes == 'true'
-  #   needs: [changed-files, deploy-operator, vllm]
+  #   needs: [changed-files, deploy-operator]
   #   permissions:
   #     contents: read
   #   strategy:
@@ -1200,7 +564,7 @@ jobs:
   #   runs-on: cpu-amd-m5-2xlarge
   #   # Run if push to main, or manually triggered
   #   if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-  #   needs: [changed-files, deploy-operator, sglang]
+  #   needs: [changed-files, deploy-operator]
   #   permissions:
   #     contents: read
   #   strategy:
@@ -1222,7 +586,7 @@ jobs:
   #   runs-on: cpu-amd-m5-2xlarge
   #   # Run if push to main, or manually triggered
   #   if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-  #   needs: [changed-files, deploy-operator, trtllm]
+  #   needs: [changed-files, deploy-operator]
   #   permissions:
   #     contents: read
   #   strategy:
@@ -1272,21 +636,21 @@ jobs:
   #       export KUBECONFIG=$(pwd)/.kubeconfig
   #       kubectl config set-context --current --namespace=$NAMESPACE
 
-  # #       echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-  # #       chmod 600 .kubeconfig
-  # #       export KUBECONFIG=$(pwd)/.kubeconfig
-  # #       kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+  #       echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+  #       chmod 600 .kubeconfig
+  #       export KUBECONFIG=$(pwd)/.kubeconfig
+  #       kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
 
   #       # For debugging purposes, list all the resources before we uninstall
   #       kubectl get dynamographdeployments
   #       kubectl get all
 
-  # #       echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
-  # #       kubectl delete dynamographdeployments --all -n $NAMESPACE || true
+  #       echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
+  #       kubectl delete dynamographdeployments --all -n $NAMESPACE || true
 
-  # #       # Uninstall the helm chart
-  # #       helm ls
-  # #       helm uninstall dynamo-platform --namespace $NAMESPACE || true
+  #       # Uninstall the helm chart
+  #       helm ls
+  #       helm uninstall dynamo-platform --namespace $NAMESPACE || true
 
   #       echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
   #       kubectl delete namespace $NAMESPACE || true
