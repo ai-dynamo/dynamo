@@ -926,13 +926,13 @@ if [[ "$PLATFORM" == *"linux/arm64"* && "${FRAMEWORK}" == "SGLANG" ]]; then
     # Add arguments required for sglang blackwell build
     BUILD_ARGS+=" --build-arg GRACE_BLACKWELL=true --build-arg BUILD_TYPE=blackwell_aarch64"
 fi
-LATEST_TAG=""
-if [ -z "${NO_TAG_LATEST}" ]; then
-    LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
-    if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
-        LATEST_TAG="${LATEST_TAG}-${TARGET}"
-    fi
-fi
+# LATEST_TAG=""
+# if [ -z "${NO_TAG_LATEST}" ]; then
+#     LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
+#     if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
+#         LATEST_TAG="${LATEST_TAG}-${TARGET}"
+#     fi
+# fi
 
 show_image_options
 
@@ -947,7 +947,7 @@ if docker buildx version &>/dev/null; then
     echo "*************************"
     docker buildx inspect
     echo "*************************"
-    $RUN_PREFIX docker buildx build --push --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+    $RUN_PREFIX docker buildx build --push --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
     BUILD_EXIT_CODE=${PIPESTATUS[0]}
 else
     $RUN_PREFIX DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
