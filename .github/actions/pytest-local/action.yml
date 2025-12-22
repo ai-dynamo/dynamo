@@ -56,7 +56,7 @@ runs:
         curl -LsSf https://astral.sh/uv/install.sh | sh
         echo "$HOME/.local/bin" >> $GITHUB_PATH
         export PATH="$HOME/.cargo/bin:$PATH"
-        uv pip install --system pytest
+        uv pip install pytest
         uv pip install --no-cache --no-deps -e .
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
