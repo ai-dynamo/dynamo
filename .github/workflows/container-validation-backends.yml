@@ -152,6 +152,7 @@ jobs:
         id: build-image
         uses: ./.github/actions/docker-build
         with:
+          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
           framework: ${{ matrix.framework.name }}
           target: runtime
           platform: 'linux/${{ matrix.platform.arch }}'
