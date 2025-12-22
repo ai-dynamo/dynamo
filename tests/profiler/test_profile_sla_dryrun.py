@@ -73,6 +73,7 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
+                self.pick_with_webui = False
                 # Provide minimal model_info to avoid HF queries
                 self.model_info = ModelInfo(
                     model_size=16384.0,
@@ -116,6 +117,7 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
+                self.pick_with_webui = False
                 self.model_info = ModelInfo(
                     model_size=16384.0,
                     architecture="TestArchitecture",
@@ -128,6 +130,9 @@ class TestProfileSLADryRun:
     @pytest.mark.pre_merge
     @pytest.mark.parallel
     @pytest.mark.asyncio
+    @pytest.mark.gpu_0
+    @pytest.mark.integration
+    @pytest.mark.vllm
     async def test_vllm_dryrun(self, vllm_args):
         """Test that profile_sla dry-run works for vllm backend with disagg.yaml config."""
         # Run the profile in dry-run mode - should complete without errors
@@ -136,6 +141,9 @@ class TestProfileSLADryRun:
     @pytest.mark.pre_merge
     @pytest.mark.parallel
     @pytest.mark.asyncio
+    @pytest.mark.gpu_0
+    @pytest.mark.integration
+    @pytest.mark.sglang
     async def test_sglang_dryrun(self, sglang_args):
         """Test that profile_sla dry-run works for sglang backend with disagg.yaml config."""
         # Run the profile in dry-run mode - should complete without errors
@@ -174,6 +182,7 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
+                self.pick_with_webui = False
                 self.model_info = ModelInfo(
                     model_size=16384.0,
                     architecture="TestArchitecture",
@@ -186,6 +195,9 @@ class TestProfileSLADryRun:
     @pytest.mark.pre_merge
     @pytest.mark.parallel
     @pytest.mark.asyncio
+    @pytest.mark.gpu_0
+    @pytest.mark.integration
+    @pytest.mark.trtllm
     async def test_trtllm_dryrun(self, trtllm_args):
         """Test that profile_sla dry-run works for trtllm backend with disagg.yaml config."""
         # Run the profile in dry-run mode - should complete without errors
@@ -224,6 +236,7 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
+                self.pick_with_webui = False
                 self.model_info = ModelInfo(
                     model_size=65536.0,
                     architecture="TestMoEArchitecture",
@@ -237,6 +250,9 @@ class TestProfileSLADryRun:
     @pytest.mark.pre_merge
     @pytest.mark.parallel
     @pytest.mark.asyncio
+    @pytest.mark.gpu_0
+    @pytest.mark.integration
+    @pytest.mark.sglang
     async def test_sglang_moe_dryrun(self, sglang_moe_args):
         """Test that profile_sla dry-run works for sglang backend with MoE config."""
         # Run the profile in dry-run mode - should complete without errors
@@ -297,6 +313,7 @@ class TestProfileSLADryRun:
                 # Set to 0 to trigger auto-generation path
                 self.num_gpus_per_node = 0
                 self.deploy_after_profile = False
+                self.pick_with_webui = False
                 self.enable_gpu_discovery = True
 
         return Args()
@@ -304,6 +321,9 @@ class TestProfileSLADryRun:
     @pytest.mark.pre_merge
     @pytest.mark.parallel
     @pytest.mark.asyncio
+    @pytest.mark.integration
+    @pytest.mark.gpu_0
+    @pytest.mark.vllm
     @patch("benchmarks.profiler.utils.search_space_autogen.get_gpu_summary")
     @patch("benchmarks.profiler.utils.search_space_autogen.get_model_info")
     async def test_profile_with_autogen_search_space_h100(
@@ -361,6 +381,7 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 0
                 self.deploy_after_profile = False
+                self.pick_with_webui = False
                 self.enable_gpu_discovery = True
 
         return Args()
@@ -368,6 +389,9 @@ class TestProfileSLADryRun:
     @pytest.mark.pre_merge
     @pytest.mark.parallel
     @pytest.mark.asyncio
+    @pytest.mark.gpu_0
+    @pytest.mark.integration
+    @pytest.mark.sglang
     @patch("benchmarks.profiler.utils.search_space_autogen.get_gpu_summary")
     @patch("benchmarks.profiler.utils.search_space_autogen.get_model_info")
     async def test_sglang_profile_with_autogen_search_space_h100(
@@ -425,6 +449,7 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 0
                 self.deploy_after_profile = False
+                self.pick_with_webui = False
                 self.enable_gpu_discovery = True
 
         return Args()
@@ -432,6 +457,9 @@ class TestProfileSLADryRun:
     @pytest.mark.pre_merge
     @pytest.mark.parallel
     @pytest.mark.asyncio
+    @pytest.mark.gpu_0
+    @pytest.mark.integration
+    @pytest.mark.trtllm
     @patch("benchmarks.profiler.utils.search_space_autogen.get_gpu_summary")
     @patch("benchmarks.profiler.utils.search_space_autogen.get_model_info")
     async def test_trtllm_profile_with_autogen_search_space_h100(

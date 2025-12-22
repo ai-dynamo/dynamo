@@ -27,6 +27,10 @@ dynamo-operator:
   # -- etcd server address for operator state storage (leave empty to use the bundled etcd chart). Format: "http://hostname:port" or "https://hostname:port"
   etcdAddr: ""
 
+  nats:
+    # -- Whether the NATS is enabled
+    enabled: true
+
   # -- URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true).
   modelExpressURL: ""
   # -- Namespace access controls for the operator
@@ -42,8 +46,8 @@ dynamo-operator:
       # Interval for renewing the namespace scope marker lease (namespace-restricted mode only). The namespace-restricted operator renews its lease at this interval to signal it's still running.
       renewInterval: 10s
 
-  # -- The Dynamo discovery backend to use. By default, will rely on ETCD for discovery. Can be set to "kubernetes" to use Kubernetes API for service discovery. --
-  discoveryBackend: ""
+  # -- The Dynamo discovery backend to use. Default is "kubernetes" for Kubernetes API service discovery. Set to "etcd" to use ETCD for discovery. --
+  discoveryBackend: "kubernetes"
 
   # Controller manager configuration
   controllerManager:
@@ -259,6 +263,12 @@ etcd:
   livenessProbe:
     # Whether to enable liveness probes (disabled to reduce startup complexity)
     enabled: false
+
+  # Pod Disruption Budget configuration
+  # Should be enabled for HA deployments with 3+ replicas
+  pdb:
+    # Whether to create a PodDisruptionBudget (disabled for single-node deployments)
+    create: false
 
   # Node tolerations for etcd pods (allows scheduling on specific nodes)
   tolerations: []

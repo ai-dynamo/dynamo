@@ -372,10 +372,21 @@ class EncodeHelper:
             }
             return
         else:
-            yield {
-                "error": (
-                    "Unsupported encode request: expected embedding_paths (.pt/.bin) "
-                    "or (image_urls and text_prompt) for full EPD"
-                )
+            # Tensor format (e.g., llava_next_mm_embed_seashore.pt)
+            encodings = loaded_data
+            auxiliary_data = {}
+
+        # Create readable operation with main embeddings tensor (works for both formats)
+        descriptor = nixl_connect.Descriptor(encodings)
+        with await connector.create_readable(descriptor) as readable_op:
+            # Get the metadata for the readable operation
+            op_metadata = readable_op.metadata()
+
+            # Send back shape info, readable metadata, and serialized auxiliary data
+            response = {
+                "nixl_readable_metadata": op_metadata.model_dump(),
+                "embeddings_shape": list(encodings.shape),
+                "embeddings_dtype": str(encodings.dtype),
+                "auxiliary_data": EncodeHelper.serialize_tensor_dict(auxiliary_data),
             }
             return

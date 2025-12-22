@@ -165,10 +165,11 @@ def send_completion_request(
         raise
 
 
-@pytest.mark.trtllm_marker
+@pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.slow
 @pytest.mark.gpu_1
+@pytest.mark.nightly
 def test_smoke(request, runtime_services):
     """End-to-end test for TRTLLM worker with autodeploy backend in its most basic form."""
 
