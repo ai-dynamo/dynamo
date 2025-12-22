@@ -144,7 +144,8 @@ runs:
           --framework ${{ inputs.framework }} \
           --platform ${{ inputs.platform }} \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
-          --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
+          --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}" \
+          --no-tag-latest
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 
