@@ -113,14 +113,14 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          - { arch: amd64 }
+          - { arch: arm64 }
         framework:
           - { name: vllm, arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04', arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04', arm_cuda_version: '12.9', arm_torch_backend: 'cu129' }
           - { name: sglang, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
           - { name: trtllm, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
     name: ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-    runs-on: ${{ matrix.platform.runner }}
+    runs-on: builder-cpu-amd-runner
     steps:
       - name: define buildkit builders
         shell: bash
