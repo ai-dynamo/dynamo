@@ -115,13 +115,13 @@ VLLM_RUNTIME_IMAGE_TAG_CU13="13.0.2-runtime-ubuntu24.04"
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-SGLANG_CUDA_VERSION="12.9.1"
-# This is for Dockerfile
+
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
-# This is for Dockerfile.sglang. Unlike the other frameworks, it is using a different base image
-SGLANG_FRAMEWORK_IMAGE="nvcr.io/nvidia/cuda"
-SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
+SGLANG_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
+SGLANG_CUDA_VERSION="12.9.1"
+SGLANG_PYTHON_VERSION="3.10"
+
+PYTHON_VERSION="3.12"
 
 NIXL_REF=0.8.0
 NIXL_UCX_REF=v1.20.0-rc1
@@ -909,13 +909,10 @@ fi
 
 if [[ $FRAMEWORK == "SGLANG" ]]; then
     echo "Customizing Python, CUDA, and framework images for sglang images"
-    BUILD_ARGS+=" --build-arg PYTHON_VERSION=3.10"
+    BUILD_ARGS+=" --build-arg PYTHON_VERSION=${SGLANG_PYTHON_VERSION}"
     BUILD_ARGS+=" --build-arg CUDA_VERSION=${SGLANG_CUDA_VERSION}"
-    # Unlike the other two frameworks, SGLang's framework image is different from the base image, so we need to set it explicitly.
-    BUILD_ARGS+=" --build-arg FRAMEWORK_IMAGE=${SGLANG_FRAMEWORK_IMAGE}"
-    BUILD_ARGS+=" --build-arg FRAMEWORK_IMAGE_TAG=${SGLANG_FRAMEWORK_IMAGE_TAG}"
 else
-    BUILD_ARGS+=" --build-arg PYTHON_VERSION=3.12"
+    BUILD_ARGS+=" --build-arg PYTHON_VERSION=${PYTHON_VERSION}"
 fi
 # Add sccache build arguments
 if [ "$USE_SCCACHE" = true ]; then

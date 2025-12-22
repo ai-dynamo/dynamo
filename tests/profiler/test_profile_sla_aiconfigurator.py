@@ -114,7 +114,7 @@ class TestProfileSlaAiconfigurator:
     @pytest.mark.parallel
     @pytest.mark.asyncio
     @pytest.mark.gpu_1
-    @pytest.mark.performance
+    @pytest.mark.integration
     async def test_trtllm_aiconfigurator_single_model(self, llm_args):
         # Test that profile_sla works with the model & backend in the llm_args fixture.
         await run_profile(llm_args)
@@ -122,8 +122,8 @@ class TestProfileSlaAiconfigurator:
     @pytest.mark.parallel
     @pytest.mark.asyncio
     @pytest.mark.gpu_1
+    @pytest.mark.integration
     @pytest.mark.nightly
-    @pytest.mark.performance
     @pytest.mark.parametrize(
         "backend, aic_backend_version",
         [
