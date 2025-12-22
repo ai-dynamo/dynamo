@@ -34,7 +34,7 @@ runs:
       shell: bash
       run: |
         # Setup test directories
-        mkdir -p test-results
+        # mkdir -p test-results
 
         # Set platform architecture from input
         PLATFORM_ARCH="${{ inputs.platform_arch }}"
@@ -53,51 +53,55 @@ runs:
         PYTEST_XML_FILE: pytest_test_report.xml
         HF_HOME: /runner/_work/_temp
       run: |
+        # 1. Install uv and fix PATH
         curl -LsSf https://astral.sh/uv/install.sh | sh
-        echo "$HOME/.local/bin" >> $GITHUB_PATH
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
         export PATH="$HOME/.cargo/bin:$PATH"
+
+        # 2. Setup Virtual Env (Using default .venv for 'uv run' compatibility)
+        uv venv
+        source .venv/bin/activate
+
+        # 3. Install dependencies
         uv pip install pytest
         uv pip install --no-cache --no-deps -e .
-        # Run pytest with detailed output and JUnit XML
-        set +e  # Don't exit on test failures
 
-        # Determine docker runtime flags and pytest command based on dry_run mode
+        set +e
+
+        # 4. Define Test Directory
+        TEST_RESULTS_DIR="$(pwd)/test-results"
+        mkdir -p "$TEST_RESULTS_DIR"
+
+        # 5. Build Command (Fixed JUnit path to use the local results dir)
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
-          echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
-          GPU_FLAGS=""
-          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
+          echo "🔍 Running pytest in dry-run mode"
+          PYTEST_CMD="uv run pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          PYTEST_CMD="pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          # FIXED: Changed /workspace/test-results to ./test-results
+          PYTEST_CMD="uv run pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
 
-          # Detect GPU availability and conditionally add GPU flags
-          GPU_FLAGS=""
           if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
-            echo "✓ GPU detected, enabling GPU runtime"
+            echo "✓ GPU detected"
             GPU_FLAGS="--runtime=nvidia --gpus all"
-          else
-            echo "⚠️  No GPU detected, running in CPU-only mode"
           fi
         fi
 
-        # Get absolute path for test-results directory and ensure it has proper permissions
-        TEST_RESULTS_DIR="$(pwd)/test-results"
+        # 6. Execute
         bash -c "${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
-        # Verify test results were written (only in normal mode)
         if [[ "${{ inputs.dry_run }}" != "true" ]]; then
-          if [[ -f "${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}" ]]; then
-            echo "✅ Test results file found: ${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}"
+          if [[ -f "test-results/${{ env.PYTEST_XML_FILE }}" ]]; then
+            echo "✅ Test results file found."
           else
-            echo "⚠️  Test results file not found: ${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}"
+            echo "⚠️  Test results file NOT found."
           fi
         fi
 
-        # Always continue to results processing
         exit 0
 
     - name: Process Test Results
