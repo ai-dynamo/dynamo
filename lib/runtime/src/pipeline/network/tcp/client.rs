@@ -846,4 +846,225 @@ mod tests {
             "Controller should be killed after receiving Kill message"
         );
     }
+
+    // ==================== create_response_stream tests ====================
+
+    use super::super::{CallHomeHandshake, TcpStreamConnectionInfo};
+    use crate::pipeline::network::{ConnectionInfo, StreamType};
+
+    /// Helper to create a ConnectionInfo for testing
+    fn create_test_connection_info(
+        address: &str,
+        subject: &str,
+        context_id: &str,
+        stream_type: StreamType,
+    ) -> ConnectionInfo {
+        let tcp_info = TcpStreamConnectionInfo {
+            address: address.to_string(),
+            subject: subject.to_string(),
+            context: context_id.to_string(),
+            stream_type,
+        };
+        ConnectionInfo::from(tcp_info)
+    }
+
+    const NON_EXISTENT_IP_ADDRESS: &str = "non.existent.ip.address:0";
+
+    /// Test that create_response_stream fails with invalid stream type
+    #[tokio::test]
+    async fn test_create_response_stream_invalid_stream_type() {
+        let controller = Arc::new(Controller::default());
+        let context_id = controller.id().to_string();
+
+        // Create connection info with wrong stream type (Request instead of Response)
+        // Address is unused since validation fails before connection attempt
+        let info: ConnectionInfo = create_test_connection_info(
+            NON_EXISTENT_IP_ADDRESS,
+            "test-subject",
+            &context_id,
+            StreamType::Request,
+        );
+
+        let result = TcpClient::create_response_stream(controller, info).await;
+
+        match result {
+            Ok(_) => panic!("Expected error for invalid stream type"),
+            Err(err) => {
+                assert!(
+                    err.to_string().contains("Invalid stream type"),
+                    "Expected 'Invalid stream type' error, got: {}",
+                    err
+                );
+            }
+        }
+    }
+
+    /// Test that create_response_stream fails with mismatched context
+    #[tokio::test]
+    async fn test_create_response_stream_invalid_context() {
+        let controller = Arc::new(Controller::default());
+
+        // Create connection info with wrong context id
+        let info = create_test_connection_info(
+            NON_EXISTENT_IP_ADDRESS,
+            "test-subject",
+            "wrong-context-id",
+            StreamType::Response,
+        );
+
+        let result = TcpClient::create_response_stream(controller, info).await;
+
+        match result {
+            Ok(_) => panic!("Expected error for invalid context"),
+            Err(err) => {
+                assert!(
+                    err.to_string().contains("Invalid context"),
+                    "Expected 'Invalid context' error, got: {}",
+                    err
+                );
+            }
+        }
+    }
+
+    /// Test that create_response_stream fails when server is not available
+    #[tokio::test]
+    async fn test_create_response_stream_connection_refused() {
+        let controller = Arc::new(Controller::default());
+        let context_id = controller.id().to_string();
+
+        // Use a port that's unlikely to have a server running
+        let info: ConnectionInfo = create_test_connection_info(
+            NON_EXISTENT_IP_ADDRESS,
+            "test-subject",
+            &context_id,
+            StreamType::Response,
+        );
+
+        let result = TcpClient::create_response_stream(controller, info).await;
+
+        match result {
+            Ok(_) => panic!("Expected error for invalid service address"),
+            Err(err) => {
+                assert!(
+                    err.to_string().contains("Name or service not known"),
+                    "Expected 'Invalid context' error, got: {}",
+                    err
+                );
+            }
+        }
+    }
+
+    /// Test successful create_response_stream with a mock server
+    #[tokio::test]
+    async fn test_create_response_stream_success() {
+        use tokio::io::AsyncWriteExt;
+
+        // Start a mock server
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let controller = Arc::new(Controller::default());
+        let context_id = controller.id().to_string();
+
+        let info = create_test_connection_info(
+            &server_addr.to_string(),
+            "test-subject",
+            &context_id,
+            StreamType::Response,
+        );
+
+        // Spawn server task to accept connection and handle handshake
+        let server_handle = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = tokio::io::split(socket);
+            let mut framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
+
+            // Read the handshake message
+            let handshake_msg = framed_reader.next().await.unwrap().unwrap();
+            let (header, _) = handshake_msg.optional_parts();
+            let header = header.unwrap();
+            let handshake: CallHomeHandshake = serde_json::from_slice(header).unwrap();
+
+            assert_eq!(handshake.subject, "test-subject");
+            assert_eq!(handshake.stream_type, StreamType::Response);
+
+            // Shutdown to signal EOF
+            write_half.shutdown().await.unwrap();
+
+            handshake
+        });
+
+        // Create the response stream
+        let stream_sender = TcpClient::create_response_stream(controller, info)
+            .await
+            .expect("Expected successful connection");
+        assert!(stream_sender.prologue.is_some());
+
+        // Wait for server to complete and verify handshake was correct
+        let handshake = server_handle.await.unwrap();
+        assert_eq!(handshake.subject, "test-subject");
+    }
+
+    /// Test that StreamSender can send messages through the stream
+    #[tokio::test]
+    async fn test_create_response_stream_can_send_messages() {
+        use tokio::io::AsyncWriteExt;
+
+        // Start a mock server
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let controller = Arc::new(Controller::default());
+        let context_id = controller.id().to_string();
+
+        let info = create_test_connection_info(
+            &server_addr.to_string(),
+            "test-subject",
+            &context_id,
+            StreamType::Response,
+        );
+
+        // Spawn server task
+        let server_handle = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = tokio::io::split(socket);
+            let mut framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
+
+            // Read handshake
+            let _handshake_msg = framed_reader.next().await.unwrap().unwrap();
+
+            // Read data message sent by client
+            let data_msg = framed_reader.next().await.unwrap().unwrap();
+            let (_, data) = data_msg.optional_parts();
+            let data = data.unwrap();
+
+            // Verify the data
+            assert_eq!(data.as_ref(), b"test payload");
+
+            // Read sentinel message
+            let sentinel_msg = framed_reader.next().await.unwrap().unwrap();
+            let (header, _) = sentinel_msg.optional_parts();
+            let header = header.unwrap();
+            let control: ControlMessage = serde_json::from_slice(header).unwrap();
+            assert!(matches!(control, ControlMessage::Sentinel));
+
+            // Shutdown to signal EOF
+            write_half.shutdown().await.unwrap();
+        });
+
+        // Create the response stream
+        let stream_sender = TcpClient::create_response_stream(controller, info)
+            .await
+            .unwrap();
+
+        // Send a message through the stream
+        let test_msg = TwoPartMessage::from_data(Bytes::from("test payload"));
+        stream_sender.tx.send(test_msg).await.unwrap();
+
+        // Drop the sender to close the channel and trigger sentinel
+        drop(stream_sender);
+
+        // Wait for server to complete
+        server_handle.await.unwrap();
+    }
 }
