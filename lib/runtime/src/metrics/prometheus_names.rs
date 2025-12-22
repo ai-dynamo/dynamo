@@ -297,6 +297,9 @@ pub mod kvbm {
 
     /// Number of failed object storage read operations (blocks)
     pub const OBJECT_READ_FAILURES: &str = "object_read_failures";
+
+    /// Number of failed object storage write operations (blocks)
+    pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
 }
 
 /// KvStats metrics from LLM workers
