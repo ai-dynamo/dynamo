@@ -111,7 +111,6 @@ jobs:
           runtime_image_tag: ''
           cuda_version: ''
           torch_backend: ''
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -141,7 +140,6 @@ jobs:
           runtime_image_tag: ''
           cuda_version: ''
           torch_backend: ''
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -219,7 +217,6 @@ jobs:
           runtime_image_tag: ${{ matrix.runtime_image_tag }}
           cuda_version: ${{ matrix.cuda_version }}
           torch_backend: ${{ matrix.torch_backend }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -249,7 +246,6 @@ jobs:
           runtime_image_tag: ${{ matrix.runtime_image_tag }}
           cuda_version: ${{ matrix.cuda_version }}
           torch_backend: ${{ matrix.torch_backend }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -560,6 +556,8 @@ jobs:
             timeout: 120
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
       - name: Check if build succeeded
         id: check_build
         env:
@@ -695,6 +693,8 @@ jobs:
             timeout: 150
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
       - name: Check if build succeeded
         id: check_build
         env:
