@@ -124,7 +124,7 @@ jobs:
           aws_push: 'false'
           azure_push: 'true'
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  vllm:
+  vllm-cuda-13:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
@@ -182,7 +182,7 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
       - name: Run tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
+        # if: ${{ matrix.platform.arch != 'arm64' }}  # run tests on arm too
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
@@ -191,7 +191,7 @@ jobs:
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
 
-  vllm-cu12:
+  vllm:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
