@@ -10,6 +10,7 @@ use ffmpeg_next::ffi::{AVPixelFormat, av_image_copy_to_buffer};
 use memfile::{CreateOptions, MemFile, Seal};
 use ndarray::Array4;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use video_rs::frame::RawFrame;
 use video_rs::{Location, Time};
 
@@ -22,7 +23,7 @@ use crate::preprocessor::media::{
 const FRAME_TIME_BUFFER_SECS: f64 = 0.001;
 const DEFAULT_MAX_ALLOC: u64 = 512 * 1024 * 1024; // 512 MB
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VideoDecoderLimits {
     /// Maximum allowed total allocation of decoded frames in bytes
@@ -38,7 +39,7 @@ impl Default for VideoDecoderLimits {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VideoDecoder {
     #[serde(default)]

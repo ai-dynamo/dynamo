@@ -3,6 +3,7 @@
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use validator::{Validate, ValidationError};
 
 pub use crate::protocols::common::timing::TimingInfo;
@@ -13,7 +14,7 @@ pub trait NvExtProvider {
 }
 
 /// Worker ID information for disaggregated serving
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct WorkerIdInfo {
     /// The prefill worker ID that processed this request
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -25,7 +26,7 @@ pub struct WorkerIdInfo {
 }
 
 /// NVIDIA LLM response extensions
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct NvExtResponse {
     /// Worker ID information (prefill and decode worker IDs)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,7 +44,7 @@ pub struct NvExtResponse {
 }
 
 /// NVIDIA LLM extensions to the OpenAI API
-#[derive(Serialize, Deserialize, Builder, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone)]
 #[validate(schema(function = "validate_nv_ext"))]
 pub struct NvExt {
     /// If true, sampling will be forced to be greedy.

@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use utoipa::ToSchema;
 
 use crate::protocols::openai::nvext::WorkerIdInfo;
 
@@ -241,7 +242,7 @@ impl Default for RequestTracker {
 ///
 /// This struct is serialized and included in the response's `nvext` field
 /// when the client requests timing information via `extra_fields: ["timing"]`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TimingInfo {
     /// When the request was received (epoch milliseconds)
     pub request_received_ms: u64,
