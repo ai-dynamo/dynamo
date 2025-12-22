@@ -50,6 +50,8 @@ on:
         required: true
       SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL:
         required: false
+      SLACK_OPS_SUPPORT_GROUP_ID:
+        required: false
       AZURE_AKS_CI_KUBECONFIG_B64:
         required: false
       HF_TOKEN:
@@ -1069,6 +1071,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          SLACK_OPS_GROUP_ID: ${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           PIPELINE_TYPE: ${{ inputs.pipeline_type }}
         run: |
@@ -1119,9 +1122,18 @@ jobs:
             FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | "• " + .name' "$JOBS_JSON")
             FAILED_JOBS_TEXT="*Failed Jobs (${FAILED_COUNT}):*"$'\n'"${FAILED_JOBS}"
 
+            # Build ops-support mention (use group ID if available, otherwise plain text)
+            if [ -n "${SLACK_OPS_GROUP_ID:-}" ]; then
+              OPS_MENTION="<!subteam^${SLACK_OPS_GROUP_ID}|@ops-support>"
+            else
+              OPS_MENTION="@ops-support"
+            fi
+            ACTION_TEXT=":rotating_light: cc ${OPS_MENTION} - Please investigate the failures above."
+
             PAYLOAD=$(jq -n \
               --arg summary "$SUMMARY_TEXT" \
               --arg failed "$FAILED_JOBS_TEXT" \
+              --arg action "$ACTION_TEXT" \
               '{
                 text: $summary,
                 blocks: [
@@ -1138,6 +1150,18 @@ jobs:
                       type: "mrkdwn",
                       text: $failed
                     }
+                  },
+                  {
+                    type: "divider"
+                  },
+                  {
+                    type: "context",
+                    elements: [
+                      {
+                        type: "mrkdwn",
+                        text: $action
+                      }
+                    ]
                   }
                 ]
               }')
