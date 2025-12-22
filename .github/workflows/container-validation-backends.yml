@@ -108,8 +108,7 @@ jobs:
 
 
   builder:
-    needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    needs: detect-buildkit-workers
     strategy:
       fail-fast: false
       matrix:
