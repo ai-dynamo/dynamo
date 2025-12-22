@@ -51,7 +51,7 @@ jobs:
     name: run pytests for ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
     runs-on: gpu-l40-amd64
     container:
-      image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:140f7e720451a3e8e5013d6910ba5525a65e457f-vllm-amd64
+      image: "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:140f7e720451a3e8e5013d6910ba5525a65e457f-vllm-amd64"
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
