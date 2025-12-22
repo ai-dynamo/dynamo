@@ -119,13 +119,13 @@ jobs:
           - { name: vllm, arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04', arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04', arm_cuda_version: '12.9', arm_torch_backend: 'cu129' }
           - { name: sglang, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
           - { name: trtllm, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
-    name: (${{ matrix.framework.name }}) (${{ matrix.platform.arch }})
+    name: ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: define buildkit builders
         shell: bash
         run: |
-          ADDRS="${{ needs.detect-buildkit-workers.outputs[format('{0}-{1}', matrix.framework.name, matrix.platform.arch)] }}"
+          ADDRS="${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}"
           IFS=',' read -ra ADDR_LIST <<< "$ADDRS"
           FIRST=true
           for addr in "${ADDR_LIST[@]}"; do
