@@ -1075,9 +1075,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Prefill Request ID: {request_id}")
 
-        # Token-in-token-out mode: internal protocol format
-        async for chunk in self._generate_token_mode(request, context, request_id):
-            yield chunk
+        if self.use_vllm_tokenizer:
+            # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
+            async for chunk in self._generate_text_mode(request, context, request_id):
+                yield chunk
+        else:
+            # Token-in-token-out mode: internal protocol format
+            async for chunk in self._generate_token_mode(request, context, request_id):
+                yield chunk
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
@@ -1182,6 +1187,126 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         )
 
                     yield output
+            except asyncio.CancelledError:
+                # raise the error because we cannot migrate prefill requests
+                raise GeneratorExit(
+                    "Prefill engine was shut down during token generation"
+                ) from None
+
+    async def _generate_text_mode(self, request, context, request_id):
+        """Generate prefill using OpenAI-compatible format (text-in-text-out)."""
+        # Get text input using InputParamManager
+        input_data = self.input_param_manager.get_input_param(
+            request, use_tokenizer=True
+        )
+
+        # Build prompt for vLLM
+        if isinstance(input_data, list):
+            prompt = TokensPrompt(prompt_token_ids=input_data)
+        else:
+            prompt = TextPrompt(prompt=input_data)
+
+        # Build sampling params from OpenAI-style request
+        sampling_params = build_sampling_params_openai(
+            request, self.default_sampling_params
+        )
+
+        # Configure for prefill-only mode with remote decode
+        if sampling_params.extra_args is None:
+            sampling_params.extra_args = {}
+        sampling_params.extra_args["kv_transfer_params"] = {
+            "do_remote_decode": True,
+        }
+        sampling_params_defaults = {
+            "do_remote_prefill": False,
+            "remote_engine_id": None,
+            "remote_block_ids": None,
+            "remote_host": None,
+            "remote_port": None,
+        }
+        # Add only missing keys
+        for k, v in sampling_params_defaults.items():
+            sampling_params.extra_args["kv_transfer_params"].setdefault(k, v)
+        # Override for prefill: only generate 1 token
+        sampling_params.max_tokens = 1
+        sampling_params.min_tokens = 1
+
+        # Extract LoRA request if present
+        lora_request = None
+        model_name = request.get("model")
+
+        if model_name and model_name in self.lora_id_for_name:
+            lora_id = self.lora_id_for_name[model_name]
+            lora_request = LoRARequest(
+                lora_name=model_name,
+                lora_int_id=lora_id,
+                lora_path=self.lora_name_to_path[model_name],
+            )
+            logger.info(
+                f"Prefill request {request_id} will use LoRA adapter: {model_name} (ID: {lora_id}), "
+                f"path: {self.lora_name_to_path[model_name]}"
+            )
+
+        dp_rank = request.get("dp_rank", None)
+        openai_request_id = request.get("id") or request.get("request_id", request_id)
+
+        trace_headers = self._build_trace_headers(context)
+
+        async with self._abort_monitor(context, request_id, is_prefill=True):
+            try:
+                gen = self.engine_client.generate(
+                    prompt,
+                    sampling_params,
+                    request_id,
+                    data_parallel_rank=dp_rank,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                )
+            except EngineDeadError as e:
+                logger.error(f"vLLM EngineDeadError: {e}")
+                logger.warning("Initiating Dynamo Runtime shutdown.")
+                self.runtime.shutdown()
+                os._exit(1)
+
+            try:
+                async for res in gen:
+                    logger.debug(f"kv transfer params: {res.kv_transfer_params}")
+
+                    # Build OpenAI-compatible response with disaggregated params
+                    output_text = res.outputs[0].text if res.outputs else ""
+
+                    chunk = {
+                        "id": openai_request_id,
+                        "created": int(time.time()),
+                        "object": "chat.completion.chunk",
+                        "model": model_name or "unknown",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "role": "assistant",
+                                    "content": output_text,
+                                },
+                                "finish_reason": None,
+                            }
+                        ],
+                        "disaggregated_params": (
+                            {"kv_transfer_params": res.kv_transfer_params}
+                            if res.kv_transfer_params
+                            else None
+                        ),
+                        "completion_usage": BaseWorkerHandler._build_completion_usage(
+                            request_output=res
+                        ),
+                    }
+
+                    if lora_request:
+                        logger.info(
+                            f"Prefill completed for request {request_id} with LoRA {lora_request.lora_name}: "
+                            f"has_kv_params={res.kv_transfer_params is not None}"
+                        )
+
+                    yield chunk
             except asyncio.CancelledError:
                 # raise the error because we cannot migrate prefill requests
                 raise GeneratorExit(

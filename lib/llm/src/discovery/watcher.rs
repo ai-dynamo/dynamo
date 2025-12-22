@@ -583,10 +583,10 @@ impl ModelWatcher {
                 .add_tensor_model(card.name(), checksum, engine)?;
         } else if card.model_type.supports_prefill() {
             // Case 6: Prefill
-            // Guardrail: Verify model_input is Tokens
-            if card.model_input != ModelInput::Tokens {
+            // Guardrail: Verify model_input is Tokens or Text.
+            if card.model_input != ModelInput::Tokens && card.model_input != ModelInput::Text {
                 anyhow::bail!(
-                    "Prefill models must use ModelInput::Tokens, got {}",
+                    "Prefill models must use ModelInput::Tokens or ModelInput::Text, got {}",
                     card.model_input.as_str()
                 );
             }
