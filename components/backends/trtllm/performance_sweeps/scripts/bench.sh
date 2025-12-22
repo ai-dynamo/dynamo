@@ -22,32 +22,32 @@ if [ ! -d "${SCRIPTS_DIR}/scripts/bench" ]; then
     exit 1
 fi
 
-WAIT_TIME=300
-
 model=${1}
 multi_round=${2}
-num_gen_servers=${3}
-concurrency_list=${4}
-streaming=${5}
-log_path=${6}
-prefill_gpus=${7}
-decode_gpus=${8}
+num_ctx_servers=${3}
+num_gen_servers=${4}
+concurrency_list=${5}
+streaming=${6}
+log_path=${7}
+prefill_gpus=${8}
+decode_gpus=${9}
 total_gpus=$((prefill_gpus+decode_gpus))
-model_path=${9}
-isl=${10}
-osl=${11}
-kind=${12}
-benchmark_kind=${13}
+model_path=${10}
+isl=${11}
+osl=${12}
+kind=${13}
+benchmark_kind=${14}
 
-if [ "$#" -ne 13 ]; then
-    echo "Error: Expected 13 arguments, got $#"
-    echo "Usage: $0 <model> <multi_round> <num_gen_servers> <concurrency_list> <streaming> <log_path> <prefill_gpus> <decode_gpus> <model_path> <isl> <osl> <kind> <benchmark_kind>"
+if [ "$#" -ne 14 ]; then
+    echo "Error: Expected 14 arguments, got $#"
+    echo "Usage: $0 <model> <multi_round> <num_ctx_servers> <num_gen_servers> <concurrency_list> <streaming> <log_path> <prefill_gpus> <decode_gpus> <model_path> <isl> <osl> <kind> <benchmark_kind>"
     exit 1
 fi
 
 echo "Arguments:"
 echo "  model: $model"
 echo "  multi_round: $multi_round"
+echo "  num_ctx_servers: $num_ctx_servers"
 echo "  num_gen_servers: $num_gen_servers"
 echo "  concurrency_list: $concurrency_list"
 echo "  streaming: $streaming"
@@ -105,41 +105,35 @@ if [ -f "${log_path}/deployment_config.json" ]; then
 fi
 echo "${deployment_config}" > "${log_path}/deployment_config.json"
 
-# Wait for server to become healthy (up to 50 attempts)
-failed=true
-for ((i=1; i<=50; i++)); do
-    sleep $((i == 1 ? WAIT_TIME : 20))
-    response=$(curl -s -w "\n%{http_code}" "${hostname}:${port}/health")
-    http_code=$(echo "$response" | tail -n1)
-    body=$(echo "$response" | sed '$d')
+health_addr="http://$hostname:${port}/health"
+echo "Polling ${health_addr} every 5 seconds to check whether ${num_ctx_servers} prefills and ${num_gen_servers} decodes are alive"
 
-    # NOTE: This can be replaced with simply checking /v1/models endpoint after this PR:
-    # https://github.com/ai-dynamo/dynamo/pull/2683
-    if [[ "$http_code" == "200" ]] && echo "$body" | grep -q '"status":"healthy"' && echo "$body" | grep -q '"endpoints":\[[^]]*"dyn://dynamo.tensorrt_llm.generate"'; then
-        if [[ "$kind" == *disagg* ]]; then
-            if echo "$body" | grep -q '"dyn://dynamo.prefill.generate"'; then
-                echo "Health check succeeded on attempt $i"
-                echo "$body"
-                failed=false
-                break
-            else
-                echo "Attempt $i: prefill generate endpoint not found in etcd."
-            fi
-        else
-            echo "Health check succeeded on attempt $i"
-            echo "$body"
-            failed=false
-            break
-        fi
-    else
-        echo "Attempt $i failed: /health not ready (HTTP $http_code)."
+start_ts=$(date +%s)
+report_ts=$(date +%s)
+
+while :; do
+    # Curl timeout - our primary use case here is to launch it at the first node (localhost), so no timeout is needed.
+    curl_result=$(curl ${health_addr} 2>/dev/null)
+    # Python path - Use of `check_server_health.py` is self-constrained outside of any packaging.
+    check_result=$(python3 $SCRIPTS_DIR/scripts/check_server_health.py $num_ctx_servers $num_gen_servers <<< $curl_result)
+    if [[ $check_result == *"Model is ready."* ]]; then
+        echo $check_result
+        break;
     fi
-done
 
-if [[ "$failed" == "true" ]]; then
-    echo "Server did not respond with healthy status after 50 attempts."
-    exit 1
-fi
+    time_now=$(date +%s)
+    if [[ $((time_now - start_ts)) -ge 1200 ]]; then
+        echo "Model did not get healthy in 1200 seconds"
+        exit 2;
+    fi
+
+    if [[ $((time_now - report_ts)) -ge 20 ]]; then
+        echo $check_result
+        report_ts=$time_now
+    fi
+
+    sleep 5
+done
 
 curl -v  -w "%{http_code}" "${hostname}:${port}/v1/chat/completions" \
   -H "Content-Type: application/json" \
@@ -155,37 +149,33 @@ curl -v  -w "%{http_code}" "${hostname}:${port}/v1/chat/completions" \
   "max_tokens": 30
 }'
 
-# aiperf already does a warmup
-if [[ "$benchmark_kind" == "sa" ]]; then
-    python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
-        --served-model-name ${model} \
-        --model ${model_path} \
-        --dataset-name random \
-        --num-prompts "${multi_round}" \
-        --random-input-len ${isl} \
-        --random-output-len ${osl} \
-        --random-range-ratio 0.8 \
-        --ignore-eos \
-        --use-chat-template \
-        --backend "dynamo" \
-        --endpoint "/v1/completions" \
-        --percentile-metrics ttft,tpot,itl,e2el \
-        --max-concurrency "1" \
-        --host ${hostname} \
-        --port ${port}
-fi
-
 mkdir -p ${log_path}/results
 echo "Starting benchmark..."
 for concurrency in ${concurrency_list}; do
-    original_concurrency=${concurrency}
+    original_concurrency=$concurrency
     concurrency=$((concurrency * num_gen_servers))
     num_prompts=$((concurrency * multi_round))
     echo "Benchmarking with concurrency ${concurrency} ... ${num_prompts} prompts"
     mkdir -p ${log_path}/concurrency_${concurrency}
-    
+
     if [[ "$benchmark_kind" == "sa" ]]; then
         python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
+            --served-model-name ${model} \
+            --model ${model_path} \
+            --dataset-name random \
+            --num-prompts "$(($concurrency * 2))" \
+            --random-input-len ${isl} \
+            --random-output-len ${osl} \
+            --random-range-ratio 0.8 \
+            --ignore-eos \
+	    --use-chat-template \
+            --backend "dynamo" \
+	    --endpoint "/v1/completions" \
+	    --percentile-metrics ttft,tpot,itl,e2el \
+            --max-concurrency "$concurrency" \
+	    --host ${hostname} \
+            --port ${port}
+	python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
             --served-model-name ${model} \
             --model ${model_path} \
             --dataset-name random \

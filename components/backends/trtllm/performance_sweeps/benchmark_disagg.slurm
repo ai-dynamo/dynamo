@@ -200,7 +200,7 @@ srun -l --container-name=${CONTAINER_NAME} \
         --container-env HEAD_NODE_IP,HEAD_NODE,SCRIPTS_DIR \
         --mpi=pmix --overlap -N 1 -n 1 \
 	    -w ${nodes[0]} \
-        bash ${SCRIPTS_DIR}/scripts/bench.sh ${SERVED_MODEL_NAME} ${MULTI_ROUND} ${DECODE_COUNT} "${concurrency_list}" true ${full_logdir} ${ctx_gpus} ${decode_gpus} ${MODEL_PATH} ${ISL} ${OSL} "dynamo-disagg" ${BENCHMARK_KIND} > ${full_logdir}/bench.log 2>&1
+        bash ${SCRIPTS_DIR}/scripts/bench.sh ${SERVED_MODEL_NAME} ${MULTI_ROUND} ${PREFILL_COUNT} ${DECODE_COUNT} "${concurrency_list}" true ${full_logdir} ${ctx_gpus} ${decode_gpus} ${MODEL_PATH} ${ISL} ${OSL} "dynamo-disagg" ${BENCHMARK_KIND} > ${full_logdir}/bench.log 2>&1
 
 
 # Cleanup will be handled by the EXIT trap
