@@ -191,7 +191,7 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         openssl-devel \
         libuuid-devel \
         zlib-devel
-         
+
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
