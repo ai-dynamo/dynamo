@@ -133,6 +133,7 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.trtllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.timeout(600)
 def test_etcd_ha_failover_trtllm_aggregated(request, predownload_models):
@@ -206,6 +207,7 @@ def test_etcd_ha_failover_trtllm_aggregated(request, predownload_models):
 @pytest.mark.trtllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.timeout(600)
 def test_etcd_ha_failover_trtllm_disaggregated(
@@ -286,6 +288,7 @@ def test_etcd_ha_failover_trtllm_disaggregated(
 @pytest.mark.trtllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.timeout(600)
 def test_etcd_non_ha_shutdown_trtllm_aggregated(request, predownload_models):
@@ -346,6 +349,7 @@ def test_etcd_non_ha_shutdown_trtllm_aggregated(request, predownload_models):
 @pytest.mark.trtllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.timeout(600)
 def test_etcd_non_ha_shutdown_trtllm_disaggregated(

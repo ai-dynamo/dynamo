@@ -1279,13 +1279,17 @@ impl KvPushRouter {
             .sampling_options(sampling_options)
             .output_options(output_options)
             .router_config_override(router_config_override)
-            .dp_rank(dp_rank)
             .extra_args(extra_args)
             .tracker(Some(tracker.clone()));
 
-        // Set backend_instance_id if worker_id is provided
-        if let Some(worker_id) = worker_id {
-            request_builder.backend_instance_id(Some(worker_id));
+        // Set routing hints if worker_id or dp_rank is provided
+        if worker_id.is_some() || dp_rank.is_some() {
+            let routing = llm_rs::protocols::common::preprocessor::RoutingHints {
+                backend_instance_id: worker_id,
+                dp_rank,
+                ..Default::default()
+            };
+            request_builder.routing(Some(routing));
         }
 
         let request = request_builder.build().map_err(to_pyerr)?;
