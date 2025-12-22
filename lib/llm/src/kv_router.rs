@@ -786,11 +786,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             );
 
             // Compute actual overlap blocks by querying the indexer
-            let block_hashes =
-                compute_block_hash_for_seq(&request.token_ids, self.chooser.block_size(), None);
-            let overlap_scores = self.chooser.indexer.find_matches(block_hashes).await?;
             let worker = WorkerWithDpRank::new(id, dp_rank);
-            let overlap_blocks = overlap_scores.scores.get(&worker).copied().unwrap_or(0);
+            let overlap_blocks = self
+                .chooser
+                .get_overlap_blocks(&request.token_ids, worker)
+                .await?;
 
             // Skip add_request if EPP already handled bookkeeping via GAIE hooks
             if !is_query_only && !is_epp_routed_stage2 {
