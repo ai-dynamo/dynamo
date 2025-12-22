@@ -795,7 +795,6 @@ mod tests {
         );
     }
 
-<<<<<<< HEAD
     /// Test that handle_reader handles Kill control message by calling context.kill()
     #[tokio::test]
     async fn test_handle_reader_kill_control_message() {
@@ -806,69 +805,6 @@ mod tests {
             alive_rx: _alive_rx,
             controller,
         } = reader_harness().await;
-=======
-    // ==================== handle_reader tests ====================
-
-    /// Helper to encode a control message to bytes using the TwoPartCodec
-    fn encode_control_message(msg: &ControlMessage) -> Bytes {
-        let msg_bytes = serde_json::to_vec(msg).unwrap();
-        let two_part_msg = TwoPartMessage::from_header(Bytes::from(msg_bytes));
-        TwoPartCodec::default()
-            .encode_message(two_part_msg)
-            .unwrap()
-    }
-
-    /// Test that handle_reader handles Stop control message by calling context.stop()
-    #[tokio::test]
-    async fn test_handle_reader_stop_control_message() {
-        use tokio::io::AsyncWriteExt;
-
-        let (client, server) = create_tcp_pair().await;
-        let (read_half, _write_half) = tokio::io::split(client);
-        let (_server_read, mut server_write) = tokio::io::split(server);
-
-        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
-        let (alive_tx, _alive_rx) = tokio::sync::oneshot::channel::<()>();
-        let controller = Arc::new(Controller::default());
-
-        // Spawn the reader task
-        let controller_clone = controller.clone();
-        let reader_handle =
-            tokio::spawn(
-                async move { handle_reader(framed_reader, controller_clone, alive_tx).await },
-            );
-
-        // Send Stop control message from server (write raw encoded bytes)
-        let encoded = encode_control_message(&ControlMessage::Stop);
-        server_write.write_all(&encoded).await.unwrap();
-        server_write.flush().await.unwrap();
-
-        // Shutdown the write side to send FIN and signal EOF to the client
-        server_write.shutdown().await.unwrap();
-
-        // Wait for reader to finish
-        let _ = reader_handle.await.unwrap();
-
-        // Verify that stop was called on the controller
-        assert!(
-            controller.is_stopped(),
-            "Controller should be stopped after receiving Stop message"
-        );
-    }
-
-    /// Test that handle_reader handles Kill control message by calling context.kill()
-    #[tokio::test]
-    async fn test_handle_reader_kill_control_message() {
-        use tokio::io::AsyncWriteExt;
-
-        let (client, server) = create_tcp_pair().await;
-        let (read_half, _write_half) = tokio::io::split(client);
-        let (_server_read, mut server_write) = tokio::io::split(server);
-
-        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
-        let (alive_tx, _alive_rx) = tokio::sync::oneshot::channel::<()>();
-        let controller = Arc::new(Controller::default());
->>>>>>> 5b52910c4 (test: unit test TCP client handle_reader)
 
         // Spawn the reader task
         let controller_clone = controller.clone();
@@ -878,7 +814,6 @@ mod tests {
             );
 
         // Send Kill control message from server
-<<<<<<< HEAD
         framed_server
             .send(control_message(&ControlMessage::Kill))
             .await
@@ -886,14 +821,6 @@ mod tests {
 
         // Close the framed server to signal EOF to the client
         framed_server.close().await.unwrap();
-=======
-        let encoded = encode_control_message(&ControlMessage::Kill);
-        server_write.write_all(&encoded).await.unwrap();
-        server_write.flush().await.unwrap();
-
-        // Shutdown the write side to send FIN and signal EOF to the client
-        server_write.shutdown().await.unwrap();
->>>>>>> 5b52910c4 (test: unit test TCP client handle_reader)
 
         // Wait for reader to finish
         let _ = reader_handle.await.unwrap();
@@ -908,7 +835,6 @@ mod tests {
     /// Test that handle_reader exits when alive channel is closed
     #[tokio::test]
     async fn test_handle_reader_exits_on_alive_channel_closed() {
-<<<<<<< HEAD
         let ReaderHarness {
             framed_reader,
             alive_tx,
@@ -916,15 +842,6 @@ mod tests {
             controller,
             ..
         } = reader_harness().await;
-=======
-        let (client, server) = create_tcp_pair().await;
-        let (read_half, _write_half) = tokio::io::split(client);
-        let (_server_read, _server_write) = tokio::io::split(server);
-
-        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
-        let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
-        let controller = Arc::new(Controller::default());
->>>>>>> 5b52910c4 (test: unit test TCP client handle_reader)
 
         // Spawn the reader task
         let reader_handle =
@@ -945,7 +862,6 @@ mod tests {
     /// Test that handle_reader exits when TCP stream is closed
     #[tokio::test]
     async fn test_handle_reader_exits_on_stream_closed() {
-<<<<<<< HEAD
         let ReaderHarness {
             mut framed_server,
             framed_reader,
@@ -953,27 +869,13 @@ mod tests {
             alive_rx: _alive_rx,
             controller,
         } = reader_harness().await;
-=======
-        let (client, server) = create_tcp_pair().await;
-        let (read_half, _write_half) = tokio::io::split(client);
-        let (_server_read, mut server_write) = tokio::io::split(server);
-
-        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
-        let (alive_tx, _alive_rx) = tokio::sync::oneshot::channel::<()>();
-        let controller = Arc::new(Controller::default());
->>>>>>> 5b52910c4 (test: unit test TCP client handle_reader)
 
         // Spawn the reader task
         let reader_handle =
             tokio::spawn(async move { handle_reader(framed_reader, controller, alive_tx).await });
 
-<<<<<<< HEAD
         // Close the framed server to signal EOF to the client
         framed_server.close().await.unwrap();
-=======
-        // Shutdown the write side to send FIN and signal EOF to the client
-        server_write.shutdown().await.unwrap();
->>>>>>> 5b52910c4 (test: unit test TCP client handle_reader)
 
         // Reader should exit due to stream closure
         let result = tokio::time::timeout(std::time::Duration::from_secs(1), reader_handle).await;
@@ -987,7 +889,6 @@ mod tests {
     /// Test that handle_reader handles multiple control messages in sequence
     #[tokio::test]
     async fn test_handle_reader_multiple_control_messages() {
-<<<<<<< HEAD
         let ReaderHarness {
             mut framed_server,
             framed_reader,
@@ -995,17 +896,6 @@ mod tests {
             alive_rx: _alive_rx,
             controller,
         } = reader_harness().await;
-=======
-        use tokio::io::AsyncWriteExt;
-
-        let (client, server) = create_tcp_pair().await;
-        let (read_half, _write_half) = tokio::io::split(client);
-        let (_server_read, mut server_write) = tokio::io::split(server);
-
-        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
-        let (alive_tx, _alive_rx) = tokio::sync::oneshot::channel::<()>();
-        let controller = Arc::new(Controller::default());
->>>>>>> 5b52910c4 (test: unit test TCP client handle_reader)
 
         // Spawn the reader task
         let controller_clone = controller.clone();
@@ -1015,7 +905,6 @@ mod tests {
             );
 
         // Send multiple Stop messages (first one will stop, subsequent ones are no-ops)
-<<<<<<< HEAD
         framed_server
             .send(control_message(&ControlMessage::Stop))
             .await
@@ -1027,15 +916,6 @@ mod tests {
 
         // Close the framed server to signal EOF to the client
         framed_server.close().await.unwrap();
-=======
-        let encoded = encode_control_message(&ControlMessage::Stop);
-        server_write.write_all(&encoded).await.unwrap();
-        server_write.write_all(&encoded).await.unwrap();
-        server_write.flush().await.unwrap();
-
-        // Shutdown the write side to send FIN and signal EOF to the client
-        server_write.shutdown().await.unwrap();
->>>>>>> 5b52910c4 (test: unit test TCP client handle_reader)
 
         // Wait for reader to finish
         let _ = reader_handle.await.unwrap();
@@ -1050,7 +930,6 @@ mod tests {
     /// Test handle_reader with Stop followed by Kill
     #[tokio::test]
     async fn test_handle_reader_stop_then_kill() {
-<<<<<<< HEAD
         let ReaderHarness {
             mut framed_server,
             framed_reader,
@@ -1058,17 +937,6 @@ mod tests {
             alive_rx: _alive_rx,
             controller,
         } = reader_harness().await;
-=======
-        use tokio::io::AsyncWriteExt;
-
-        let (client, server) = create_tcp_pair().await;
-        let (read_half, _write_half) = tokio::io::split(client);
-        let (_server_read, mut server_write) = tokio::io::split(server);
-
-        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
-        let (alive_tx, _alive_rx) = tokio::sync::oneshot::channel::<()>();
-        let controller = Arc::new(Controller::default());
->>>>>>> 5b52910c4 (test: unit test TCP client handle_reader)
 
         // Spawn the reader task
         let controller_clone = controller.clone();
@@ -1078,7 +946,6 @@ mod tests {
             );
 
         // Send Stop first, then Kill
-<<<<<<< HEAD
         framed_server
             .send(control_message(&ControlMessage::Stop))
             .await
@@ -1090,16 +957,6 @@ mod tests {
 
         // Close the framed server to signal EOF to the client
         framed_server.close().await.unwrap();
-=======
-        let stop_encoded = encode_control_message(&ControlMessage::Stop);
-        let kill_encoded = encode_control_message(&ControlMessage::Kill);
-        server_write.write_all(&stop_encoded).await.unwrap();
-        server_write.write_all(&kill_encoded).await.unwrap();
-        server_write.flush().await.unwrap();
-
-        // Shutdown the write side to send FIN and signal EOF to the client
-        server_write.shutdown().await.unwrap();
->>>>>>> 5b52910c4 (test: unit test TCP client handle_reader)
 
         // Wait for reader to finish
         let _ = reader_handle.await.unwrap();
@@ -1110,7 +967,6 @@ mod tests {
             "Controller should be killed after receiving Kill message"
         );
     }
-<<<<<<< HEAD
 
     // ==================== create_response_stream tests ====================
 
@@ -1163,6 +1019,7 @@ mod tests {
         }
     }
 
+    /// Helper to create a ConnectionInfo for testing
     fn create_test_connection_info(
         address: &str,
         subject: &str,
@@ -1323,6 +1180,4 @@ mod tests {
         // Wait for server to complete
         server_handle.await.unwrap();
     }
-=======
->>>>>>> 5b52910c4 (test: unit test TCP client handle_reader)
 }
