@@ -43,4 +43,4 @@ helm upgrade -i --namespace $KGATEWAY_SYSTEM_NAMESPACE --version $KGATEWAY_VERSI
 
 
 # Deploy the Gateway Instance
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/raw/v1.0.0/config/manifests/gateway/kgateway/gateway.yaml -n $KGATEWAY_SYSTEM_NAMESPACE
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/raw/v1.0.0/config/manifests/gateway/kgateway/gateway.yaml -n $MODEL_NAMESPACE
