@@ -89,6 +89,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::environment_names::logging as env_logging;
 
+use dynamo_config::env_is_truthy;
+
 /// Default log level
 const DEFAULT_FILTER_LEVEL: &str = "info";
 
@@ -130,11 +132,9 @@ impl Default for LoggingConfig {
     }
 }
 
-/// Check if OTLP trace exporting is enabled (set OTEL_EXPORT_ENABLED to "1" to enable)
+/// Check if OTLP trace exporting is enabled (accepts: "1", "true", "on", "yes" - case insensitive)
 fn otlp_exporter_enabled() -> bool {
-    std::env::var(env_logging::otlp::OTEL_EXPORT_ENABLED)
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    env_is_truthy(env_logging::otlp::OTEL_EXPORT_ENABLED)
 }
 
 /// Get the service name from environment or use default

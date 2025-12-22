@@ -825,10 +825,11 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Name:    commonconsts.MainContainerName,
 										Image:   "test-image:latest",
 										Command: []string{"/bin/sh", "-c"},
-										Args:    []string{"ray start --head --port=6379 && some dynamo command --tensor-parallel-size 4 --pipeline-parallel-size 1"},
+										Args:    []string{"ray start --head --port=6379 && some dynamo command --tensor-parallel-size 4 --pipeline-parallel-size 1 --distributed-executor-backend ray"},
 										Env: []corev1.EnvVar{
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
-											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
+											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
@@ -843,6 +844,11 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
 												FieldRef: &corev1.ObjectFieldSelector{
 													FieldPath: "metadata.namespace",
+												},
+											}},
+											{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
+												FieldRef: &corev1.ObjectFieldSelector{
+													FieldPath: "metadata.uid",
 												},
 											}},
 											{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"},
@@ -957,7 +963,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Args:    []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
 										Env: []corev1.EnvVar{
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
-											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
+											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
@@ -972,6 +979,11 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
 												FieldRef: &corev1.ObjectFieldSelector{
 													FieldPath: "metadata.namespace",
+												},
+											}},
+											{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
+												FieldRef: &corev1.ObjectFieldSelector{
+													FieldPath: "metadata.uid",
 												},
 											}},
 											{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"},
@@ -1231,8 +1243,13 @@ func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_R
 	g.Expect(*createdDeployment.Spec.Replicas).To(gomega.Equal(int32(1)), "Initial deployment should have 1 replica")
 
 	// Step 2: Manually update the deployment to 2 replicas (simulating manual edit)
+	// Note: Real Kubernetes API server increments generation on spec changes,
+	// but the fake client doesn't, so we simulate it here.
+	// The operator sets last-applied-generation=1 on create, so we need generation > 1
+	// to trigger manual change detection.
 	manualReplicaCount := int32(2)
 	createdDeployment.Spec.Replicas = &manualReplicaCount
+	createdDeployment.Generation = 2 // Simulate K8s incrementing generation on spec change
 	err = fakeKubeClient.Update(ctx, createdDeployment)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -1255,6 +1272,106 @@ func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_R
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(reconciledDeployment.Spec.Replicas).NotTo(gomega.BeNil())
 	g.Expect(*reconciledDeployment.Spec.Replicas).To(gomega.Equal(int32(1)), "Deployment should have been reconciled back to 1 replica")
+
+	// Step 5: Call createOrUpdateOrDeleteDeployments again - it should not be modified
+	modified3, deployment3, err := reconciler.createOrUpdateOrDeleteDeployments(ctx, opt)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(modified3).To(gomega.BeFalse(), "Deployment should have been not modified")
+	g.Expect(deployment3).NotTo(gomega.BeNil())
+}
+
+func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	ctx := context.Background()
+
+	// Set up scheme
+	s := scheme.Scheme
+	err := v1alpha1.AddToScheme(s)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	err = appsv1.AddToScheme(s)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	err = corev1.AddToScheme(s)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	name := "test-component"
+	namespace := defaultNamespace
+
+	// Create DynamoComponentDeployment
+	replicaCount := int32(3)
+	dcd := &v1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:     "test-service",
+				DynamoNamespace: ptr.To("default"),
+				ComponentType:   string(commonconsts.ComponentTypeDecode),
+				Replicas:        &replicaCount,
+			},
+		},
+	}
+
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dcd).
+		Build()
+
+	recorder := record.NewFakeRecorder(100)
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:      fakeKubeClient,
+		Recorder:    recorder,
+		Config:      controller_common.Config{},
+		EtcdStorage: nil,
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return []string{}, nil
+			},
+		},
+	}
+
+	opt := generateResourceOption{
+		dynamoComponentDeployment: dcd,
+	}
+
+	t.Log("=== Step 1: Create deployment (operator's first apply) ===")
+
+	modified1, deployment1, err := reconciler.createOrUpdateOrDeleteDeployments(ctx, opt)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(modified1).To(gomega.BeTrue(), "First create should report as modified")
+	g.Expect(deployment1).NotTo(gomega.BeNil())
+	g.Expect(deployment1.Spec.RevisionHistoryLimit).To(gomega.BeNil())
+
+	operatorCreatedDeployment := &appsv1.Deployment{}
+	err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, operatorCreatedDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(*operatorCreatedDeployment.Spec.Replicas).To(gomega.Equal(replicaCount))
+
+	annotations := operatorCreatedDeployment.GetAnnotations()
+	g.Expect(annotations).NotTo(gomega.BeNil())
+	originalHash, hasHash := annotations[controller_common.NvidiaAnnotationHashKey]
+	g.Expect(hasHash).To(gomega.BeTrue(), "Hash annotation should be set")
+	t.Logf("Hash annotation after create: %s", originalHash)
+
+	t.Log("\n=== Step 2: Simulate K8s adding defaults ===")
+
+	// Operator does not set RevisionHistoryLimit but the k8s API defaults to 10
+	operatorCreatedDeployment.Spec.RevisionHistoryLimit = ptr.To(int32(10))
+	err = fakeKubeClient.Update(ctx, operatorCreatedDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// The deployment should not be modified because the spec is the same
+	modified2, deployment2, err := reconciler.createOrUpdateOrDeleteDeployments(ctx, opt)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(modified2).To(gomega.BeFalse(), "Second create should report as not modified")
+	g.Expect(deployment2).NotTo(gomega.BeNil())
+
+	modified3, deployment3, err := reconciler.createOrUpdateOrDeleteDeployments(ctx, opt)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(modified3).To(gomega.BeFalse(), "Third create should report as not modified")
+	g.Expect(deployment3).NotTo(gomega.BeNil())
 }
 
 func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
@@ -1296,7 +1413,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				status:   metav1.ConditionTrue,
 				reason:   "AllLeaderWorkerSetsReady",
 				message:  "All LeaderWorkerSets are ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
 					ReadyReplicas:   ptr.To(int32(1)),
@@ -1375,7 +1492,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				status:   metav1.ConditionFalse,
 				reason:   "SomeLeaderWorkerSetsNotReady",
 				message:  "Some LeaderWorkerSets are not ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
 					ReadyReplicas:   ptr.To(int32(2)),
@@ -1454,7 +1571,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				status:   metav1.ConditionTrue,
 				reason:   "AllLeaderWorkerSetsReady",
 				message:  "All LeaderWorkerSets are ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
 					ReadyReplicas:   ptr.To(int32(3)),
@@ -1599,7 +1716,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				status:   metav1.ConditionTrue,
 				reason:   "DeploymentReady",
 				message:  "Deployment is ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
 					Replicas:          2,
@@ -1640,7 +1757,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				status:   metav1.ConditionFalse,
 				reason:   "DeploymentNotReady",
 				message:  "Deployment is not ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
 					Replicas:          1,
@@ -1737,7 +1854,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 		wantConditionStatus      metav1.ConditionStatus
 		wantConditionReason      string
 		wantConditionMessage     string
-		wantServiceReplicaStatus v1alpha1.ServiceReplicaStatus
+		wantServiceReplicaStatus *v1alpha1.ServiceReplicaStatus
 	}{
 		{
 			name: "deployment backed DCD that is unready",
@@ -1746,7 +1863,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				status:   metav1.ConditionFalse,
 				reason:   "DeploymentNotReady",
 				message:  "Deployment is not ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
 					Replicas:          1,
@@ -1758,7 +1875,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			wantConditionStatus:  metav1.ConditionFalse,
 			wantConditionReason:  "DeploymentNotReady",
 			wantConditionMessage: "Deployment is not ready",
-			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:     v1alpha1.ComponentKindDeployment,
 				ComponentName:     "test-component",
 				Replicas:          1,
@@ -1774,7 +1891,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				status:   metav1.ConditionTrue,
 				reason:   "DeploymentReady",
 				message:  "Deployment is ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
 					Replicas:          2,
@@ -1786,7 +1903,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			wantConditionStatus:  metav1.ConditionTrue,
 			wantConditionReason:  "DeploymentReady",
 			wantConditionMessage: "Deployment is ready",
-			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:     v1alpha1.ComponentKindDeployment,
 				ComponentName:     "test-component",
 				Replicas:          2,
@@ -1802,7 +1919,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				status:   metav1.ConditionFalse,
 				reason:   "SomeLeaderWorkerSetsNotReady",
 				message:  "Some LeaderWorkerSets are not ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
 					Replicas:        3,
@@ -1813,7 +1930,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			wantConditionStatus:  metav1.ConditionFalse,
 			wantConditionReason:  "SomeLeaderWorkerSetsNotReady",
 			wantConditionMessage: "Some LeaderWorkerSets are not ready",
-			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 				ComponentName:   "test-component-0",
 				Replicas:        3,
@@ -1828,7 +1945,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				status:   metav1.ConditionTrue,
 				reason:   "AllLeaderWorkerSetsReady",
 				message:  "All LeaderWorkerSets are ready",
-				serviceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 					ComponentName:   "test-component-0",
 					Replicas:        3,
@@ -1839,7 +1956,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			wantConditionStatus:  metav1.ConditionTrue,
 			wantConditionReason:  "AllLeaderWorkerSetsReady",
 			wantConditionMessage: "All LeaderWorkerSets are ready",
-			wantServiceReplicaStatus: v1alpha1.ServiceReplicaStatus{
+			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 				ComponentName:   "test-component-0",
 				Replicas:        3,
@@ -1914,6 +2031,188 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 
 			// Assert the service replica status
 			g.Expect(updatedDCD.Status.Service).To(gomega.Equal(tt.wantServiceReplicaStatus))
+		})
+	}
+}
+
+func Test_generateDeployment_Strategy(t *testing.T) {
+	type args struct {
+		annotations map[string]string
+	}
+	tests := []struct {
+		name         string
+		args         args
+		wantStrategy appsv1.DeploymentStrategy
+	}{
+		{
+			name: "no annotations - default RollingUpdate with default maxSurge and maxUnavailable",
+			args: args{
+				annotations: nil,
+			},
+			wantStrategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxSurge:       ptr.To(intstr.FromString("25%")),
+					MaxUnavailable: ptr.To(intstr.FromString("25%")),
+				},
+			},
+		},
+		{
+			name: "deployment-strategy annotation with Recreate - strategy is Recreate",
+			args: args{
+				annotations: map[string]string{
+					KubeAnnotationDeploymentStrategy: "Recreate",
+				},
+			},
+			wantStrategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RecreateDeploymentStrategyType,
+			},
+		},
+		{
+			name: "deployment-strategy Recreate with maxSurge/maxUnavailable - maxSurge/maxUnavailable are ignored",
+			args: args{
+				annotations: map[string]string{
+					KubeAnnotationDeploymentStrategy:                    "Recreate",
+					KubeAnnotationDeploymentRollingUpdateMaxSurge:       "50%",
+					KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "30%",
+				},
+			},
+			wantStrategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RecreateDeploymentStrategyType,
+			},
+		},
+		{
+			name: "deployment-strategy RollingUpdate with only maxSurge",
+			args: args{
+				annotations: map[string]string{
+					KubeAnnotationDeploymentStrategy:              "RollingUpdate",
+					KubeAnnotationDeploymentRollingUpdateMaxSurge: "50%",
+				},
+			},
+			wantStrategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxSurge:       ptr.To(intstr.FromString("50%")),
+					MaxUnavailable: ptr.To(intstr.FromString("25%")),
+				},
+			},
+		},
+		{
+			name: "deployment-strategy RollingUpdate with only maxUnavailable",
+			args: args{
+				annotations: map[string]string{
+					KubeAnnotationDeploymentStrategy:                    "RollingUpdate",
+					KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "10%",
+				},
+			},
+			wantStrategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxSurge:       ptr.To(intstr.FromString("25%")),
+					MaxUnavailable: ptr.To(intstr.FromString("10%")),
+				},
+			},
+		},
+		{
+			name: "deployment-strategy RollingUpdate with both maxSurge and maxUnavailable",
+			args: args{
+				annotations: map[string]string{
+					KubeAnnotationDeploymentStrategy:                    "RollingUpdate",
+					KubeAnnotationDeploymentRollingUpdateMaxSurge:       "40%",
+					KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "20%",
+				},
+			},
+			wantStrategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxSurge:       ptr.To(intstr.FromString("40%")),
+					MaxUnavailable: ptr.To(intstr.FromString("20%")),
+				},
+			},
+		},
+		{
+			name: "deployment-strategy RollingUpdate with integer maxSurge and maxUnavailable (not percentages)",
+			args: args{
+				annotations: map[string]string{
+					KubeAnnotationDeploymentStrategy:                    "RollingUpdate",
+					KubeAnnotationDeploymentRollingUpdateMaxSurge:       "1",
+					KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "0",
+				},
+			},
+			wantStrategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxSurge:       ptr.To(intstr.FromInt(1)),
+					MaxUnavailable: ptr.To(intstr.FromInt(0)),
+				},
+			},
+		},
+	}
+
+	// Initialize scheme & add API types
+	s := scheme.Scheme
+	if err := v1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add corev1 to scheme: %v", err)
+	}
+	if err := appsv1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add appsv1 to scheme: %v", err)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			dcd := &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deployment-strategy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: string(dynamo.BackendFrameworkVLLM),
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						ServiceName:     "test-service",
+						DynamoNamespace: ptr.To("default"),
+						ComponentType:   string(commonconsts.ComponentTypeDecode),
+						Replicas:        ptr.To(int32(1)),
+						Annotations:     tt.args.annotations,
+						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+							MainContainer: &corev1.Container{
+								Image: "test-image:latest",
+							},
+						},
+					},
+				},
+			}
+
+			fakeKubeClient := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(dcd).
+				Build()
+
+			recorder := record.NewFakeRecorder(100)
+			reconciler := &DynamoComponentDeploymentReconciler{
+				Client:   fakeKubeClient,
+				Recorder: recorder,
+				Config:   controller_common.Config{},
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+						return []string{}, nil
+					},
+				},
+			}
+
+			opt := generateResourceOption{
+				dynamoComponentDeployment: dcd,
+			}
+
+			deployment, toDelete, err := reconciler.generateDeployment(context.Background(), opt)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(toDelete).To(gomega.BeFalse())
+			g.Expect(deployment).NotTo(gomega.BeNil())
+			g.Expect(deployment.Spec.Strategy).To(gomega.Equal(tt.wantStrategy))
 		})
 	}
 }
