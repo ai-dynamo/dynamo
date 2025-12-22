@@ -876,6 +876,9 @@ async fn chat_completions(
     // Handle required fields like messages shouldn't be empty.
     validate_chat_completion_required_fields(&request)?;
 
+    // Validate stream_options is only used when streaming (NVBug 5662680)
+    validate_chat_completion_stream_options(&request)?;
+
     // Handle Rest of Validation Errors
     validate_chat_completion_fields_generic(&request)?;
 
@@ -1063,16 +1066,22 @@ pub fn validate_chat_completion_required_fields(
         }));
     }
 
-    // stream_options is only valid when stream=true (NVBug 5662680)
+    Ok(())
+}
+
+/// Validates that stream_options is only used when stream=true for chat completions (NVBug 5662680)
+pub fn validate_chat_completion_stream_options(
+    request: &NvCreateChatCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    let inner = &request.inner;
     let streaming = inner.stream.unwrap_or(false);
     if !streaming && inner.stream_options.is_some() {
         return Err(ErrorMessage::from_http_error(HttpError {
             code: 400,
-            message: "The 'stream_options' field is only allowed when 'stream' is set to true."
-                .to_string(),
+            message: VALIDATION_PREFIX.to_string()
+                + "The 'stream_options' field is only allowed when 'stream' is set to true.",
         }));
     }
-
     Ok(())
 }
 
@@ -1100,8 +1109,8 @@ pub fn validate_completion_stream_options(
     if !streaming && inner.stream_options.is_some() {
         return Err(ErrorMessage::from_http_error(HttpError {
             code: 400,
-            message: "The 'stream_options' field is only allowed when 'stream' is set to true."
-                .to_string(),
+            message: VALIDATION_PREFIX.to_string()
+                + "The 'stream_options' field is only allowed when 'stream' is set to true.",
         }));
     }
     Ok(())
