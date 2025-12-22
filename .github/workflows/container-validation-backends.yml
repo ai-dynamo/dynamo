@@ -43,7 +43,7 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [vllm, sglang, trtllm, operator]
+    needs: [builder, operator]
     if: always()
     steps:
       - name: "Check all dependent jobs"
