@@ -64,7 +64,7 @@ runs:
 
         # 3. Install dependencies
         uv pip install pytest
-        uv pip install --no-cache --no-deps -e .
+        uv pip install --no-cache -e .
 
         set +e
 
