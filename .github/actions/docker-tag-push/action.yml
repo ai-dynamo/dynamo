@@ -39,8 +39,6 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
     - name: ECR Tag and Push
       shell: bash
       if: ${{ inputs.aws_push == 'true' }}
