@@ -47,6 +47,28 @@ runs:
         echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
         echo "🏗️  Platform architecture: ${PLATFORM_ARCH}"
 
+    - name: Pull image before running tests
+      shell: bash
+      run: |
+        echo "⏱️ Starting pull for heavy image..."
+        START_TIME=$(date +%s)
+
+        # Explicitly pull the image to isolate timing
+        docker pull "${{ inputs.image_tag }}"
+
+        END_TIME=$(date +%s)
+        DURATION=$((END_TIME - START_TIME))
+
+        # Convert to minutes and seconds
+        MINUTES=$((DURATION / 60))
+        SECONDS=$((DURATION % 60))
+
+        echo "✅ Pull completed in ${MINUTES}m ${SECONDS}s"
+
+        echo "### 🐳 Docker Pull Metrics" >> $GITHUB_STEP_SUMMARY
+        echo "* **Image:** \`${{ inputs.image_tag }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "* **Pull Duration:** ${MINUTES}m ${SECONDS}s" >> $GITHUB_STEP_SUMMARY
+
     - name: Run tests
       shell: bash
       env:
