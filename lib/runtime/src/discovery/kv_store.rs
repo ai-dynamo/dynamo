@@ -12,19 +12,19 @@ use tokio_util::sync::CancellationToken;
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, DiscoveryStream,
 };
-use crate::storage::key_value_store::{KeyValueStoreManager, WatchEvent};
+use crate::storage::kv;
 
 const INSTANCES_BUCKET: &str = "v1/instances";
 const MODELS_BUCKET: &str = "v1/mdc";
 
-/// Discovery implementation backed by a KeyValueStore
+/// Discovery implementation backed by a kv::Store
 pub struct KVStoreDiscovery {
-    store: Arc<KeyValueStoreManager>,
+    store: Arc<kv::Manager>,
     cancel_token: CancellationToken,
 }
 
 impl KVStoreDiscovery {
-    pub fn new(store: KeyValueStoreManager, cancel_token: CancellationToken) -> Self {
+    pub fn new(store: kv::Manager, cancel_token: CancellationToken) -> Self {
         Self {
             store: Arc::new(store),
             cancel_token,
@@ -154,17 +154,39 @@ impl Discovery for KVStoreDiscovery {
                 component,
                 endpoint,
                 instance_id,
+                model_suffix,
                 ..
             } => {
-                let key = Self::model_key(namespace, component, endpoint, *instance_id);
-                tracing::debug!(
-                    "KVStoreDiscovery::register: Registering model instance_id={}, namespace={}, component={}, endpoint={}, key={}",
-                    instance_id,
-                    namespace,
-                    component,
-                    endpoint,
-                    key
-                );
+                let mut key = Self::model_key(namespace, component, endpoint, *instance_id);
+
+                // If there's a model_suffix (e.g., for LoRA adapters), append it after the instance_id
+                // Key format: {namespace}/{component}/{endpoint}/{instance_id:x}/{model_suffix}
+                if let Some(suffix) = model_suffix
+                    && !suffix.is_empty()
+                {
+                    key = format!("{}/{}", key, suffix);
+                    tracing::debug!(
+                        "KVStoreDiscovery::register: Registering LoRA model with suffix={}, instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                        suffix,
+                        instance_id,
+                        namespace,
+                        component,
+                        endpoint,
+                        key
+                    );
+                }
+
+                // Log for base models (no suffix or empty suffix)
+                if model_suffix.as_ref().is_none_or(|s| s.is_empty()) {
+                    tracing::debug!(
+                        "KVStoreDiscovery::register: Registering base model instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                        instance_id,
+                        namespace,
+                        component,
+                        endpoint,
+                        key
+                    );
+                }
                 (MODELS_BUCKET, key)
             }
         };
@@ -184,7 +206,7 @@ impl Discovery for KVStoreDiscovery {
             key_path
         );
         let bucket = self.store.get_or_create_bucket(bucket_name, None).await?;
-        let key = crate::storage::key_value_store::Key::from_raw(key_path.clone());
+        let key = kv::Key::new(key_path.clone());
 
         tracing::debug!(
             "KVStoreDiscovery::register: Inserting into bucket={}, key={}",
@@ -201,6 +223,83 @@ impl Discovery for KVStoreDiscovery {
         );
 
         Ok(instance)
+    }
+
+    async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+        let (bucket_name, key_path) = match &instance {
+            DiscoveryInstance::Endpoint(inst) => {
+                let key = Self::endpoint_key(
+                    &inst.namespace,
+                    &inst.component,
+                    &inst.endpoint,
+                    inst.instance_id,
+                );
+                tracing::debug!(
+                    "Unregistering endpoint instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                    inst.instance_id,
+                    inst.namespace,
+                    inst.component,
+                    inst.endpoint,
+                    key
+                );
+                (INSTANCES_BUCKET, key)
+            }
+            DiscoveryInstance::Model {
+                namespace,
+                component,
+                endpoint,
+                instance_id,
+                model_suffix,
+                ..
+            } => {
+                let mut key = Self::model_key(namespace, component, endpoint, *instance_id);
+
+                // If there's a model_suffix (e.g., for LoRA adapters), append it after the instance_id
+                if let Some(suffix) = model_suffix
+                    && !suffix.is_empty()
+                {
+                    key = format!("{}/{}", key, suffix);
+                    tracing::debug!(
+                        "KVStoreDiscovery::unregister: Unregistering LoRA model with suffix={}, instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                        suffix,
+                        instance_id,
+                        namespace,
+                        component,
+                        endpoint,
+                        key
+                    );
+                }
+
+                // Log for base models (no suffix or empty suffix)
+                if model_suffix.as_ref().is_none_or(|s| s.is_empty()) {
+                    tracing::debug!(
+                        "Unregistering base model instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                        instance_id,
+                        namespace,
+                        component,
+                        endpoint,
+                        key
+                    );
+                }
+                (MODELS_BUCKET, key)
+            }
+        };
+
+        // Get the bucket - if it doesn't exist, the instance is already removed from the KV store
+        let Some(bucket) = self.store.get_bucket(bucket_name).await? else {
+            tracing::warn!(
+                "Bucket {} does not exist, instance already removed",
+                bucket_name
+            );
+            return Ok(());
+        };
+
+        let key = kv::Key::new(key_path.clone());
+
+        // Delete the entry from the bucket
+        bucket.delete(&key).await?;
+
+        Ok(())
     }
 
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
@@ -221,12 +320,12 @@ impl Discovery for KVStoreDiscovery {
 
         // Filter by prefix and deserialize
         let mut instances = Vec::new();
-        for (key_str, value) in entries {
-            if Self::matches_prefix(&key_str, &prefix, bucket_name) {
+        for (key, value) in entries {
+            if Self::matches_prefix(key.as_ref(), &prefix, bucket_name) {
                 match Self::parse_instance(&value) {
                     Ok(instance) => instances.push(instance),
                     Err(e) => {
-                        tracing::warn!(key = %key_str, error = %e, "Failed to parse discovery instance");
+                        tracing::warn!(%key, error = %e, "Failed to parse discovery instance");
                     }
                 }
             }
@@ -247,7 +346,7 @@ impl Discovery for KVStoreDiscovery {
             MODELS_BUCKET
         };
 
-        tracing::debug!(
+        tracing::trace!(
             "KVStoreDiscovery::list_and_watch: Starting watch for query={:?}, prefix={}, bucket={}",
             query,
             prefix,
@@ -257,54 +356,25 @@ impl Discovery for KVStoreDiscovery {
         // Use the provided cancellation token, or fall back to the default token
         let cancel_token = cancel_token.unwrap_or_else(|| self.cancel_token.clone());
 
-        // Use the KeyValueStoreManager's watch mechanism
+        // Use the kv::Manager's watch mechanism
         let (_, mut rx) = self.store.clone().watch(
             bucket_name,
             None, // No TTL
             cancel_token,
         );
 
-        tracing::debug!(
-            "KVStoreDiscovery::list_and_watch: Got watch receiver for bucket={}",
-            bucket_name
-        );
-
         // Create a stream that filters and transforms WatchEvents to DiscoveryEvents
         let stream = async_stream::stream! {
-            let mut event_count = 0;
-            tracing::debug!("KVStoreDiscovery::list_and_watch: Stream started, waiting for events on prefix={}", prefix);
             while let Some(event) = rx.recv().await {
-                event_count += 1;
-                tracing::debug!(
-                    "KVStoreDiscovery::list_and_watch: Received event #{} for prefix={}",
-                    event_count,
-                    prefix
-                );
                 let discovery_event = match event {
-                    WatchEvent::Put(kv) => {
-                        tracing::debug!(
-                            "KVStoreDiscovery::list_and_watch: Put event, key={}, prefix={}, matches={}",
-                            kv.key_str(),
-                            prefix,
-                            Self::matches_prefix(kv.key_str(), &prefix, bucket_name)
-                        );
+                    kv::WatchEvent::Put(kv) => {
                         // Check if this key matches our prefix
                         if !Self::matches_prefix(kv.key_str(), &prefix, bucket_name) {
-                            tracing::debug!(
-                                "KVStoreDiscovery::list_and_watch: Skipping key {} (doesn't match prefix {})",
-                                kv.key_str(),
-                                prefix
-                            );
                             continue;
                         }
 
                         match Self::parse_instance(kv.value()) {
                             Ok(instance) => {
-                                tracing::debug!(
-                                    "KVStoreDiscovery::list_and_watch: Emitting Added event for instance_id={}, key={}",
-                                    instance.instance_id(),
-                                    kv.key_str()
-                                );
                                 Some(DiscoveryEvent::Added(instance))
                             },
                             Err(e) => {
@@ -317,33 +387,36 @@ impl Discovery for KVStoreDiscovery {
                             }
                         }
                     }
-                    WatchEvent::Delete(kv) => {
+                    kv::WatchEvent::Delete(kv) => {
                         let key_str = kv.as_ref();
-                        tracing::debug!(
-                            "KVStoreDiscovery::list_and_watch: Delete event, key={}, prefix={}",
-                            key_str,
-                            prefix
-                        );
                         // Check if this key matches our prefix
                         if !Self::matches_prefix(key_str, &prefix, bucket_name) {
-                            tracing::debug!(
-                                "KVStoreDiscovery::list_and_watch: Skipping deleted key {} (doesn't match prefix {})",
-                                key_str,
-                                prefix
-                            );
                             continue;
                         }
 
                         // Extract instance_id from the key path, not the value
                         // Delete events have empty values in etcd, so we parse the instance_id from the key
-                        // Key format: "v1/instances/namespace/component/endpoint/{instance_id:x}"
-                        let key_parts: Vec<&str> = key_str.split('/').collect();
-                        match key_parts.last() {
+                        //
+                        // Key format (relative to bucket, after stripping bucket prefix):
+                        // - Instances: "namespace/component/endpoint/{instance_id:x}"
+                        // - Models: "namespace/component/endpoint/{instance_id:x}"
+                        // - LoRA models: "namespace/component/endpoint/{instance_id:x}/{lora_slug}"
+                        //
+                        // The instance_id is always at index 3 in the RELATIVE key (after bucket prefix).
+                        // Use strip_bucket_prefix for consistency with matches_prefix().
+                        let relative_key = Self::strip_bucket_prefix(key_str, bucket_name);
+                        let key_parts: Vec<&str> = relative_key.split('/').collect();
+
+                        // In relative key: namespace/component/endpoint/{instance_id}[/{lora_slug}]
+                        // instance_id is at index 3
+                        let instance_id_index = 3;
+
+                        match key_parts.get(instance_id_index) {
                             Some(instance_id_hex) => {
                                 match u64::from_str_radix(instance_id_hex, 16) {
                                     Ok(instance_id) => {
                                         tracing::debug!(
-                                            "KVStoreDiscovery::list_and_watch: Emitting Removed event for instance_id={}, key={}",
+                                            "KVStoreDiscovery::list_and_watch: Emitting Removed event for instance_id={:x}, key={}",
                                             instance_id,
                                             key_str
                                         );
@@ -352,7 +425,9 @@ impl Discovery for KVStoreDiscovery {
                                     Err(e) => {
                                         tracing::warn!(
                                             key = %key_str,
+                                            relative_key = %relative_key,
                                             error = %e,
+                                            instance_id_hex = %instance_id_hex,
                                             "Failed to parse instance_id hex from deleted key"
                                         );
                                         None
@@ -362,7 +437,10 @@ impl Discovery for KVStoreDiscovery {
                             None => {
                                 tracing::warn!(
                                     key = %key_str,
-                                    "Delete event key has no path components"
+                                    relative_key = %relative_key,
+                                    expected_index = instance_id_index,
+                                    actual_parts = key_parts.len(),
+                                    "Delete event key doesn't have instance_id at expected position"
                                 );
                                 None
                             }
@@ -371,19 +449,10 @@ impl Discovery for KVStoreDiscovery {
                 };
 
                 if let Some(event) = discovery_event {
-                    tracing::debug!("KVStoreDiscovery::list_and_watch: Yielding event: {:?}", event);
                     yield Ok(event);
-                } else {
-                    tracing::debug!("KVStoreDiscovery::list_and_watch: Event was filtered out (None)");
                 }
             }
-            tracing::debug!("KVStoreDiscovery::list_and_watch: Stream ended after {} events for prefix={}", event_count, prefix);
         };
-
-        tracing::debug!(
-            "KVStoreDiscovery::list_and_watch: Returning stream for query={:?}",
-            query
-        );
         Ok(Box::pin(stream))
     }
 }
@@ -395,7 +464,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_store_discovery_register_endpoint() {
-        let store = KeyValueStoreManager::memory();
+        let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
         let client = KVStoreDiscovery::new(store, cancel_token);
 
@@ -403,7 +472,7 @@ mod tests {
             namespace: "test".to_string(),
             component: "comp1".to_string(),
             endpoint: "ep1".to_string(),
-            transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+            transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
 
         let instance = client.register(spec).await.unwrap();
@@ -420,7 +489,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_store_discovery_list() {
-        let store = KeyValueStoreManager::memory();
+        let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
         let client = KVStoreDiscovery::new(store, cancel_token);
 
@@ -429,7 +498,7 @@ mod tests {
             namespace: "ns1".to_string(),
             component: "comp1".to_string(),
             endpoint: "ep1".to_string(),
-            transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+            transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
         client.register(spec1).await.unwrap();
 
@@ -437,7 +506,7 @@ mod tests {
             namespace: "ns1".to_string(),
             component: "comp1".to_string(),
             endpoint: "ep2".to_string(),
-            transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+            transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
         client.register(spec2).await.unwrap();
 
@@ -445,7 +514,7 @@ mod tests {
             namespace: "ns2".to_string(),
             component: "comp2".to_string(),
             endpoint: "ep1".to_string(),
-            transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+            transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
         client.register(spec3).await.unwrap();
 
@@ -475,7 +544,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_store_discovery_watch() {
-        let store = KeyValueStoreManager::memory();
+        let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
         let client = Arc::new(KVStoreDiscovery::new(store, cancel_token.clone()));
 
@@ -493,7 +562,7 @@ mod tests {
                 namespace: "test".to_string(),
                 component: "comp1".to_string(),
                 endpoint: "ep1".to_string(),
-                transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+                transport: TransportType::Nats("nats://localhost:4222".to_string()),
             };
             client_clone.register(spec).await.unwrap();
         });

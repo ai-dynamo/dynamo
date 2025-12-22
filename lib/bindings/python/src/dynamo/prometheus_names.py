@@ -55,6 +55,10 @@ class frontend_service:
     INPUT_SEQUENCE_TOKENS = "input_sequence_tokens"
     # Output sequence length in tokens
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
+    # Number of cached tokens (prefix cache hits) per request
+    CACHED_TOKENS = "cached_tokens"
+    # Total number of output tokens generated (counter that updates in real-time)
+    OUTPUT_TOKENS_TOTAL = "output_tokens_total"
     # Time to first token in seconds
     TIME_TO_FIRST_TOKEN_SECONDS = "time_to_first_token_seconds"
     # Inter-token latency in seconds
@@ -74,15 +78,31 @@ class frontend_service:
     MODEL_KV_CACHE_BLOCK_SIZE = "model_kv_cache_block_size"
     # Request migration limit for a worker serving the model (MDC)
     MODEL_MIGRATION_LIMIT = "model_migration_limit"
+    # Total number of request migrations due to worker unavailability
+    MODEL_MIGRATION_TOTAL = "model_migration_total"
+    # Label name for the type of migration
+    MIGRATION_TYPE_LABEL = "migration_type"
 
 
-class kvbm_connector:
-    """KVBM connector"""
+class kvbm:
+    """KVBM"""
 
-    # KVBM connector leader
-    KVBM_CONNECTOR_LEADER = "kvbm_connector_leader"
-    # KVBM connector worker
-    KVBM_CONNECTOR_WORKER = "kvbm_connector_worker"
+    # The number of offload blocks from device to host
+    OFFLOAD_BLOCKS_D2H = "offload_blocks_d2h"
+    # The number of offload blocks from host to disk
+    OFFLOAD_BLOCKS_H2D = "offload_blocks_h2d"
+    # The number of offload blocks from device to disk (bypassing host memory)
+    OFFLOAD_BLOCKS_D2D = "offload_blocks_d2d"
+    # The number of onboard blocks from host to device
+    ONBOARD_BLOCKS_H2D = "onboard_blocks_h2d"
+    # The number of onboard blocks from disk to device
+    ONBOARD_BLOCKS_D2D = "onboard_blocks_d2d"
+    # The number of matched tokens
+    MATCHED_TOKENS = "matched_tokens"
+    # Host cache hit rate (0.0-1.0) from the sliding window
+    HOST_CACHE_HIT_RATE = "host_cache_hit_rate"
+    # Disk cache hit rate (0.0-1.0) from the sliding window
+    DISK_CACHE_HIT_RATE = "disk_cache_hit_rate"
 
 
 class kvrouter:
@@ -123,45 +143,6 @@ class name_prefix:
     COMPONENT = "dynamo_component"
     # Prefix for frontend service metrics
     FRONTEND = "dynamo_frontend"
-
-
-class nats_client:
-    """NATS client metrics. DistributedRuntime contains a NATS client shared by all children)"""
-
-    # Prefix for all NATS client metrics
-    PREFIX = ""
-    # Total number of bytes received by NATS client
-    IN_TOTAL_BYTES = "nats_client_in_total_bytes"
-    # Total number of bytes sent by NATS client
-    OUT_OVERHEAD_BYTES = "nats_client_out_overhead_bytes"
-    # Total number of messages received by NATS client
-    IN_MESSAGES = "nats_client_in_messages"
-    # Total number of messages sent by NATS client
-    OUT_MESSAGES = "nats_client_out_messages"
-    # Current number of active connections for NATS client
-    # Note: Gauge metric measuring current connections, not cumulative total
-    CURRENT_CONNECTIONS = "nats_client_current_connections"
-    # Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)
-    CONNECTION_STATE = "nats_client_connection_state"
-
-
-class nats_service:
-    """NATS service metrics, from the $SRV.STATS.<service_name> requests on NATS server"""
-
-    # Prefix for all NATS service metrics
-    PREFIX = ""
-    # Average processing time in milliseconds (maps to: average_processing_time in ms)
-    PROCESSING_MS_AVG = "nats_service_processing_ms_avg"
-    # Total errors across all endpoints (maps to: num_errors)
-    ERRORS_TOTAL = "nats_service_errors_total"
-    # Total requests across all endpoints (maps to: num_requests)
-    REQUESTS_TOTAL = "nats_service_requests_total"
-    # Total processing time in milliseconds (maps to: processing_time in ms)
-    PROCESSING_MS_TOTAL = "nats_service_processing_ms_total"
-    # Number of active services (derived from ServiceSet.services)
-    ACTIVE_SERVICES = "nats_service_active_services"
-    # Number of active endpoints (derived from ServiceInfo.endpoints)
-    ACTIVE_ENDPOINTS = "nats_service_active_endpoints"
 
 
 class task_tracker:

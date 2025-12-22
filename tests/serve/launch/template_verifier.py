@@ -38,13 +38,12 @@ class TemplateVerificationHandler:
         yield {"token_ids": response_tokens}
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def main(runtime: DistributedRuntime):
     """Main worker function for template verification."""
 
     # Create service
     component = runtime.namespace("test").component("backend")
-    await component.create_service()
     endpoint = component.endpoint("generate")
 
     # Use the existing custom template from fixtures

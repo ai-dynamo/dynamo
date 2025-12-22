@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """
 Test configuration and fixtures for Dynamo Python bindings tests.
@@ -403,8 +391,45 @@ def nats_and_etcd():
                 print(f"Error removing ETCD data dir: {e}")
 
 
+@pytest.fixture(scope="function")
+def temp_file_store():
+    """
+    A temporary directory to use as the key-value store. Cleaned up on test exit.
+    Local to the unit test using it.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ["DYN_FILE_KV"] = tmpdir
+        yield tmpdir
+
+
+@pytest.fixture
+def store_kv(request):
+    """
+    KV store for runtime. Defaults to "file".
+
+    To iterate over multiple stores in a test:
+        @pytest.mark.parametrize("store_kv", ["file", "etcd"], indirect=True)
+        async def test_example(runtime):
+            ...
+    """
+    return getattr(request, "param", "file")
+
+
+@pytest.fixture
+def request_plane(request):
+    """
+    Request plane for runtime. Defaults to "nats".
+
+    To iterate over multiple transports in a test:
+        @pytest.mark.parametrize("request_plane", ["tcp", "nats"], indirect=True)
+        async def test_example(runtime):
+            ...
+    """
+    return getattr(request, "param", "nats")
+
+
 @pytest.fixture(scope="function", autouse=False)
-async def runtime(request):
+async def runtime(request, store_kv, request_plane):
     """
     Create a DistributedRuntime for testing.
 
@@ -414,6 +439,14 @@ async def runtime(request):
 
     Without @pytest.mark.forked in isolated mode, you will get "Worker already initialized"
     errors when multiple tests try to create runtimes in the same process.
+
+    The store_kv and request_plane can be customized by overriding their fixtures
+    or using @pytest.mark.parametrize with indirect=True:
+
+        @pytest.mark.forked
+        @pytest.mark.parametrize("store_kv", ["etcd"], indirect=True)
+        async def test_with_etcd(runtime):
+            ...
     """
     # Check if the test is marked with @pytest.mark.forked (only in isolated mode)
     if ENABLE_ISOLATED_ETCD_AND_NATS:
@@ -436,6 +469,6 @@ This is required because DistributedRuntime is a process-level singleton.
             )
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, "mem", True)
+    runtime = DistributedRuntime(loop, store_kv, request_plane)
     yield runtime
     runtime.shutdown()

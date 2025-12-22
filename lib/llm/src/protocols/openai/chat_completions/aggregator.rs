@@ -12,6 +12,7 @@ use crate::protocols::{
     openai::ParsingOptions,
 };
 
+use dynamo_async_openai::types::StopReason;
 use dynamo_runtime::engine::DataStream;
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
@@ -34,6 +35,8 @@ pub struct DeltaAggregator {
     error: Option<String>,
     /// Optional service tier information for the response.
     service_tier: Option<dynamo_async_openai::types::ServiceTierResponse>,
+    /// Aggregated nvext field from stream responses
+    nvext: Option<serde_json::Value>,
 }
 
 /// Represents the accumulated state of a single chat choice during streaming aggregation.
@@ -47,6 +50,8 @@ struct DeltaChoice {
     role: Option<dynamo_async_openai::types::Role>,
     /// The reason the completion was finished (if applicable).
     finish_reason: Option<dynamo_async_openai::types::FinishReason>,
+    /// The stop string or token that triggered the stop condition.
+    stop_reason: Option<StopReason>,
     /// Optional log probabilities for the chat choice.
     logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
     // Optional tool calls for the chat choice.
@@ -97,6 +102,7 @@ impl DeltaAggregator {
             choices: HashMap::new(),
             error: None,
             service_tier: None,
+            nvext: None,
         }
     }
 
@@ -140,6 +146,11 @@ impl DeltaAggregator {
                         aggregator.system_fingerprint = Some(system_fingerprint);
                     }
 
+                    // Aggregate nvext field (take the last non-None value)
+                    if delta.nvext.is_some() {
+                        aggregator.nvext = delta.nvext;
+                    }
+
                     // Aggregate choices incrementally.
                     for choice in delta.choices {
                         let state_choice =
@@ -151,6 +162,7 @@ impl DeltaAggregator {
                                     text: "".to_string(),
                                     role: choice.delta.role,
                                     finish_reason: None,
+                                    stop_reason: None,
                                     logprobs: None,
                                     tool_calls: None,
                                     reasoning_content: None,
@@ -194,6 +206,11 @@ impl DeltaAggregator {
                         // Update finish reason if provided.
                         if let Some(finish_reason) = choice.finish_reason {
                             state_choice.finish_reason = Some(finish_reason);
+                        }
+
+                        // Update stop reason if provided.
+                        if let Some(stop_reason) = choice.stop_reason {
+                            state_choice.stop_reason = Some(stop_reason);
                         }
 
                         // Update logprobs
@@ -247,6 +264,7 @@ impl DeltaAggregator {
             system_fingerprint: aggregator.system_fingerprint,
             choices,
             service_tier: aggregator.service_tier,
+            nvext: aggregator.nvext,
         };
 
         Ok(response)
@@ -287,6 +305,7 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
             },
             index: delta.index,
             finish_reason,
+            stop_reason: delta.stop_reason,
             logprobs: delta.logprobs,
         }
     }
@@ -399,6 +418,7 @@ mod tests {
             index,
             delta,
             finish_reason,
+            stop_reason: None,
             logprobs,
         };
 
@@ -411,6 +431,7 @@ mod tests {
             system_fingerprint: None,
             choices: vec![choice],
             object: "chat.completion".to_string(),
+            nvext: None,
         };
 
         Annotated {
@@ -616,6 +637,7 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
+                    stop_reason: None,
                     logprobs: None,
                 },
                 dynamo_async_openai::types::ChatChoiceStream {
@@ -629,10 +651,12 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
+                    stop_reason: None,
                     logprobs: None,
                 },
             ],
             object: "chat.completion".to_string(),
+            nvext: None,
         };
 
         // Wrap it in Annotated and create a stream

@@ -6,9 +6,9 @@ use std::sync::Arc;
 use crate::{
     discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
-    entrypoint::{self, EngineConfig, input::common},
+    entrypoint::{EngineConfig, RouterConfig, input::common},
     grpc::service::kserve,
-    kv_router::KvRouterConfig,
+    http::service::metrics::Metrics,
     namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -16,23 +16,27 @@ use crate::{
     },
 };
 use dynamo_runtime::DistributedRuntime;
-use dynamo_runtime::pipeline::RouterMode;
 
 /// Build and run an KServe gRPC service
 pub async fn run(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
-    let grpc_service_builder = kserve::KserveService::builder()
+    let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
         .with_request_template(engine_config.local_model().request_template());
 
+    // Set HTTP metrics port if provided (for parallel test execution)
+    if let Some(http_metrics_port) = engine_config.local_model().http_metrics_port() {
+        grpc_service_builder = grpc_service_builder.http_metrics_port(http_metrics_port);
+    }
+
     let grpc_service = match engine_config {
-        EngineConfig::Dynamic(_) => {
+        EngineConfig::Dynamic { ref model, .. } => {
             let grpc_service = grpc_service_builder.build()?;
-            let router_config = engine_config.local_model().router_config();
+            let router_config = model.router_config();
             // Listen for models registering themselves, add them to gRPC service
-            let namespace = engine_config.local_model().namespace().unwrap_or("");
+            let namespace = model.namespace().unwrap_or("");
             let target_namespace = if is_global_namespace(namespace) {
                 None
             } else {
@@ -41,84 +45,13 @@ pub async fn run(
             run_watcher(
                 distributed_runtime.clone(),
                 grpc_service.state().manager_clone(),
-                router_config.router_mode,
-                Some(router_config.kv_router_config),
-                router_config.busy_threshold,
+                router_config.clone(),
                 target_namespace,
             )
             .await?;
             grpc_service
         }
-        EngineConfig::StaticRemote(local_model) => {
-            let card = local_model.card();
-            let checksum = card.mdcsum();
-            let router_mode = local_model.router_config().router_mode;
-
-            let grpc_service = grpc_service_builder.build()?;
-            let manager = grpc_service.model_manager();
-
-            let endpoint_id = local_model.endpoint_id();
-            let component = distributed_runtime
-                .namespace(&endpoint_id.namespace)?
-                .component(&endpoint_id.component)?;
-            let client = component.endpoint(&endpoint_id.name).client().await?;
-
-            let kv_chooser = if router_mode == RouterMode::KV {
-                Some(
-                    manager
-                        .kv_chooser_for(
-                            &component,
-                            card.kv_cache_block_size,
-                            Some(local_model.router_config().kv_router_config),
-                        )
-                        .await?,
-                )
-            } else {
-                None
-            };
-
-            let tokenizer_hf = card.tokenizer_hf()?;
-            let chat_engine = entrypoint::build_routed_pipeline::<
-                NvCreateChatCompletionRequest,
-                NvCreateChatCompletionStreamResponse,
-            >(
-                card,
-                &client,
-                router_mode,
-                None,
-                kv_chooser.clone(),
-                tokenizer_hf.clone(),
-                None, // No prefill chooser in grpc static mode
-            )
-            .await?;
-            manager.add_chat_completions_model(
-                local_model.display_name(),
-                checksum,
-                chat_engine,
-            )?;
-
-            let completions_engine = entrypoint::build_routed_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(
-                card,
-                &client,
-                router_mode,
-                None,
-                kv_chooser,
-                tokenizer_hf,
-                None, // No prefill chooser in grpc static mode
-            )
-            .await?;
-            manager.add_completions_model(
-                local_model.display_name(),
-                checksum,
-                completions_engine,
-            )?;
-
-            grpc_service
-        }
-        EngineConfig::StaticFull { engine, model, .. } => {
+        EngineConfig::InProcessText { engine, model, .. } => {
             let grpc_service = grpc_service_builder.build()?;
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = grpc_service.model_manager();
@@ -127,7 +60,7 @@ pub async fn run(
             manager.add_chat_completions_model(model.service_name(), checksum, engine)?;
             grpc_service
         }
-        EngineConfig::StaticCore {
+        EngineConfig::InProcessTokens {
             engine: inner_engine,
             model,
             ..
@@ -154,9 +87,18 @@ pub async fn run(
             grpc_service
         }
     };
-    grpc_service
-        .run(distributed_runtime.primary_token())
-        .await?;
+
+    // Run both HTTP (for metrics) and gRPC servers concurrently
+    let http_service = grpc_service.http_service().clone();
+    let shutdown_token = distributed_runtime.primary_token();
+
+    // Wait for both servers to complete, propagating the first error if any occurs
+    // Both tasks should run indefinitely until cancelled by the shutdown token
+    tokio::try_join!(
+        grpc_service.run(shutdown_token.clone()),
+        http_service.run(shutdown_token)
+    )?;
+
     distributed_runtime.shutdown(); // Cancel primary token
     Ok(())
 }
@@ -166,18 +108,12 @@ pub async fn run(
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
-    router_mode: RouterMode,
-    kv_router_config: Option<KvRouterConfig>,
-    busy_threshold: Option<f64>,
+    router_config: RouterConfig,
     target_namespace: Option<String>,
 ) -> anyhow::Result<()> {
-    let watch_obj = ModelWatcher::new(
-        runtime.clone(),
-        model_manager,
-        router_mode,
-        kv_router_config,
-        busy_threshold,
-    );
+    // Create metrics for migration tracking (not exposed via /metrics in gRPC mode)
+    let metrics = Arc::new(Metrics::new());
+    let watch_obj = ModelWatcher::new(runtime.clone(), model_manager, router_config, None, metrics);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery

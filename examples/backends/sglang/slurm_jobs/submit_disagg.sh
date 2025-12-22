@@ -48,7 +48,6 @@ check_env MODEL_PATH
 check_env CONFIG_DIR
 check_env CONTAINER_IMAGE
 
-GPU_TYPE="gb200-fp8"
 GPUS_PER_NODE=4
 : "${NETWORK_INTERFACE:=enP6p9s0np0}"
 
@@ -62,6 +61,8 @@ ISL=$6
 OSL=$7
 CONCURRENCIES=$8
 REQUEST_RATE=$9
+GPU_TYPE=${10}
+SCRIPT_VARIANT=${11}
 
 RETRIES=1 # defaults to retry the job 1 time to avoid transient errors
 
@@ -74,14 +75,18 @@ if [[ $PREFILL_NODES -eq 6 ]] && [[ $PREFILL_WORKERS -eq 3 ]] && [[ $DECODE_NODE
     USE_INIT_LOCATIONS=(--use-init-location)
 fi
 
+SCRIPT_VARIANT_ARGS=()
+if [[ -n "$SCRIPT_VARIANT" ]]; then
+    SCRIPT_VARIANT_ARGS=(--script-variant "$SCRIPT_VARIANT")
+fi
+
 command=(
     python3 submit_job_script.py
     --account $SLURM_ACCOUNT --partition $SLURM_PARTITION --time-limit $TIME_LIMIT
-    --template job_script_template.j2
     --model-dir $MODEL_PATH --config-dir $CONFIG_DIR
     --container-image $CONTAINER_IMAGE
 
-    --gpu-type $GPU_TYPE --gpus-per-node $GPUS_PER_NODE --network-interface $NETWORK_INTERFACE
+    --gpus-per-node $GPUS_PER_NODE --network-interface $NETWORK_INTERFACE
 
     --prefill-nodes $PREFILL_NODES --prefill-workers $PREFILL_WORKERS
     --decode-nodes $DECODE_NODES --decode-workers $DECODE_WORKERS
@@ -90,6 +95,11 @@ command=(
     --profiler "${profiler_args}"
 
     --retries $RETRIES
+
+    --gpu-type $GPU_TYPE
+
+    --run-in-ci
+    ${SCRIPT_VARIANT_ARGS[@]}
 )
 
 "${command[@]}"

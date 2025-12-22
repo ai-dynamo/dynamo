@@ -3,6 +3,7 @@
 
 import argparse
 import ast
+import os
 from typing import Any, Dict
 
 import yaml
@@ -80,10 +81,12 @@ def create_profiler_parser() -> argparse.Namespace:
             decode_interpolation_granularity: Int (how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length, default: 6)
             use_ai_configurator: Boolean (use ai-configurator to estimate benchmarking results instead of running actual deployment, default: False)
             aic_system: String (target system for use with aiconfigurator, default: None)
-            aic_model_name: String (aiconfigurator name of the target model, default: None)
+            aic_hf_id: String (aiconfigurator huggingface id of the target model, default: None)
             aic_backend: String (aiconfigurator backend of the target model, if not provided, will use args.backend, default: "")
             aic_backend_version: String (specify backend version when using aiconfigurator to estimate perf, default: None)
             dry_run: Boolean (dry run the profile job, default: False)
+            pick_with_webui: Boolean (pick the best parallelization mapping using webUI, default: False)
+            webui_port: Int (webUI port, default: $PROFILER_WEBUI_PORT or 8000)
         sla:
             isl: Int (target input sequence length, default: 3000)
             osl: Int (target output sequence length, default: 500)
@@ -113,6 +116,8 @@ def create_profiler_parser() -> argparse.Namespace:
         help="Configuration as Python dict literal, YAML, or JSON string. CLI args override config values. "
         "Example: \"{'engine': {'backend': 'vllm', 'config': '/path'}, 'sla': {'isl': 3000}}\"",
     )
+
+    # CLI arguments with config-aware defaults (using nested .get() for cleaner code)
     parser.add_argument(
         "--model",
         type=str,
@@ -126,7 +131,6 @@ def create_profiler_parser() -> argparse.Namespace:
         help="Container image to use for DGD components (frontend, planner, workers). Overrides images in config file.",
     )
 
-    # CLI arguments with config-aware defaults (using nested .get() for cleaner code)
     parser.add_argument(
         "--namespace",
         type=str,
@@ -233,6 +237,23 @@ def create_profiler_parser() -> argparse.Namespace:
         default=config.get("hardware", {}).get("enable_gpu_discovery", False),
         help="Enable automatic GPU discovery from Kubernetes cluster nodes. When enabled, overrides any manually specified hardware configuration. Requires cluster-wide node access permissions.",
     )
+    parser.add_argument(
+        "--pick-with-webui",
+        action="store_true",
+        default=config.get("sweep", {}).get("pick_with_webui", False),
+        help="Pick the best parallelization mapping using webUI",
+    )
+
+    default_webui_port = 8000
+    webui_port_env = os.environ.get("PROFILER_WEBUI_PORT")
+    if webui_port_env:
+        default_webui_port = int(webui_port_env)
+    parser.add_argument(
+        "--webui-port",
+        type=int,
+        default=config.get("sweep", {}).get("webui_port", default_webui_port),
+        help="WebUI port",
+    )
 
     # Dynamically add all planner arguments from planner_argparse.py
     add_planner_arguments_to_parser(parser, prefix="planner-")
@@ -260,10 +281,10 @@ def create_profiler_parser() -> argparse.Namespace:
         help="Target system for use with aiconfigurator (e.g. h100_sxm, h200_sxm)",
     )
     parser.add_argument(
-        "--aic-model-name",
+        "--aic-hf-id",
         type=str,
-        default=config.get("sweep", {}).get("aic_model_name"),
-        help="aiconfigurator name of the target model (e.g. QWEN3_32B, DEEPSEEK_V3)",
+        default=config.get("sweep", {}).get("aic_hf_id"),
+        help="aiconfigurator name of the target model (e.g. Qwen/Qwen3-32B, meta-llama/Llama-3.1-405B)",
     )
     parser.add_argument(
         "--aic-backend",

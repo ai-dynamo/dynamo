@@ -44,3 +44,5 @@ spec:
             - "1"
             - --trust-remote-code
             - --skip-tokenizer-init
+            - --kv-events-config
+            - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'

@@ -20,7 +20,6 @@ import asyncio
 import logging
 import os
 import pathlib
-import re
 import signal
 
 import uvloop
@@ -31,12 +30,15 @@ from dynamo.llm import (
     EngineType,
     EntrypointArgs,
     KvRouterConfig,
+    ModelDeploymentCard,
+    PythonAsyncEngine,
     RouterConfig,
     RouterMode,
     make_engine,
     run_input,
 )
 from dynamo.runtime import DistributedRuntime
+from dynamo.runtime.logging import configure_dynamo_logging
 
 from . import __version__
 
@@ -46,19 +48,23 @@ CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR = (
 )
 CUSTOM_BACKEND_ENDPOINT_ENV_VAR = "CUSTOM_BACKEND_ENDPOINT"
 
+configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-def validate_static_endpoint(value):
-    """Validate that static-endpoint is three words separated by dots."""
-    if not re.match(
-        r"^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$",
-        value,
-    ):
-        raise argparse.ArgumentTypeError(
-            f"static-endpoint must be three words separated by dots, got: {value}"
-        )
-    return value
+async def _dummy_generator(request):
+    """Minimal generator that yields nothing. Work in progress."""
+    return
+    yield  # Makes this an async generator
+
+
+async def engine_factory(mdc: ModelDeploymentCard) -> PythonAsyncEngine:
+    """
+    Called by Rust when a model is discovered.
+    """
+    loop = asyncio.get_running_loop()
+    logger.info(f"Engine_factory called with MDC: {mdc.to_json_str()[:100]}...")
+    return PythonAsyncEngine(_dummy_generator, loop)
 
 
 def validate_model_name(value):
@@ -91,7 +97,10 @@ def parse_args():
         "-i", "--interactive", action="store_true", help="Interactive text chat"
     )
     parser.add_argument(
-        "--kv-cache-block-size", type=int, help="KV cache block size (u32)."
+        "--kv-cache-block-size",
+        type=int,
+        default=os.environ.get("DYN_KV_CACHE_BLOCK_SIZE"),
+        help="KV cache block size (u32). Can be set via DYN_KV_CACHE_BLOCK_SIZE env var.",
     )
     parser.add_argument(
         "--http-host",
@@ -127,21 +136,39 @@ def parse_args():
     parser.add_argument(
         "--kv-overlap-score-weight",
         type=float,
-        default=1.0,
+        default=float(os.environ.get("DYN_KV_OVERLAP_SCORE_WEIGHT", "1.0")),
         help="KV Router: Weight for overlap score in worker selection. Higher values prioritize KV cache reuse.",
     )
     parser.add_argument(
         "--router-temperature",
         type=float,
-        default=0.0,
+        default=float(os.environ.get("DYN_ROUTER_TEMPERATURE", "0.0")),
         help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
     )
     parser.add_argument(
         "--no-kv-events",
         action="store_false",
         dest="use_kv_events",
-        default=True,
-        help="KV Router: Disable KV events. When set, uses ApproxKvRouter for predicting block creation/deletion based only on incoming requests at a timer. By default, KV events are enabled.",
+        default=os.environ.get("DYN_KV_EVENTS", "true").lower() != "false",
+        help="KV Router: Disable KV events. When set, the router predicts cache state based on routing decisions with TTL-based expiration and pruning, rather than receiving events from workers. By default, KV events are enabled.",
+    )
+    parser.add_argument(
+        "--router-ttl",
+        type=float,
+        default=float(os.environ.get("DYN_ROUTER_TTL", "120.0")),
+        help="KV Router: Time-to-live in seconds for blocks when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_TTL env var (default: 120.0).",
+    )
+    parser.add_argument(
+        "--router-max-tree-size",
+        type=int,
+        default=int(os.environ.get("DYN_ROUTER_MAX_TREE_SIZE", str(2**10))),
+        help="KV Router: Maximum tree size before pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_MAX_TREE_SIZE env var (default: 1024).",
+    )
+    parser.add_argument(
+        "--router-prune-target-ratio",
+        type=float,
+        default=float(os.environ.get("DYN_ROUTER_PRUNE_TARGET_RATIO", "0.8")),
+        help="KV Router: Target size ratio after pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_PRUNE_TARGET_RATIO env var (default: 0.8).",
     )
     parser.add_argument(
         "--namespace",
@@ -176,15 +203,22 @@ def parse_args():
         help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing.",
     )
     parser.add_argument(
-        "--busy-threshold",
-        type=float,
-        default=None,
-        help="Threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache usage. If not set, busy detection is disabled.",
+        "--enforce-disagg",
+        action="store_true",
+        default=False,
+        help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
     )
     parser.add_argument(
-        "--static-endpoint",
-        type=validate_static_endpoint,
-        help="Static endpoint in format: word.word.word (e.g., dynamo.backend.generate)",
+        "--active-decode-blocks-threshold",
+        type=float,
+        default=None,
+        help="Threshold percentage (0.0-1.0) for determining when a worker is considered busy based on KV cache block utilization. If not set, blocks-based busy detection is disabled.",
+    )
+    parser.add_argument(
+        "--active-prefill-tokens-threshold",
+        type=int,
+        default=None,
+        help="Literal token count threshold for determining when a worker is considered busy based on prefill token utilization. When active prefill tokens exceed this threshold, the worker is marked as busy. If not set, tokens-based busy detection is disabled.",
     )
     parser.add_argument(
         "--model-name",
@@ -208,6 +242,12 @@ def parse_args():
         default=False,
         help="Start KServe gRPC server.",
     )
+    parser.add_argument(
+        "--grpc-metrics-port",
+        type=int,
+        default=8788,
+        help="HTTP metrics port for gRPC service (u16). Only used with --kserve-grpc-server. Defaults to 8788.",
+    )
     add_config_dump_args(parser)
     parser.add_argument(
         "--custom-backend-metrics-endpoint",
@@ -228,14 +268,26 @@ def parse_args():
     parser.add_argument(
         "--store-kv",
         type=str,
+        choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
         help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
+    parser.add_argument(
+        "--request-plane",
+        type=str,
+        choices=["nats", "http", "tcp"],
+        default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
+        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    )
+    parser.add_argument(
+        "--exp-python-factory",
+        action="store_true",
+        default=False,
+        help="[EXPERIMENTAL] Enable Python-based engine factory. When set, engines will be created via a Python callback instead of the default Rust pipeline.",
     )
 
     flags = parser.parse_args()
 
-    if flags.static_endpoint and (not flags.model_name or not flags.model_path):
-        parser.error("--static-endpoint requires both --model-name and --model-path")
     if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
         parser.error("--tls-cert-path and --tls-key-path must be provided together")
     if flags.custom_backend_metrics_polling_interval < 0:
@@ -247,9 +299,15 @@ def parse_args():
 
 
 async def async_main():
+    # The system status server port is a worker concern.
+    #
+    # Serve tests set DYN_SYSTEM_PORT for the worker, but aggregated launch scripts
+    # start `dynamo.frontend` first. If the frontend inherits DYN_SYSTEM_PORT, it can
+    # bind that port before the worker, causing port conflicts and/or scraping the
+    # wrong metrics endpoint.
+    os.environ.pop("DYN_SYSTEM_PORT", None)
     flags = parse_args()
     dump_config(flags.dump_config_to, flags)
-    is_static = bool(flags.static_endpoint)  # true if the string has a value
 
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
@@ -268,7 +326,7 @@ async def async_main():
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, flags.store_kv, is_static)
+    runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -286,6 +344,9 @@ async def async_main():
             router_snapshot_threshold=flags.router_snapshot_threshold,
             router_reset_states=flags.router_reset_states,
             router_track_active_blocks=flags.router_track_active_blocks,
+            router_ttl_secs=flags.router_ttl,
+            router_max_tree_size=flags.router_max_tree_size,
+            router_prune_target_ratio=flags.router_prune_target_ratio,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random
@@ -299,12 +360,13 @@ async def async_main():
         "http_port": flags.http_port,
         "kv_cache_block_size": flags.kv_cache_block_size,
         "router_config": RouterConfig(
-            router_mode, kv_router_config, flags.busy_threshold
+            router_mode,
+            kv_router_config,
+            active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
+            active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
+            enforce_disagg=flags.enforce_disagg,
         ),
     }
-
-    if flags.static_endpoint:
-        kwargs["endpoint_id"] = flags.static_endpoint
 
     if flags.model_name:
         kwargs["model_name"] = flags.model_name
@@ -316,6 +378,8 @@ async def async_main():
         kwargs["tls_key_path"] = flags.tls_key_path
     if flags.namespace:
         kwargs["namespace"] = flags.namespace
+    if flags.kserve_grpc_server and flags.grpc_metrics_port:
+        kwargs["http_metrics_port"] = flags.grpc_metrics_port
     if flags.custom_backend_metrics_endpoint:
         kwargs[
             "custom_backend_metrics_endpoint"
@@ -325,13 +389,10 @@ async def async_main():
             "custom_backend_metrics_polling_interval"
         ] = flags.custom_backend_metrics_polling_interval
 
-    if is_static:
-        # out=dyn://<static_endpoint>
-        engine_type = EngineType.Static
-    else:
-        # out=auto, most common
-        engine_type = EngineType.Dynamic
-    e = EntrypointArgs(engine_type, **kwargs)
+    if flags.exp_python_factory:
+        kwargs["engine_factory"] = engine_factory
+
+    e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
 
     try:

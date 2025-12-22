@@ -26,7 +26,7 @@ from vllm.logprobs import PromptLogprobs
 from vllm.multimodal.inputs import MultiModalUUIDDict  # noqa: F401
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import RequestMetrics
+from vllm.v1.metrics.stats import RequestStateStats
 
 import dynamo.nixl_connect as connect
 
@@ -109,6 +109,15 @@ class ImageContent(BaseModel):
     image_url: ImageURLDetail
 
 
+class AudioURLDetail(BaseModel):
+    url: str
+
+
+class AudioContent(BaseModel):
+    type: Literal["audio_url"]
+    audio_url: AudioURLDetail
+
+
 class VideoURLDetail(BaseModel):
     url: str
 
@@ -118,7 +127,7 @@ class VideoContent(BaseModel):
     video_url: VideoURLDetail
 
 
-MessageContent = Union[TextContent, ImageContent, VideoContent]
+MessageContent = Union[TextContent, ImageContent, AudioContent, VideoContent]
 
 
 class ChatMessage(BaseModel):
@@ -138,6 +147,7 @@ class MultiModalRequest(BaseModel):
 class MultiModalInput(BaseModel):
     image_url: Optional[str] = None
     video_url: Optional[str] = None
+    audio_url: Optional[str] = None
 
 
 class vLLMMultimodalRequest(vLLMGenerateRequest):
@@ -145,7 +155,7 @@ class vLLMMultimodalRequest(vLLMGenerateRequest):
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
     embeddings_shape: Optional[
-        Union[Tuple[int, int, int], Tuple[int, int, int, int]]
+        Union[Tuple[int, int, int], Tuple[int, int, int, int], Tuple[int, int]]
     ] = None
     serialized_request: Optional[connect.RdmaMetadata] = None
 
@@ -156,7 +166,7 @@ class MyRequestOutput(BaseModel):
     https://github.com/vllm-project/vllm/blob/a4c402a756fa3213caf9d2cde0e4ceb2d57727f2/vllm/outputs.py#L85
 
     This class is used to serialize the RequestOutput and any recursively defined types
-    We can do this because PromptLogprobs, RequestMetrics, and CompletionOutput are all serializable dataclasses
+    We can do this because PromptLogprobs, RequestStateStats, and CompletionOutput are all serializable dataclasses
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -167,7 +177,7 @@ class MyRequestOutput(BaseModel):
     prompt_logprobs: Optional[PromptLogprobs] = None
     outputs: List[CompletionOutput]
     finished: bool
-    metrics: Optional[RequestMetrics] = None
+    metrics: Optional[RequestStateStats] = None
     kv_transfer_params: Optional[dict[str, Any]] = None
     # lora_request: Optional[LoRARequest] = None
     # encoder_prompt: Optional[str] = None

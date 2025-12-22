@@ -8,20 +8,37 @@
 pub mod input;
 pub use input::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use dynamo_runtime::pipeline::RouterMode;
 
 use crate::{
     backend::ExecutionContext, engines::StreamingEngine, kv_router::KvRouterConfig,
-    local_model::LocalModel,
+    local_model::LocalModel, model_card::ModelDeploymentCard,
+    types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
+
+/// Callback type for engine factory (async)
+pub type EngineFactoryCallback = Arc<
+    dyn Fn(
+            ModelDeploymentCard,
+        ) -> Pin<
+            Box<dyn Future<Output = anyhow::Result<OpenAIChatCompletionsStreamingEngine>> + Send>,
+        > + Send
+        + Sync,
+>;
 
 #[derive(Debug, Clone, Default)]
 pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,
-    pub busy_threshold: Option<f64>,
+    /// Threshold for active decode blocks utilization (0.0-1.0)
+    pub active_decode_blocks_threshold: Option<f64>,
+    /// Threshold for active prefill tokens utilization (literal token count)
+    pub active_prefill_tokens_threshold: Option<u64>,
+    pub enforce_disagg: bool,
 }
 
 impl RouterConfig {
@@ -29,12 +46,24 @@ impl RouterConfig {
         Self {
             router_mode,
             kv_router_config,
-            busy_threshold: None,
+            active_decode_blocks_threshold: None,
+            active_prefill_tokens_threshold: None,
+            enforce_disagg: false,
         }
     }
 
-    pub fn with_busy_threshold(mut self, threshold: Option<f64>) -> Self {
-        self.busy_threshold = threshold;
+    pub fn with_active_decode_blocks_threshold(mut self, threshold: Option<f64>) -> Self {
+        self.active_decode_blocks_threshold = threshold;
+        self
+    }
+
+    pub fn with_active_prefill_tokens_threshold(mut self, threshold: Option<u64>) -> Self {
+        self.active_prefill_tokens_threshold = threshold;
+        self
+    }
+
+    pub fn with_enforce_disagg(mut self, enforce_disagg: bool) -> Self {
+        self.enforce_disagg = enforce_disagg;
         self
     }
 }
@@ -42,35 +71,39 @@ impl RouterConfig {
 #[derive(Clone)]
 pub enum EngineConfig {
     /// Remote networked engines that we discover via etcd
-    Dynamic(Box<LocalModel>),
-
-    /// Remote networked engines that we know about at startup
-    StaticRemote(Box<LocalModel>),
-
-    /// A Full service engine does it's own tokenization and prompt formatting.
-    StaticFull {
-        engine: Arc<dyn StreamingEngine>,
+    Dynamic {
         model: Box<LocalModel>,
-        is_static: bool,
+        engine_factory: Option<EngineFactoryCallback>,
     },
 
-    /// A core engine expects to be wrapped with pre/post processors that handle tokenization.
-    StaticCore {
+    /// A Text engine receives text, does it's own tokenization and prompt formatting.
+    InProcessText {
+        engine: Arc<dyn StreamingEngine>,
+        model: Box<LocalModel>,
+    },
+
+    /// A Tokens engine receives tokens, expects to be wrapped with pre/post processors that handle tokenization.
+    InProcessTokens {
         engine: ExecutionContext,
         model: Box<LocalModel>,
-        is_static: bool,
         is_prefill: bool,
     },
 }
 
 impl EngineConfig {
-    fn local_model(&self) -> &LocalModel {
+    pub fn local_model(&self) -> &LocalModel {
         use EngineConfig::*;
         match self {
-            Dynamic(lm) => lm,
-            StaticRemote(lm) => lm,
-            StaticFull { model, .. } => model,
-            StaticCore { model, .. } => model,
+            Dynamic { model, .. } => model,
+            InProcessText { model, .. } => model,
+            InProcessTokens { model, .. } => model,
+        }
+    }
+
+    pub fn engine_factory(&self) -> Option<&EngineFactoryCallback> {
+        match self {
+            EngineConfig::Dynamic { engine_factory, .. } => engine_factory.as_ref(),
+            _ => None,
         }
     }
 }

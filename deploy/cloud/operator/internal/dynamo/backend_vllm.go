@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -26,7 +25,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 
 	if isMultinode {
 		// Apply multinode-specific argument modifications
-		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer)
+		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, component.Resources, numberOfNodes)
 
 		// Remove probes for multinode worker and leader
 		if role == RoleWorker {
@@ -72,12 +71,12 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 
 // updateVLLMMultinodeArgs will inject Ray-specific flags for tensor parallel multinode deployments
 // OR data parallel flags for data parallel multinode deployments
-func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
+func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources, numberOfNodes int32) {
 	expandedArgs := getExpandedArgs(container)
-	if needsRayDistributedLaunch(expandedArgs, container.Resources) {
+	if needsRayDistributedLaunch(expandedArgs, resources) {
 		injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer)
-	} else if needsDataParallelLaunch(expandedArgs, container.Resources) {
-		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer)
+	} else if needsDataParallelLaunch(expandedArgs, resources) {
+		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, resources, numberOfNodes)
 	} else {
 		logger := log.Log.WithName("vllm-backend")
 		logger.Info("No need to inject Ray-specific or data parallel flags for multinode deployments", "args", strings.Join(container.Args, " "))
@@ -99,43 +98,95 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 	case RoleLeader:
 		fullCommand := strings.Join(container.Command, " ")
 		originalArgs := strings.Join(container.Args, " ")
-		// Prepend ray start --head command to existing args
-		container.Args = []string{fmt.Sprintf("ray start --head --port=%s && %s %s", VLLMPort, fullCommand, originalArgs)}
+		// Use Ray executor for multi-node vLLM deployments.
+		// vLLM will create a placement group spanning all Ray nodes and spawn workers automatically.
+		// DO NOT pass --nnodes or --node-rank - these are only for mp backend.
+		// The Ray executor handles multi-node distribution via placement groups.
+		vllmMultinodeFlags := "--distributed-executor-backend ray"
+		container.Args = []string{fmt.Sprintf("ray start --head --port=%s && %s %s %s", VLLMPort, fullCommand, originalArgs, vllmMultinodeFlags)}
 	case RoleWorker:
-		// Worker nodes only run Ray, completely replace args
+		// Worker nodes only run Ray agent - vLLM on leader will spawn Ray actors on workers
 		leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 		container.Args = []string{fmt.Sprintf("ray start --address=%s:%s --block", leaderHostname, VLLMPort)}
 	}
 	container.Command = []string{"/bin/sh", "-c"} // ensure cmd is a shell
 }
 
-func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
+func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources, numberOfNodes int32) {
 	expandedArgs := getExpandedArgs(container)
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
-	dataParallelSizeLocal := getContainerGPUs(container.Resources) / getWorldSize(expandedArgs)
-	var startRank string
+
+	// Calculate engines per node
+	containerGPUs := getContainerGPUs(resources)
+	worldSize := getWorldSize(expandedArgs) // TP * PP per engine
+	dataParallelSizeLocal := containerGPUs / worldSize
+
+	// Get total DP size from args, or calculate from nodes
+	totalDPSize := getFlagValue(expandedArgs, dataParallelSizeFlag)
+	if totalDPSize == 1 {
+		totalDPSize = dataParallelSizeLocal * int64(numberOfNodes)
+	}
+
+	var flags []string
+	needsShell := false
+
+	// Helper to check if flag already exists in args
+	hasFlag := func(flag string) bool {
+		for _, arg := range expandedArgs {
+			if arg == flag {
+				return true
+			}
+		}
+		return false
+	}
+
 	switch role {
-	case RoleWorker:
-		nodeRank, _ := multinodeDeployer.GetNodeRank()
-		startRank = fmt.Sprintf("$(( %d * %s ))", dataParallelSizeLocal, nodeRank)
 	case RoleLeader:
-		startRank = "0" // leader start rank is always 0
-	default:
-		startRank = "0"
+		// Leader runs API server + coordinator + local engines
+		// Hybrid LB mode: local DP coordination within node, Dynamo routes between nodes
+		flags = []string{"--data-parallel-hybrid-lb"}
+		// Only inject --data-parallel-size if not already present (avoids duplicates from profiler)
+		if !hasFlag("--data-parallel-size") {
+			flags = append(flags, "--data-parallel-size", strconv.FormatInt(totalDPSize, 10))
+		}
+		flags = append(flags,
+			"--data-parallel-size-local", strconv.FormatInt(dataParallelSizeLocal, 10),
+			"--data-parallel-start-rank", "0",
+			"--data-parallel-address", leaderHostname,
+			"--data-parallel-rpc-port", dataParallelRPCPort,
+		)
+
+	case RoleWorker:
+		// Worker runs API server + coordinator + local engines on its node
+		// Hybrid LB mode: local DP coordination within node, Dynamo routes between nodes
+		nodeRank, _ := multinodeDeployer.GetNodeRank()
+		startRank := fmt.Sprintf("$(( %d * %s ))", dataParallelSizeLocal, nodeRank)
+		needsShell = true // Need shell for arithmetic expansion
+
+		flags = []string{"--data-parallel-hybrid-lb"}
+		// Only inject --data-parallel-size if not already present (avoids duplicates from profiler)
+		if !hasFlag("--data-parallel-size") {
+			flags = append(flags, "--data-parallel-size", strconv.FormatInt(totalDPSize, 10))
+		}
+		flags = append(flags,
+			"--data-parallel-size-local", strconv.FormatInt(dataParallelSizeLocal, 10),
+			"--data-parallel-start-rank", startRank,
+			"--data-parallel-address", leaderHostname,
+			"--data-parallel-rpc-port", dataParallelRPCPort,
+		)
 	}
-	flags := []string{
-		"--data-parallel-address", leaderHostname,
-		"--data-parallel-size-local", strconv.FormatInt(dataParallelSizeLocal, 10),
-		"--data-parallel-rpc-port", dataParallelRPCPort,
-		"--data-parallel-start-rank", startRank,
-	}
-	injectFlagsIntoContainerCommand(container, strings.Join(flags, " "), true, "vllm")
+
+	injectFlagsIntoContainerCommand(container, strings.Join(flags, " "), needsShell, "vllm")
 }
 
 // if world size (within DP rank) > GPU count, then we need to inject ray
 // world size = tensor parallel size * pipeline parallel size
-func needsRayDistributedLaunch(expandedArgs []string, resources corev1.ResourceRequirements) bool {
-	return getWorldSize(expandedArgs) > getContainerGPUs(resources)
+func needsRayDistributedLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
+	containerGPUs := getContainerGPUs(resources)
+	if containerGPUs == 0 {
+		return false
+	}
+	return getWorldSize(expandedArgs) > containerGPUs
 }
 
 func getWorldSize(expandedArgs []string) int64 {
@@ -145,9 +196,13 @@ func getWorldSize(expandedArgs []string) int64 {
 }
 
 // if world size across all DP ranks > GPU count, then we need to inject data parallel multinode coordination
-func needsDataParallelLaunch(expandedArgs []string, resources corev1.ResourceRequirements) bool {
+func needsDataParallelLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
 	dataParallelSize := getFlagValue(expandedArgs, dataParallelSizeFlag)
-	return getWorldSize(expandedArgs)*dataParallelSize > getContainerGPUs(resources)
+	containerGPUs := getContainerGPUs(resources)
+	if containerGPUs == 0 {
+		return false
+	}
+	return getWorldSize(expandedArgs)*dataParallelSize > containerGPUs
 }
 
 func getFlagValue(expandedArgs []string, flag string) int64 {
@@ -164,14 +219,12 @@ func getFlagValue(expandedArgs []string, flag string) int64 {
 	return flagValue
 }
 
-func getContainerGPUs(resources corev1.ResourceRequirements) int64 {
-	var containerGPUs int64 = 1
-	// Requests defaults to Limits, doesn't make sense in case where Requests < Limits for gpus
-	for name, quantity := range resources.Limits {
-		if name.String() == consts.KubeResourceGPUNvidia {
-			containerGPUs = quantity.Value()
-			break
-		}
+func getContainerGPUs(resources *v1alpha1.Resources) int64 {
+	if resources == nil || resources.Limits == nil || resources.Limits.GPU == "" {
+		return 0
 	}
-	return containerGPUs
+	if gpus, err := strconv.ParseInt(resources.Limits.GPU, 10, 64); err == nil {
+		return gpus
+	}
+	return 0
 }

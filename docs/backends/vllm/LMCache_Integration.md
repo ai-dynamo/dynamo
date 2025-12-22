@@ -20,16 +20,15 @@ This document describes how LMCache is integrated into Dynamo's vLLM backend to 
 
 ### Configuration
 
-LMCache is enabled by setting the `ENABLE_LMCACHE` environment variable:
+LMCache is enabled using the `--connector lmcache` flag:
 
 ```bash
-export ENABLE_LMCACHE=1
+python -m dynamo.vllm --model <model_name> --connector lmcache
 ```
 
-Additional LMCache configuration can be customized via environment variables:
-- `LMCACHE_CHUNK_SIZE=256` - Token chunk size for cache granularity (default: 256)
-- `LMCACHE_LOCAL_CPU=True` - Enable CPU memory backend for offloading
-- `LMCACHE_MAX_LOCAL_CPU_SIZE=20` - CPU memory limit in GB (user can adjust based on available RAM to a fixed value)
+### Customization
+
+LMCache configuration can be customized via environment variables listed [here](https://docs.lmcache.ai/api_reference/configurations.html).
 
 For advanced configurations, LMCache supports multiple [storage backends](https://docs.lmcache.ai/index.html):
 - **CPU RAM**: Fast local memory offloading
@@ -59,10 +58,6 @@ In aggregated mode, the system uses:
 ## Disaggregated Serving
 
 Disaggregated serving separates prefill and decode operations into dedicated workers. This provides better resource utilization and scalability for production deployments.
-
-### Configuration
-
-The same `ENABLE_LMCACHE=1` environment variable enables LMCache, but the system automatically configures different connector setups for prefill and decode workers.
 
 ### Deployment
 
@@ -100,7 +95,7 @@ The system automatically configures KV transfer based on the deployment mode and
 #### Prefill Worker (Disaggregated Mode)
 ```python
 kv_transfer_config = KVTransferConfig(
-    kv_connector="MultiConnector",
+    kv_connector="PdConnector",
     kv_role="kv_both",
     kv_connector_extra_config={
         "connectors": [
@@ -127,22 +122,9 @@ kv_transfer_config = KVTransferConfig(
 )
 ```
 
-### Environment Setup
-
-The system automatically configures LMCache environment variables when enabled:
-
-```python
-lmcache_config = {
-    "LMCACHE_CHUNK_SIZE": "256",
-    "LMCACHE_LOCAL_CPU": "True",
-    "LMCACHE_MAX_LOCAL_CPU_SIZE": "20"
-}
-```
-
 ### Integration Points
 
 1. **Argument Parsing** (`args.py`):
-   - Detects `ENABLE_LMCACHE` environment variable
    - Configures appropriate KV transfer settings
    - Sets up connector configurations based on worker type
 
@@ -167,8 +149,59 @@ lmcache_config = {
    - Shared context across sessions
    - Long-running services with warm caches
 
+## Metrics and Monitoring
+
+When LMCache is enabled with `--connector lmcache` and `DYN_SYSTEM_PORT` is set, LMCache metrics are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
+
+**Requirements to access LMCache metrics:**
+- `--connector lmcache` - Enables LMCache
+- `DYN_SYSTEM_PORT=8081` - Enables metrics HTTP endpoint
+- `PROMETHEUS_MULTIPROC_DIR` (optional) - If not set, Dynamo manages it internally. Only set explicitly if you need control over the metrics directory.
+
+For detailed information on LMCache metrics, including the complete list of available metrics and how to access them, see the **[LMCache Metrics section](prometheus.md#lmcache-metrics)** in the vLLM Prometheus Metrics Guide.
+
+### Troubleshooting
+
+#### LMCache log: `PrometheusLogger instance already created with different metadata`
+
+You may see an error like:
+
+```text
+LMCache ERROR: PrometheusLogger instance already created with different metadata. This should not happen except in test
+```
+
+**Version note**: We reproduced this behavior with **vLLM v0.12.0**. We have not reproduced it with **vLLM v0.11.0**, so it may be specific to (or introduced in) v0.12.0.
+
+This is emitted by LMCache when the LMCache connector is initialized more than once in the same process (for example, once for a `WORKER` role and later for a `SCHEDULER` role). LMCache uses a process-global singleton for its Prometheus logger, so the second initialization can log this warning if its metadata differs.
+
+- **Impact**: This is a log-only error; in our testing it does not prevent vLLM/Dynamo from serving requests. If you care about LMCache metric labels, be aware the logger singleton uses the first-seen metadata.
+- **Repro without Dynamo** (vLLM v0.12.0):
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+  --host 127.0.0.1 --port 18000 \
+  --gpu-memory-utilization 0.24 \
+  --enforce-eager \
+  --no-enable-prefix-caching \
+  --max-num-seqs 2 \
+  --kv-offloading-backend lmcache \
+  --kv-offloading-size 1 \
+  --disable-hybrid-kv-cache-manager
+```
+
+- **Mitigation (silence)**: set `LMCACHE_LOG_LEVEL=CRITICAL`.
+- **Upstream issue**: [vLLM issue #30996](https://github.com/vllm-project/vllm/issues/30996).
+
+#### vLLM log: `Found PROMETHEUS_MULTIPROC_DIR was set by user`
+
+vLLM v1 uses `prometheus_client.multiprocess` and stores intermediate metric values in `PROMETHEUS_MULTIPROC_DIR`.
+
+- If you **set `PROMETHEUS_MULTIPROC_DIR` yourself**, vLLM warns that the directory must be wiped between runs to avoid stale/incorrect metrics.
+- When running via Dynamo, the vLLM wrapper may set `PROMETHEUS_MULTIPROC_DIR` internally to a temporary directory to avoid vLLM cleanup issues. If you still see the warning, confirm you are not exporting `PROMETHEUS_MULTIPROC_DIR` in your shell or container environment.
+
 ## References and Additional Resources
 
 - [LMCache Documentation](https://docs.lmcache.ai/index.html) - Comprehensive guide and API reference
 - [Configuration Reference](https://docs.lmcache.ai/api_reference/configurations.html) - Detailed configuration options
+- [LMCache Observability Guide](https://docs.lmcache.ai/production/observability/vllm_endpoint.html) - Metrics and monitoring details
 

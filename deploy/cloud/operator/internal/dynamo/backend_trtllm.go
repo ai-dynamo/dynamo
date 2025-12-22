@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -103,8 +102,9 @@ func (b *TRTLLMBackend) addSSHVolumeMount(container *corev1.Container) {
 
 // setupLeaderContainer configures the leader node with SSH setup and mpirun command
 func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, component *v1alpha1.DynamoComponentDeploymentSharedSpec, multinodeDeployer MultinodeDeployer) {
-	// Generate the list of worker hostnames
-	workerHosts := b.generateWorkerHostnames(numberOfNodes, serviceName, multinodeDeployer)
+	// Generate the list of all hostnames
+	hostNamesList := b.hostNamesList(numberOfNodes, serviceName, multinodeDeployer)
+	allHostnames := strings.Join(hostNamesList, ",")
 
 	// Store original command/args for later use
 	var originalCommand string
@@ -150,13 +150,23 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 
 	mpirunCmd := fmt.Sprintf("mpirun --allow-run-as-root --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p %d -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" %s %s",
 		totalGPUs,
-		workerHosts,
+		allHostnames,
 		commonconsts.MpiRunSshPort,
 		envVarsStr,
 		wrappedCommand)
 
-	// Combine SSH setup and mpirun command
-	fullCommand := strings.Join(append(sshSetupCommands, mpirunCmd), " && ")
+	// Combine SSH setup and mpirun command, optionally adding DNS wait for deployers that need it
+	var allCommands []string
+	if multinodeDeployer.NeedsDNSWait() {
+		// Wait for DNS resolution of all worker nodes (needed for LWS)
+		workerHosts := strings.Join(hostNamesList[1:], " ")
+		dnsWaitCmd := fmt.Sprintf(`TIMEOUT=300; START_TIME=$(date +%%s); for worker in %s; do echo "Waiting for DNS: $worker"; until getent hosts $worker >/dev/null 2>&1; do CURRENT_TIME=$(date +%%s); if [ $((CURRENT_TIME - START_TIME)) -gt $TIMEOUT ]; then echo "ERROR: Timeout waiting for DNS: $worker"; exit 1; fi; echo "DNS not ready for $worker, retrying..."; sleep 2; done; echo "✓ DNS resolved: $worker"; done; echo "All workers DNS ready"`, workerHosts)
+
+		allCommands = append(sshSetupCommands, dnsWaitCmd, mpirunCmd)
+	} else {
+		allCommands = append(sshSetupCommands, mpirunCmd)
+	}
+	fullCommand := strings.Join(allCommands, " && ")
 
 	// Update container to use bash with the full command
 	container.Command = []string{"/bin/sh", "-c"}
@@ -181,7 +191,6 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 		"ssh-keygen -t ed25519 -f ~/.ssh/host_keys/ssh_host_ed25519_key -N ''",
 		// Create SSH daemon config to use custom host keys location and non-privileged port
 		fmt.Sprintf("printf 'Port %d\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\n' > ~/.ssh/sshd_config", commonconsts.MpiRunSshPort),
-		"mkdir -p /run/sshd",
 		"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 	}
 
@@ -192,13 +201,13 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 	container.Args = []string{fullCommand}
 }
 
-// generateWorkerHostnames creates a comma-separated list of worker hostnames
-func (b *TRTLLMBackend) generateWorkerHostnames(numberOfNodes int32, serviceName string, multinodeDeployer MultinodeDeployer) string {
-	return strings.Join(multinodeDeployer.GetHostNames(serviceName, numberOfNodes), ",")
+// hostNamesList generates the list of hostnames for all nodes in the multinode deployment
+func (b *TRTLLMBackend) hostNamesList(numberOfNodes int32, serviceName string, multinodeDeployer MultinodeDeployer) []string {
+	return multinodeDeployer.GetHostNames(serviceName, numberOfNodes)
 }
 
 // getGPUsPerNode extracts the number of GPUs per node from resources
-func getGPUsPerNode(resources *common.Resources) int32 {
+func getGPUsPerNode(resources *v1alpha1.Resources) int32 {
 	if resources != nil && resources.Requests != nil && resources.Requests.GPU != "" {
 		if gpus, err := strconv.ParseInt(resources.Requests.GPU, 10, 32); err == nil {
 			return int32(gpus)
@@ -218,7 +227,7 @@ func getCommonTRTLLMEnvVars() map[string]bool {
 		"CUDA_VISIBLE_DEVICES": true, "MODEL_PATH": true, "HF_TOKEN": true, "HUGGING_FACE_HUB_TOKEN": true, "HF_ENDPOINT": true,
 		"TOKENIZERS_PARALLELISM": true, "NCCL_DEBUG": true, "NCCL_IB_DISABLE": true, "NCCL_P2P_DISABLE": true,
 		"TENSORRT_LLM_CACHE_DIR": true, "HF_HOME": true, "TRANSFORMERS_CACHE": true, "HF_DATASETS_CACHE": true,
-		"PATH": true, "LD_LIBRARY_PATH": true, "PYTHONPATH": true, "HOME": true, "USER": true,
+		"PATH": true, "LD_LIBRARY_PATH": true, "PYTHONPATH": true, "HOME": true, "USER": true, "TRTLLM_USE_UCX_KVCACHE": true,
 	}
 }
 

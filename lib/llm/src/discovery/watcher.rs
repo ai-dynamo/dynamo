@@ -20,8 +20,9 @@ use dynamo_runtime::{
 
 use crate::{
     backend::Backend,
-    entrypoint,
-    kv_router::{KvRouterConfig, PrefillRouter},
+    entrypoint::{self, EngineFactoryCallback, RouterConfig},
+    http::service::metrics::Metrics,
+    kv_router::PrefillRouter,
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
@@ -50,11 +51,11 @@ pub enum ModelUpdate {
 pub struct ModelWatcher {
     manager: Arc<ModelManager>,
     drt: DistributedRuntime,
-    router_mode: RouterMode,
+    router_config: RouterConfig,
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
-    kv_router_config: Option<KvRouterConfig>,
-    busy_threshold: Option<f64>,
+    engine_factory: Option<EngineFactoryCallback>,
+    metrics: Arc<Metrics>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -69,18 +70,18 @@ impl ModelWatcher {
     pub fn new(
         runtime: DistributedRuntime,
         model_manager: Arc<ModelManager>,
-        router_mode: RouterMode,
-        kv_router_config: Option<KvRouterConfig>,
-        busy_threshold: Option<f64>,
+        router_config: RouterConfig,
+        engine_factory: Option<EngineFactoryCallback>,
+        metrics: Arc<Metrics>,
     ) -> ModelWatcher {
         Self {
             manager: model_manager,
             drt: runtime,
-            router_mode,
+            router_config,
             notify_on_model: Notify::new(),
             model_update_tx: None,
-            kv_router_config,
-            busy_threshold,
+            engine_factory,
+            metrics,
         }
     }
 
@@ -339,21 +340,21 @@ impl ModelWatcher {
         tracing::debug!(model_name = card.name(), "adding model");
         self.manager.save_model_card(key, card.clone())?;
 
-        // Check if we should skip registration:
-        // - Skip if a model with this name already exists
-        // - UNLESS this is a prefill model and no prefill model exists yet for this name
-        let is_new_prefill = card.model_type.supports_prefill()
-            && !self
-                .manager
-                .list_prefill_models()
-                .contains(&card.name().to_string());
+        // Skip duplicate registrations based on model type.
+        // Prefill and decode models are tracked separately, so registering one
+        // doesn't block the other (they can arrive in any order).
+        let already_registered = if card.model_type.supports_prefill() {
+            self.manager.has_prefill_model(card.name())
+        } else {
+            self.manager.has_decode_model(card.name())
+        };
 
-        if self.manager.has_model_any(card.name()) && !is_new_prefill {
+        if already_registered {
             tracing::debug!(
                 model_name = card.name(),
                 namespace = endpoint_id.namespace,
                 model_type = %card.model_type,
-                "New endpoint for existing model, skipping"
+                "Model already registered, skipping"
             );
             return Ok(());
         }
@@ -361,6 +362,7 @@ impl ModelWatcher {
         if let Some(tx) = &self.model_update_tx {
             tx.send(ModelUpdate::Added(card.clone())).await.ok();
         }
+
         let checksum = card.mdcsum();
 
         if card.model_input == ModelInput::Tokens
@@ -370,10 +372,15 @@ impl ModelWatcher {
             // A model that expects pre-processed requests meaning it's up to us whether we
             // handle Chat or Completions requests, so handle whatever the model supports.
 
-            let kv_chooser = if self.router_mode == RouterMode::KV {
+            let endpoint = component.endpoint(&endpoint_id.name);
+            let kv_chooser = if self.router_config.router_mode == RouterMode::KV {
                 Some(
                     self.manager
-                        .kv_chooser_for(&component, card.kv_cache_block_size, self.kv_router_config)
+                        .kv_chooser_for(
+                            &endpoint,
+                            card.kv_cache_block_size,
+                            Some(self.router_config.kv_router_config),
+                        )
                         .await?,
                 )
             } else {
@@ -390,34 +397,69 @@ impl ModelWatcher {
                 .register_prefill_router(card.name().to_string())
                 .map(|rx| {
                     // Create prefill-specific config with track_active_blocks disabled
-                    let mut prefill_config = self.kv_router_config.unwrap_or_default();
+                    let mut prefill_config = self.router_config.kv_router_config;
                     prefill_config.router_track_active_blocks = false;
 
                     PrefillRouter::new(
                         rx,
                         self.manager.clone(),
-                        self.router_mode,
+                        self.router_config.router_mode,
                         card.kv_cache_block_size,
                         Some(prefill_config),
+                        self.router_config.enforce_disagg,
                     )
                 });
 
+            // Get or create the worker monitor for this model
+            // This allows dynamic threshold updates via the ModelManager
+            // Create monitor if either threshold is configured
+            let worker_monitor = if self.router_config.active_decode_blocks_threshold.is_some()
+                || self.router_config.active_prefill_tokens_threshold.is_some()
+            {
+                // Default thresholds: active_decode_blocks=1.0 (disabled), active_prefill_tokens=1000000 (effectively disabled)
+                let active_decode_blocks = self
+                    .router_config
+                    .active_decode_blocks_threshold
+                    .unwrap_or(1.0);
+                let active_prefill_tokens = self
+                    .router_config
+                    .active_prefill_tokens_threshold
+                    .unwrap_or(1000000);
+                Some(self.manager.get_or_create_worker_monitor(
+                    card.name(),
+                    client.clone(),
+                    active_decode_blocks,
+                    active_prefill_tokens,
+                ))
+            } else {
+                None
+            };
+
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
-                let chat_engine = entrypoint::build_routed_pipeline::<
-                    NvCreateChatCompletionRequest,
-                    NvCreateChatCompletionStreamResponse,
-                >(
-                    card,
-                    &client,
-                    self.router_mode,
-                    self.busy_threshold,
-                    kv_chooser.clone(),
-                    tokenizer_hf.clone(),
-                    prefill_chooser.clone(),
-                )
-                .await
-                .context("build_routed_pipeline")?;
+                // Work in progress. This will allow creating  a chat_engine from Python.
+                let chat_engine = if let Some(ref factory) = self.engine_factory {
+                    factory(card.clone())
+                        .await
+                        .context("python engine_factory")?
+                } else {
+                    entrypoint::build_routed_pipeline::<
+                        NvCreateChatCompletionRequest,
+                        NvCreateChatCompletionStreamResponse,
+                    >(
+                        card,
+                        &client,
+                        self.router_config.router_mode,
+                        worker_monitor.clone(),
+                        kv_chooser.clone(),
+                        tokenizer_hf.clone(),
+                        prefill_chooser.clone(),
+                        self.router_config.enforce_disagg,
+                        self.metrics.clone(),
+                    )
+                    .await
+                    .context("build_routed_pipeline")?
+                };
                 self.manager
                     .add_chat_completions_model(card.name(), checksum, chat_engine)
                     .context("add_chat_completions_model")?;
@@ -440,12 +482,14 @@ impl ModelWatcher {
                 >(
                     card,
                     &client,
-                    self.router_mode,
-                    self.busy_threshold,
+                    self.router_config.router_mode,
+                    worker_monitor,
                     kv_chooser,
                     preprocessor,
                     tokenizer_hf,
                     prefill_chooser,
+                    self.router_config.enforce_disagg,
+                    self.metrics.clone(),
                 )
                 .await
                 .context("build_routed_pipeline_with_preprocessor")?;
@@ -460,7 +504,7 @@ impl ModelWatcher {
                 NvCreateEmbeddingRequest,
                 Annotated<NvCreateEmbeddingResponse>,
             >::from_client_with_threshold(
-                client, self.router_mode, None, None
+                client, self.router_config.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);
@@ -468,12 +512,13 @@ impl ModelWatcher {
                 .add_embeddings_model(card.name(), checksum, engine)?;
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case 3: Text + Chat
-            let push_router =
-                PushRouter::<
-                    NvCreateChatCompletionRequest,
-                    Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client_with_threshold(client, self.router_mode, None, None)
-                .await?;
+            let push_router = PushRouter::<
+                NvCreateChatCompletionRequest,
+                Annotated<NvCreateChatCompletionStreamResponse>,
+            >::from_client_with_threshold(
+                client, self.router_config.router_mode, None, None
+            )
+            .await?;
             let engine = Arc::new(push_router);
             self.manager
                 .add_chat_completions_model(card.name(), checksum, engine)?;
@@ -483,7 +528,7 @@ impl ModelWatcher {
                 NvCreateCompletionRequest,
                 Annotated<NvCreateCompletionResponse>,
             >::from_client_with_threshold(
-                client, self.router_mode, None, None
+                client, self.router_config.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);
@@ -505,7 +550,7 @@ impl ModelWatcher {
                 PreprocessedEmbeddingRequest,
                 Annotated<EmbeddingsEngineOutput>,
             >::from_client_with_threshold(
-                client, self.router_mode, None, None
+                client, self.router_config.router_mode, None, None
             )
             .await?;
 
@@ -530,7 +575,7 @@ impl ModelWatcher {
                 NvCreateTensorRequest,
                 Annotated<NvCreateTensorResponse>,
             >::from_client_with_threshold(
-                client, self.router_mode, None, None
+                client, self.router_config.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);

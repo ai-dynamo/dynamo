@@ -24,6 +24,7 @@ a high-level, SLA-driven interface for deploying machine learning models on Dyna
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -66,6 +67,26 @@ type ProfilingConfigSpec struct {
 	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
 	// +kubebuilder:validation:Required
 	ProfilerImage string `json:"profilerImage"`
+
+	// OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.
+	// If specified, all profiling artifacts (logs, plots, configs, raw data) will be written
+	// to this PVC instead of an ephemeral emptyDir volume. This allows users to access
+	// complete profiling results after the job completes by mounting the PVC.
+	// The PVC must exist in the same namespace as the DGDR.
+	// If not specified, profiling uses emptyDir and only essential data is saved to ConfigMaps.
+	// Note: ConfigMaps are still created regardless of this setting for planner integration.
+	// +kubebuilder:validation:Optional
+	OutputPVC string `json:"outputPVC,omitempty"`
+
+	// Resources specifies the compute resource requirements for the profiling job container.
+	// If not specified, no resource requests or limits are set.
+	// +kubebuilder:validation:Optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Tolerations allows the profiling job to be scheduled on nodes with matching taints.
+	// For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint.
+	// +kubebuilder:validation:Optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 }
 
 // DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.
@@ -108,11 +129,20 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:validation:Required
 	Model string `json:"model"`
 
-	// Backend specifies the inference backend to use.
+	// Backend specifies the inference backend for profiling.
 	// The controller automatically sets this value in profilingConfig.config.engine.backend.
+	// Profiling runs on real GPUs or via AIC simulation to collect performance data.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	Backend string `json:"backend"`
+
+	// UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of
+	// a real backend deployment. When true, the deployment uses simulated engines that
+	// don't require GPUs, using the profiling data to simulate realistic timing behavior.
+	// Mocker is available in all backend images and useful for large-scale experiments.
+	// Profiling still runs against the real backend (specified above) to collect performance data.
+	// +kubebuilder:default=false
+	UseMocker bool `json:"useMocker,omitempty"`
 
 	// EnableGpuDiscovery controls whether the profiler should automatically discover GPU
 	// resources from the Kubernetes cluster nodes. When enabled, the profiler will override
@@ -192,6 +222,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// including metadata, based on profiling results. Users can extract this to create
 	// a DGD manually, or it's used automatically when autoApply is true.
 	// Stored as RawExtension to preserve all fields including metadata.
+	// For mocker backends, this contains the mocker DGD spec.
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:EmbeddedResource

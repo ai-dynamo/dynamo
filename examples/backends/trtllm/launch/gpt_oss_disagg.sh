@@ -6,15 +6,16 @@
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 export MODEL_PATH=${MODEL_PATH:-"/model"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"openai/gpt-oss-120b"}
-export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/recipes/gpt-oss-120b/trtllm/disagg/prefill.yaml"}
-export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/recipes/gpt-oss-120b/trtllm/disagg/decode.yaml"}
+export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/gpt-oss-120b/prefill.yaml"}
+export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/gpt-oss-120b/decode.yaml"}
 
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 
 # run frontend
-python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python3 -m dynamo.frontend --router-mode round-robin &
 
 # With tensor_parallel_size=4, each worker needs 4 GPUs
 # run prefill worker

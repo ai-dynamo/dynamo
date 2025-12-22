@@ -14,6 +14,7 @@ pub use agent::NixlAgent;
 pub use config::NixlBackendConfig;
 
 pub use nixl_sys::{MemType, OptArgs, RegistrationHandle};
+pub use serde::{Deserialize, Serialize};
 
 /// Trait for storage types that can be registered with NIXL.
 pub trait NixlCompatible {
@@ -24,7 +25,7 @@ pub trait NixlCompatible {
 }
 
 /// NIXL descriptor containing registration information.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NixlDescriptor {
     pub addr: u64,
     pub size: usize,

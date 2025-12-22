@@ -7,8 +7,6 @@ import (
 )
 
 const (
-	HPACPUDefaultAverageUtilization = 80
-
 	DefaultUserId = "default"
 	DefaultOrgId  = "default"
 
@@ -24,6 +22,11 @@ const (
 
 	MpiRunSshPort = 2222
 
+	// Default security context values
+	// These provide secure defaults for running containers as non-root
+	// Users can override these via extraPodSpec.securityContext in their DynamoGraphDeployment
+	DefaultSecurityContextFSGroup = 1000
+
 	EnvDynamoServicePort = "DYNAMO_PORT"
 
 	KubeLabelDynamoSelector = "nvidia.com/selector"
@@ -31,6 +34,7 @@ const (
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
 
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
+	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 
 	KubeLabelDynamoGraphDeploymentName  = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent            = "nvidia.com/dynamo-component"
@@ -41,6 +45,8 @@ const (
 	KubeLabelDynamoBaseModel            = "nvidia.com/dynamo-base-model"
 	KubeLabelDynamoBaseModelHash        = "nvidia.com/dynamo-base-model-hash"
 	KubeAnnotationDynamoBaseModel       = "nvidia.com/dynamo-base-model"
+	KubeLabelDynamoDiscoveryBackend     = "nvidia.com/dynamo-discovery-backend"
+	KubeLabelDynamoDiscoveryEnabled     = "nvidia.com/dynamo-discovery-enabled"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
@@ -50,12 +56,17 @@ const (
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
 	DynamoDeploymentConfigEnvVar = "DYN_DEPLOYMENT_CONFIG"
+	DynamoNamespaceEnvVar        = "DYN_NAMESPACE"
+	DynamoComponentEnvVar        = "DYN_COMPONENT"
+	DynamoDiscoveryBackendEnvVar = "DYN_DISCOVERY_BACKEND"
 
 	GlobalDynamoNamespace = "dynamo"
 
 	ComponentTypePlanner      = "planner"
 	ComponentTypeFrontend     = "frontend"
 	ComponentTypeWorker       = "worker"
+	ComponentTypePrefill      = "prefill"
+	ComponentTypeDecode       = "decode"
 	ComponentTypeDefault      = "default"
 	PlannerServiceAccountName = "planner-serviceaccount"
 

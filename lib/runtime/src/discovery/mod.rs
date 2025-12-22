@@ -8,10 +8,17 @@ use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use tokio_util::sync::CancellationToken;
 
+mod metadata;
+pub use metadata::{DiscoveryMetadata, MetadataSnapshot};
+
 mod mock;
 pub use mock::{MockDiscovery, SharedMockRegistry};
 mod kv_store;
 pub use kv_store::KVStoreDiscovery;
+
+mod kube;
+pub use kube::{KubeDiscoveryClient, hash_pod_name};
+
 pub mod utils;
 use crate::component::TransportType;
 pub use utils::watch_and_extract_field;
@@ -72,6 +79,9 @@ pub enum DiscoverySpec {
         /// This allows lib/runtime to remain independent of lib/llm types
         /// DiscoverySpec.from_model() and DiscoveryInstance.deserialize_model() are ergonomic helpers to create and deserialize the model card.
         card_json: serde_json::Value,
+        /// Optional suffix appended after instance_id in the key path (e.g., for LoRA adapters)
+        /// Key format: {namespace}/{component}/{endpoint}/{instance_id}[/{model_suffix}]
+        model_suffix: Option<String>,
     },
 }
 
@@ -87,12 +97,28 @@ impl DiscoverySpec {
     where
         T: Serialize,
     {
+        Self::from_model_with_suffix(namespace, component, endpoint, card, None)
+    }
+
+    /// Creates a Model discovery spec with an optional suffix (e.g., for LoRA adapters)
+    /// The suffix is appended after the instance_id in the key path
+    pub fn from_model_with_suffix<T>(
+        namespace: String,
+        component: String,
+        endpoint: String,
+        card: &T,
+        model_suffix: Option<String>,
+    ) -> Result<Self>
+    where
+        T: Serialize,
+    {
         let card_json = serde_json::to_value(card)?;
         Ok(Self::Model {
             namespace,
             component,
             endpoint,
             card_json,
+            model_suffix,
         })
     }
 
@@ -116,12 +142,14 @@ impl DiscoverySpec {
                 component,
                 endpoint,
                 card_json,
+                model_suffix,
             } => DiscoveryInstance::Model {
                 namespace,
                 component,
                 endpoint,
                 instance_id,
                 card_json,
+                model_suffix,
             },
         }
     }
@@ -142,6 +170,9 @@ pub enum DiscoveryInstance {
         /// ModelDeploymentCard serialized as JSON
         /// This allows lib/runtime to remain independent of lib/llm types
         card_json: serde_json::Value,
+        /// Optional suffix appended after instance_id in the key path (e.g., for LoRA adapters)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_suffix: Option<String>,
     },
 }
 
@@ -190,6 +221,9 @@ pub trait Discovery: Send + Sync {
 
     /// Registers an object in the discovery plane with the instance id
     async fn register(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance>;
+
+    /// Unregisters an instance from the discovery plane
+    async fn unregister(&self, instance: DiscoveryInstance) -> Result<()>;
 
     /// Returns a list of currently registered instances for the given discovery query
     /// This is a one-time snapshot without watching for changes
