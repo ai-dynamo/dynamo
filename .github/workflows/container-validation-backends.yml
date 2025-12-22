@@ -205,7 +205,7 @@ jobs:
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
 
-  operator-main:
+  operator:
     needs: detect-buildkit-workers
     strategy:
       fail-fast: false
