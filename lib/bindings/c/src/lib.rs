@@ -789,6 +789,14 @@ pub unsafe extern "C" fn dynamo_router_add_request(
 
     let pl = unsafe { &*pipeline };
 
+    tracing::debug!(
+        request_id = %request_id,
+        worker_id = worker_id,
+        dp_rank = dp_rank,
+        token_count = token_count,
+        "[GAIE] dynamo_router_add_request called from EPP"
+    );
+
     let Some(ref kv_router) = pl.kv_router else {
         tracing::error!("KV router not available (router_mode is not KV)");
         return DynamoLlmResult::ERR;
@@ -823,7 +831,7 @@ pub unsafe extern "C" fn dynamo_router_add_request(
             dp_rank = dp_rank,
             overlap_blocks = overlap_blocks,
             token_count = tokens.len(),
-            "Added request to router bookkeeping"
+            "[GAIE] dynamo_router_add_request completed - request registered in router bookkeeping"
         );
     };
 
@@ -857,6 +865,11 @@ pub unsafe extern "C" fn dynamo_router_mark_prefill_complete(
 
     let pl = unsafe { &*pipeline };
 
+    tracing::debug!(
+        request_id = %request_id,
+        "[GAIE] dynamo_router_mark_prefill_complete called from EPP"
+    );
+
     let Some(ref kv_router) = pl.kv_router else {
         tracing::error!("KV router not available (router_mode is not KV)");
         return DynamoLlmResult::ERR;
@@ -866,6 +879,11 @@ pub unsafe extern "C" fn dynamo_router_mark_prefill_complete(
     let fut = async move {
         if let Err(e) = kv_router.mark_prefill_completed(&request_id).await {
             tracing::warn!("Failed to mark prefill completed for {}: {}", request_id, e);
+        } else {
+            tracing::debug!(
+                request_id = %request_id,
+                "[GAIE] dynamo_router_mark_prefill_complete completed - prefill tokens released"
+            );
         }
     };
 
@@ -899,6 +917,11 @@ pub unsafe extern "C" fn dynamo_router_free_request(
 
     let pl = unsafe { &*pipeline };
 
+    tracing::debug!(
+        request_id = %request_id,
+        "[GAIE] dynamo_router_free_request called from EPP"
+    );
+
     let Some(ref kv_router) = pl.kv_router else {
         tracing::error!("KV router not available (router_mode is not KV)");
         return DynamoLlmResult::ERR;
@@ -908,6 +931,11 @@ pub unsafe extern "C" fn dynamo_router_free_request(
     let fut = async move {
         if let Err(e) = kv_router.free(&request_id).await {
             tracing::warn!("Failed to free request {}: {}", request_id, e);
+        } else {
+            tracing::debug!(
+                request_id = %request_id,
+                "[GAIE] dynamo_router_free_request completed - request removed from bookkeeping"
+            );
         }
     };
 

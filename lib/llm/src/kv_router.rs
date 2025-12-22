@@ -802,6 +802,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         worker,
                     )
                     .await;
+            } else if is_epp_routed_stage2 {
+                tracing::debug!(
+                    request_id = %context_id,
+                    worker_id = id,
+                    dp_rank = dp_rank,
+                    "[GAIE Stage 2] Skipping add_request - bookkeeping handled by EPP GAIE hooks"
+                );
             }
             (id, dp_rank, overlap_blocks)
         } else {
@@ -901,6 +908,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 if let Err(e) = chooser.free(&context_id).await {
                     tracing::warn!("Failed to free request {context_id}: {e}");
                 }
+            } else {
+                tracing::debug!(
+                    request_id = %context_id,
+                    "[GAIE Stage 2] Skipping free() - cleanup handled by EPP GAIE cleanup plugin"
+                );
             }
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
