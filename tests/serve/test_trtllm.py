@@ -188,9 +188,14 @@ trtllm_configs = {
         name="epd_multimodal",
         directory=trtllm_dir,
         script_name="epd_multimodal.sh",
-        marks=[pytest.mark.gpu_4, pytest.mark.trtllm_marker, pytest.mark.multimodal],
+        marks=[
+            pytest.mark.gpu_4,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.nightly,
+        ],
         model="llava-hf/llava-v1.6-mistral-7b-hf",
-        models_port=8000,
+        frontend_port=DefaultPort.FRONTEND.value,
         timeout=1200,
         delayed_start=120,
         request_payloads=[
@@ -201,6 +206,8 @@ trtllm_configs = {
                 temperature=0.0,
                 max_tokens=120,
             )
+        ],
+    ),
     "completions_only": TRTLLMConfig(
         name="completions_only",
         directory=trtllm_dir,
@@ -243,7 +250,7 @@ def test_deployment(
     dynamo_dynamic_ports,
     num_system_ports,
     predownload_models,
-    image_server
+    image_server,
 ):
     """
     Test dynamo deployments with different configurations.
