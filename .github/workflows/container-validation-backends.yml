@@ -487,7 +487,7 @@ jobs:
     runs-on: cpu-amd-m5-2xlarge
     # Run if push to main, or manually triggered
     if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [changed-files, deploy-operator, sglang]
+    needs: [changed-files, deploy-operator]
     permissions:
       contents: read
     strategy:
