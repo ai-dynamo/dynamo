@@ -43,7 +43,7 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [builder, operator]
+    needs: [build-and-test-framework, operator]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -127,7 +127,7 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
 
 
-  builder:
+  build-and-test-framework:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
@@ -140,7 +140,7 @@ jobs:
           - { name: vllm, arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04', arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04', arm_cuda_version: '12.9', arm_torch_backend: 'cu129' }
           - { name: sglang, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
           - { name: trtllm, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
-    name: (${{ matrix.framework.name }}) (${{ matrix.platform.arch }})
+    name: ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Output Node Name
@@ -199,8 +199,8 @@ jobs:
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true' && needs.builder.outputs.vllm_amd64_done == 'true'
-    needs: [changed-files, operator, builder]
+    if: needs.changed-files.outputs.has_code_changes == 'true'
+    needs: [changed-files, operator, build-and-test-framework]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
     outputs:
