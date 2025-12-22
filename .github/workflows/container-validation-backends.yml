@@ -9,7 +9,6 @@ on:
       - main
       - "pull-request/[0-9]+"
       - release/*.*.*
-      - ci/consolidate-action-steps
   workflow_dispatch:
     inputs:
       run_deploy_operator:
