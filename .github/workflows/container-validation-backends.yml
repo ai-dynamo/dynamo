@@ -199,8 +199,8 @@ jobs:
         id: report-done
         run: |
           echo "${{ matrix.framework.name }}_${{ matrix.platform.arch }}_done=true" >> $GITHUB_OUTPUT
-    outputs:
-      ${{ matrix.framework.name }}_${{ matrix.platform.arch }}_done: ${{ steps.report-done.outputs.${{ matrix.framework.name }}_${{ matrix.platform.arch }}_done }}
+    # outputs:
+    #   ${{ matrix.framework.name }}_${{ matrix.platform.arch }}_done: ${{ steps.report-done.outputs.${{ matrix.framework.name }}_${{ matrix.platform.arch }}_done }}
 
 
   # deploy-operator:
