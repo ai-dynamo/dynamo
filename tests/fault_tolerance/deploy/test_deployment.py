@@ -435,6 +435,7 @@ def results_summary():
 
 @pytest.mark.k8s
 @pytest.mark.fault_tolerance
+@pytest.mark.post_merge
 @pytest.mark.e2e
 @pytest.mark.slow
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")

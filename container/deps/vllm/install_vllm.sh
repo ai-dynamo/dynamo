@@ -146,7 +146,6 @@ elif [[ "$CUDA_VERSION_MAJOR" == "13" ]]; then
         uv pip install \
             --index-strategy=unsafe-best-match \
             --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND} \
-            nixl[cu13]==0.7.1 \
             https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER}/vllm-${VLLM_VER}+${TORCH_BACKEND}-cp38-abi3-manylinux_2_31_x86_64.whl[flashinfer,runai] \
             --torch-backend=${TORCH_BACKEND}
         uv pip install flashinfer-cubin==$FLASHINF_REF

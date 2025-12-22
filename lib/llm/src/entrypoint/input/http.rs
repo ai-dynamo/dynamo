@@ -205,6 +205,7 @@ async fn run_watcher(
         model_manager,
         router_config,
         engine_factory,
+        metrics.clone(),
     );
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
