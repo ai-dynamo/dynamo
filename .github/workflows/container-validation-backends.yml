@@ -9,6 +9,7 @@ on:
       - main
       - "pull-request/[0-9]+"
       - release/*.*.*
+      - ops-2577/buildkit-slim
   workflow_dispatch:
     inputs:
       run_deploy_operator:
