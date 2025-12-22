@@ -24,6 +24,9 @@ class TensorRTLLMEngine:
     def __init__(self, engine_args, disaggregation_mode: DisaggregationMode):
         self._llm: Optional[LLM] = None
         self.disaggregation_mode = disaggregation_mode
+        # NOTE: `engine_args` may be reused by callers (e.g., for logging or other workers).
+        # Copy it so that our internal `pop()` / pruning doesn't leak side effects.
+        engine_args = dict(engine_args)
         backend = engine_args.pop("backend", Backend.PYTORCH)
         if backend == Backend.PYTORCH:
             self._llm_cls = LLM
@@ -43,8 +46,12 @@ class TensorRTLLMEngine:
         if not self._llm:
             if self.disaggregation_mode == DisaggregationMode.ENCODE:
                 # Initialize the multimodal encoder for full EPD
-                max_batch_size = self.engine_args.pop("max_batch_size", 1)
-                model = self.engine_args.pop("model")
+                # Prefill/decode workers initialize the standard TRT-LLM `LLM` from `engine_args`
+                # (model, backend settings, kv cache config, etc.). ENCODE workers instead use
+                # TRT-LLM's `MultimodalEncoder`, which has a different constructor surface.
+                # We intentionally pass only the supported parameters to avoid unexpected kwargs.
+                max_batch_size = self.engine_args.get("max_batch_size", 1)
+                model = self.engine_args.get("model")
                 logging.info(
                     f"Initializing multimodal encoder with max_batch_size: {max_batch_size}"
                 )

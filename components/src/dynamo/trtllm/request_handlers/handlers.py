@@ -160,6 +160,14 @@ class PrefillHandler(HandlerBase):
                         "PrefillHandler calling Encode Worker via remote_encode_with_nixl"
                     )
                     embeddings_tensor = await self.remote_encode_with_nixl(request)
+                else:
+                    # We can still handle embedding_paths without NIXL:
+                    # `MultimodalRequestProcessor.process_openai_request` will load the embeddings
+                    # locally in the prefill worker as a fallback. The encode-worker+NIXL path is
+                    # useful when you want a dedicated I/O stage and/or explicit RDMA transfer.
+                    logging.debug(
+                        "PrefillHandler: no encode_client/connector; falling back to local embedding load"
+                    )
 
             # Handle image URLs (full E-PD flow with MultimodalEncoder)
             elif image_urls:

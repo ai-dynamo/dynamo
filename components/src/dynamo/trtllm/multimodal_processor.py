@@ -179,8 +179,9 @@ class MultimodalRequestProcessor:
         if processed_prompt_from_encoder is not None:
             text_prompt = processed_prompt_from_encoder
             result = {"prompt": text_prompt}
-            if "_epd_prompt_token_ids" in request and request["_epd_prompt_token_ids"]:
-                result["prompt_token_ids"] = request["_epd_prompt_token_ids"]
+            prompt_token_ids = request.get("_epd_prompt_token_ids")
+            if prompt_token_ids:
+                result["prompt_token_ids"] = prompt_token_ids
             else:
                 logging.warning("MM PROCESSOR: No prompt_token_ids from encoder")
             return result

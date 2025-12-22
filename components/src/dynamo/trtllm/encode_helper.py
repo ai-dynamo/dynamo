@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import logging
 from dataclasses import asdict
 from typing import Any, Dict, Optional, Union
@@ -287,6 +288,14 @@ class EncodeHelper:
                 logging.debug("EncodeHelper completed readable operation.")
         elif image_urls and text_prompt:
             # Use trtllm MultimodalEncoder to generate embeddings
+            # NOTE: `default_multimodal_input_loader` needs `model_dir` / `model_type` to
+            # construct the correct multimodal input format and apply model-specific
+            # preprocessing. These are derived from Dynamo's multimodal processor config.
+            if model_dir is None or model_type is None:
+                yield {
+                    "error": "model_dir and model_type are required for full EPD encode"
+                }
+                return
             inputs = default_multimodal_input_loader(
                 tokenizer=tokenizer,
                 model_dir=model_dir,
@@ -301,7 +310,11 @@ class EncodeHelper:
                 yield {"error": "No engine configured on encode worker for full EPD"}
                 return
 
-            encoder_outputs = list(engine.llm.generate(inputs))
+            # NOTE: MultimodalEncoder.generate() is synchronous. Run it off-thread to avoid
+            # blocking the encode worker's event loop under concurrency.
+            encoder_outputs = await asyncio.to_thread(
+                lambda: list(engine.llm.generate(inputs))
+            )
             if not encoder_outputs:
                 logging.error("ENCODE WORKER: encoder_outputs is empty")
                 yield {"ep_disaggregated_params": None}
@@ -313,7 +326,7 @@ class EncodeHelper:
                 )
                 yield {"ep_disaggregated_params": None}
                 return
-            # NOTE: `hasattr` is used for TRT-LLM version compatibility: older versions
+            # NOTE: `hasattr` is used for TRT-LLM version compatibility: TBD
             # may not have multimodal_embedding_handles/multimodal_hashes on DisaggregatedParams.
             if (
                 hasattr(ep_disaggregated_params, "multimodal_embedding_handles")
@@ -349,7 +362,8 @@ class EncodeHelper:
                         processed_prompt, add_special_tokens=False
                     )
             logging.debug(
-                f"ENCODE WORKER: Extracted processed_prompt: {processed_prompt}"
+                "ENCODE WORKER: Extracted processed_prompt (len=%s)",
+                len(processed_prompt) if processed_prompt is not None else None,
             )
             yield {
                 "ep_disaggregated_params": params_dict,
