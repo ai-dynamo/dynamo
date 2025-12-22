@@ -1,5 +1,5 @@
-name: 'Pytest'
-description: 'Run pytest on pre-built container images'
+name: 'Pytest Local'
+description: 'Run pytest locally'
 inputs:
   pytest_marks:
     description: 'Pytest marks'
@@ -44,27 +44,6 @@ runs:
         echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
         echo "🏗️  Platform architecture: ${PLATFORM_ARCH}"
 
-    - name: Pull image before running tests
-      shell: bash
-      run: |
-        echo "⏱️ Starting pull for heavy image..."
-        START_TIME=$(date +%s)
-
-        # Explicitly pull the image to isolate timing
-        docker pull "${{ inputs.image_tag }}"
-
-        END_TIME=$(date +%s)
-        DURATION=$((END_TIME - START_TIME))
-
-        # Convert to minutes and seconds
-        MINUTES=$((DURATION / 60))
-        SECONDS=$((DURATION % 60))
-
-        echo "✅ Pull completed in ${MINUTES}m ${SECONDS}s"
-
-        echo "### 🐳 Docker Pull Metrics" >> $GITHUB_STEP_SUMMARY
-        echo "* **Image:** \`${{ inputs.image_tag }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "* **Pull Duration:** ${MINUTES}m ${SECONDS}s" >> $GITHUB_STEP_SUMMARY
 
     - name: Run tests
       shell: bash
@@ -98,16 +77,7 @@ runs:
 
         # Get absolute path for test-results directory and ensure it has proper permissions
         TEST_RESULTS_DIR="$(pwd)/test-results"
-        chmod 777 "${TEST_RESULTS_DIR}"
-        echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
-
-        docker run ${GPU_FLAGS} --rm -w /workspace \
-          --cpus=${NUM_CPUS} \
-          --network host \
-          --name ${{ env.CONTAINER_ID }}_pytest \
-          -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
-          ${{ inputs.image_tag }} \
-          bash -c "${PYTEST_CMD}"
+        bash -c "${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
