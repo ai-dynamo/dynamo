@@ -745,16 +745,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Simple query-only detection: presence of query_instance_id annotation means query-only mode
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
 
-        // Detect if this request was pre-routed by EPP (GAIE Stage 1)
-        // EPP sets worker IDs directly, so their presence indicates bookkeeping is handled
-        // by GAIE hooks (not by this router in Stage 2)
+        // Determine if this router should handle local state updates (add_request, free, etc.)
+        // When routing hints are present, the external caller handles state tracking
+        // via separate API calls, so we skip local updates here.
         let routing = request.routing.as_ref();
-        let is_epp_routed_stage2 = routing
+        let handle_local_updates = routing
             .map(|r| {
-                r.backend_instance_id.is_some()
-                    || (r.prefill_worker_id.is_some() && r.decode_worker_id.is_some())
+                // No routing hints = we handle updates locally
+                r.backend_instance_id.is_none()
+                    && !(r.prefill_worker_id.is_some() && r.decode_worker_id.is_some())
             })
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
         let phase = request
@@ -792,8 +793,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .get_overlap_blocks(&request.token_ids, worker)
                 .await?;
 
-            // Skip add_request if EPP already handled bookkeeping via GAIE hooks
-            if !is_query_only && !is_epp_routed_stage2 {
+            // Perform add_request if this router handles local updates
+            if !is_query_only && handle_local_updates {
                 self.chooser
                     .add_request(
                         context_id.clone(),
@@ -802,12 +803,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         worker,
                     )
                     .await;
-            } else if is_epp_routed_stage2 {
+            } else if !handle_local_updates {
                 tracing::debug!(
                     request_id = %context_id,
                     worker_id = id,
                     dp_rank = dp_rank,
-                    "[GAIE Stage 2] Skipping add_request - bookkeeping handled by EPP GAIE hooks"
+                    "Skipping add_request - handled externally"
                 );
             }
             (id, dp_rank, overlap_blocks)
@@ -870,10 +871,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let chooser = self.chooser.clone();
         let context_for_monitoring = stream_context.clone();
 
-        // TODO: For GAIE workflows, move mark_prefill_completed to a sidecar since GAIE
-        // does not support a hook for the first token generated event. Currently we still
-        // call it here in the stream wrapper for both GAIE and non-GAIE flows.
-        // The free() call is skipped for GAIE since it's handled by the cleanup plugin.
+        // TODO: When handle_local_updates=false, consider moving mark_prefill_completed
+        // to an external caller (e.g., sidecar) if they support a first-token hook.
+        // Currently mark_prefill_completed is called here for all flows.
+        // The free() call is skipped when handle_local_updates=false.
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut prefill_marked = false;
 
@@ -903,15 +904,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }
             }
 
-            // Skip free() for EPP-routed requests - cleanup is handled by GAIE cleanup plugin
-            if !is_epp_routed_stage2 {
+            // Perform free() if this router handles local updates
+            if handle_local_updates {
                 if let Err(e) = chooser.free(&context_id).await {
                     tracing::warn!("Failed to free request {context_id}: {e}");
                 }
             } else {
                 tracing::debug!(
                     request_id = %context_id,
-                    "[GAIE Stage 2] Skipping free() - cleanup handled by EPP GAIE cleanup plugin"
+                    "Skipping free() - handled externally"
                 );
             }
         });
