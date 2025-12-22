@@ -1,13 +1,10 @@
-name: 'Pytest Local'
-description: 'Run pytest locally'
+name: 'Pytest'
+description: 'Run pytest on pre-built container images'
 inputs:
   pytest_marks:
     description: 'Pytest marks'
     required: true
     default: 'e2e and vllm and gpu_1 and not slow'
-  image_tag:
-    description: 'Image Tag to run tests on'
-    required: true
   cpu_limit:
     description: 'Maximum number of cores available to docker'
     required: false
@@ -47,6 +44,28 @@ runs:
         echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
         echo "🏗️  Platform architecture: ${PLATFORM_ARCH}"
 
+    - name: Pull image before running tests
+      shell: bash
+      run: |
+        echo "⏱️ Starting pull for heavy image..."
+        START_TIME=$(date +%s)
+
+        # Explicitly pull the image to isolate timing
+        docker pull "${{ inputs.image_tag }}"
+
+        END_TIME=$(date +%s)
+        DURATION=$((END_TIME - START_TIME))
+
+        # Convert to minutes and seconds
+        MINUTES=$((DURATION / 60))
+        SECONDS=$((DURATION % 60))
+
+        echo "✅ Pull completed in ${MINUTES}m ${SECONDS}s"
+
+        echo "### 🐳 Docker Pull Metrics" >> $GITHUB_STEP_SUMMARY
+        echo "* **Image:** \`${{ inputs.image_tag }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "* **Pull Duration:** ${MINUTES}m ${SECONDS}s" >> $GITHUB_STEP_SUMMARY
+
     - name: Run tests
       shell: bash
       env:
@@ -82,7 +101,13 @@ runs:
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
-        bash -c "${PYTEST_CMD}"
+        docker run ${GPU_FLAGS} --rm -w /workspace \
+          --cpus=${NUM_CPUS} \
+          --network host \
+          --name ${{ env.CONTAINER_ID }}_pytest \
+          -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
+          ${{ inputs.image_tag }} \
+          bash -c "${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
@@ -134,10 +159,10 @@ runs:
         # Exit with original test result to maintain workflow behavior
         exit ${TEST_EXIT_CODE}
 
-    # - name: Upload Test Results
-    #   uses: actions/upload-artifact@v4
-    #   if: always()  # Always upload test results, even if tests failed
-    #   with:
-    #     name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
-    #     path: test-results/pytest_test_report_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
-    #     retention-days: 7
+    - name: Upload Test Results
+      uses: actions/upload-artifact@v4
+      if: always()  # Always upload test results, even if tests failed
+      with:
+        name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/pytest_test_report_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        retention-days: 7
