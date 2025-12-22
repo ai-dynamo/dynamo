@@ -749,11 +749,7 @@ pub unsafe extern "C" fn dynamo_free_worker_selection_result(
     DynamoLlmResult::OK
 }
 
-/* ------------------------------------------------------------------------
- * Router bookkeeping functions for GAIE integration
- * These functions allow EPP to manage request lifecycle in the KV router
- * ------------------------------------------------------------------------ */
-
+/// Router bookkeeping functions for GAIE integration
 /// Add a request to the router's bookkeeping after worker selection.
 /// Call this from GAIE Stage 1 after `dynamo_query_worker_selection_and_annotate`.
 ///
@@ -798,8 +794,10 @@ pub unsafe extern "C" fn dynamo_router_add_request(
     );
 
     let Some(ref kv_router) = pl.kv_router else {
-        tracing::error!("KV router not available (router_mode is not KV)");
-        return DynamoLlmResult::ERR;
+        tracing::debug!(
+            "[GAIE] KV router not available (router_mode is not KV), skipping add_request (no-op)"
+        );
+        return DynamoLlmResult::OK;
     };
 
     let tokens: Vec<u32> = if token_count > 0 && !token_ids.is_null() {
@@ -871,8 +869,10 @@ pub unsafe extern "C" fn dynamo_router_mark_prefill_complete(
     );
 
     let Some(ref kv_router) = pl.kv_router else {
-        tracing::error!("KV router not available (router_mode is not KV)");
-        return DynamoLlmResult::ERR;
+        tracing::debug!(
+            "[GAIE] KV router not available (router_mode is not KV), skipping mark_prefill_complete (no-op)"
+        );
+        return DynamoLlmResult::OK;
     };
 
     let kv_router = kv_router.clone();
@@ -923,8 +923,10 @@ pub unsafe extern "C" fn dynamo_router_free_request(
     );
 
     let Some(ref kv_router) = pl.kv_router else {
-        tracing::error!("KV router not available (router_mode is not KV)");
-        return DynamoLlmResult::ERR;
+        tracing::debug!(
+            "[GAIE] KV router not available (router_mode is not KV), skipping free_request (no-op)"
+        );
+        return DynamoLlmResult::OK;
     };
 
     let kv_router = kv_router.clone();
