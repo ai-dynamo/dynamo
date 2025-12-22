@@ -144,6 +144,7 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
   done
   decode_nodes_csv=$(IFS=, ; echo "${decode_node_list[*]}")
   echo "Running Decode Nodes: ${decode_nodes_csv}"
+  set -x
   srun -l --container-name=${CONTAINER_NAME} \
       --container-mounts=${container_mounts} \
       --mpi=pmix \
@@ -152,9 +153,11 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
       --ntasks $decode_tp_size \
       --oversubscribe \
       --overlap \
-      -e UCX_NET_DEVICES,TRTLLM_UCX_INTERFACE \
-      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${config} ${MODEL_PATH} ${SERVED_MODEL_NAME} "decode" &> ${full_logdir}/output_decode_worker_${i}.log &
+      --container-env UCX_NET_DEVICES,TRTLLM_UCX_INTERFACE \
+      -o ${full_logdir}/output_decode_worker_${i}.log \
+      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${config} ${MODEL_PATH} ${SERVED_MODEL_NAME} "decode" &
   echo "$!" >> "$PID_FILE"
+  set +x
 done
 
 PREFILL_COUNT=$(grep 'prefill_count:' "${full_logdir}/instance_config.yaml" | awk '{print $2}')
@@ -178,6 +181,7 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
   echo "Running Prefill Worker: ${i}"
   node_idx=$((prefill_start_idx + (i-1)))
   echo "Running Prefill Nodes: ${nodes[node_idx]}"
+  set -x
   srun -l --container-name=${CONTAINER_NAME} \
         --container-mounts=${container_mounts} \
         --mpi=pmix --overlap -w ${nodes[node_idx]} \
@@ -185,10 +189,12 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
         --overlap \
         --ntasks $(( prefill_tp_size < NTASKS_PER_NODE ? prefill_tp_size : NTASKS_PER_NODE )) \
         --nodes 1 $gpus_per_node \
-        -e UCX_NET_DEVICES,TRTLLM_UCX_INTERFACE \
-        bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${config} ${MODEL_PATH} ${SERVED_MODEL_NAME} 'prefill' &> ${full_logdir}/output_prefill_worker_${i}.log &
+        --container-env UCX_NET_DEVICES,TRTLLM_UCX_INTERFACE \
+	-o ${full_logdir}/output_prefill_worker_${i}.log \
+        bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${config} ${MODEL_PATH} ${SERVED_MODEL_NAME} 'prefill' &
   prefill_pids+=($!)
   echo "$!" >> "$PID_FILE"
+  set +x
 done
 
 ctx_gpus=$((prefill_tp_size*PREFILL_COUNT))
