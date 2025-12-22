@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: agg-8xtp2
+spec:
+  pvcs:
+  - create: false
+    name: model-cache
+  - create: false
+    name: compilation-cache
+  services:
+    Frontend:
+      componentType: frontend
+      dynamoNamespace: agg-8xtp2
+      envs:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.frontend
+          args:
+            - --router-reset-states
+      replicas: 1
+      resources:
+        requests:
+          cpu: "8"
+        limits:
+          cpu: "8"
+      subComponentType: null
+    VllmDecodeWorker:
+      componentType: worker
+      dynamoNamespace: agg-8xtp2
+      envFromSecret: hf-token-secret
+      volumeMounts:
+      - name: model-cache
+        mountPoint: /home/dynamo/.cache/huggingface
+      - name: compilation-cache
+        mountPoint: /home/dynamo/.cache/vllm
+        useAsCompilationCache: true
+      extraPodSpec:
+        mainContainer:
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --tensor-parallel-size
+          - '2'
+          - --disable-log-requests
+          - --gpu-memory-utilization
+          - '0.90'
+          - --async-scheduling
+          - --block-size
+          - '64'
+          - --hf-overrides
+          - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+          - --max-model-len
+          - '131072'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          env:
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: "false"
+          - name: HF_HOME
+            value: /home/dynamo/.cache/huggingface
+          workingDir: /workspace
+      replicas: 8
+      resources:
+        limits:
+          gpu: '2'
+          custom:
+            rdma/ib: "2"
+        requests:
+          gpu: '2'
+      subComponentType: decode

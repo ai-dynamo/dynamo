@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Parallelization: Hermetic test (xdist-safe via dynamic ports).
+# Tested on: Linux (Ubuntu 24.04 container), Intel(R) Core(TM) i9-14900K, 32 vCPU.
+# Combined pre_merge wall time (this file + test_tensor_parameters.py):
+# - Serialized: 87.48s.
+# - Parallel (-n auto): 25.27s (62.21s saved, 3.46x).
+# GPU Requirement: gpu_0 (CPU-only, echo worker does not use GPU)
+
+"""gRPC tensor echo test with mocker worker."""
 
 from __future__ import annotations
 
@@ -11,7 +19,6 @@ import shutil
 import pytest
 import triton_echo_client
 
-from tests.conftest import EtcdServer, NatsServer
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import ManagedProcess
 
@@ -20,38 +27,10 @@ logger = logging.getLogger(__name__)
 TEST_MODEL = QWEN
 
 
-class DynamoFrontendProcess(ManagedProcess):
-    """Process manager for Dynamo frontend"""
-
-    def __init__(self, request):
-        command = ["python", "-m", "dynamo.frontend", "--kserve-grpc-server"]
-
-        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
-        env = os.environ.copy()
-        env.pop("DYN_SYSTEM_PORT", None)
-
-        log_dir = f"{request.node.name}_frontend"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
-
-        super().__init__(
-            command=command,
-            env=env,
-            display_output=True,
-            terminate_existing=True,
-            log_dir=log_dir,
-        )
-
-
 class MockWorkerProcess(ManagedProcess):
-    def __init__(self, request, worker_id: str = "mocker-worker"):
+    def __init__(self, request, system_port: int, worker_id: str = "mocker-worker"):
         self.worker_id = worker_id
+        self.system_port = system_port
 
         command = [
             "python3",
@@ -61,7 +40,7 @@ class MockWorkerProcess(ManagedProcess):
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
-        env["DYN_SYSTEM_PORT"] = "8083"
+        env["DYN_SYSTEM_PORT"] = str(system_port)
 
         log_dir = f"{request.node.name}_{worker_id}"
 
@@ -75,8 +54,8 @@ class MockWorkerProcess(ManagedProcess):
             env=env,
             health_check_urls=[
                 # gRPC doesn't expose endpoint for listing models, so skip this check
-                # ("http://localhost:8000/v1/models", check_models_api),
-                ("http://localhost:8083/health", self.is_ready),
+                # (f"http://localhost:{grpc_port}/v1/models", check_models_api),
+                (f"http://localhost:{system_port}/health", self.is_ready),
             ],
             timeout=300,
             display_output=True,
@@ -101,30 +80,29 @@ class MockWorkerProcess(ManagedProcess):
         return is_ready
 
 
-@pytest.fixture(scope="module")
-def runtime_services(request):
-    """Module-scoped runtime services for this test file."""
-    with NatsServer(request) as nats_process:
-        with EtcdServer(request) as etcd_process:
-            yield nats_process, etcd_process
+@pytest.fixture(scope="function")
+def start_services_with_echo_worker(request, start_services_with_grpc):
+    """Start echo worker with the shared gRPC frontend.
+
+    Function-scoped to allow parallel test execution.
+    Each test gets its own gRPC frontend + echo worker on unique ports.
+    No namespace conflicts because runtime_services_dynamic_ports provides isolated Etcd/NATS.
+    """
+    frontend_port, system_port = start_services_with_grpc
+    with MockWorkerProcess(request, system_port):
+        logger.info(f"gRPC Echo Worker started for test on port {frontend_port}")
+        yield frontend_port
 
 
-@pytest.fixture(scope="module")
-def start_services(request, runtime_services):
-    """Start frontend and worker processes once for this module's tests."""
-    with DynamoFrontendProcess(request):
-        logger.info("Frontend started for tests")
-        with MockWorkerProcess(request):
-            logger.info("Worker started for tests")
-            yield
-
-
-@pytest.mark.usefixtures("start_services")
 @pytest.mark.pre_merge
-@pytest.mark.gpu_1
+@pytest.mark.gpu_0  # Echo worker is CPU-only (no GPU required)
+@pytest.mark.parallel
 @pytest.mark.integration
 @pytest.mark.model(TEST_MODEL)
-def test_echo() -> None:
-    triton_echo_client.check_health()
-    triton_echo_client.run_infer()
-    triton_echo_client.get_config()
+def test_echo(start_services_with_echo_worker) -> None:
+    frontend_port = start_services_with_echo_worker
+    # Use a per-test client instance to avoid cross-test/global state issues.
+    client = triton_echo_client.TritonEchoClient(grpc_port=frontend_port)
+    client.check_health()
+    client.run_infer()
+    client.get_config()
