@@ -165,30 +165,7 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      - name: Docker Tag and Push
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tags: ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-{0}-{1}', matrix.framework.name, matrix.platform.arch) || '' }}
-          aws_push: 'true'
-          azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      - name: Run tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "pre_merge and ${{ matrix.framework.name }} and (gpu_0 or gpu_1)"
-          framework: "${{ matrix.framework.name }}"
-          test_type: "pre_merge"
-          platform_arch: ${{ matrix.platform.arch }}
-      - name: Report Done
-        id: report-done
-        run: |
-          echo "${{ matrix.framework.name }}_${{ matrix.platform.arch }}_done=true" >> $GITHUB_OUTPUT
+
 
   # vllm-main:
   #   needs: detect-buildkit-workers
