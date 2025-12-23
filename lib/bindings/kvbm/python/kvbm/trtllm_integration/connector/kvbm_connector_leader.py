@@ -5,6 +5,7 @@ import logging
 import os
 from typing import List, Optional
 
+import tensorrt_llm
 from kvbm import KvbmLeader
 from kvbm.trtllm_integration.consolidator_config import is_truthy
 from kvbm.trtllm_integration.rust import KvbmRequest
@@ -118,6 +119,12 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
         output = RustSchedulerOutput()
 
         for req in scheduler_output.new_requests:
+            if not hasattr(req, "num_scheduled_tokens"):
+                raise ValueError(
+                    f"""num_scheduled_tokens is not found in the SchedulerOutput!
+                    You're currently using TRTLLM {tensorrt_llm.__version__}
+                    The mimimum supported version is 1.2.0rc2"""
+                )
             output.add_new_request(
                 str(req.request_id),
                 req.new_tokens,
@@ -134,6 +141,14 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
                 req.new_block_ids,
                 req.computed_position,
             )
+
+        output.add_num_scheduled_tokens(
+            {
+                str(req.request_id): req.num_scheduled_tokens
+                for req in scheduler_output.new_requests
+                + scheduler_output.cached_requests
+            }
+        )
 
         return self._connector.build_connector_metadata(output)
 
