@@ -68,14 +68,14 @@ func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client 
 
 		if isMultinode {
 			// Check PodCliqueScalingGroup: spec.replicas == status.availableReplicas
-			ok, reason, serviceStatus := checkPCSGReady(ctx, client, resourceName, dgd.Namespace, logger)
+			ok, reason, serviceStatus := CheckPCSGReady(ctx, client, resourceName, dgd.Namespace, logger)
 			serviceStatuses[serviceName] = serviceStatus
 			if !ok {
 				notReadyComponents = append(notReadyComponents, fmt.Sprintf("pcsg/%s: %s", resourceName, reason))
 			}
 		} else {
 			// Check PodClique: spec.replicas == status.readyReplicas
-			ok, reason, serviceStatus := checkPodCliqueReady(ctx, client, resourceName, dgd.Namespace, logger)
+			ok, reason, serviceStatus := CheckPodCliqueReady(ctx, client, resourceName, dgd.Namespace, logger)
 			serviceStatuses[serviceName] = serviceStatus
 			if !ok {
 				notReadyComponents = append(notReadyComponents, fmt.Sprintf("podclique/%s: %s", resourceName, reason))
@@ -90,8 +90,8 @@ func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client 
 	return true, "", serviceStatuses
 }
 
-// checkPodCliqueReady checks if a PodClique has spec.replicas == status.readyReplicas
-func checkPodCliqueReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1alpha1.ServiceReplicaStatus) {
+// CheckPodCliqueReady checks if a PodClique has spec.replicas == status.readyReplicas
+func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1alpha1.ServiceReplicaStatus) {
 	podClique := &grovev1alpha1.PodClique{}
 	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, podClique)
 	if err != nil {
@@ -127,8 +127,8 @@ func checkPodCliqueReady(ctx context.Context, client client.Client, resourceName
 	return true, "", serviceStatus
 }
 
-// checkPCSGReady checks if a PodCliqueScalingGroup has spec.replicas == status.availableReplicas
-func checkPCSGReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1alpha1.ServiceReplicaStatus) {
+// CheckPCSGReady checks if a PodCliqueScalingGroup has spec.replicas == status.availableReplicas
+func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1alpha1.ServiceReplicaStatus) {
 	pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
 	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, pcsg)
 	if err != nil {
