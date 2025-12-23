@@ -122,7 +122,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         "and no prefill_client is available for fallback."
                     )
 
-                logging.debug("No bootstrap_info in request, fetching from prefill worker")
+                logging.debug(
+                    "No bootstrap_info in request, fetching from prefill worker"
+                )
                 prefill_stream = await self.prefill_client.generate(
                     DisaggPreprocessedRequest(
                         request=request,
