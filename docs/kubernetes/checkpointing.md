@@ -88,7 +88,7 @@ spec:
       resources:
         limits:
           nvidia.com/gpu: "1"
-      
+
       # Checkpoint configuration
       checkpoint:
         enabled: true
@@ -141,10 +141,10 @@ checkpoint:
     s3:
       # AWS S3
       uri: "s3://my-bucket/checkpoints"
-      
+
       # Or MinIO / custom S3
       uri: "s3://minio.example.com/my-bucket/checkpoints"
-      
+
       # Optional: credentials secret
       credentialsSecretRef: "s3-creds"
 ```
@@ -284,7 +284,7 @@ spec:
     framework: "vllm"
     tensorParallelSize: 1
     dtype: "bfloat16"
-  
+
   job:
     activeDeadlineSeconds: 3600
     podTemplateSpec:
