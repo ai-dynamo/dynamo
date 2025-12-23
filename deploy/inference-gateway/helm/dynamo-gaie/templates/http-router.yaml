@@ -24,7 +24,6 @@ spec:
   - group: gateway.networking.k8s.io
     kind: Gateway
     name: {{ .Values.httpRoute.gatewayName }}
-    namespace: kgateway-system
   rules:
   - backendRefs:
     - group: inference.networking.x-k8s.io
