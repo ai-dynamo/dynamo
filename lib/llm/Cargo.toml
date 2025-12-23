@@ -195,6 +195,10 @@ insta = { version = "1.41", features = [
 lazy_static = "1.4"
 mockito = "1.7.0"
 
+[[bin]]
+name = "generate-frontend-openapi"
+path = "src/bin/generate_frontend_openapi.rs"
+
 [build-dependencies]
 tonic-build = { version = "0.13.1" }
 

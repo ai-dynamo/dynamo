@@ -12,9 +12,9 @@ changelog:
       labels: [fix, revert]
     - title: 📚 Documentation
       labels: [docs]
-    - title: 🛠️ Build, CI and Test
-      labels: [build, ci, test]
+    - title: 🛠️ Build, CI, Test, and Chores
+      labels: [build, ci, test, chore]
     - title: Other Changes
       labels: ["*"]
       exclude:
-        labels: [chore, style]
+        labels: [style]

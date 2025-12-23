@@ -23,7 +23,7 @@ High-level guide to Dynamo Kubernetes deployments. Start here, then dive into sp
 
 **Kubernetes Namespace**: The K8s namespace where your DynamoGraphDeployment resource is created.
 - Used for: Resource isolation, RBAC, organizing deployments
-- Example: `dynamo-system`, `dynamo-cloud`, `team-a-namespace`
+- Example: `dynamo-system`, `team-a-namespace`
 
 **Dynamo Namespace**: The logical namespace used by Dynamo components for service discovery via etcd.
 - Used for: Runtime component communication, service discovery
@@ -34,7 +34,7 @@ These are independent. A single Kubernetes namespace can host multiple Dynamo na
 
 ## Pre-deployment Checks
 
-Before deploying the platform, it is recommended to run the pre-deployment checks to ensure the cluster is ready for deployment. Please refer to the [pre-deployment checks](../../deploy/cloud/pre-deployment/README.md) for more details.
+Before deploying the platform, it is recommended to run the pre-deployment checks to ensure the cluster is ready for deployment. Please refer to the [pre-deployment checks](../../deploy/pre-deployment/README.md) for more details.
 
 ## 1. Install Platform First
 

@@ -114,7 +114,7 @@ sglang_configs = {
         name="kv_events",
         directory=sglang_dir,
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         env={
             "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
@@ -227,6 +227,7 @@ sglang_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.post_merge,
             pytest.mark.timeout(
                 420
             ),  # Total test timeout: 2x measured average (79.36s) + download time (240s) for 7B model
@@ -276,7 +277,7 @@ def test_sglang_deployment(
 
 @pytest.mark.e2e
 @pytest.mark.sglang
-@pytest.mark.gpu_1
+@pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.skip(
     reason="Requires 4 GPUs - enable when hardware is consistently available"
