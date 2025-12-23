@@ -147,10 +147,14 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
 
         let pool_config = PoolConfig {
             enable_pool: true,
+            enable_temp_device_buffer_pool: false,
             max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
             max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
             num_outer_components: config.model_config.outer_dim,
             num_layers: config.model_config.num_layers,
+            page_size: config.model_config.page_size,
+            inner_dim: config.model_config.inner_dim,
+            dtype_width_bytes: config.model_config.dtype_width_bytes,
         };
 
         // We want cuda offloads to happen in parallel with host onboards, so we need to use a different stream.
@@ -158,7 +162,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             config.nixl_agent.clone(),
             cuda_ctx.new_stream()?,
             config.async_rt_handle.clone(),
-            Some(pool_config),
+            Some(pool_config.clone()),
         ));
 
         // Device -> Host offload
@@ -196,7 +200,10 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             config.nixl_agent.clone(),
             cuda_ctx.new_stream()?,
             config.async_rt_handle.clone(),
-            None,
+            Some(PoolConfig {
+                enable_temp_device_buffer_pool: true,
+                ..pool_config
+            }),
         ));
 
         // Host -> Disk offload
@@ -792,6 +799,7 @@ mod tests {
             disk_blocks,
             inner_dim,
             LayoutType::FullyContiguous,
+            LayoutType::FullyContiguous,
             BlockRegistrationDuplicationSetting::Disabled,
             false,
         )
@@ -803,7 +811,8 @@ mod tests {
         host_blocks: Option<usize>,
         disk_blocks: Option<usize>,
         inner_dim: Option<usize>,
-        layout_type: LayoutType,
+        device_layout_type: LayoutType,
+        offload_layout_type: LayoutType,
         duplication_setting: BlockRegistrationDuplicationSetting,
         bypass_cpu_mem: bool,
     ) -> Result<(
@@ -827,7 +836,7 @@ mod tests {
 
         let device_pool = Some(build_layout(
             config.clone(),
-            layout_type,
+            device_layout_type,
             agent,
             &DeviceAllocator::default(),
             duplication_setting,
@@ -837,7 +846,7 @@ mod tests {
             config.num_blocks = host_blocks;
             Some(build_layout(
                 config.clone(),
-                layout_type,
+                offload_layout_type,
                 agent,
                 &PinnedAllocator::default(),
                 duplication_setting,
@@ -850,7 +859,7 @@ mod tests {
             config.num_blocks = disk_blocks;
             Some(build_layout(
                 config.clone(),
-                layout_type,
+                offload_layout_type,
                 agent,
                 &DiskAllocator,
                 duplication_setting,
@@ -1066,6 +1075,7 @@ mod tests {
             None,
             None,
             layout_type,
+            layout_type,
             BlockRegistrationDuplicationSetting::Disabled,
             false,
         )?;
@@ -1110,12 +1120,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_offload_device_to_disk_bypass_cpu() -> Result<()> {
+    #[rstest]
+    #[case(LayoutType::FullyContiguous)]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
+    async fn test_offload_device_to_disk_bypass_cpu(#[case] layout: LayoutType) -> Result<()> {
         let (offload_manager, device_pool, host_pool, disk_pool) = build_pools_with_layout(
             4,
             Some(4),
             Some(4),
             None,
+            layout,
             LayoutType::FullyContiguous,
             BlockRegistrationDuplicationSetting::Disabled,
             true,
@@ -1234,6 +1249,7 @@ mod tests {
             None,
             None,
             layout_type,
+            layout_type,
             BlockRegistrationDuplicationSetting::Disabled,
             false,
         )?;
@@ -1301,6 +1317,7 @@ mod tests {
             Some(4),
             None,
             None,
+            layout_type,
             layout_type,
             BlockRegistrationDuplicationSetting::Disabled,
             false,
@@ -1431,6 +1448,7 @@ mod tests {
             Some(4),
             None,
             layout_type,
+            layout_type,
             BlockRegistrationDuplicationSetting::Disabled,
             false,
         )?;
@@ -1477,6 +1495,7 @@ mod tests {
             None,
             Some(4),
             None,
+            layout_type,
             layout_type,
             BlockRegistrationDuplicationSetting::Disabled,
             false,
@@ -1528,6 +1547,7 @@ mod tests {
             Some(8),
             Some(8),
             None,
+            layout_type,
             layout_type,
             BlockRegistrationDuplicationSetting::Disabled,
             false,
@@ -1639,6 +1659,7 @@ mod tests {
                 Some(4),
                 Some(GDS_ALIGNMENT), // Use GDS-friendly alignment
                 layout_type,
+                layout_type,
                 BlockRegistrationDuplicationSetting::Disabled,
                 false,
             )?;
@@ -1746,6 +1767,7 @@ mod tests {
                 Some(2), // disk_blocks - this was the bug!
                 None,    // inner_dim
                 LayoutType::FullyContiguous,
+                LayoutType::FullyContiguous,
                 BlockRegistrationDuplicationSetting::Disabled,
                 false,
             )?;
@@ -1817,6 +1839,7 @@ mod tests {
                 Some(2),
                 None,
                 LayoutType::FullyContiguous,
+                LayoutType::FullyContiguous,
                 BlockRegistrationDuplicationSetting::Disabled,
                 false,
             );
@@ -1847,6 +1870,7 @@ mod tests {
                 None,
                 Some(2), // disk_blocks - fixed parameter order
                 None,    // inner_dim
+                LayoutType::FullyContiguous,
                 LayoutType::FullyContiguous,
                 BlockRegistrationDuplicationSetting::Disabled,
                 false,
@@ -1883,6 +1907,7 @@ mod tests {
                 Some(2),    // Very limited host buffer
                 Some(8),    // Plenty of disk space
                 Some(4096), // GDS-friendly alignment
+                LayoutType::FullyContiguous,
                 LayoutType::FullyContiguous,
                 BlockRegistrationDuplicationSetting::Disabled,
                 false,
@@ -1956,6 +1981,9 @@ mod tests {
                 host_config.map(|(n, _)| n),
                 device_config.map(|(n, _)| n),
                 disk_config.map(|(n, _)| n),
+                LayoutType::LayerSeparate {
+                    outer_contiguous: false,
+                }, // Most complex
                 LayoutType::LayerSeparate {
                     outer_contiguous: false,
                 }, // Most complex

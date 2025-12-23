@@ -215,6 +215,10 @@ async fn perform_allocation_and_build_handler(
             max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
             num_outer_components: device_layout.config().outer_dim,
             num_layers: device_layout.config().num_layers,
+            enable_temp_device_buffer_pool: true,
+            page_size: device_layout.config().page_size,
+            inner_dim: device_layout.config().inner_dim,
+            dtype_width_bytes: device_layout.config().dtype_width_bytes,
         };
         let transfer_context = Arc::new(TransferContext::new(
             Arc::new(Some(agent)),
