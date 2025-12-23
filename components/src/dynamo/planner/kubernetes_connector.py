@@ -48,7 +48,7 @@ class TargetReplica(BaseModel):
 class KubernetesConnector(PlannerConnector):
     def __init__(
         self,
-        dynamo_namespace: str,
+        _dynamo_namespace: str,
         model_name: Optional[str] = None,
         k8s_namespace: Optional[str] = None,
     ):
@@ -275,7 +275,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--blocking", action="store_true")
     args = parser.parse_args()
-    connector = KubernetesConnector(args.dynamo_namespace, args.k8s_namespace)
+    connector = KubernetesConnector(
+        args.dynamo_namespace, k8s_namespace=args.k8s_namespace
+    )
 
     if args.action == "add":
         task = connector.add_component(SubComponentType(args.component), args.blocking)
