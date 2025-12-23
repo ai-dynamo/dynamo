@@ -103,7 +103,7 @@ flowchart LR
 
 ### Multimodal Example
 
-In the case of the [Dynamo Multimodal Disaggregated Example](../../backends/vllm/multimodal.md):
+In the case of the [Dynamo Multimodal Disaggregated Example](../../multimodal/vllm.md):
 
  1. The HTTP frontend accepts a text prompt and a URL to an image.
 

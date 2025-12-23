@@ -2,9 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-import os
 import re
-import shutil
 import socket
 import threading
 import time
@@ -14,60 +12,32 @@ import pytest
 import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.managed_process import (
+    DynamoFrontendProcess as BaseDynamoFrontendProcess,
+)
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
 
 
-class DynamoFrontendProcess(ManagedProcess):
-    """Process manager for Dynamo frontend"""
+class DynamoFrontendProcess(BaseDynamoFrontendProcess):
+    """Fault-tolerance frontend wrapper (keeps env settings from the historical helper)."""
 
     def __init__(self, request):
-        # Allocate frontend port
-        frontend_port = allocate_port(8100)
-        self.frontend_port = frontend_port
-
-        command = ["python", "-m", "dynamo.frontend", "--http-port", str(frontend_port)]
-
-        env = os.environ.copy()
-        env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
-        env["DYN_LOG"] = "debug"
-        # Disable canary health check - these tests expect full control over requests
-        # sent to the workers where canary health check intermittently sends dummy
-        # requests to workers interfering with the test process which may cause
-        # intermittent failures
-        env["DYN_HEALTH_CHECK_ENABLED"] = "false"
-        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
-        env.pop("DYN_SYSTEM_PORT", None)
-
-        log_dir = f"{request.node.name}_frontend"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
-
+        extra_env = {
+            "DYN_REQUEST_PLANE": request.getfixturevalue("request_plane"),
+            "DYN_LOG": "debug",
+            # These tests expect full control over requests sent to workers. The canary
+            # health check can inject extra requests and cause intermittent failures.
+            "DYN_HEALTH_CHECK_ENABLED": "false",
+        }
         super().__init__(
-            command=command,
-            env=env,
-            display_output=True,
-            terminate_existing=False,  # Don't terminate other processes of the same name, we'll only terminate our own PID
-            log_dir=log_dir,
+            request,
+            frontend_port=0,  # allocate a free port (xdist-safe)
+            router_mode="round-robin",
+            extra_env=extra_env,
+            terminate_existing=False,
         )
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Release allocated port when frontend exits."""
-        try:
-            # frontend_port is always allocated in __init__
-            deallocate_port(self.frontend_port)
-        except Exception as e:
-            logger.warning(f"Failed to release frontend port: {e}")
-
-        return super().__exit__(exc_type, exc_val, exc_tb)
 
 
 class CancellableRequest:

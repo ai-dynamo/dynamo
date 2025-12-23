@@ -17,6 +17,62 @@ limitations under the License.
 
 # Contribution Guidelines
 
+## External Contributors: Issue-First Workflow
+
+Thank you for your interest in contributing to Dynamo. To help us review your work efficiently, please follow the workflow below.
+
+### When Is a GitHub Issue Required?
+
+**You can submit a PR directly without an issue if:**
+
+- Your change is **<100 lines of code** AND addresses a simple, focused concern (typos, simple bug fixes, formatting)
+- **OR** your PR addresses an **existing approved GitHub Issue** (link with "Fixes #123")
+
+**You must create a GitHub Issue first for:**
+
+- Changes ≥100 lines of code
+- New features, architecture changes, or multi-component changes
+- Any change that requires design discussion
+
+**Note**: All PRs are triaged. If your PR lacks sufficient context or understanding, reviewers will reject the PR and ask you to first submit an issue and get approval before proceeding.
+
+### Issue-First Workflow Steps
+
+**If you are an external contributor and your change requires a GitHub Issue**, please follow this workflow. This process ensures that external contributions are well-aligned with the project's goals and reduces the likelihood of significant rework.
+
+1. **Create a GitHub Issue First** – Before writing any code, [open a GitHub Issue](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml) using the **Contribution Request** template.
+
+2. **Identify the Problem** – Clearly explain the problem you are trying to solve, including any relevant context, error messages, or use cases.
+
+3. **Recommend a Solution** – Propose your intended solution or approach in the issue. Include:
+   - **Estimated PR size**: XS / S / M / L / XL / XXL (use your best judgment)
+   - **Files affected**: Approximate number and which components/interfaces
+   - **Type of change**:
+     - **Bug fix**: Corrects existing behavior with minimal code changes; should include tests that capture the issue
+     - **New feature**: Adds new behavior or capability; requires comprehensive tests for the new functionality
+     - **Refactoring**: Restructures code without changing behavior; no new tests required
+     - **Performance improvement**: Optimizes existing behavior; should include before/after benchmarks
+
+   This helps the Dynamo team understand your plan, assess complexity, and provide early feedback. PRs that significantly exceed their stated size may be rejected.
+
+4. **Get Approval** – Wait for the Dynamo team to review and approve both the problem statement and your proposed solution. This ensures alignment with the project's architecture and roadmap before you invest time in implementation. Once approved, a maintainer will apply the `approved-for-pr` label to your issue.
+
+5. **Submit a Pull Request** – Once your issue has the `approved-for-pr` label, [submit a PR](https://github.com/ai-dynamo/dynamo/compare) that references the issue. Link your PR to the issue using [GitHub keywords](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue) (e.g., "Fixes #123" or "Closes #123").
+
+6. **Address Code Rabbit Review** – Wait for the automated Code Rabbit review to complete. Address its suggestions, including the nitpicks—they are often quite insightful and help improve code quality.
+
+7. **Ensure CI Tests Pass** – Wait for all CI tests to pass. If any tests fail, investigate and fix the issues before requesting human review.
+
+8. **Check CODEOWNERS** – Review the [CODEOWNERS](https://github.com/ai-dynamo/dynamo/blob/main/CODEOWNERS) file to identify which team members need to sign off on your PR based on the files you've modified.
+
+9. **Request a Review** – Add whomever approved your GitHub Issue as a reviewer on your PR. Please also add [@dagil-nvidia](https://github.com/dagil-nvidia) for visibility.
+
+> **Note on AI-Generated Code**: While Dynamo encourages the use of AI-generated code, it is the full responsibility of the submitter to understand every change in the PR. Failure to demonstrate sufficient understanding of the submitted code will result in rejection.
+
+---
+
+## General Contribution Guidelines
+
 Contributions that fix documentation errors or that make small changes
 to existing code can be contributed directly by following the rules
 below and submitting an appropriate PR.
@@ -193,4 +249,4 @@ you can use `-s` or `--signoff` to add the `Signed-off-by` line to
 the end of the commit message.
 
 ⚠️ **Contributor-Friendly DCO Guide:**
-If your pull request fails the DCO check, don’t worry! Check out our [DCO Troubleshooting Guide](DCO.md) for step-by-step instructions to fix it quickly.
+If your pull request fails the DCO check, don't worry! Check out our [DCO Troubleshooting Guide](DCO.md) for step-by-step instructions to fix it quickly.

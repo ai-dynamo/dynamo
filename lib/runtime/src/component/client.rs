@@ -21,6 +21,9 @@ use crate::{
     transports::etcd::Client as EtcdClient,
 };
 
+/// Default interval for periodic reconciliation of instance_avail with instance_source
+const DEFAULT_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+
 #[derive(Clone, Debug)]
 pub struct Client {
     // This is me
@@ -35,11 +38,24 @@ pub struct Client {
     instance_avail_tx: Arc<tokio::sync::watch::Sender<Vec<u64>>>,
     // Watch receiver for available instance IDs (for cloning to external subscribers)
     instance_avail_rx: tokio::sync::watch::Receiver<Vec<u64>>,
+    /// Interval for periodic reconciliation of instance_avail with instance_source.
+    /// This ensures instances removed via `report_instance_down` are eventually restored.
+    reconcile_interval: Duration,
 }
 
 impl Client {
     // Client with auto-discover instances using key-value store
     pub(crate) async fn new(endpoint: Endpoint) -> Result<Self> {
+        Self::with_reconcile_interval(endpoint, DEFAULT_RECONCILE_INTERVAL).await
+    }
+
+    /// Create a client with a custom reconcile interval.
+    /// The reconcile interval controls how often `instance_avail` is reset to match
+    /// `instance_source`, restoring any instances removed via `report_instance_down`.
+    pub(crate) async fn with_reconcile_interval(
+        endpoint: Endpoint,
+        reconcile_interval: Duration,
+    ) -> Result<Self> {
         tracing::trace!(
             "Client::new_dynamic: Creating dynamic client for endpoint: {}",
             endpoint.id()
@@ -54,6 +70,7 @@ impl Client {
             instance_free: Arc::new(ArcSwap::from(Arc::new(vec![]))),
             instance_avail_tx: Arc::new(avail_tx),
             instance_avail_rx: avail_rx,
+            reconcile_interval,
         };
         client.monitor_instance_source();
         Ok(client)
@@ -132,7 +149,13 @@ impl Client {
     }
 
     /// Monitor the key-value instance source and update instance_avail.
+    ///
+    /// This function also performs periodic reconciliation: if `instance_source` hasn't
+    /// changed for `reconcile_interval`, we reset `instance_avail` to match
+    /// `instance_source`. This ensures instances removed via `report_instance_down`
+    /// are eventually restored even if the discovery source doesn't emit updates.
     fn monitor_instance_source(&self) {
+        let reconcile_interval = self.reconcile_interval;
         let cancel_token = self.endpoint.drt().primary_token();
         let client = self.clone();
         let endpoint_id = self.endpoint.id();
@@ -152,11 +175,20 @@ impl Client {
                 // Send update to watch channel subscribers
                 let _ = client.instance_avail_tx.send(instance_ids);
 
-                if let Err(err) = rx.changed().await {
-                    tracing::error!(
-                        "monitor_instance_source: The Sender is dropped: {err}, endpoint={endpoint_id}",
-                    );
-                    cancel_token.cancel();
+                tokio::select! {
+                    result = rx.changed() => {
+                        if let Err(err) = result {
+                            tracing::error!(
+                                "monitor_instance_source: The Sender is dropped: {err}, endpoint={endpoint_id}",
+                            );
+                            cancel_token.cancel();
+                        }
+                    }
+                    _ = tokio::time::sleep(reconcile_interval) => {
+                        tracing::trace!(
+                            "monitor_instance_source: periodic reconciliation for endpoint={endpoint_id}",
+                        );
+                    }
                 }
             }
         });
@@ -239,5 +271,120 @@ impl Client {
         let instance_source = Arc::new(watch_rx);
         instance_sources.insert(endpoint.clone(), Arc::downgrade(&instance_source));
         Ok(instance_source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+    /// Test that instances removed via report_instance_down are restored after
+    /// the reconciliation interval elapses.
+    #[tokio::test]
+    async fn test_instance_reconciliation() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(100);
+
+        let rt = Runtime::from_current().unwrap();
+        // Use process_local config to avoid needing etcd/nats
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_reconciliation".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        // Use a short reconcile interval for faster tests
+        let client = Client::with_reconcile_interval(endpoint, TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+
+        // Initially, instance_avail should be empty (no registered instances)
+        assert!(client.instance_ids_avail().is_empty());
+
+        // For this test, we'll directly manipulate instance_avail and verify reconciliation
+        // Store some test IDs
+        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
+
+        assert_eq!(**client.instance_ids_avail(), vec![1u64, 2, 3]);
+
+        // Simulate report_instance_down removing instance 2
+        client.report_instance_down(2);
+        assert_eq!(**client.instance_ids_avail(), vec![1u64, 3]);
+
+        // Wait for reconciliation interval + buffer
+        // The monitor_instance_source will reset instance_avail to match instance_source
+        // Since instance_source is empty, after reconciliation instance_avail should be empty
+        tokio::time::sleep(TEST_RECONCILE_INTERVAL + Duration::from_millis(50)).await;
+
+        // After reconciliation, instance_avail should match instance_source (which is empty)
+        assert!(
+            client.instance_ids_avail().is_empty(),
+            "After reconciliation, instance_avail should match instance_source"
+        );
+
+        rt.shutdown();
+    }
+
+    /// Test that report_instance_down correctly removes an instance from instance_avail.
+    #[tokio::test]
+    async fn test_report_instance_down() {
+        let rt = Runtime::from_current().unwrap();
+        // Use process_local config to avoid needing etcd/nats
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_report_down".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = endpoint.client().await.unwrap();
+
+        // Manually set up instance_avail with test instances
+        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
+        assert_eq!(**client.instance_ids_avail(), vec![1u64, 2, 3]);
+
+        // Report instance 2 as down
+        client.report_instance_down(2);
+
+        // Verify instance 2 is removed
+        let avail = client.instance_ids_avail();
+        assert!(avail.contains(&1), "Instance 1 should still be available");
+        assert!(
+            !avail.contains(&2),
+            "Instance 2 should be removed after report_instance_down"
+        );
+        assert!(avail.contains(&3), "Instance 3 should still be available");
+
+        rt.shutdown();
+    }
+
+    /// Test that instance_avail_watcher receives updates when instances change.
+    #[tokio::test]
+    async fn test_instance_avail_watcher() {
+        let rt = Runtime::from_current().unwrap();
+        // Use process_local config to avoid needing etcd/nats
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_watcher".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = endpoint.client().await.unwrap();
+        let watcher = client.instance_avail_watcher();
+
+        // Set initial instances
+        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
+
+        // Report instance down - this should notify the watcher
+        client.report_instance_down(2);
+
+        // The watcher should receive the update
+        // Note: We need to check if changed() was signaled
+        let current = watcher.borrow().clone();
+        assert_eq!(current, vec![1, 3]);
+
+        rt.shutdown();
     }
 }

@@ -174,7 +174,6 @@ for concurrency in ${concurrency_list}; do
 	    --num-dataset-entries ${num_prompts} \
     	--random-seed 100 \
     	--artifact-dir ${artifacts_dir} \
-    	-v \
     	-H 'Authorization: Bearer NOT USED' \
     	-H 'Accept: text/event-stream'
     echo "Benchmark with concurrency ${concurrency} done"

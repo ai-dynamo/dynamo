@@ -136,6 +136,11 @@ metricsService:
 
 natsAddr: ""
 etcdAddr: ""
+
+nats:
+  # Whether the NATS is enabled
+  enabled: true
+
 modelExpressURL: ""
 
 # Webhook configuration

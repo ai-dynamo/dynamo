@@ -8,14 +8,27 @@
 pub mod input;
 pub use input::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use dynamo_runtime::pipeline::RouterMode;
 
 use crate::{
     backend::ExecutionContext, engines::StreamingEngine, kv_router::KvRouterConfig,
-    local_model::LocalModel,
+    local_model::LocalModel, model_card::ModelDeploymentCard,
+    types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
+
+/// Callback type for engine factory (async)
+pub type EngineFactoryCallback = Arc<
+    dyn Fn(
+            ModelDeploymentCard,
+        ) -> Pin<
+            Box<dyn Future<Output = anyhow::Result<OpenAIChatCompletionsStreamingEngine>> + Send>,
+        > + Send
+        + Sync,
+>;
 
 #[derive(Debug, Clone, Default)]
 pub struct RouterConfig {
@@ -58,7 +71,10 @@ impl RouterConfig {
 #[derive(Clone)]
 pub enum EngineConfig {
     /// Remote networked engines that we discover via etcd
-    Dynamic(Box<LocalModel>),
+    Dynamic {
+        model: Box<LocalModel>,
+        engine_factory: Option<EngineFactoryCallback>,
+    },
 
     /// A Text engine receives text, does it's own tokenization and prompt formatting.
     InProcessText {
@@ -75,12 +91,19 @@ pub enum EngineConfig {
 }
 
 impl EngineConfig {
-    fn local_model(&self) -> &LocalModel {
+    pub fn local_model(&self) -> &LocalModel {
         use EngineConfig::*;
         match self {
-            Dynamic(lm) => lm,
+            Dynamic { model, .. } => model,
             InProcessText { model, .. } => model,
             InProcessTokens { model, .. } => model,
+        }
+    }
+
+    pub fn engine_factory(&self) -> Option<&EngineFactoryCallback> {
+        match self {
+            EngineConfig::Dynamic { engine_factory, .. } => engine_factory.as_ref(),
+            _ => None,
         }
     }
 }

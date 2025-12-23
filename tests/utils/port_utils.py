@@ -15,6 +15,7 @@ import random
 import socket
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 # Port allocation lock file
@@ -25,6 +26,18 @@ _PORT_REGISTRY_FILE = Path(tempfile.gettempdir()) / "pytest_port_allocations.jso
 # TODO: Get Rust backend to use u16 instead of i16 so we can use full 1024-65535 range
 _PORT_MIN = 1024
 _PORT_MAX = 32767
+
+
+@dataclass(frozen=True)
+class ServicePorts:
+    """Port allocation for Dynamo service deployments.
+
+    Used by tests that need to pass a cohesive set of ports around (frontend + one or
+    more worker/system ports).
+    """
+
+    frontend_port: int
+    system_ports: list[int]
 
 
 def _load_port_registry() -> dict:

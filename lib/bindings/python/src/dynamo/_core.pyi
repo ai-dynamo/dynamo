@@ -232,16 +232,42 @@ class Client:
         ...
 
 
-def compute_block_hash_for_seq_py(tokens: List[int], kv_block_size: int) -> List[int]:
+def compute_block_hash_for_seq_py(
+    tokens: List[int],
+    kv_block_size: int,
+    block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None
+) -> List[int]:
     """
-    Compute block hashes for a sequence of tokens
+    Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
+
+    When block_mm_infos is provided, the mm_hashes are included in the hash computation
+    to ensure that blocks with identical tokens but different multimodal objects produce
+    different hashes.
 
     Args:
         tokens: List of token IDs
-        kv_block_size: Size of each KV cache block
+        kv_block_size: Size of each block in tokens
+        block_mm_infos: Optional per-block multimodal metadata. Each element corresponds to a block
+                       and should be None or a dict with structure:
+                       {
+                           "mm_objects": [
+                               {
+                                   "mm_hash": int,  # Hash of the MM object
+                               }
+                           ]
+                       }
 
     Returns:
-        List of block hashes as integers
+        List of block hashes (one per block)
+
+    Example:
+        >>> tokens = [1, 2, 3, 4] * 8  # 32 tokens = 1 block
+        >>> mm_info = {
+        ...     "mm_objects": [{
+        ...         "mm_hash": 0xDEADBEEF,
+        ...     }]
+        ... }
+        >>> hashes = compute_block_hash_for_seq_py(tokens, 32, [mm_info])
     """
 
     ...

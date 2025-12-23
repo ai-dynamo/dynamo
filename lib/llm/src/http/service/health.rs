@@ -38,8 +38,19 @@ pub fn live_check_router(
 }
 
 async fn live_handler(
-    axum::extract::State(_state): axum::extract::State<Arc<service_v2::State>>,
+    axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
+    // Check if the http service is being cancelled/shutdown
+    if state.is_cancelled() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "shutting_down",
+                "message": "Service is shutting down"
+            })),
+        );
+    }
+
     (
         StatusCode::OK,
         Json(json!({

@@ -32,6 +32,10 @@ const MAX_SNAPSHOT_STABILITY_ATTEMPTS: usize = 10;
 const CHECK_INTERVAL_BASE: Duration = Duration::from_secs(1);
 const CHECK_INTERVAL_JITTER_MS: i64 = 100;
 
+// Worker query retry configuration
+const WORKER_QUERY_MAX_RETRIES: u32 = 8;
+const WORKER_QUERY_INITIAL_BACKOFF_MS: u64 = 200;
+
 // ============================================================================
 // Local KvIndexer-based Recovery
 // ============================================================================
@@ -65,8 +69,7 @@ pub async fn recover_from_all_workers(
         // Skip workers without local indexer
         if !worker_query_client.has_local_indexer(worker_id) {
             tracing::debug!(
-                worker_id,
-                "Skipping recovery - worker does not have local indexer enabled"
+                "Skipping recovery - worker {worker_id} does not have local indexer enabled"
             );
             continue;
         }
@@ -101,10 +104,7 @@ pub async fn recover_from_all_workers(
     // Log summary
     if total_recovered > 0 || failed_workers > 0 {
         tracing::info!(
-            total_recovered,
-            successful_workers,
-            failed_workers,
-            "Startup recovery completed"
+            "Startup recovery completed: {total_recovered} events recovered from {successful_workers} workers, {failed_workers} workers failed"
         );
     }
 
@@ -133,35 +133,61 @@ pub async fn recover_from_worker(
 ) -> Result<usize> {
     if worker_query_client.has_local_indexer(worker_id) {
         tracing::debug!(
-            worker_id,
-            start_event_id = ?start_event_id,
-            end_event_id = ?end_event_id,
-            "Attempting recovery from worker"
+            "Attempting recovery from worker {worker_id}, start_event_id: {start_event_id:?}, end_event_id: {end_event_id:?}"
         );
     } else {
-        tracing::warn!(
-            worker_id,
-            "Worker does not have local indexer enabled, skipping recovery"
-        );
+        tracing::warn!("Worker {worker_id} does not have local indexer enabled, skipping recovery");
         return Ok(0);
     }
 
-    // Query worker for events in range
-    let response = worker_query_client
-        .query_worker(worker_id, start_event_id, end_event_id)
-        .await?;
+    // Query worker for events in range, with retry logic for transient failures
+    // (e.g., worker's query service not yet re-subscribed after NATS restart)
+    let mut response = None;
+    let mut last_error = None;
+
+    for attempt in 0..WORKER_QUERY_MAX_RETRIES {
+        match worker_query_client
+            .query_worker(worker_id, start_event_id, end_event_id)
+            .await
+        {
+            Ok(resp) => {
+                if attempt > 0 {
+                    tracing::info!("Worker {worker_id} query succeeded after retry {attempt}");
+                }
+                response = Some(resp);
+                break;
+            }
+            Err(e) => {
+                last_error = Some(e);
+                if attempt < WORKER_QUERY_MAX_RETRIES - 1 {
+                    let backoff_ms = WORKER_QUERY_INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
+                    tracing::warn!(
+                        "Worker {worker_id} query failed on attempt {attempt}, retrying after {backoff_ms}ms"
+                    );
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                }
+            }
+        }
+    }
+
+    let response = match response {
+        Some(r) => r,
+        None => return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No response"))),
+    };
 
     // Handle response variants
     let events = match response {
         WorkerKvQueryResponse::Events(events) => {
-            tracing::debug!(worker_id, count = events.len(), "Got buffered events");
+            tracing::debug!(
+                "Got {count} buffered events from worker {worker_id}",
+                count = events.len()
+            );
             events
         }
         WorkerKvQueryResponse::TreeDump(events) => {
             tracing::info!(
-                worker_id,
-                count = events.len(),
-                "Got tree dump (range too old or unspecified)"
+                "Got tree dump from worker {worker_id} (range too old or unspecified), count: {count}",
+                count = events.len()
             );
             events
         }
@@ -171,11 +197,7 @@ pub async fn recover_from_worker(
             newest_available,
         } => {
             tracing::warn!(
-                worker_id,
-                ?requested_start,
-                ?requested_end,
-                newest_available,
-                "Requested range is newer than available data"
+                "Worker {worker_id} requested range is newer than available data: requested_start: {requested_start:?}, requested_end: {requested_end:?}, newest_available: {newest_available}"
             );
             return Ok(0);
         }
@@ -188,24 +210,21 @@ pub async fn recover_from_worker(
 
     if events_count == 0 {
         tracing::debug!(
-            worker_id,
-            start_event_id = ?start_event_id,
-            "No events to recover from worker"
+            "No events to recover from worker {worker_id}, start_event_id: {start_event_id:?}"
         );
         return Ok(0);
     }
 
     tracing::info!(
-        worker_id,
-        start_event_id = ?start_event_id,
-        events_count,
-        "Recovered {events_count} events from worker"
+        "Recovered {events_count} events from worker {worker_id}, start_event_id: {start_event_id:?}"
     );
 
     // Apply recovered events to the indexer
     for event in events {
         if let Err(e) = event_tx.send(event).await {
-            tracing::error!(worker_id, error = %e, "Failed to send recovered event to indexer");
+            tracing::error!(
+                "Failed to send recovered event to indexer for worker {worker_id}: {e}"
+            );
             anyhow::bail!("Failed to send recovered event: {e}");
         }
     }
@@ -528,8 +547,7 @@ pub async fn start_kv_router_background(
                     };
 
                     tracing::warn!(
-                        worker_id = worker_id,
-                        "DISCOVERY: Generate endpoint instance removed, removing worker"
+                        "DISCOVERY: Generate endpoint instance removed, removing worker {worker_id}"
                     );
 
                     if let Err(e) = remove_worker_tx.send(worker_id).await {
@@ -611,8 +629,7 @@ pub async fn start_kv_router_background(
                     let consumer_to_delete = router_instance_id.to_string();
 
                     tracing::info!(
-                        router_instance_id = router_instance_id,
-                        "DISCOVERY: Router instance removed, attempting to delete orphaned consumer: {consumer_to_delete}"
+                        "DISCOVERY: Router instance {router_instance_id} removed, attempting to delete orphaned consumer: {consumer_to_delete}"
                     );
 
                     // Delete the consumer (allow race condition if multiple routers try to delete)
@@ -653,11 +670,11 @@ pub async fn start_kv_router_background_nats_core(
 ) -> Result<()> {
     // Subscribe to KV events using NATS Core
     let mut subscriber = component.subscribe(KV_EVENT_SUBJECT).await?;
+    let kv_event_subject = format!("{}.{}", component.subject(), KV_EVENT_SUBJECT);
 
     tracing::info!(
-        "KV Router using NATS Core subscription on subject: {}.{} (local_indexer mode)",
-        component.subject(),
-        KV_EVENT_SUBJECT
+        subject = %kv_event_subject,
+        "KV Router using NATS Core subscription (local_indexer mode)"
     );
 
     // Get the generate endpoint and watch for instance events (add/remove)
@@ -696,8 +713,7 @@ pub async fn start_kv_router_background_nats_core(
                             let worker_id = _instance.instance_id();
 
                             tracing::info!(
-                                worker_id = worker_id,
-                                "DISCOVERY: Worker added, dumping local indexer into router"
+                                "DISCOVERY: Worker {worker_id} added, dumping local indexer into router"
                             );
 
                             // Query worker's local indexer and dump all events
@@ -712,24 +728,19 @@ pub async fn start_kv_router_background_nats_core(
                             {
                                 Ok(count) => {
                                     tracing::info!(
-                                        worker_id = worker_id,
-                                        events_recovered = count,
-                                        "Successfully dumped worker's local indexer"
+                                        "Successfully dumped worker {worker_id}'s local indexer, recovered {count} events"
                                     );
                                 }
                                 Err(e) => {
                                     tracing::warn!(
-                                        worker_id = worker_id,
-                                        error = %e,
-                                        "Failed to dump worker's local indexer (may not have local indexer enabled)"
+                                        "Failed to dump worker {worker_id}'s local indexer (may not have local indexer enabled): {e}"
                                     );
                                 }
                             }
                         }
                         DiscoveryEvent::Removed(worker_id) => {
                             tracing::warn!(
-                                worker_id = worker_id,
-                                "DISCOVERY: Worker removed, removing from router indexer"
+                                "DISCOVERY: Worker {worker_id} removed, removing from router indexer"
                             );
 
                             if let Err(e) = remove_worker_tx.send(worker_id).await {
@@ -760,12 +771,9 @@ pub async fn start_kv_router_background_nats_core(
                         // Gap detected - recover missing events before processing current
                         let gap_start = last_id + 1;
                         let gap_end = event_id - 1;
+                        let gap_size = gap_end - gap_start + 1;
                         tracing::warn!(
-                            worker_id,
-                            gap_start,
-                            gap_end,
-                            gap_size = gap_end - gap_start + 1,
-                            "Event ID gap detected, recovering events [{gap_start}, {gap_end}]"
+                            "Event ID gap detected for worker {worker_id}, recovering events [{gap_start}, {gap_end}], gap_size: {gap_size}"
                         );
 
                         // Note: While recovering, new events may queue in the NATS subscriber's
@@ -779,11 +787,7 @@ pub async fn start_kv_router_background_nats_core(
                             &kv_events_tx,
                         ).await {
                             tracing::error!(
-                                worker_id,
-                                gap_start,
-                                gap_end,
-                                error = %e,
-                                "Failed to recover gap events; proceeding with current event anyway"
+                                "Failed to recover gap events for worker {worker_id} (gap_start: {gap_start}, gap_end: {gap_end}); proceeding with current event anyway: {e}"
                             );
                             // Note: If recovery fails, we still apply the current event.
                             // The tree will have a gap, but it's better than dropping the event.

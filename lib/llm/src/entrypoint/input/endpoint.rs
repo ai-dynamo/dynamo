@@ -82,7 +82,7 @@ pub async fn run(
             let fut = endpoint.endpoint_builder().handler(ingress).start();
             Box::pin(fut)
         }
-        EngineConfig::Dynamic(_) => {
+        EngineConfig::Dynamic { .. } => {
             unreachable!("An endpoint input will never have a Dynamic engine");
         }
     };

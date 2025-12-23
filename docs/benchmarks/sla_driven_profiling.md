@@ -170,6 +170,67 @@ Suggested prefill TP:4 (TTFT 48.37 ms, throughput 15505.23 tokens/s/GPU)
 Suggested decode TP:4 (ITL 4.83 ms, throughput 51.22 tokens/s/GPU)
 ```
 
+#### Interactive Configuration Selection WebUI
+
+When running the profiler with `--pick-with-webui`, an interactive web interface is launched that allows you to visually explore profiling results and manually select configurations.
+
+**Features:**
+- **Interactive Charts**: Visualize prefill TTFT, decode ITL, and GPU hours analysis with hover-to-highlight synchronization between charts and tables
+- **Pareto-Optimal Analysis**: The GPU Hours table shows pareto-optimal configurations balancing latency and throughput
+- **DGD Config Preview**: Click "Show Config" on any row to view the corresponding DynamoGraphDeployment YAML
+- **GPU Cost Estimation**: Toggle GPU cost display to convert GPU hours to cost ($/1000 requests)
+- **SLA Visualization**: Red dashed lines indicate your TTFT and ITL targets
+
+**Selection Methods:**
+1. **GPU Hours Table** (recommended): Click any row to select both prefill and decode configurations at once based on the pareto-optimal combination
+2. **Individual Selection**: Click one row in the Prefill table AND one row in the Decode table to manually choose each
+
+**Example DGD Config Output:**
+
+When you click "Show Config", you'll see a DynamoGraphDeployment configuration like:
+
+```yaml
+# DynamoGraphDeployment Configuration
+# Prefill: 1 GPU(s), TP=1
+# Decode: 4 GPU(s), TP=4
+# Model: Qwen/Qwen3-32B-FP8
+# Backend: trtllm
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+spec:
+  services:
+    PrefillWorker:
+      subComponentType: prefill
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          args:
+          - --tensor-parallel-size=1
+    DecodeWorker:
+      subComponentType: decode
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          args:
+          - --tensor-parallel-size=4
+```
+
+**Usage:**
+```bash
+python -m benchmarks.profiler.profile_sla \
+  --backend trtllm \
+  --config path/to/disagg.yaml \
+  --pick-with-webui \
+  --use-ai-configurator \
+  --model Qwen/Qwen3-32B-FP8 \
+  --aic-system h200_sxm \
+  --ttft 200 --itl 15
+```
+
+Once you have selected a configuration, the full DynamoGraphDeployment CRD will be saved in your output folder as `config_with_planner.yaml`.
+
+The WebUI launches on port 8000 by default (configurable with `--webui-port`).
+
 #### Output Performance Plots
 
 The profiler will generate the following plots to better visualize the performance data:

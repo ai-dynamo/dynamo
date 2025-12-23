@@ -5,14 +5,17 @@ import json
 import logging
 import queue
 
-from benchmarks.profiler.utils.defaults import DEFAULT_GPU_COST_PER_HOUR
 from benchmarks.profiler.webui.utils import (
-    create_gpu_cost_update_handler,
+    add_profiling_error,
+    clear_profiling_errors,
     create_gradio_interface,
     create_selection_handler,
     generate_config_data,
     wait_for_selection,
 )
+
+# Re-export for use by profiler modules
+__all__ = ["pick_config_with_webui", "add_profiling_error", "clear_profiling_errors"]
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -37,12 +40,15 @@ def pick_config_with_webui(prefill_data, decode_data, args):
     Returns:
         tuple[int, int]: (selected_prefill_idx, selected_decode_idx)
     """
-    # Generate JSON data (also writes default JSON file for convenience)
+    # Note: Don't clear profiling errors here - they should be accumulated
+    # during the profiling run and displayed in the WebUI.
+    # clear_profiling_errors() should be called at the start of a new profiling run.
+
+    # Generate JSON data with GPU hours (frontend handles cost conversion)
     data_dict = generate_config_data(
         prefill_data,
         decode_data,
         args,
-        gpu_cost_per_hour=DEFAULT_GPU_COST_PER_HOUR,
         write_to_disk=True,
     )
     json_data_str = json.dumps(data_dict)
@@ -61,19 +67,11 @@ def pick_config_with_webui(prefill_data, decode_data, args):
     handle_selection = create_selection_handler(
         data_dict_ref, selection_queue, prefill_selection, decode_selection
     )
-    update_gpu_cost_per_hour = create_gpu_cost_update_handler(
-        prefill_data=prefill_data,
-        decode_data=decode_data,
-        args=args,
-        data_dict_ref=data_dict_ref,
-        default_gpu_cost_per_hour=DEFAULT_GPU_COST_PER_HOUR,
-    )
 
+    # Note: GPU hours -> Cost conversion is handled by frontend JavaScript (gpu_cost_toggle.js)
     demo = create_gradio_interface(
         json_data_str,
         handle_selection,
-        update_json_data_fn=update_gpu_cost_per_hour,
-        default_gpu_cost_per_hour=DEFAULT_GPU_COST_PER_HOUR,
     )
 
     return wait_for_selection(demo, selection_queue, args.webui_port)

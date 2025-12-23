@@ -34,6 +34,7 @@ chrono = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
+dynamo-config = { workspace = true }
 either = { workspace = true }
 etcd-client = { workspace = true }
 futures = { workspace = true }

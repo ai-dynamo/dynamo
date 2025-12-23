@@ -182,7 +182,7 @@ type DynamoComponentDeploymentStatus struct {
 
 	// Service contains replica status information for this service.
 	// +optional
-	Service ServiceReplicaStatus `json:"service,omitempty"`
+	Service *ServiceReplicaStatus `json:"service,omitempty"`
 }
 
 // +genclient
@@ -223,7 +223,10 @@ func (s *DynamoComponentDeployment) IsReady() (bool, string) {
 }
 
 func (s *DynamoComponentDeployment) GetServiceStatuses() map[string]ServiceReplicaStatus {
-	return map[string]ServiceReplicaStatus{s.Spec.ServiceName: s.Status.Service}
+	if s.Status.Service == nil {
+		return map[string]ServiceReplicaStatus{}
+	}
+	return map[string]ServiceReplicaStatus{s.Spec.ServiceName: *s.Status.Service}
 }
 
 func (s *DynamoComponentDeploymentStatus) IsReady() (bool, string) {

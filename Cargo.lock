@@ -832,6 +832,24 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
+version = "0.70.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f49d8fed880d473ea71efb9bf597651e77201bdd4893efe54c9e5d65ae04ce6f"
+dependencies = [
+ "bitflags 2.10.0",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.13.0",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash 1.1.0",
+ "shlex",
+ "syn 2.0.111",
+]
+
+[[package]]
+name = "bindgen"
 version = "0.71.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f58bf3d7db68cfbac37cfc485a8d711e87e064c3d0fe0435b92f7a407f9d6b3"
@@ -2534,7 +2552,7 @@ checksum = "e1d926b4d407d372f141f93bb444696142c29d32962ccbd3531117cf3aa0bfa9"
 
 [[package]]
 name = "dynamo-async-openai"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -2557,6 +2575,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "utoipa",
  "uuid 1.18.1",
 ]
 
@@ -2572,14 +2591,14 @@ dependencies = [
 
 [[package]]
 name = "dynamo-config"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-discovery"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2621,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2639,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -2677,6 +2696,7 @@ dependencies = [
  "either",
  "erased-serde",
  "etcd-client",
+ "ffmpeg-next",
  "futures",
  "futures-util",
  "galil-seiferas",
@@ -2690,6 +2710,7 @@ dependencies = [
  "itertools 0.14.0",
  "json-five",
  "lazy_static",
+ "memfile",
  "minijinja",
  "minijinja-contrib",
  "mockito",
@@ -2741,13 +2762,14 @@ dependencies = [
  "utoipa-swagger-ui",
  "uuid 1.18.1",
  "validator",
+ "video-rs",
  "xxhash-rust",
  "zeromq",
 ]
 
 [[package]]
 name = "dynamo-memory"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2764,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "dynamo-async-openai",
@@ -2783,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-run"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2811,7 +2833,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2831,6 +2853,7 @@ dependencies = [
  "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
+ "dynamo-config",
  "educe",
  "either",
  "env_logger",
@@ -2888,7 +2911,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bytemuck",
  "dashmap 6.1.0",
@@ -3229,6 +3252,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
+]
+
+[[package]]
+name = "ffmpeg-next"
+version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da02698288e0275e442a47fc12ca26d50daf0d48b15398ba5906f20ac2e2a9f9"
+dependencies = [
+ "bitflags 2.10.0",
+ "ffmpeg-sys-next",
+ "libc",
+]
+
+[[package]]
+name = "ffmpeg-sys-next"
+version = "7.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9e9c75ebd4463de9d8998fb134ba26347fe5faee62fabf0a4b4d41bd500b4ad"
+dependencies = [
+ "bindgen 0.70.1",
+ "cc",
+ "libc",
+ "num_cpus",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
@@ -5266,7 +5314,7 @@ checksum = "2874a2af47a2325c2001a6e6fad9b16a53b802102b528163885171cf92b15976"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -5929,6 +5977,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 
 [[package]]
+name = "memfile"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f64636fdb65a5f0740f920c4281f3dbb76a71e25e25914b6d27000739897d40e"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "memmap2"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6001,9 +6058,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja"
-version = "2.13.0"
+version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0adbe6e92a6ce0fd6c4aac593fdfd3e3950b0f61b1a63aa9731eb6fd85776fa3"
+checksum = "12ea9ac0a51fb5112607099560fdf0f90366ab088a2a9e6e8ae176794e9806aa"
 dependencies = [
  "memo-map",
  "self_cell",
@@ -6013,9 +6070,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "2.13.0"
+version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a915f5cc17b954d5252b6373cc5fd97eb86d75e29b30ac2ee7932126451eef24"
+checksum = "be6ad8bbc21c256d5f2f5494699d5d69d519b8510d672a0e43b7bfa3a56c388a"
 dependencies = [
  "minijinja",
  "serde",
@@ -6713,11 +6770,11 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d80bd4b5b8363cfd933000a8757a453e58ee10ee6e400c38ae31db512444a31"
+checksum = "06518de4709489510ec1fa8938f1f510f8c9c1f154b096c3c0913ab2feade9b0"
 dependencies = [
- "bindgen",
+ "bindgen 0.71.1",
  "cc",
  "libc",
  "os_info",
@@ -11725,6 +11782,8 @@ dependencies = [
  "quote",
  "regex",
  "syn 2.0.111",
+ "url",
+ "uuid 1.18.1",
 ]
 
 [[package]]
@@ -11881,6 +11940,17 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "video-rs"
+version = "0.10.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "859aad7261bac267f90f9635ec9addba3b4bcb4bbb2edb03fec3e6b765657bee"
+dependencies = [
+ "ffmpeg-next",
+ "tracing",
+ "url",
+]
 
 [[package]]
 name = "virtue"

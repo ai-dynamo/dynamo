@@ -70,6 +70,7 @@ jobs:
             --timeout 20 \
             --root-dir "${{ github.workspace }}" \
             --exclude-path ".*ATTRIBUTIONS.*" \
+            --exclude-path "./lib/llm/tests/data/.*" \
             --accept "200..=299, 403, 429" \
             --exclude-all-private --exclude 0.0.0.0 \
             $OFFLINE_FLAG \

@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-
 import os
 
 import pytest
@@ -59,12 +58,12 @@ def minio_lora_service():
     Provide a MinIO service with a pre-uploaded LoRA adapter for testing.
 
     This fixture:
-    1. Starts a MinIO Docker container
+    1. Connects to existing MinIO or starts a Docker container
     2. Creates the required S3 bucket
     3. Downloads the LoRA adapter from Hugging Face Hub
     4. Uploads it to MinIO
     5. Yields the MinioLoraConfig with connection details
-    6. Cleans up after the test
+    6. Cleans up after the test (only stops container if we started it)
 
     Usage:
         def test_lora(minio_lora_service):
@@ -76,13 +75,11 @@ def minio_lora_service():
     service = MinioService(config)
 
     try:
-        # Start MinIO
+        # Start or connect to MinIO
         service.start()
 
-        # Create bucket
+        # Create bucket and upload LoRA
         service.create_bucket()
-
-        # Download and upload LoRA
         local_path = service.download_lora()
         service.upload_lora(local_path)
 
@@ -92,6 +89,6 @@ def minio_lora_service():
         yield config
 
     finally:
-        # Stop MinIO and clean up
+        # Stop MinIO only if we started it, clean up temp dirs
         service.stop()
         service.cleanup_temp()

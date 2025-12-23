@@ -88,7 +88,7 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 		},
 		{
 			Name:  "DYN_HEALTH_CHECK_ENABLED",
-			Value: "true",
+			Value: "false",
 		},
 	}...)
 

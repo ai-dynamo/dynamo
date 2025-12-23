@@ -48,7 +48,9 @@ DYNAMO_PID=$!
 
 # run decode worker with metrics on port 8081
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
+# For disaggregated deployments we standardize on DYN_SYSTEM_PORT1/2 instead of
+# *_PREFILL/*_DECODE env names so test harnesses can set one simple pair.
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=0 \
 python3 -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
@@ -66,7 +68,7 @@ echo "Waiting for decode worker to initialize..."
 sleep 10
 
 # run prefill worker with metrics on port 8082 (foreground)
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_PREFILL:-8082} \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 DYN_VLLM_KV_EVENT_PORT=20081 \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=0 \

@@ -47,6 +47,5 @@ aiperf profile \
   --request-count ${num_requests} \
   --num-dataset-entries ${num_unique_prompts} \
   --random-seed ${seed} \
-  -v \
   -H 'Authorization: Bearer NOT USED' \
   -H 'Accept: text/event-stream'

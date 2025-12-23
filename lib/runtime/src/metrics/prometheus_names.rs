@@ -147,6 +147,21 @@ pub mod frontend_service {
     /// Request migration limit for a worker serving the model (MDC)
     pub const MODEL_MIGRATION_LIMIT: &str = "model_migration_limit";
 
+    /// Total number of request migrations due to worker unavailability
+    pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
+
+    /// Label name for the type of migration
+    pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
+
+    /// Migration type label values
+    pub mod migration_type {
+        /// Migration during initial stream creation (NoResponders error)
+        pub const NEW_REQUEST: &str = "new_request";
+
+        /// Migration during ongoing request (stream disconnected)
+        pub const ONGOING_REQUEST: &str = "ongoing_request";
+    }
+
     /// Status label values
     pub mod status {
         /// Value for successful requests

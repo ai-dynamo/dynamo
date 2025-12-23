@@ -50,7 +50,11 @@ from benchmarks.profiler.utils.profile_prefill import (
     profile_prefill_aiconfigurator,
 )
 from benchmarks.profiler.utils.profiler_argparse import create_profiler_parser
-from benchmarks.profiler.webui.select_config import pick_config_with_webui
+from benchmarks.profiler.webui.select_config import (
+    add_profiling_error,
+    clear_profiling_errors,
+    pick_config_with_webui,
+)
 from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
@@ -130,6 +134,9 @@ logger.addHandler(console_handler)
 async def run_profile(args):
     # List to track all created deployment clients for cleanup in case of failure
     deployment_clients = []
+
+    # Clear any errors from previous profiling runs
+    clear_profiling_errors()
 
     # Inherit aic_backend from backend if not explicitly set
     if not args.aic_backend:
@@ -476,7 +483,9 @@ async def run_profile(args):
             logger.info("Analyzing results and generate recommendations...")
             # Safety guards: no results → exit early with a clear message
             if not prefill_data.num_gpus:
-                logger.error("No prefill results produced; skipping recommendations.")
+                error_msg = "No prefill results produced; skipping recommendations."
+                logger.error(error_msg)
+                add_profiling_error(error_msg)
                 return
 
             if args.pick_with_webui:
@@ -488,9 +497,9 @@ async def run_profile(args):
                 # automatically select P/D config within SLA with the highest throughput/GPU
                 # select best parallel mapping for prefill
                 if min(prefill_data.ttft) > args.ttft:
-                    logger.warning(
-                        "No engine configuration satisfies the TTFT requirement, please try a smaller model or more powerful hardware"
-                    )
+                    warning_msg = "No engine configuration satisfies the TTFT requirement, please try a smaller model or more powerful hardware"
+                    logger.warning(warning_msg)
+                    add_profiling_error(warning_msg)
                     selected_prefill_idx = int(np.argmin(np.array(prefill_data.ttft)))
                 else:
                     valid_indices = [
@@ -508,14 +517,14 @@ async def run_profile(args):
 
                 # select best parallel mapping for decode
                 if not decode_data.num_gpus:
-                    logger.error(
-                        "No decode results produced; skipping recommendations."
-                    )
+                    error_msg = "No decode results produced; skipping recommendations."
+                    logger.error(error_msg)
+                    add_profiling_error(error_msg)
                     return
                 if min(decode_data.itl) > args.itl:
-                    logger.warning(
-                        "No engine configuration satisfies the ITL requirement, please try a smaller model or more powerful hardware"
-                    )
+                    warning_msg = "No engine configuration satisfies the ITL requirement, please try a smaller model or more powerful hardware"
+                    logger.warning(warning_msg)
+                    add_profiling_error(warning_msg)
                     selected_decode_idx = int(np.argmin(np.array(decode_data.itl)))
                 else:
                     valid_indices = [

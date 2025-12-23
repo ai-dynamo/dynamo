@@ -181,6 +181,17 @@ Dynamo provides comprehensive benchmarking tools to evaluate and optimize your d
 - **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies (aggregated vs. disaggregated vs. vanilla vLLM) using AIPerf
 - **[SLA-Driven Dynamo Deployments](docs/planner/sla_planner_quickstart.md)** – Optimize your deployment to meet SLA requirements
 
+## Frontend OpenAPI specification
+
+The OpenAI-compatible HTTP frontend exposes an OpenAPI 3 specification at `/openapi.json`.
+To generate and persist the same specification without running the server (for example for CI, documentation, or NIM integration), run:
+
+```bash
+cargo run -p dynamo-llm --bin generate-frontend-openapi
+```
+
+This writes the current frontend spec to `docs/frontends/openapi.json` at the repository root.
+
 # Engines
 
 Dynamo is designed to be inference engine agnostic. To use any engine with Dynamo, NATS and etcd need to be installed, along with a Dynamo frontend (`python -m dynamo.frontend [--interactive]`).

@@ -18,12 +18,13 @@ import math
 import re
 import time
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
+from tests.utils.constants import DefaultPort
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +41,12 @@ class BasePayload:
 
     # Connection info
     host: str = "localhost"
-    port: int = 8000
+    port: int = DefaultPort.FRONTEND.value
     endpoint: str = ""
     method: str = "POST"
+    # Optional additional ports used by specialized payloads (e.g. LoRA system/control-plane APIs).
+    # This is intentionally empty by default to preserve prior semantics.
+    system_ports: list[int] = field(default_factory=list)
 
     def url(self) -> str:
         ep = self.endpoint.lstrip("/")
@@ -256,7 +260,7 @@ class LoraTestChatPayload(ChatPayload):
         body: dict,
         lora_name: str,
         s3_uri: str,
-        system_port: int = 8081,
+        system_port: int = DefaultPort.SYSTEM1.value,
         repeat_count: int = 1,
         expected_response: Optional[list] = None,
         expected_log: Optional[list] = None,
@@ -269,7 +273,7 @@ class LoraTestChatPayload(ChatPayload):
             expected_log=expected_log or [],
             timeout=timeout,
         )
-        self.system_port = system_port
+        self.system_ports = [system_port]
         self.lora_name = lora_name
         self.s3_uri = s3_uri
         self._lora_loaded = False
@@ -282,7 +286,7 @@ class LoraTestChatPayload(ChatPayload):
             from tests.serve.lora_utils import load_lora_adapter
 
             load_lora_adapter(
-                system_port=self.system_port,
+                system_port=self.system_ports[0],
                 lora_name=self.lora_name,
                 s3_uri=self.s3_uri,
                 timeout=self.timeout,
@@ -455,7 +459,7 @@ class MetricCheck:
 class MetricsPayload(BasePayload):
     endpoint: str = "/metrics"
     method: str = "GET"
-    port: int = 8081
+    port: int = DefaultPort.SYSTEM1.value
     min_num_requests: int = 1
     backend: Optional[
         str

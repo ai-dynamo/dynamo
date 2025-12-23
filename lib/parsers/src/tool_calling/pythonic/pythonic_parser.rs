@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::super::ToolDefinition;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 use regex::Regex;
 use rustpython_parser::{
@@ -161,6 +162,7 @@ fn const_expr(e: &Expr) -> Result<Value, Box<dyn std::error::Error>> {
 
 pub fn try_tool_call_parse_pythonic(
     message: &str,
+    _tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     let stripped = strip_text(message).trim().to_string();
 
@@ -263,7 +265,7 @@ mod tests {
     #[test]
     fn test_parse_tool_call_parse_pythonic_basic() {
         let message = "[foo(a=1, b=2), bar(x=3)]";
-        let (result, content) = try_tool_call_parse_pythonic(message).unwrap();
+        let (result, content) = try_tool_call_parse_pythonic(message, None).unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 2);
@@ -279,7 +281,7 @@ mod tests {
     #[test]
     fn test_parse_tool_call_parse_pythonic_with_text() {
         let message = "Hey yo ! [foo(a=1, b=2), bar(x=3)] Hey yo";
-        let (result, content) = try_tool_call_parse_pythonic(message).unwrap();
+        let (result, content) = try_tool_call_parse_pythonic(message, None).unwrap();
         assert_eq!(content, Some("Hey yo !".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 2);
@@ -295,7 +297,7 @@ mod tests {
     #[test]
     fn test_parse_tool_call_parse_pythonic_with_text_and_new_line() {
         let message = "Hey \n yo ! [foo(a=1, b=2), bar(x=3)] Hey yo";
-        let (result, content) = try_tool_call_parse_pythonic(message).unwrap();
+        let (result, content) = try_tool_call_parse_pythonic(message, None).unwrap();
         assert_eq!(content, Some("Hey \n yo !".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 2);
@@ -311,7 +313,7 @@ mod tests {
     #[test]
     fn test_parse_tool_call_parse_pythonic_with_no_calls() {
         let message = "Hey \n yo !";
-        let (result, content) = try_tool_call_parse_pythonic(message).unwrap();
+        let (result, content) = try_tool_call_parse_pythonic(message, None).unwrap();
         assert_eq!(content, Some("Hey \n yo !".to_string()));
         assert!(result.is_empty());
         assert_eq!(result.len(), 0)
@@ -320,7 +322,7 @@ mod tests {
     #[test]
     fn test_parse_tool_call_parse_pythonic_with_python_tags() {
         let message = "<|python_start|>[foo(a=1, b=2), bar(x=3)]<|python_end|>";
-        let (result, content) = try_tool_call_parse_pythonic(message).unwrap();
+        let (result, content) = try_tool_call_parse_pythonic(message, None).unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 2);
@@ -336,7 +338,7 @@ mod tests {
     #[test]
     fn test_parse_tool_call_parse_pythonic_with_list_arg_values() {
         let message = "[foo(a=[1, 2, 3], b=2), bar(x=[3, 4, 5])]";
-        let (result, _) = try_tool_call_parse_pythonic(message).unwrap();
+        let (result, _) = try_tool_call_parse_pythonic(message, None).unwrap();
         assert!(!result.is_empty());
         assert_eq!(result.len(), 2);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -351,7 +353,7 @@ mod tests {
     #[test]
     fn test_parse_tool_call_parse_pythonic_with_dict_arg_values() {
         let message = "[foo(a={'a': 1, 'b': 2}, b=2), bar(x={'x': 3, 'y': {'e': 'f'}})]";
-        let (result, _) = try_tool_call_parse_pythonic(message).unwrap();
+        let (result, _) = try_tool_call_parse_pythonic(message, None).unwrap();
         assert!(!result.is_empty());
         assert_eq!(result.len(), 2);
         let (name, args) = extract_name_and_args(result[0].clone());

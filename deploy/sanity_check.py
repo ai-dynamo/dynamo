@@ -5,15 +5,16 @@
 """
 Dynamo System Information Checker
 
-A comprehensive diagnostic tool that displays system configuration and Dynamo project status
+Diagnostic tool that displays system configuration and Dynamo project status
 in a hierarchical tree format. This script checks for:
 
 - System resources (OS, CPU, memory, GPU)
+- Container/host context (execution context, /dev/shm sizing, selected env)
 - Development tools (Cargo/Rust, Maturin, Python)
 - LLM frameworks (vllm, sglang, tensorrt_llm)
 - Dynamo runtime and framework components
-- File system (permissions and disk space, detailed with --thorough-check)
-- HuggingFace model cache (detailed with --thorough-check)
+- File system (permissions and disk space, more detail with --thorough-check)
+- HuggingFace model cache (more detail with --thorough-check)
 - Installation status and component availability
 
 IMPORTANT: This script is STANDALONE and uses only Python stdlib (no Dynamo components).
@@ -32,7 +33,9 @@ The output uses status indicators:
 
 By default, the tool runs quickly by checking only directory permissions and skipping
 size calculations. Use --thorough-check for detailed file-level permission analysis,
-directory size information, and disk space checking.
+directory size information, disk space checking, ulimit information, and DYN_* env.
+
+`--json-output` prints a minified JSON tree (terse subset) for copy/paste into issues.
 
 Exit codes:
 - 0: All critical components are present
@@ -42,6 +45,9 @@ Example output (default mode):
 
 System info (hostname=jensen-linux, IP=10.111.122.133)
 ├─ OS Ubuntu 24.04.1 LTS (Noble Numbat) (Linux 6.11.0-28-generic x86_64), Memory=26.7/125.5 GiB, Cores=32
+│  ├─ Execution context: container
+│  ├─ DYNAMO_COMMIT_SHA: <sha or "not set">
+│  └─ Shared memory (/dev/shm): <used/total/avail>
 ├─ User info: user=ubuntu, uid=1000, gid=1000
 ├─ ✅ NVIDIA GPU NVIDIA RTX 6000 Ada Generation, driver 570.133.07, CUDA 12.8, Power=26.14/300.00 W, Memory=289/49140 MiB
 ├─ 🤖Framework
@@ -65,7 +71,8 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
 ├─ ✅ Python 3.12.3, /opt/dynamo/venv/bin/python
 │  ├─ ✅ PyTorch 2.7.1+cu128, ✅torch.cuda.is_available
 │  └─ PYTHONPATH not set
-└─ Dynamo $HOME/dynamo, SHA: a03d29066, Date: 2025-08-30 16:22:29 PDT
+└─ Dynamo $HOME/dynamo
+   ├─ Git HEAD: a03d29066, branch=main, Date: 2025-08-30 16:22:29 PDT
    ├─ ✅ Runtime components ai-dynamo-runtime 0.4.1
    │  │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime-0.4.1.dist-info: created=2025-08-30 19:14:29 PDT
    │  │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime.pth: modified=2025-08-30 19:14:29 PDT
@@ -86,13 +93,15 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
       └─ ✅ dynamo.vllm      $HOME/dynamo/components/src/dynamo/vllm/__init__.py
 
 Usage:
-    python deploy/sanity_check.py [--thorough-check] [--terse] [--runtime-check]
+    python deploy/sanity_check.py [--thorough-check] [--terse] [--runtime-check] [--json-output]
 
 Options:
-    --thorough-check  Enable thorough checking (file permissions, directory sizes, HuggingFace model details)
+    --thorough-check  Enable thorough checking (file permissions, directory sizes, disk space, ulimits, DYN_* env, HuggingFace model details)
     --terse           Enable terse output mode (show only essential info and errors)
+    --json-output     Output a JSON representation (terse subset) suitable for copy/paste
     --runtime-check   Skip compile-time dependency checks (Rust, Cargo, Maturin) for runtime containers
                       and validate ai-dynamo packages (ai-dynamo-runtime and ai-dynamo)
+    --no-gpu-check    Skip GPU detection and information collection (useful for environments without GPU access)
 """
 
 import datetime
@@ -101,6 +110,7 @@ import json
 import logging
 import os
 import platform
+import resource
 import shutil
 import subprocess
 import sys
@@ -231,6 +241,48 @@ class NodeInfo:
         for line in self.render():
             print(line)
 
+    def to_json_obj(self) -> Dict[str, Any]:
+        """
+        Convert this node into a JSON-serializable object.
+
+        Why: `--json-output` needs a copy/pasteable representation of the tree without
+        relying on terminal formatting characters or emojis.
+        """
+
+        def _clean_json_text(text: str) -> str:
+            # Why: tree output uses emojis and padding for human readability. In
+            # JSON mode we have explicit `status`, so we strip UI-only prefixes.
+            text = text.strip()
+            for prefix in ("✅", "❌", "⚠️", "❓"):
+                if text.startswith(prefix):
+                    text = text[len(prefix) :].lstrip()
+                    break
+            if text.startswith("🤖"):
+                text = text[len("🤖") :].lstrip()
+            return text.strip()
+
+        obj: Dict[str, Any] = {"label": _clean_json_text(self.label)}
+        if self.desc is not None:
+            obj["desc"] = _clean_json_text(self.desc)
+
+        # Keep status stable and machine-friendly.
+        # NOTE: `NodeStatus.INFO` exists but typically doesn't render a symbol.
+        if self.status != NodeStatus.NONE:
+            obj["status"] = self.status.value
+
+        if self.metadata:
+            # Exclude internal metadata keys used for rendering.
+            metadata = {
+                k: v for k, v in self.metadata.items() if k != "part_of_previous"
+            }
+            if metadata:
+                obj["meta"] = metadata
+
+        if self.children:
+            obj["children"] = [child.to_json_obj() for child in self.children]
+
+        return obj
+
     def has_errors(self) -> bool:
         """Check if this node or any of its children have errors"""
         # Check if this node has an error
@@ -325,7 +377,42 @@ class SystemInfo(NodeInfo):
 
         # Collect and add all system information
         # Always show: OS, User, GPU, Framework, Dynamo
-        self.add_child(OSInfo())
+        os_info = OSInfo()
+        # Put execution context and build SHA directly under OS for quick triage when
+        # scanning logs.
+        os_info.add_child(
+            NodeInfo(
+                label="Execution context",
+                desc="container"
+                if self._is_inside_container()
+                else "host (non-docker)",
+                status=NodeStatus.INFO,
+            )
+        )
+        dynamo_commit_sha = os.environ.get("DYNAMO_COMMIT_SHA")
+        os_info.add_child(
+            NodeInfo(
+                label="DYNAMO_COMMIT_SHA",
+                desc=dynamo_commit_sha.strip() if dynamo_commit_sha else "not set",
+                status=NodeStatus.INFO,
+            )
+        )
+        # Attach host/container context directly under OS (no wrapper node), so it is
+        # visible near the top when copy/pasting logs.
+        os_info.add_child(self._dev_shm_info_node())
+        indicators = self._container_indicators_node()
+        if indicators is not None:
+            os_info.add_child(indicators)
+        selected_env = self._selected_env_node()
+        if selected_env is not None:
+            os_info.add_child(selected_env)
+        if self.thorough_check:
+            dyn_env = self._dyn_env_node()
+            if dyn_env is not None:
+                os_info.add_child(dyn_env)
+            os_info.add_child(self._ulimit_info_node())
+
+        self.add_child(os_info)
         self.add_child(UserInfo())
 
         # Add GPU info (always show, even if not found) unless --no-gpu-check
@@ -368,6 +455,137 @@ class SystemInfo(NodeInfo):
                 thorough_check=self.thorough_check, runtime_check=self.runtime_check
             )
         )
+
+    def _dev_shm_info_node(self) -> NodeInfo:
+        """Report /dev/shm sizing and mount options (common source of container issues)."""
+        path = "/dev/shm"
+        if not os.path.exists(path):
+            return NodeInfo(
+                label="Shared memory (/dev/shm)",
+                desc="not present",
+                status=NodeStatus.WARNING,
+            )
+
+        status = NodeStatus.INFO
+        desc = path
+        try:
+            st = os.statvfs(path)
+            total = st.f_frsize * st.f_blocks
+            avail = st.f_frsize * st.f_bavail
+            used = max(total - avail, 0)
+
+            def _fmt_gib(n: int) -> str:
+                return f"{(n / (1024**3)):.2f} GiB"
+
+            desc = f"{_fmt_gib(used)}/{_fmt_gib(total)} used (avail {_fmt_gib(avail)})"
+
+            # Heuristic: small /dev/shm is a common default in Docker and can break
+            # shared-memory heavy workloads.
+            if total < 1 * 1024**3:
+                status = NodeStatus.WARNING
+        except Exception:
+            desc = "unable to statvfs"
+            status = NodeStatus.WARNING
+
+        node = NodeInfo(label="Shared memory (/dev/shm)", desc=desc, status=status)
+        node.add_metadata("writable", str(os.access(path, os.W_OK)).lower())
+
+        # Best-effort mount info from /proc/mounts (stdlib only).
+        try:
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 4 and parts[1] == path:
+                        node.add_metadata("fstype", parts[2])
+                        node.add_metadata("opts", parts[3])
+                        break
+        except Exception:
+            pass
+
+        return node
+
+    def _container_indicators_node(self) -> Optional[NodeInfo]:
+        """Return a node describing container indicators, or None if none are present."""
+        indicators = NodeInfo(label="Container indicators", status=NodeStatus.INFO)
+        if os.path.exists("/.dockerenv"):
+            indicators.add_metadata("dockerenv", "true")
+        if os.path.exists("/run/.containerenv"):
+            indicators.add_metadata("containerenv", "true")
+
+        container_env = os.environ.get("container")
+        if container_env is not None and container_env != "":
+            indicators.add_metadata("container", container_env)
+
+        docker_container_env = os.environ.get("DOCKER_CONTAINER")
+        if docker_container_env is not None and docker_container_env != "":
+            indicators.add_metadata("DOCKER_CONTAINER", docker_container_env)
+
+        if not indicators.metadata:
+            return None
+        return indicators
+
+    def _selected_env_node(self) -> Optional[NodeInfo]:
+        """Return a small set of env vars that are often relevant for debugging."""
+        env_node = NodeInfo(label="Selected env", status=NodeStatus.INFO)
+        for k in [
+            "DYNAMO_HOME",
+            "CUDA_VISIBLE_DEVICES",
+            "NVIDIA_VISIBLE_DEVICES",
+            "NVIDIA_DRIVER_CAPABILITIES",
+            "DYN_SYSTEM_PORT",
+        ]:
+            v = os.environ.get(k)
+            if v is not None and v != "":
+                env_node.add_metadata(k, v)
+        if not env_node.metadata:
+            return None
+        return env_node
+
+    def _dyn_env_node(self) -> Optional[NodeInfo]:
+        """Return all DYN_* env vars, one per line, or None if none are set."""
+        dyn_env = {k: v for k, v in os.environ.items() if k.startswith("DYN_")}
+        if not dyn_env:
+            return None
+        dyn_env_node = NodeInfo(
+            label="DYN_* env",
+            desc=f"{len(dyn_env)} variables",
+            status=NodeStatus.INFO,
+        )
+        for k in sorted(dyn_env.keys()):
+            v = dyn_env.get(k)
+            if v is None:
+                continue
+            dyn_env_node.add_child(NodeInfo(label=k, desc=v, status=NodeStatus.INFO))
+        return dyn_env_node
+
+    def _ulimit_info_node(self) -> NodeInfo:
+        """Summarize key RLIMITs (similar to `ulimit`) using stdlib only."""
+        node = NodeInfo(label="Ulimits", status=NodeStatus.INFO)
+
+        def _fmt_limit(value: int) -> str:
+            # resource.RLIM_INFINITY is typically a very large integer.
+            if value == resource.RLIM_INFINITY:
+                return "unlimited"
+            return str(value)
+
+        # Keep this list small and high-signal for serving workloads.
+        limits: List[Tuple[str, int]] = [
+            ("nofile", resource.RLIMIT_NOFILE),
+            ("nproc", resource.RLIMIT_NPROC),
+            ("memlock", resource.RLIMIT_MEMLOCK),
+            ("stack", resource.RLIMIT_STACK),
+            ("core", resource.RLIMIT_CORE),
+        ]
+
+        for name, rlim in limits:
+            try:
+                soft, hard = resource.getrlimit(rlim)
+                node.add_metadata(name, f"{_fmt_limit(soft)}:{_fmt_limit(hard)}")
+            except Exception:
+                # Avoid failing sanity_check on platforms/containers that restrict access.
+                pass
+
+        return node
 
     def _get_ip_address(self) -> Optional[str]:
         """Get the primary IP address of the system."""
@@ -611,7 +829,7 @@ class GPUInfo(NodeInfo):
 
             # Handle single vs multiple GPUs
             if len(gpu_names) == 1:
-                # Single GPU - compact format
+                # Single GPU - concise format
                 value = gpu_names[0]
                 if driver or cuda:
                     driver_cuda = []
@@ -2506,17 +2724,25 @@ class DynamoInfo(NodeInfo):
             self.add_child(hint)
             return
 
-        # Get git info
-        sha, date = self._get_git_info(workspace_dir)
-
         # Build main label
         display_workspace = self._replace_home_with_var(workspace_dir)
-        if sha and date:
-            value = f"{display_workspace}, SHA: {sha}, Date: {date}"
-        else:
-            value = display_workspace
+        super().__init__(label="Dynamo", desc=display_workspace, status=NodeStatus.INFO)
 
-        super().__init__(label="Dynamo", desc=value, status=NodeStatus.INFO)
+        # Add explicit git info as a child so it's always visible and can clearly say
+        # "not a git directory" when unavailable.
+        git_sha, git_date, git_branch, git_msg = self._get_git_info(workspace_dir)
+        if git_sha:
+            parts = [git_sha]
+            if git_branch:
+                parts.append(f"branch={git_branch}")
+            if git_date:
+                parts.append(f"Date: {git_date}")
+            git_desc = ", ".join(parts)
+        else:
+            git_desc = git_msg
+        self.add_child(
+            NodeInfo(label="Git HEAD", desc=git_desc, status=NodeStatus.INFO)
+        )
 
         # Always add runtime components
         runtime_info = DynamoRuntimeInfo(
@@ -2534,12 +2760,29 @@ class DynamoInfo(NodeInfo):
         )
         self.add_child(framework_info)
 
-    def _get_git_info(self, workspace_dir: str) -> Tuple[Optional[str], Optional[str]]:
-        """Get git SHA and date for the workspace."""
+    def _get_git_info(
+        self, workspace_dir: str
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
+        """Get git SHA, date, and branch for the workspace (or a clear message when unavailable)."""
+        git_bin = shutil.which("git")
+        if not git_bin:
+            return None, None, None, "git not found"
+
         try:
+            # First, detect whether we're inside a git work tree.
+            result = subprocess.run(
+                [git_bin, "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                cwd=workspace_dir,
+                timeout=5,
+            )
+            if result.returncode != 0 or result.stdout.strip().lower() != "true":
+                return None, None, None, "not in a git directory"
+
             # Get short SHA
             result = subprocess.run(
-                ["git", "rev-parse", "--short", "HEAD"],
+                [git_bin, "rev-parse", "--short", "HEAD"],
                 capture_output=True,
                 text=True,
                 cwd=workspace_dir,
@@ -2547,9 +2790,28 @@ class DynamoInfo(NodeInfo):
             )
             sha = result.stdout.strip() if result.returncode == 0 else None
 
+            # Get branch name (best-effort). In detached HEAD this returns "HEAD".
+            branch: Optional[str] = None
+            try:
+                result = subprocess.run(
+                    [git_bin, "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    cwd=workspace_dir,
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    candidate = result.stdout.strip()
+                    if candidate and candidate != "HEAD":
+                        branch = candidate
+                    elif candidate == "HEAD":
+                        branch = "detached"
+            except Exception:
+                branch = None
+
             # Get commit date
             result = subprocess.run(
-                ["git", "show", "-s", "--format=%ci", "HEAD"],
+                [git_bin, "show", "-s", "--format=%ci", "HEAD"],
                 capture_output=True,
                 text=True,
                 cwd=workspace_dir,
@@ -2574,9 +2836,11 @@ class DynamoInfo(NodeInfo):
             else:
                 date = None
 
-            return sha, date
+            if sha:
+                return sha, date, branch, ""
+            return None, None, None, "not in a git directory"
         except Exception:
-            return None, None
+            return None, None, None, "not in a git directory"
 
     @staticmethod
     def find_workspace() -> Optional[str]:
@@ -2648,6 +2912,21 @@ def show_installation_recommendation():
     print("             or export PYTHONPATH=$DYNAMO_HOME/components/src\n")
 
 
+def get_installation_recommendation_lines() -> List[str]:
+    """
+    Get installation recommendations for missing components.
+
+    Why: `--json-output` must keep stdout JSON-only. We return structured lines that
+    can be embedded in JSON instead of printing free-form text.
+    """
+    return [
+        "To install missing components for development (not production):",
+        "  Runtime:   (cd lib/bindings/python && maturin develop)",
+        "  Framework: uv pip install -e .",
+        "             or export PYTHONPATH=$DYNAMO_HOME/components/src",
+    ]
+
+
 def main():
     """Main function - collect and display system information"""
     import argparse
@@ -2668,6 +2947,13 @@ def main():
         help="Show only essential information (OS, User, GPU, Framework, Dynamo) and errors",
     )
     parser.add_argument(
+        "--json",
+        "--json-output",
+        dest="json_output",
+        action="store_true",
+        help="Output a JSON representation (terse subset) suitable for copy/paste",
+    )
+    parser.add_argument(
         "--runtime-check",
         "--runtime",
         action="store_true",
@@ -2683,18 +2969,40 @@ def main():
     # Validate mutual exclusion
     if args.thorough_check and args.terse:
         parser.error("--thorough-check and --terse cannot be used together")
+    if args.json_output and args.thorough_check:
+        parser.error("--json-output and --thorough-check cannot be used together")
+    if args.json_output and args.terse:
+        parser.error(
+            "--json-output and --terse cannot be used together (json-output is already terse)"
+        )
+    # Keep `--json-output` output JSON-only for copy/paste (no Python warnings noise).
+    if args.json_output:
+        import warnings
+
+        warnings.filterwarnings("ignore")
 
     # Simply create a SystemInfo instance - it collects everything in its constructor
     tree = SystemInfo(
         thorough_check=args.thorough_check,
-        terse=args.terse,
+        terse=args.terse or args.json_output,
         runtime_check=args.runtime_check,
         no_gpu_check=args.no_gpu_check,
     )
-    tree.print_tree()
+
+    framework_errors = has_framework_errors(tree)
+
+    if args.json_output:
+        out = tree.to_json_obj()
+        if framework_errors:
+            out["install_recommendation"] = get_installation_recommendation_lines()
+        print(
+            json.dumps(out, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+        )
+    else:
+        tree.print_tree()
 
     # Check if there are framework component errors and show installation recommendation
-    if has_framework_errors(tree):
+    if framework_errors and not args.json_output:
         show_installation_recommendation()
 
     # Exit with non-zero status if there are any errors

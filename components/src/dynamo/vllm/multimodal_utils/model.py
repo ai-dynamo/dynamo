@@ -27,6 +27,7 @@ class SupportedModels:
     """Supported multimodal model identifiers"""
 
     LLAVA_1_5_7B = "llava-hf/llava-1.5-7b-hf"
+    QWEN_2_VL_2B = "Qwen/Qwen2-VL-2B-Instruct"
     QWEN_2_5_VL_7B = "Qwen/Qwen2.5-VL-7B-Instruct"
     LLAVA_NEXT_VIDEO_7B = "llava-hf/LLaVA-NeXT-Video-7B-hf"
 
@@ -100,6 +101,28 @@ def is_model_supported(model_name: str, supported_model: str) -> bool:
     return normalized_name == normalized_supported
 
 
+# List of all Qwen VL model variants for easy extension
+QWEN_VL_MODELS = [
+    SupportedModels.QWEN_2_VL_2B,
+    SupportedModels.QWEN_2_5_VL_7B,
+]
+
+
+def is_qwen_vl_model(model_name: str) -> bool:
+    """
+    Check if a model is any Qwen VL variant.
+
+    Args:
+        model_name: The model name to check
+
+    Returns:
+        True if the model is a Qwen VL variant, False otherwise
+    """
+    return any(
+        is_model_supported(model_name, qwen_model) for qwen_model in QWEN_VL_MODELS
+    )
+
+
 def load_vision_model(model_id: str) -> torch.nn.Module:
     """
     Load a vision model from a HuggingFace model ID.
@@ -132,7 +155,7 @@ def construct_mm_data(
     image_embeds = image_embeds.to(embeddings_dtype)
 
     # Model-specific image handling
-    if is_model_supported(model, SupportedModels.QWEN_2_5_VL_7B):
+    if is_qwen_vl_model(model):
         return _construct_qwen_image_data(image_embeds, image_grid_thw)
     else:
         # Default image handling for other models (e.g., LLAVA_1_5_7B)

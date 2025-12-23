@@ -4,6 +4,7 @@
 from typing import Any, Dict, List, Optional, Union
 
 from tests.utils.client import send_request
+from tests.utils.constants import DefaultPort
 from tests.utils.payloads import (
     ChatPayload,
     ChatPayloadWithLogprobs,
@@ -115,7 +116,7 @@ def metric_payload_default(
     repeat_count: int = 1,
     expected_log: Optional[List[str]] = None,
     backend: Optional[str] = None,
-    port: int = 8081,
+    port: int = DefaultPort.SYSTEM1.value,
 ) -> MetricsPayload:
     return MetricsPayload(
         body={},

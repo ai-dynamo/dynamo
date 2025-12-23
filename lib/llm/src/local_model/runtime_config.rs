@@ -7,6 +7,15 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::protocols::tensor;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct DisaggregatedEndpoint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_host: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_port: Option<u16>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelRuntimeConfig {
     pub total_kv_blocks: Option<u64>,
@@ -40,6 +49,10 @@ pub struct ModelRuntimeConfig {
     // doesn't provide JSON parsing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tensor_model_config: Option<tensor::TensorModelConfig>,
+
+    /// Bootstrap endpoint for disaggregated serving (prefill workers publish this)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disaggregated_endpoint: Option<DisaggregatedEndpoint>,
 }
 
 const fn default_data_parallel_size() -> u32 {
@@ -58,6 +71,7 @@ impl Default for ModelRuntimeConfig {
             enable_local_indexer: false,
             runtime_data: HashMap::new(),
             tensor_model_config: None,
+            disaggregated_endpoint: None,
         }
     }
 }

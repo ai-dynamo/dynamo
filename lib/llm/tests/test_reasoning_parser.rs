@@ -487,6 +487,7 @@ mod tests {
         let tool_parsed_stream = OpenAIPreprocessor::apply_tool_calling_jail(
             Some("nemotron_deci".to_string()),
             None, // No tool_choice in this test
+            None, // No tool_definitions in this test
             reasoning_parsed_stream,
         );
 
@@ -600,6 +601,7 @@ mod tests {
         let tool_parsed_stream = OpenAIPreprocessor::apply_tool_calling_jail(
             Some("harmony".to_string()),
             None, // No tool_choice in this test
+            None, // No tool_definitions in this test
             reasoning_parsed_stream,
         );
 

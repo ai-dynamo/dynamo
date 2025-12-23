@@ -2045,6 +2045,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_jailed_stream_qwen3_coder_multiple_params() {
+        use dynamo_parsers::tool_calling::ToolDefinition;
+
         let chunks = vec![
             create_mock_response_chunk("Let me search for that. ".to_string(), 0),
             create_mock_response_chunk(
@@ -2054,9 +2056,23 @@ mod tests {
             create_mock_response_chunk(" Searching now.".to_string(), 0),
         ];
 
+        // Define the web_search tool with its parameters
+        let tool_defs = vec![ToolDefinition {
+            name: "web_search".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer"},
+                    "filter": {"type": "string"},
+                },
+            })),
+        }];
+
         let input_stream = stream::iter(chunks);
         let jail = JailedStream::builder()
             .tool_call_parser("qwen3_coder")
+            .tool_definitions(tool_defs)
             .build();
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;

@@ -40,7 +40,7 @@ set -e
 warmup_isl=$chosen_isl
 warmup_osl=$chosen_osl
 warmup_req_rate=250
-warmup_concurrency_list=(1 4 8 32 64 128 256 512)
+warmup_concurrency_list=(1 4 32 128 256)
 
 # Ensure all chosen concurrencies are in warmup list
 for c in "${chosen_concurrencies[@]}"; do

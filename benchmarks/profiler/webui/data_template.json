@@ -76,11 +76,11 @@
                     "min": 0
                 },
                 "y": {
-                    "title": "Cost ($)",
+                    "title": "GPU Hours",
                     "min": 0
                 }
             },
-            "title": "Cost Per 1000 ? requests"
+            "title": "GPU Hours Per 1000 ? requests"
         },
         "table": {
             "columns": [
@@ -89,7 +89,7 @@
                 "ITL (ms)",
                 "Decode Thpt (tokens/s/GPU)",
                 "Tokens/User",
-                "Cost ($)",
+                "GPU Hours",
                 "Action"
             ],
             "data": []
