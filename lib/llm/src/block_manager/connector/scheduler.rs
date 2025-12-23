@@ -199,16 +199,20 @@ impl WorkerSchedulerClient {
             "slot does not exist"
         );
 
-        let slot = self
-            .slots
-            .get_mut(&request.request_id)
-            .expect("slot does not exist");
-
-        slot.operations.push(request.uuid);
-
         match request.request_type {
-            RequestType::Immediate => {}
+            RequestType::Immediate => {
+                // For Immediate (ONBOARD) operations, we do NOT track them on the worker side.
+                // The leader handles completion tracking via ZMQ ACK. This avoids race conditions
+                // in TP>1 setups where the ImmediateResult arrives before the scheduler slot exists.
+            }
             RequestType::Scheduled => {
+                let slot = self
+                    .slots
+                    .get_mut(&request.request_id)
+                    .expect("slot does not exist");
+
+                slot.operations.push(request.uuid);
+
                 self.scheduler_tx
                     .send(SchedulerMessage::EnqueueRequest(request))
                     .expect("failed to enqueue request; disconnected");
@@ -373,14 +377,12 @@ impl Scheduler {
         debug_assert!(!self.slots.contains_key(&request_id), "slot already exists");
         tracing::debug!("engine state adding slot");
         let slot = SchedulerSlot::new(req);
-        if let Some(unprocessed_results) = self.unprocessed_immediate_results.remove(&request_id) {
-            tracing::debug!(
-                "found {} unprocessed immediate results; adding to slot",
-                unprocessed_results.len()
-            );
-            slot.completed
-                .fetch_add(unprocessed_results.len() as u64, Ordering::Relaxed);
-        }
+
+        // NOTE: We do NOT apply unprocessed_immediate_results here because we are NOT
+        // tracking Immediate (ONBOARD) operations on the worker side. The leader handles
+        // ONBOARD completion via ZMQ ACK. Just discard any unprocessed results.
+        let _ = self.unprocessed_immediate_results.remove(&request_id);
+
         self.slots.insert(request_id, slot);
     }
 
@@ -457,22 +459,20 @@ impl Scheduler {
 
     #[tracing::instrument(level = "debug", skip_all, fields(request_id = %result.request_id, operation_id = %result.uuid))]
     fn handle_immediate_result(&mut self, result: ImmediateTransferResult) {
-        match self.slots.get_mut(&result.request_id) {
-            Some(slot) => {
-                slot.completed.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(
-                    "matched slot; incrementing completed counter to {}",
-                    slot.completed.load(Ordering::Relaxed)
-                );
-            }
-            None => {
-                tracing::debug!("no slot found; adding to unprocessed immediate results");
-                self.unprocessed_immediate_results
-                    .entry(result.request_id)
-                    .or_default()
-                    .insert(result.uuid);
-            }
-        }
+        // NOTE: With the worker-side tracking fix, we do NOT track Immediate (ONBOARD)
+        // operations on the worker side. The leader handles ONBOARD completion via ZMQ ACK.
+        //
+        // This ImmediateResult is still received (sent by the transfer handler), but we
+        // do NOT increment the completion counter. If we did, the slot would have
+        // completed > operations.len() (because enqueue_request() doesn't add Immediate
+        // operations to slot.operations), causing is_complete() to return false.
+        //
+        // Just log for debugging purposes and discard.
+        let slot_exists = self.slots.contains_key(&result.request_id);
+        tracing::debug!(
+            slot_exists,
+            "received immediate result (not tracking on worker side)"
+        );
     }
 
     /// This function is used to handle the request from worker or transfer based on their arrival order.

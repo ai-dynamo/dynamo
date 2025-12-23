@@ -21,7 +21,7 @@ use dynamo_llm::block_manager::{
         data::logical::distributed_leader_worker::DistributedLeaderWorkerResources,
         locality::Logical,
     },
-    connector::*,
+    connector::{*, protocol::RequestType},
     kv_consolidator::EventSource,
 };
 use dynamo_llm::tokens::{SaltHash, TokenBlockSequence, Tokens};
@@ -83,6 +83,10 @@ pub struct KvConnectorLeader {
     block_size: usize,
     inflight_requests: HashSet<String>,
     onboarding_slots: HashSet<String>,
+    /// Tracks requests that have Scheduled operations sent to the worker.
+    /// Used to determine if request_finished() should return true (wait for worker)
+    /// or false (no worker tracking needed, e.g., ONBOARD-only requests).
+    worker_tracked_requests: HashSet<String>,
     iteration_counter: u64,
     kvbm_metrics: KvbmMetrics,
 }
@@ -189,6 +193,7 @@ impl KvConnectorLeader {
             block_size: page_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),
+            worker_tracked_requests: HashSet::new(),
             iteration_counter: 0,
             kvbm_metrics,
         }
@@ -357,8 +362,19 @@ impl Leader for KvConnectorLeader {
             md.create_slot(request_id.clone());
 
             if let Some(pending_ops) = slot.take_pending_operations() {
+                let num_scheduled = pending_ops
+                    .iter()
+                    .filter(|op| op.request_type == RequestType::Scheduled)
+                    .count();
                 tracing::debug!("adding {} pending onboarding operations", pending_ops.len());
                 md.add_operations(pending_ops);
+
+                // Only track if there are Scheduled operations.
+                // Immediate (ONBOARD) operations are handled by the leader via ZMQ ACK,
+                // so the worker doesn't need to track them. This fixes TP>1 race conditions.
+                if num_scheduled > 0 {
+                    self.worker_tracked_requests.insert(request_id.clone());
+                }
             }
 
             assert!(
@@ -405,12 +421,22 @@ impl Leader for KvConnectorLeader {
             slot.apply_scheduler_output(&[], &[], new_req.num_computed_tokens, scheduled_tokens)?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {
+                let num_scheduled = pending_ops
+                    .iter()
+                    .filter(|op| op.request_type == RequestType::Scheduled)
+                    .count();
                 tracing::debug!(
                     "adding {} pending operations for slot {}",
                     pending_ops.len(),
                     new_req.request_id
                 );
                 md.add_operations(pending_ops);
+
+                // Only track if there are Scheduled operations.
+                if num_scheduled > 0 {
+                    self.worker_tracked_requests
+                        .insert(new_req.request_id.clone());
+                }
             }
         }
 
@@ -467,12 +493,21 @@ impl Leader for KvConnectorLeader {
             )?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {
+                let num_scheduled = pending_ops
+                    .iter()
+                    .filter(|op| op.request_type == RequestType::Scheduled)
+                    .count();
                 tracing::debug!(
                     "adding {} pending operations for slot {}",
                     pending_ops.len(),
                     request_id
                 );
                 md.add_operations(pending_ops);
+
+                // Only track if there are Scheduled operations.
+                if num_scheduled > 0 {
+                    self.worker_tracked_requests.insert(request_id.clone());
+                }
             }
         }
 
@@ -507,6 +542,7 @@ impl Leader for KvConnectorLeader {
                 "request_finished called for request_id: {request_id} but slot is not found"
             );
             self.inflight_requests.remove(&request_id);
+            self.worker_tracked_requests.remove(&request_id);
             return Ok(false);
         }
 
@@ -533,21 +569,30 @@ impl Leader for KvConnectorLeader {
         //            The worker side of the connector API will later call `finish_requests()`
         //            to notify vLLM when the request is truly complete.
         //
-        // TODO(jthomson04): This is a temporary fix to ensure vLLM 0.11.2 compatibility.
-        //     IMPORTANT: We must ALWAYS return `true` here, even when the slot is already Finished.
+        // vLLM 0.11.2 compatibility note:
+        //     If we return `false`, vLLM removes the request from `self.requests` immediately.
+        //     If the worker connector later reports completion via `get_finished()`, vLLM's
+        //     scheduler.py has an assertion `req_id in self.requests` that would fail.
         //
-        //      Why? If we return `false`, vLLM removes the request from `self.requests` immediately.
-        //      However, our worker connector may still report completion later via `finish_requests()`.
-        //      When that happens, vLLM's scheduler.py has an assertion `req_id in self.requests`
-        //      that will fail because the request was already removed from the hash table.
+        //     To avoid this, we return `false` ONLY when:
+        //     1. The slot is Finished (all operations complete)
+        //     2. AND the request has NO Scheduled operations sent to the worker
         //
-        //      By always returning `true`, we ensure vLLM keeps the request in its hash table until
-        //      our worker explicitly signals completion, avoiding the race condition.
+        //     If the request had Scheduled operations (offload), the worker is tracking it
+        //     and will return it in `get_finished()`. We must return `true` to let vLLM wait.
         //
-        //      If the slot is already Finished (no pending operations), we clean it up from our side
-        //      but still return `true` so vLLM waits for the worker's completion signal.
+        //     For requests with only Immediate (ONBOARD) operations or no operations at all,
+        //     we can safely return `false` since the worker is not tracking them.
+        let was_tracked_by_worker = self.worker_tracked_requests.remove(&request_id);
+
         if let SlotState::Finished = slot.state() {
             self.slot_manager().remove_slot(&request_id)?;
+
+            // If this request was NOT tracked by worker, it's safe to return false.
+            // The worker won't track it, so vLLM can clean up immediately.
+            if !was_tracked_by_worker {
+                return Ok(false);
+            }
         } else {
             debug_assert!(matches!(slot.state(), SlotState::Finishing));
         }
