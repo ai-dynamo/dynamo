@@ -4,7 +4,7 @@
 
 ```
 cd dynamo/examples/backends/vllm/deploy
-vim agg_router.yaml    #under metadata add namespace: dynamo-cloud and change image to your built base image
+vim agg_router.yaml    #under metadata add namespace: dynamo-system and change image to your built base image
 kubectl apply -f agg_router.yaml
 ```
 
@@ -13,19 +13,19 @@ Your pods should be running like below
 ```
 ubuntu@ip-192-168-83-157:~/dynamo/examples/backends/vllm/deploy$ kubectl get pods -A
 NAMESPACE      NAME                                                              READY   STATUS    RESTARTS   AGE
-dynamo-cloud   dynamo-platform-dynamo-operator-controller-manager-86795c5f4j4k   2/2     Running   0          4h17m
-dynamo-cloud   dynamo-platform-etcd-0                                            1/1     Running   0          4h17m
-dynamo-cloud   dynamo-platform-nats-0                                            2/2     Running   0          4h17m
-dynamo-cloud   dynamo-platform-nats-box-5dbf45c748-bxqj7                         1/1     Running   0          4h17m
-dynamo-cloud   vllm-agg-router-frontend-79d599bb9c-fg97p                         1/1     Running   0          4m9s
-dynamo-cloud   vllm-agg-router-vllmdecodeworker-787d575485-hrcjp                 1/1     Running   0          4m9s
-dynamo-cloud   vllm-agg-router-vllmdecodeworker-787d575485-zkwdd                 1/1     Running   0          4m9s
+dynamo-system   dynamo-platform-dynamo-operator-controller-manager-86795c5f4j4k   2/2     Running   0          4h17m
+dynamo-system   dynamo-platform-etcd-0                                            1/1     Running   0          4h17m
+dynamo-system   dynamo-platform-nats-0                                            2/2     Running   0          4h17m
+dynamo-system   dynamo-platform-nats-box-5dbf45c748-bxqj7                         1/1     Running   0          4h17m
+dynamo-system   vllm-agg-router-frontend-79d599bb9c-fg97p                         1/1     Running   0          4m9s
+dynamo-system   vllm-agg-router-vllmdecodeworker-787d575485-hrcjp                 1/1     Running   0          4m9s
+dynamo-system   vllm-agg-router-vllmdecodeworker-787d575485-zkwdd                 1/1     Running   0          4m9s
 ```
 
 Test the Deployment
 
 ```
-kubectl port-forward deployment/vllm-agg-router-frontend 8000:8000 -n dynamo-cloud
+kubectl port-forward deployment/vllm-agg-router-frontend 8000:8000 -n dynamo-system
 curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
