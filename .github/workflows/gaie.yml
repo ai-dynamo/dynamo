@@ -24,7 +24,7 @@ concurrency:
 jobs:
   gaie:
     name: Build Images, Deploy Dynamo, Install GAIE, create EPP image and make sure it works.
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: gpu-l40-amd64
     env:
       FRAMEWORK: vllm
       PROFILE: agg
