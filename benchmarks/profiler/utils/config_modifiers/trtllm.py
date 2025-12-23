@@ -87,12 +87,34 @@ class TrtllmConfigModifier:
         target: EngineType,
         is_moe_model: bool = False,
     ) -> dict:
-        if is_moe_model:
-            raise NotImplementedError(
-                "MoE model support is not implemented for TrtLLM backend"
-            )
-
         cfg = Config.model_validate(config)
+        
+        if is_moe_model:
+            # For MoE models, preserve MoE-related fields in override-engine-args JSON
+            for sub_component_type in [SubComponentType.PREFILL, SubComponentType.DECODE]:
+                try:
+                    worker_service = get_worker_service_from_config(
+                        cfg, backend="trtllm", sub_component_type=sub_component_type
+                    )
+                    args = validate_and_get_worker_args(worker_service, backend="trtllm")
+                    args = break_arguments(args)
+                    
+                    # Parse and preserve MoE fields in override-engine-args
+                    override_dict, args = parse_override_engine_args(args)
+                    
+                    # Ensure MoE fields are preserved (they may already be set)
+                    # If not present, they'll be set by set_config_tep_size/set_config_dep_size
+                    # Here we just ensure they're not lost during conversion
+                    
+                    override_str = json.dumps(override_dict)
+                    args = append_argument(args, ["--override-engine-args", override_str])
+                    
+                    worker_service.extraPodSpec.mainContainer.args = args
+                except (ValueError, KeyError):
+                    logger.debug(
+                        f"Skipping {sub_component_type} service as it doesn't exist"
+                    )
+                    continue
 
         # set metadata name
         cfg.metadata.name = "trtllm-agg"
@@ -262,9 +284,45 @@ class TrtllmConfigModifier:
         num_gpus_per_node: int,
         component_type: SubComponentType = SubComponentType.DECODE,
     ):
-        raise NotImplementedError(
-            "TEP (Tensor Expert Parallelism) is not implemented for TrtLLM backend"
+        """
+        Set Tensor Expert Parallelism (TEP) for TensorRT-LLM MoE models.
+        
+        TRTLLM uses JSON fields in --override-engine-args.
+        All MoE configuration is done via JSON, not command-line args.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="trtllm", sub_component_type=component_type
         )
+
+        # Set up resources with multinode configuration
+        setup_worker_service_resources(worker_service, tep_size, num_gpus_per_node)
+
+        # Get and validate args
+        args = validate_and_get_worker_args(worker_service, backend="trtllm")
+        args = break_arguments(args)
+
+        # Parse existing override-engine-args (if any) and update
+        override_dict, args = parse_override_engine_args(args)
+
+        # 1. Set tensor_parallel_size=tep_size (splits KV heads)
+        override_dict["tensor_parallel_size"] = tep_size
+
+        # 2. Set moe_expert_parallel_size=tep_size (distributes experts across GPUs)
+        override_dict["moe_expert_parallel_size"] = tep_size
+
+        # 3. Set moe_tensor_parallel_size=1 (each expert's weights fully on one GPU)
+        override_dict["moe_tensor_parallel_size"] = 1
+
+        # 4. Disable attention DP (TEP uses TP for attention)
+        override_dict["enable_attention_dp"] = False
+
+        # Serialize JSON and append to args
+        override_str = json.dumps(override_dict)
+        args = append_argument(args, ["--override-engine-args", override_str])
+
+        worker_service.extraPodSpec.mainContainer.args = args
+        return cfg.model_dump()
 
     @classmethod
     def set_config_dep_size(
@@ -274,9 +332,46 @@ class TrtllmConfigModifier:
         num_gpus_per_node: int,
         component_type: SubComponentType = SubComponentType.DECODE,
     ):
-        raise NotImplementedError(
-            "DEP (Data Expert Parallelism) is not implemented for TrtLLM backend"
+        """
+        Set Data Expert Parallelism (DEP) for TensorRT-LLM MoE models.
+        
+        TRTLLM uses JSON fields in --override-engine-args.
+        All MoE configuration is done via JSON, not command-line args.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="trtllm", sub_component_type=component_type
         )
+
+        # Set up resources with multinode configuration
+        setup_worker_service_resources(worker_service, dep_size, num_gpus_per_node)
+
+        # Get and validate args
+        args = validate_and_get_worker_args(worker_service, backend="trtllm")
+        args = break_arguments(args)
+
+        # Parse existing override-engine-args (if any) and update
+        override_dict, args = parse_override_engine_args(args)
+
+        # 1. Set tensor_parallel_size=dep_size (use all GPUs)
+        #    Attention DP below ensures KV heads aren't split
+        override_dict["tensor_parallel_size"] = dep_size
+
+        # 2. Set moe_expert_parallel_size=dep_size (distributes experts across GPUs)
+        override_dict["moe_expert_parallel_size"] = dep_size
+
+        # 3. Set moe_tensor_parallel_size=1 (each expert's weights fully on one GPU)
+        override_dict["moe_tensor_parallel_size"] = 1
+
+        # 4. Enable attention DP (replicates KV heads, partitions requests)
+        override_dict["enable_attention_dp"] = True
+
+        # Serialize JSON and append to args
+        override_str = json.dumps(override_dict)
+        args = append_argument(args, ["--override-engine-args", override_str])
+
+        worker_service.extraPodSpec.mainContainer.args = args
+        return cfg.model_dump()
 
     @classmethod
     def get_model_name(cls, config: dict) -> str:
