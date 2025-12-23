@@ -30,7 +30,12 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
-      has_code_changes: ${{ steps.filter.outputs.has_code_changes }}
+      core: ${{ steps.filter.outputs.core }}
+      operator: ${{ steps.filter.outputs.operator }}
+      deploy: ${{ steps.filter.outputs.deploy }}
+      vllm: ${{ steps.filter.outputs.vllm }}
+      sglang: ${{ steps.filter.outputs.sglang }}
+      trtllm: ${{ steps.filter.outputs.trtllm }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -51,7 +56,7 @@ jobs:
 
   operator:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.operator == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -127,7 +132,7 @@ jobs:
 
   vllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -194,7 +199,7 @@ jobs:
 
   sglang:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -255,7 +260,7 @@ jobs:
 
   trtllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -316,7 +321,7 @@ jobs:
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true'
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -581,7 +586,7 @@ jobs:
   # - Run rest of jobs only on push to main or manual trigger
   deploy-test-vllm-disagg-router:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
