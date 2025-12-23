@@ -61,6 +61,7 @@ class AIConfiguratorPerfEstimator:
         logger.info("aiconfigurator database loaded.")
 
         self.backend = aiconfigurator.sdk.backends.factory.get_backend(backend)
+        self.backend_name = backend  # Store the backend name string for get_model
         self.hf_id = hf_id
 
     def _get_model(self, **model_config_kwargs):
@@ -68,8 +69,10 @@ class AIConfiguratorPerfEstimator:
 
         # NOTE: MOE models error out unless moe_tp_size and moe_ep_size are provided.
         model_config = aiconfigurator.sdk.config.ModelConfig(**model_config_kwargs)
+        # Pass backend_name string (not backend object) so aiconfigurator can check
+        # for specific backend features like enable_wideep for sglang
         model = aiconfigurator.sdk.models.get_model(
-            self.hf_id, model_config, self.backend
+            self.hf_id, model_config, self.backend_name
         )
         return model
 

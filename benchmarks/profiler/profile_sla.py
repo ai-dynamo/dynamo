@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import yaml
+from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 
 from benchmarks.profiler.utils.aiperf import (
     get_decode_itl_and_thpt_per_gpu,
@@ -59,7 +60,6 @@ from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
 )
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 
 
 @dataclass
@@ -188,6 +188,9 @@ async def run_profile(args):
             )
 
         if args.use_ai_configurator:
+            # Import aiconfigurator common module for quant modes
+            import aiconfigurator.sdk.common as aic_common
+
             if not args.aic_system:
                 raise ValueError(
                     "Must provide --aic-system when using --use-ai-configurator."
@@ -263,9 +266,30 @@ async def run_profile(args):
                     logger.info("Skipping deployment creation in dry run mode")
                 elif args.use_ai_configurator:
                     logger.info("Using ai-configurator to estimate prefill latency")
+                    # Build model config kwargs, including MOE params if needed
+                    if args.model_info.is_moe:
+                        # WideEP constraints: tp_size <= 8, use attention_dp for more GPUs
+                        model_config_kwargs = {
+                            "tp_size": mapping.get_wideep_tp_size(),
+                            "attention_dp_size": mapping.get_wideep_attn_dp_size(),
+                            "moe_tp_size": mapping.get_moe_tp_size(),
+                            "moe_ep_size": mapping.get_moe_ep_size(),
+                            "moe_backend": "deepep_moe",
+                            "enable_wideep": True,
+                            # FP8 quant modes required for WideEP
+                            "fmha_quant_mode": aic_common.FMHAQuantMode.fp8_block,
+                            "kvcache_quant_mode": aic_common.KVCacheQuantMode.fp8,
+                            "gemm_quant_mode": aic_common.GEMMQuantMode.fp8_block,
+                            "moe_quant_mode": aic_common.MoEQuantMode.fp8_block,
+                        }
+                    else:
+                        model_config_kwargs = {
+                            "tp_size": mapping.get_tp_size(),
+                            "attention_dp_size": mapping.get_attn_dp_size(),
+                        }
                     perf_dict = ai_configurator_perf_estimator.estimate_prefill_perf(
                         args.isl,
-                        tp_size=mapping.get_tp_size(),
+                        **model_config_kwargs,
                     )
                     ttft = perf_dict["context_latency"]
                     logger.info(f"Estimated prefill TTFT: {ttft:.2f}ms")
@@ -370,8 +394,29 @@ async def run_profile(args):
                 elif args.use_ai_configurator:
                     # Compute max_concurrency and max_kv_tokens to know which
                     # num_request to sweep over.
+                    # Build model config kwargs, including MOE params if needed
+                    if args.model_info.is_moe:
+                        # WideEP constraints: tp_size <= 8, use attention_dp for more GPUs
+                        model_config_kwargs = {
+                            "tp_size": mapping.get_wideep_tp_size(),
+                            "attention_dp_size": mapping.get_wideep_attn_dp_size(),
+                            "moe_tp_size": mapping.get_moe_tp_size(),
+                            "moe_ep_size": mapping.get_moe_ep_size(),
+                            "moe_backend": "deepep_moe",
+                            "enable_wideep": True,
+                            # FP8 quant modes required for WideEP
+                            "fmha_quant_mode": aic_common.FMHAQuantMode.fp8_block,
+                            "kvcache_quant_mode": aic_common.KVCacheQuantMode.fp8,
+                            "gemm_quant_mode": aic_common.GEMMQuantMode.fp8_block,
+                            "moe_quant_mode": aic_common.MoEQuantMode.fp8_block,
+                        }
+                    else:
+                        model_config_kwargs = {
+                            "tp_size": mapping.get_tp_size(),
+                            "attention_dp_size": mapping.get_attn_dp_size(),
+                        }
                     max_concurrency = ai_configurator_perf_estimator.get_max_batch_size(
-                        args.isl, args.osl, tp_size=mapping.get_tp_size()
+                        args.isl, args.osl, **model_config_kwargs
                     )
                     max_kv_tokens = max_concurrency * (args.isl + args.osl)
 
@@ -422,12 +467,33 @@ async def run_profile(args):
                             logger.info(
                                 "Using ai-configurator to estimate decode latency."
                             )
+                            # Build model config kwargs, including MOE params if needed
+                            if args.model_info.is_moe:
+                                # WideEP constraints: tp_size <= 8, use attention_dp for more GPUs
+                                model_config_kwargs = {
+                                    "tp_size": mapping.get_wideep_tp_size(),
+                                    "attention_dp_size": mapping.get_wideep_attn_dp_size(),
+                                    "moe_tp_size": mapping.get_moe_tp_size(),
+                                    "moe_ep_size": mapping.get_moe_ep_size(),
+                                    "moe_backend": "deepep_moe",
+                                    "enable_wideep": True,
+                                    # FP8 quant modes required for WideEP
+                                    "fmha_quant_mode": aic_common.FMHAQuantMode.fp8_block,
+                                    "kvcache_quant_mode": aic_common.KVCacheQuantMode.fp8,
+                                    "gemm_quant_mode": aic_common.GEMMQuantMode.fp8_block,
+                                    "moe_quant_mode": aic_common.MoEQuantMode.fp8_block,
+                                }
+                            else:
+                                model_config_kwargs = {
+                                    "tp_size": mapping.get_tp_size(),
+                                    "attention_dp_size": mapping.get_attn_dp_size(),
+                                }
                             perf_dict = ai_configurator_perf_estimator.estimate_perf(
                                 args.isl,
                                 args.osl,
                                 num_request,
                                 mode=EngineType.DECODE,
-                                tp_size=mapping.get_tp_size(),
+                                **model_config_kwargs,
                             )
 
                             itl = perf_dict["tpot"]
@@ -579,13 +645,34 @@ async def run_profile(args):
         if args.dry_run:
             logger.info("Skipping deployment creation in dry run mode")
         elif args.use_ai_configurator:
+            # Build model config kwargs, including MOE params if needed
+            if args.model_info.is_moe:
+                # WideEP constraints: tp_size <= 8, use attention_dp for more GPUs
+                model_config_kwargs = {
+                    "tp_size": best_prefill_mapping.get_wideep_tp_size(),
+                    "attention_dp_size": best_prefill_mapping.get_wideep_attn_dp_size(),
+                    "moe_tp_size": best_prefill_mapping.get_moe_tp_size(),
+                    "moe_ep_size": best_prefill_mapping.get_moe_ep_size(),
+                    "moe_backend": "deepep_moe",
+                    "enable_wideep": True,
+                    # FP8 quant modes required for WideEP
+                    "fmha_quant_mode": aic_common.FMHAQuantMode.fp8_block,
+                    "kvcache_quant_mode": aic_common.KVCacheQuantMode.fp8,
+                    "gemm_quant_mode": aic_common.GEMMQuantMode.fp8_block,
+                    "moe_quant_mode": aic_common.MoEQuantMode.fp8_block,
+                }
+            else:
+                model_config_kwargs = {
+                    "tp_size": best_prefill_mapping.get_tp_size(),
+                    "attention_dp_size": best_prefill_mapping.get_attn_dp_size(),
+                }
             profile_prefill_aiconfigurator(
                 work_dir,
                 best_prefill_gpus,  # num_gpus
                 sweep_max_context_length,
                 args.prefill_interpolation_granularity,
                 ai_configurator_perf_estimator,
-                tp_size=best_prefill_mapping.get_tp_size(),
+                **model_config_kwargs,
             )
         else:
             client = DynamoDeploymentClient(
@@ -663,10 +750,36 @@ async def run_profile(args):
         if args.dry_run:
             logger.info("Skipping deployment creation in dry run mode")
         elif args.use_ai_configurator:
-            attention_dp_size = best_decode_mapping.get_attn_dp_size()
+            # Build model config kwargs, including MOE params if needed
+            if args.model_info.is_moe:
+                # WideEP constraints: tp_size <= 8, use attention_dp for more GPUs
+                attention_dp_size = best_decode_mapping.get_wideep_attn_dp_size()
+                model_config_kwargs = {
+                    "tp_size": best_decode_mapping.get_wideep_tp_size(),
+                    "attention_dp_size": attention_dp_size,
+                    "moe_tp_size": best_decode_mapping.get_moe_tp_size(),
+                    "moe_ep_size": best_decode_mapping.get_moe_ep_size(),
+                    "moe_backend": "deepep_moe",
+                    "enable_wideep": True,
+                    # FP8 quant modes required for WideEP
+                    "fmha_quant_mode": aic_common.FMHAQuantMode.fp8_block,
+                    "kvcache_quant_mode": aic_common.KVCacheQuantMode.fp8,
+                    "gemm_quant_mode": aic_common.GEMMQuantMode.fp8_block,
+                    "moe_quant_mode": aic_common.MoEQuantMode.fp8_block,
+                }
+            else:
+                attention_dp_size = best_decode_mapping.get_attn_dp_size()
+                model_config_kwargs = {
+                    "tp_size": best_decode_mapping.get_tp_size(),
+                    "attention_dp_size": attention_dp_size,
+                }
             max_kv_tokens = ai_configurator_perf_estimator.get_max_kv_tokens(
-                args.isl, args.osl, tp_size=best_decode_mapping.get_tp_size()
+                args.isl, args.osl, **model_config_kwargs
             )
+            # Remove attention_dp_size from kwargs since it's passed positionally
+            decode_model_config_kwargs = {
+                k: v for k, v in model_config_kwargs.items() if k != "attention_dp_size"
+            }
             profile_decode_aiconfigurator(
                 work_dir,
                 best_decode_gpus,  # num_gpus
@@ -675,7 +788,7 @@ async def run_profile(args):
                 args.decode_interpolation_granularity,
                 ai_configurator_perf_estimator,
                 attention_dp_size,
-                tp_size=best_decode_mapping.get_tp_size(),
+                **decode_model_config_kwargs,
             )
         else:
             client = DynamoDeploymentClient(

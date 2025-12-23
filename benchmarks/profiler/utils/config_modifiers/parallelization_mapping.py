@@ -103,6 +103,65 @@ class ParallelizationMapping:
             "Invalid ParallelizationMapping: no parallelization strategy set"
         )
 
+    def get_moe_tp_size(self) -> int:
+        """
+        Get the MOE tensor parallelism size for aiconfigurator WideEP.
+        For WideEP, experts are always expert-parallelized (not tensor-parallelized),
+        so moe_tp_size is always 1.
+        - TEP: moe_tp_size = 1 (experts distributed via EP, not TP)
+        - DEP: moe_tp_size = 1 (experts distributed via EP, not TP)
+        - TP: moe_tp_size = 1
+
+        Returns:
+            The MOE tensor parallelism size (always 1 for WideEP)
+        """
+        # WideEP uses expert parallelism, not tensor parallelism for MOE
+        return 1
+
+    def get_moe_ep_size(self) -> int:
+        """
+        Get the MOE expert parallelism size for aiconfigurator WideEP.
+        For WideEP, experts are distributed across GPUs via expert parallelism.
+        - TEP: moe_ep_size = tep (experts distributed across tep GPUs)
+        - DEP: moe_ep_size = dep (experts distributed across dep GPUs)
+        - TP: moe_ep_size = tp (experts distributed across tp GPUs)
+
+        Returns:
+            The MOE expert parallelism size
+        """
+        if self.tep is not None:
+            return self.tep
+        if self.dep is not None:
+            return self.dep
+        if self.tp is not None:
+            return self.tp
+        return 1
+
+    def get_wideep_tp_size(self) -> int:
+        """
+        Get the attention tensor parallelism size for WideEP.
+        WideEP MLA data only supports tp_size up to 8.
+        - TEP: tp_size = min(tep, 8)
+        - DEP: tp_size = min(dep, 8)
+
+        Returns:
+            The attention tensor parallelism size (capped at 8 for WideEP)
+        """
+        total_gpus = self.get_num_gpus()
+        return min(total_gpus, 8)
+
+    def get_wideep_attn_dp_size(self) -> int:
+        """
+        Get the attention data parallelism size for WideEP.
+        WideEP doesn't support TP>1 and DP>1 for attention simultaneously.
+        Since we use tp_size up to 8, attention_dp_size must be 1.
+
+        Returns:
+            The attention data parallelism size for WideEP (always 1)
+        """
+        # WideEP constraint: can't have both tp>1 and attn_dp>1
+        return 1
+
 
 def _check_divisibility(
     value: int | None,

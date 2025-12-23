@@ -151,3 +151,84 @@ class TestProfileSlaAiconfigurator:
         llm_args.backend = backend
         llm_args.aic_backend_version = aic_backend_version
         await run_profile(llm_args)
+
+    @pytest.fixture
+    def moe_args(self, request):
+        """Fixture for MOE model test arguments."""
+
+        class Args:
+            def __init__(self):
+                self.model = ""
+                self.dgd_image = ""
+                self.backend = "sglang"
+                self.config = "examples/backends/sglang/deploy/disagg.yaml"
+                # Use unique output directory per test for parallel execution
+                self.output_dir = f"/tmp/test_profiling_results_{request.node.name}"
+                self.namespace = f"test-namespace-{request.node.name}"
+                # WideEP database only has data for moe_ep_size >= 16
+                self.min_num_gpus_per_engine = 16
+                self.max_num_gpus_per_engine = 64 # Max 64 (8 nodes × 8 GPUs/node)
+                self.skip_existing_results = False
+                self.force_rerun = False
+                self.isl = 3000
+                self.osl = 150
+                self.ttft = 200
+                self.itl = 20
+                self.prefill_interpolation_granularity = 16
+                self.decode_interpolation_granularity = 6
+                self.service_name = ""
+                self.dry_run = False
+                self.use_ai_configurator = True
+                self.aic_system = "h200_sxm"
+                self.aic_hf_id = "deepseek-ai/DeepSeek-R1"
+                self.aic_backend = ""
+                self.aic_backend_version = None
+                self.num_gpus_per_node = 8
+                self.deploy_after_profile = False
+                # MOE model info
+                self.model_info = ModelInfo(
+                    model_size=671000.0,  # ~671B params
+                    architecture="DeepseekV3ForCausalLM",
+                    is_moe=True,
+                    max_context_length=131072,
+                    num_experts=256,
+                    num_kv_heads=128,
+                    intermediate_size=18432,
+                )
+
+        return Args()
+
+    # limitations:
+    # AIC SGLang deepep only supports fp8 and Deepseek moe models.
+    @pytest.mark.parallel
+    @pytest.mark.asyncio
+    @pytest.mark.gpu_0
+    @pytest.mark.nightly
+    @pytest.mark.performance
+    @pytest.mark.parametrize(
+        "aic_backend_version",
+        [
+            None,
+            "0.5.1.post1",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "hf_model_id, architecture, num_experts",
+        [
+            ("deepseek-ai/DeepSeek-R1", "DeepseekV3ForCausalLM", 256),
+            ("deepseek-ai/DeepSeek-V3", "DeepseekV3ForCausalLM", 256),
+        ],
+    )
+    async def test_sglang_aiconfigurator_moe_models(
+        self, moe_args, hf_model_id, architecture, num_experts, aic_backend_version
+    ):
+        """Test that profile_sla works with SGLang MOE models via aiconfigurator.
+
+        Note: MOE models require moe_tp_size and moe_ep_size parameters to be passed
+        to aiconfigurator. This test verifies the current behavior with MOE models.
+        """
+        moe_args.aic_hf_id = hf_model_id
+        moe_args.aic_backend_version = aic_backend_version
+        moe_args.model_info.architecture = architecture
+        moe_args.model_info.num_experts = num_experts
+        await run_profile(moe_args)
