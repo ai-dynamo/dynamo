@@ -115,6 +115,32 @@ impl fmt::Debug for ObjectStorage {
     }
 }
 
+// Implement core Storage trait for interoperability with block manager
+impl super::Storage for ObjectStorage {
+    fn storage_type(&self) -> super::StorageType {
+        super::StorageType::Nixl
+    }
+
+    fn addr(&self) -> u64 {
+        0
+    }
+
+    fn size(&self) -> usize {
+        self.size
+    }
+
+    unsafe fn as_ptr(&self) -> *const u8 {
+        std::ptr::null()
+    }
+
+    unsafe fn as_mut_ptr(&mut self) -> *mut u8 {
+        std::ptr::null_mut()
+    }
+}
+
+// Object storage is remote - accessed via NIXL transfers
+impl super::Remote for ObjectStorage {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
