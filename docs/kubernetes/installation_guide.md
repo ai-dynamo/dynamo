@@ -55,7 +55,7 @@ kubectl get clusterrolebinding -o json | \
 
 ## Installation Paths
 
-Platform is installed using Dynamo Kubernetes Platform [helm chart](../../deploy/cloud/helm/platform/README.md).
+Platform is installed using Dynamo Kubernetes Platform [helm chart](../../deploy/helm/charts/platform/README.md).
 
 **Path A: Pre-built Artifacts**
 - Use case: Production deployment, shared or dedicated clusters
@@ -198,7 +198,7 @@ export DOCKER_PASSWORD=<YOUR_NGC_CLI_API_KEY>
 export IMAGE_TAG=${RELEASE_VERSION}
 
 # 2. Build operator
-cd deploy/cloud/operator
+cd deploy/operator
 
 # 2.1 Alternative 1 : Build and push the operator image for multiple platforms
 docker buildx create --name multiplatform --driver docker-container --bootstrap
@@ -218,7 +218,7 @@ kubectl create secret docker-registry docker-imagepullsecret \
   --docker-password=${DOCKER_PASSWORD} \
   --namespace=${NAMESPACE}
 
-cd deploy/cloud/helm
+cd deploy/helm/charts
 
 # 4. Install CRDs
 helm upgrade --install dynamo-crds ./crds/ --namespace default
@@ -327,13 +327,37 @@ just add the following to the helm install command:
 ```
 
 **Clean uninstall?**
+
+To uninstall the platform, you can run the following command:
+```
+helm uninstall dynamo-platform --namespace ${NAMESPACE}
+```
+
+To uninstall the CRDs, follow these steps:
+
+Get all of the dynamo CRDs installed in your cluster:
 ```bash
-./uninstall.sh  # Removes all CRDs and platform
+kubectl get crd | grep "dynamo.*nvidia.com"
+```
+
+You should see something like this:
+```
+dynamocomponentdeployments.nvidia.com               2025-10-21T14:49:52Z
+dynamocomponents.nvidia.com                         2025-10-25T05:16:10Z
+dynamographdeploymentrequests.nvidia.com            2025-11-24T05:26:04Z
+dynamographdeployments.nvidia.com                   2025-09-04T20:56:40Z
+dynamographdeploymentscalingadapters.nvidia.com     2025-12-09T21:05:59Z
+dynamomodels.nvidia.com                             2025-11-07T00:19:43Z
+```
+
+Delete each CRD one by one:
+```bash
+kubectl delete crd <crd-name>
 ```
 
 ## Advanced Options
 
-- [Helm Chart Configuration](../../deploy/cloud/helm/platform/README.md)
+- [Helm Chart Configuration](../../deploy/helm/charts/platform/README.md)
 - [Create custom deployments](./deployment/create_deployment.md)
 - [Dynamo Operator details](./dynamo_operator.md)
 - [Model Express Server details](https://github.com/ai-dynamo/modelexpress)

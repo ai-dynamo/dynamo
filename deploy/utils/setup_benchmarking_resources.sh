@@ -35,7 +35,7 @@ Sets up benchmarking and profiling resources in an existing Dynamo namespace:
   - Installs benchmark dependencies if requirements.txt exists
 
 Prerequisites:
-  - Dynamo Cloud platform must already be installed in the namespace
+  - Dynamo Kubernetes Platform must already be installed in the namespace
   - kubectl must be configured and pointing to the target cluster
 
 Environment variables:
@@ -48,14 +48,14 @@ if ! command -v kubectl &>/dev/null; then err "kubectl not found"; exit 1; fi
 
 # Check if namespace exists
 if ! kubectl get namespace "$NAMESPACE" &>/dev/null; then
-  err "Namespace $NAMESPACE does not exist. Please create it first or install Dynamo Cloud platform."
+  err "Namespace $NAMESPACE does not exist. Please create it first or install Dynamo Kubernetes Platform."
   exit 1
 fi
 
 # Check if Dynamo platform is installed
 if ! kubectl get pods -n "$NAMESPACE" | grep -q "dynamo-platform"; then
   warn "Dynamo platform pods not found in namespace $NAMESPACE"
-  warn "Please ensure Dynamo Cloud platform is installed first:"
+  warn "Please ensure Dynamo Kubernetes Platform is installed first:"
   warn "  See: docs/kubernetes/installation_guide.md"
   if [[ -z "${FORCE:-}" && -z "${YES:-}" ]]; then
     read -p "Continue anyway? [y/N]: " -r ans
