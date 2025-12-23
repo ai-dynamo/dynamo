@@ -330,6 +330,9 @@ async fn completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    // Validate stream_options is only used when streaming (NVBug 5662680)
+    validate_completion_stream_options(&request)?;
+
     validate_completion_fields_generic(&request)?;
 
     // Detect batch prompts
@@ -873,6 +876,9 @@ async fn chat_completions(
     // Handle required fields like messages shouldn't be empty.
     validate_chat_completion_required_fields(&request)?;
 
+    // Validate stream_options is only used when streaming (NVBug 5662680)
+    validate_chat_completion_stream_options(&request)?;
+
     // Handle Rest of Validation Errors
     validate_chat_completion_fields_generic(&request)?;
 
@@ -1063,6 +1069,22 @@ pub fn validate_chat_completion_required_fields(
     Ok(())
 }
 
+/// Validates that stream_options is only used when stream=true for chat completions (NVBug 5662680)
+pub fn validate_chat_completion_stream_options(
+    request: &NvCreateChatCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    let inner = &request.inner;
+    let streaming = inner.stream.unwrap_or(false);
+    if !streaming && inner.stream_options.is_some() {
+        return Err(ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string()
+                + "The 'stream_options' field is only allowed when 'stream' is set to true.",
+        }));
+    }
+    Ok(())
+}
+
 /// Validates a chat completion request and returns an error response if validation fails.
 ///
 /// This function calls the `validate` method implemented for `NvCreateChatCompletionRequest`.
@@ -1076,6 +1098,22 @@ pub fn validate_chat_completion_fields_generic(
             message: VALIDATION_PREFIX.to_string() + &e.to_string(),
         })
     })
+}
+
+/// Validates that stream_options is only used when stream=true for completions (NVBug 5662680)
+pub fn validate_completion_stream_options(
+    request: &NvCreateCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    let inner = &request.inner;
+    let streaming = inner.stream.unwrap_or(false);
+    if !streaming && inner.stream_options.is_some() {
+        return Err(ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string()
+                + "The 'stream_options' field is only allowed when 'stream' is set to true.",
+        }));
+    }
+    Ok(())
 }
 
 /// Validates a completion request and returns an error response if validation fails.
@@ -1395,9 +1433,9 @@ async fn list_models_openai(
     for model_name in models {
         data.push(ModelListing {
             id: model_name.clone(),
-            object: "object",
-            created,                        // Where would this come from?
-            owned_by: "nvidia".to_string(), // Get organization from config
+            object: "model", // Per OpenAI spec, this should be "model"
+            created,
+            owned_by: "nvidia".to_string(),
         });
     }
 
@@ -1417,8 +1455,8 @@ struct ListModelOpenAI {
 #[derive(Serialize)]
 struct ModelListing {
     id: String,
-    object: &'static str, // always "object"
-    created: u64,         //  Seconds since epoch
+    object: &'static str, // always "model" per OpenAI spec
+    created: u64,         // Seconds since epoch
     owned_by: String,
 }
 

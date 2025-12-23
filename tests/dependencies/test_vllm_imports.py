@@ -9,6 +9,7 @@ import pytest
 @pytest.mark.vllm
 @pytest.mark.unit
 @pytest.mark.gpu_1
+@pytest.mark.pre_merge
 def test_import_deep_ep():
     """Test that deep_ep module can be imported."""
     try:
@@ -22,6 +23,7 @@ def test_import_deep_ep():
 @pytest.mark.vllm
 @pytest.mark.unit
 @pytest.mark.gpu_1
+@pytest.mark.pre_merge
 def test_import_pplx_kernels():
     """Test that pplx_kernels module can be imported."""
     try:

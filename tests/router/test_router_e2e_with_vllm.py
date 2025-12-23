@@ -427,6 +427,7 @@ def test_router_decisions_vllm_multiple_workers(
 
 
 @pytest.mark.gpu_2
+@pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
 def test_router_decisions_vllm_dp(
