@@ -518,25 +518,34 @@ async fn network_receive_handler(
     loop {
         tokio::select! {
             biased;
-
+            
             _ = response_tx.closed() => {
+                // #region agent log
+                { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"C","location":"tcp_server.rs:523","message":"server_response_channel_CLOSED","data":{{"context_id":"{}"}},"timestamp":{}}}"#, context.id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                // #endregion
                 tracing::trace!("response channel closed before the client finished writing data");
                 control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
                 break;
             }
 
             _ = context.killed() => {
+                // #region agent log
+                { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"C","location":"tcp_server.rs:529","message":"server_context_KILLED","data":{{"context_id":"{}"}},"timestamp":{}}}"#, context.id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                // #endregion
                 tracing::trace!("context kill signal received; shutting down");
                 control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
                 break;
             }
 
             _ = context.stopped(), if can_stop => {
+                // #region agent log
+                { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"C","location":"tcp_server.rs:535","message":"server_context_STOPPED","data":{{"context_id":"{}","can_stop":{}}},"timestamp":{}}}"#, context.id(), can_stop, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                // #endregion
                 tracing::trace!("context stop signal received; shutting down");
                 can_stop = false;
                 control_tx.send(ControlMessage::Stop).await.expect("the control channel should not be closed");
             }
-
+            
             msg = framed_reader.next() => {
                 match msg {
                     Some(Ok(msg)) => {

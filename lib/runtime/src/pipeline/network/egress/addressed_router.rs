@@ -181,10 +181,14 @@ where
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut is_complete_final = false;
+        let request_id_for_log = request_id.clone();
         let stream = tokio_stream::StreamNotifyClose::new(
             tokio_stream::wrappers::ReceiverStream::new(response_stream.rx),
         )
         .filter_map(move |res| {
+            // #region agent log
+            { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"D","location":"addressed_router.rs:187","message":"egress_filter_map_called","data":{{"request_id":"{}","res_is_some":{},"is_complete_final":{},"is_stopped":{}}},"timestamp":{}}}"#, request_id_for_log, res.is_some(), is_complete_final, engine_ctx_.is_stopped(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+            // #endregion
             if let Some(res_bytes) = res {
                 if is_complete_final {
                     return Some(U::from_err(
@@ -200,6 +204,9 @@ where
                         if let Some(data) = item.data {
                             Some(data)
                         } else if is_complete_final {
+                            // #region agent log
+                            { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"D","location":"addressed_router.rs:203","message":"egress_stream_END_complete_final_no_data","data":{{"request_id":"{}"}},"timestamp":{}}}"#, request_id_for_log, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                            // #endregion
                             None
                         } else {
                             Some(U::from_err(
@@ -217,15 +224,24 @@ where
                     }
                 }
             } else if is_complete_final {
+                // #region agent log
+                { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"D","location":"addressed_router.rs:219","message":"egress_stream_END_channel_closed_complete_final","data":{{"request_id":"{}"}},"timestamp":{}}}"#, request_id_for_log, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                // #endregion
                 // end of stream
                 None
             } else if engine_ctx_.is_stopped() {
+                // #region agent log
+                { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"D","location":"addressed_router.rs:222","message":"egress_stream_END_context_stopped","data":{{"request_id":"{}"}},"timestamp":{}}}"#, request_id_for_log, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                // #endregion
                 // Gracefully end the stream if 'stop_generating()' was called. Do NOT check for
                 // 'is_killed()' here because it implies the stream ended abnormally which should be
                 // handled by the error branch below.
                 tracing::debug!("Request cancelled and then trying to read a response");
                 None
             } else {
+                // #region agent log
+                { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"D","location":"addressed_router.rs:229","message":"egress_stream_END_unexpected","data":{{"request_id":"{}"}},"timestamp":{}}}"#, request_id_for_log, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                // #endregion
                 // stream ended unexpectedly
                 tracing::debug!("{STREAM_ERR_MSG}");
                 Some(U::from_err(Error::msg(STREAM_ERR_MSG).into()))

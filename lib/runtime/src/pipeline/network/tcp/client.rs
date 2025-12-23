@@ -276,27 +276,46 @@ async fn handle_writer(
 ) -> Result<FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>> {
     // Only send sentinel for normal channel closure
     let mut send_sentinel = true;
+    let context_id = context.id().to_string();
+
+    // #region agent log
+    { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"B","location":"tcp_client.rs:271","message":"handle_writer_started","data":{{"context_id":"{}"}},"timestamp":{}}}"#, context_id, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+    // #endregion
 
     loop {
         let msg = tokio::select! {
             biased;
 
             _ = context.killed() => {
+                // #region agent log
+                { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"B","location":"tcp_client.rs:284","message":"context_KILLED_signal","data":{{"context_id":"{}"}},"timestamp":{}}}"#, context_id, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                // #endregion
                 tracing::trace!("context kill signal received; shutting down");
                 send_sentinel = false;
                 break;
             }
 
             _ = context.stopped() => {
+                // #region agent log
+                { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"B","location":"tcp_client.rs:290","message":"context_STOPPED_signal","data":{{"context_id":"{}"}},"timestamp":{}}}"#, context_id, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                // #endregion
                 tracing::trace!("context stop signal received; shutting down");
                 send_sentinel = false;
                 break;
             }
 
+            // NOTE: We intentionally do NOT react to context.stopped() here.
+            // stop_generating() means "stop producing new results, but drain what's in the stream"
+            // The publisher should continue sending until the channel is closed normally or killed.
+
+
             msg = bytes_rx.recv() => {
                 match msg {
                     Some(msg) => msg,
                     None => {
+                        // #region agent log
+                        { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"B","location":"tcp_client.rs:300","message":"channel_closed_normally","data":{{"context_id":"{}"}},"timestamp":{}}}"#, context_id, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                        // #endregion
                         tracing::trace!("response channel closed; shutting down");
                         break;
                     }
@@ -305,6 +324,9 @@ async fn handle_writer(
         };
 
         if let Err(e) = framed_writer.send(msg).await {
+            // #region agent log
+            { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"B","location":"tcp_client.rs:307","message":"framed_writer_send_FAILED","data":{{"context_id":"{}","error":"{:?}"}},"timestamp":{}}}"#, context_id, e, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+            // #endregion
             tracing::trace!(
                 "failed to send message to network; possible disconnect: {:?}",
                 e
@@ -313,6 +335,10 @@ async fn handle_writer(
             break;
         }
     }
+
+    // #region agent log
+    { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"B","location":"tcp_client.rs:318","message":"handle_writer_exiting","data":{{"context_id":"{}","send_sentinel":{}}},"timestamp":{}}}"#, context_id, send_sentinel, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+    // #endregion
 
     // Send sentinel only on normal closure
     if send_sentinel {

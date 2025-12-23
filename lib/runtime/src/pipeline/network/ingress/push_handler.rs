@@ -263,11 +263,22 @@ where
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut send_complete_final = true;
+        let mut chunk_count = 0u32;
+        // #region agent log
+        { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"A","location":"push_handler.rs:266","message":"stream_loop_started","data":{{"context_id":"{}","is_stopped":{}}},"timestamp":{}}}"#, context.id(), context.is_stopped(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+        // #endregion
         while let Some(resp) = stream.next().await {
+            chunk_count += 1;
+            // #region agent log
+            { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"A","location":"push_handler.rs:268","message":"stream_chunk_received","data":{{"context_id":"{}","chunk":{},"is_stopped":{},"is_err":{}}},"timestamp":{}}}"#, context.id(), chunk_count, context.is_stopped(), resp.err().is_some(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+            // #endregion
             tracing::trace!("Sending response: {:?}", resp);
             if let Some(err) = resp.err()
                 && format!("{:?}", err) == STREAM_ERR_MSG
             {
+                // #region agent log
+                { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"E","location":"push_handler.rs:273","message":"STREAM_ERR_MSG_detected","data":{{"context_id":"{}"}},"timestamp":{}}}"#, context.id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                // #endregion
                 tracing::warn!(STREAM_ERR_MSG);
                 send_complete_final = false;
                 break;
@@ -281,8 +292,25 @@ where
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
+            // #region agent log
+            { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"A","location":"push_handler.rs:284","message":"before_send_chunk","data":{{"context_id":"{}","chunk":{},"is_stopped":{}}},"timestamp":{}}}"#, context.id(), chunk_count, context.is_stopped(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+            // #endregion
             if (publisher.send(resp_bytes.into()).await).is_err() {
-                tracing::error!("Failed to publish response for stream {}", context.id());
+                // #region agent log
+                { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"A","location":"push_handler.rs:285","message":"SEND_FAILED","data":{{"context_id":"{}","chunk":{},"is_stopped":{}}},"timestamp":{}}}"#, context.id(), chunk_count, context.is_stopped(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                // #endregion
+                // If context is already stopped (e.g., stop word detected), the client likely
+                // closed the connection after receiving the complete response. This is expected.
+                if context.is_stopped() {
+                    // #region agent log
+                    { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"FIX","location":"push_handler.rs:302","message":"SEND_FAILED_BUT_EXPECTED","data":{{"context_id":"{}","chunk":{},"reason":"context_stopped"}},"timestamp":{}}}"#, context.id(), chunk_count, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                    // #endregion
+                } else {
+                    // #region agent log
+                    { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"FIX","location":"push_handler.rs:302","message":"SEND_FAILED_UNEXPECTED_ERROR","data":{{"context_id":"{}","chunk":{}}},"timestamp":{}}}"#, context.id(), chunk_count, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                    // #endregion
+                    tracing::error!("Failed to publish response for stream {}", context.id());
+                }
                 context.stop_generating();
                 send_complete_final = false;
                 if let Some(m) = self.metrics() {
@@ -293,6 +321,9 @@ where
                 break;
             }
         }
+        // #region agent log
+        { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"C","location":"push_handler.rs:296","message":"stream_loop_finished","data":{{"context_id":"{}","chunk_count":{},"send_complete_final":{},"is_stopped":{}}},"timestamp":{}}}"#, context.id(), chunk_count, send_complete_final, context.is_stopped(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+        // #endregion
         if send_complete_final {
             let resp_wrapper = NetworkStreamWrapper::<U> {
                 data: None,
@@ -303,7 +334,13 @@ where
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
+            // #region agent log
+            { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"C","location":"push_handler.rs:306","message":"before_send_complete_final","data":{{"context_id":"{}","is_stopped":{}}},"timestamp":{}}}"#, context.id(), context.is_stopped(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+            // #endregion
             if (publisher.send(resp_bytes.into()).await).is_err() {
+                // #region agent log
+                { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"C","location":"push_handler.rs:307","message":"SEND_COMPLETE_FINAL_FAILED","data":{{"context_id":"{}","is_stopped":{}}},"timestamp":{}}}"#, context.id(), context.is_stopped(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                // #endregion
                 tracing::error!(
                     "Failed to publish complete final for stream {}",
                     context.id()

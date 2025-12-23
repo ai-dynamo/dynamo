@@ -217,7 +217,13 @@ impl
                     // If we detected a local stop condition, mark stream as finished
                     // so we stop iterating (upstream may keep generating, but we ignore it)
                     if finish_reason.is_some() && data.finish_reason.is_none() {
+                        // #region agent log
+                        { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"C","location":"backend.rs:219","message":"calling_stop_generating","data":{{"context_id":"{}","finish_reason":"{:?}","is_stopped_before":{}}},"timestamp":{}}}"#, state.stream.context().id(), finish_reason, state.stream.context().is_stopped(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                        // #endregion
                         state.stream.context().stop_generating();
+                        // #region agent log
+                        { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"C","location":"backend.rs:222","message":"stop_generating_called","data":{{"context_id":"{}","is_stopped_after":{}}},"timestamp":{}}}"#, state.stream.context().id(), state.stream.context().is_stopped(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                        // #endregion
                         state.finished = true;
                     }
 

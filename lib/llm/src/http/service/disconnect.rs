@@ -184,6 +184,9 @@ pub fn monitor_for_disconnects(
                             yield Event::default().event("error").comment(err.to_string());
                         }
                         None => {
+                            // #region agent log
+                            { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"F","location":"disconnect.rs:186","message":"monitor_for_disconnects_STREAM_ENDED_NORMALLY","data":{{"context_id":"{}"}},"timestamp":{}}}"#, context.id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                            // #endregion
                             // Stream ended normally
                             inflight_guard.mark_ok();
                             stream_handle.disarm();
@@ -196,6 +199,9 @@ pub fn monitor_for_disconnects(
                     }
                 }
                 _ = context.stopped() => {
+                    // #region agent log
+                    { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/workspace/.cursor/debug.log") { let _ = writeln!(f, r#"{{"hypothesisId":"F","location":"disconnect.rs:198","message":"monitor_for_disconnects_CONTEXT_STOPPED","data":{{"context_id":"{}"}},"timestamp":{}}}"#, context.id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()); } }
+                    // #endregion
                     tracing::trace!("Context stopped; breaking stream");
                     break;
                 }
