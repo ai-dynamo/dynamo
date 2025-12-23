@@ -162,6 +162,42 @@ pub enum LayoutType {
 }
 
 impl LayoutType {
+    /// Auto-detect layout type from tensor metadata
+    ///
+    /// Detects FullyContiguous vs LayerSeparate based on:
+    /// - Number of tensors (1 = FullyContiguous, multiple = LayerSeparate)
+    /// - First tensor shape (checks for [blocks, layers, ...] pattern)
+    ///
+    /// # Arguments
+    /// * `num_tensors` - Number of KV cache tensors passed
+    /// * `first_tensor_shape` - Shape of the first tensor
+    /// * `num_device_blocks` - Expected number of blocks
+    ///
+    /// # Returns
+    /// LayoutType::FullyContiguous if single tensor with [blocks, layers, ...] shape
+    /// LayoutType::LayerSeparate otherwise
+    pub fn auto_detect(
+        num_tensors: usize,
+        first_tensor_shape: &[usize],
+        num_device_blocks: usize,
+    ) -> anyhow::Result<Self> {
+        // FullyContiguous: Single tensor with [num_blocks, num_layers, ...]
+        if num_tensors == 1 && first_tensor_shape.len() >= 2 {
+            let dim0 = first_tensor_shape[0];
+            let dim1 = first_tensor_shape[1];
+
+            // Check if dim0 matches num_blocks and dim1 looks like num_layers
+            // Typical models have 2-200 layers, so check dim1 is in reasonable range
+            if dim0 >= num_device_blocks && dim1 >= 2 && dim1 <= 200 {
+                return Ok(LayoutType::FullyContiguous);
+            }
+        }
+
+        // LayerSeparate: Multiple tensors OR shape doesn't match FullyContiguous pattern
+        // Fall back to existing layer_separate_auto for outer_contiguous detection
+        Self::layer_separate_auto(first_tensor_shape, num_device_blocks)
+    }
+
     /// Create a LayerSeparate layout type with auto-detection based on tensor shapes
     pub fn layer_separate_auto(shape: &[usize], num_device_blocks: usize) -> anyhow::Result<Self> {
         let outer_contiguous = if shape[0] >= num_device_blocks {

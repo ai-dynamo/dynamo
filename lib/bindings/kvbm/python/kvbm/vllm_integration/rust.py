@@ -20,6 +20,9 @@ try:
     KvConnectorLeader = getattr(_vllm_integration, "PyKvConnectorLeader")
     SchedulerOutput = getattr(_vllm_integration, "SchedulerOutput")
 
+    # Layout type enum for configuring KV cache memory layout
+    PyLayoutType = getattr(_vllm_integration, "PyLayoutType")
+
     from kvbm import BlockManager
 
 except ImportError:
@@ -34,6 +37,7 @@ except ImportError:
     KvConnectorWorker = None
     KvConnectorLeader = None
     SchedulerOutput = None
+    PyLayoutType = None
 
 __all__ = [
     "KvbmCacheManager",
@@ -46,4 +50,5 @@ __all__ = [
     "KvConnectorWorker",
     "KvConnectorLeader",
     "SchedulerOutput",
+    "PyLayoutType",
 ]

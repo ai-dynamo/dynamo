@@ -115,6 +115,37 @@ class KvConnectorWorker:
         else:
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
+        # Detect layout type from tensor structure
+        from kvbm.vllm_integration.rust import PyLayoutType
+
+        num_tensors = len(ordered_kv_caches)
+        device_layout_type = None
+        host_layout_type = None
+        disk_layout_type = None
+
+        # FullyContiguous: Single tensor with [blocks, layers, ...]
+        # LayerSeparate: Multiple tensors (one per layer)
+        if num_tensors == 1 and len(shape) >= 2:
+            # Single tensor - check if it's FullyContiguous pattern
+            if shape[0] >= num_device_blocks and shape[1] >= 2:
+                device_layout_type = PyLayoutType.FullyContiguous
+                host_layout_type = PyLayoutType.FullyContiguous
+                disk_layout_type = PyLayoutType.FullyContiguous
+                print(
+                    f"KVBM: Detected FullyContiguous layout - single tensor with shape {list(shape)}"
+                )
+        elif num_tensors > 1:
+            # Multiple tensors = LayerSeparate
+            device_layout_type = PyLayoutType.LayerSeparate
+            host_layout_type = PyLayoutType.LayerSeparate
+            disk_layout_type = PyLayoutType.LayerSeparate
+            print(
+                f"KVBM: Detected LayerSeparate layout - {num_tensors} separate tensors"
+            )
+
+        # If detection didn't set layout, let Rust auto-detect
+        # This happens for edge cases
+
         # Register with connector using ordered data
         self._connector.register_kv_caches(
             num_device_blocks,
@@ -123,6 +154,9 @@ class KvConnectorWorker:
             kv_cache_dtype.itemsize,
             ordered_kv_caches,
             raw_event_handles,
+            device_layout_type,
+            host_layout_type,
+            disk_layout_type,
         )
 
     def bind_connector_metadata(self, data: bytes) -> None:

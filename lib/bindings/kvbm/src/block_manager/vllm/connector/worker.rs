@@ -169,17 +169,21 @@ impl Worker for KvConnectorWorker {
             Some(layout) => layout,
             None => {
                 if let Some(ref shape) = first_tensor_shape {
-                    match LayoutType::layer_separate_auto(shape, num_device_blocks) {
+                    let num_tensors = rust_kv_caches.len();
+                    match LayoutType::auto_detect(num_tensors, shape, num_device_blocks) {
                         Ok(detected) => {
                             tracing::info!(
-                                "Auto-detected device layout from tensor shape: {:?}",
+                                "Auto-detected device layout from {} tensor(s) with shape {:?}: {:?}",
+                                num_tensors,
+                                shape,
                                 detected
                             );
                             detected
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "Failed to auto-detect layout from shape {:?}: {}. Using default.",
+                                "Failed to auto-detect layout from {} tensor(s) with shape {:?}: {}. Using LayerSeparate default.",
+                                num_tensors,
                                 shape,
                                 e
                             );
@@ -187,7 +191,7 @@ impl Worker for KvConnectorWorker {
                         }
                     }
                 } else {
-                    tracing::warn!("No tensors available for layout detection. Using default.");
+                    tracing::warn!("No tensors available for layout detection. Using LayerSeparate default.");
                     LayoutType::layer_separate_auto_default()
                 }
             }

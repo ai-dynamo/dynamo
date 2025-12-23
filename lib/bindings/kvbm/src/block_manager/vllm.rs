@@ -37,6 +37,9 @@ pub use block_list::{BlockListType, BlockState, BlockStates, KvbmBlockList};
 pub use request::KvbmRequest;
 pub use slot::{Slot, SlotPosition};
 
+// Import PyLayoutType from distributed module for vLLM integration
+use crate::block_manager::distributed::PyLayoutType;
+
 #[pymodule]
 fn _vllm_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<KvbmCacheManager>()?;
@@ -53,6 +56,10 @@ fn _vllm_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // TODO: use TRTLLM own integration module
     m.add_class::<connector::trtllm_worker::PyTrtllmKvConnectorWorker>()?;
     m.add_class::<connector::trtllm_leader::PyTrtllmKvConnectorLeader>()?;
+
+    // Export PyLayoutType for layout configuration
+    m.add_class::<PyLayoutType>()?;
+
     Ok(())
 }
 
