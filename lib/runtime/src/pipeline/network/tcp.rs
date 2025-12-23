@@ -20,6 +20,9 @@
 pub mod client;
 pub mod server;
 
+#[cfg(test)]
+pub mod test_utils;
+
 use super::ControlMessage;
 use serde::{Deserialize, Serialize};
 

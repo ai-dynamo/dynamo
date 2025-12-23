@@ -329,21 +329,11 @@ async fn handle_writer(
 mod tests {
     use super::*;
     use crate::pipeline::context::Controller;
+    use crate::pipeline::network::tcp::test_utils::create_tcp_pair;
     use bytes::Bytes;
     use std::sync::Arc;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
-
-    /// Helper to create a real TCP connection pair for testing
-    async fn create_tcp_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let (server, _) = listener.accept().await.unwrap();
-
-        (client, server)
-    }
 
     /// Test that handle_writer forwards messages from the channel to the framed writer
     #[tokio::test]
