@@ -94,10 +94,10 @@ jobs:
 
           # Build vLLM image using build.sh
           VLLM_FULL_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${VLLM_IMAGE_TAG}"
-          echo "=============================================="
+          echo "==============================================="
           echo "VLLM_IMAGE_TAG: ${VLLM_IMAGE_TAG}"
           echo "VLLM_FULL_IMAGE: ${VLLM_FULL_IMAGE}"
-          echo "=============================================="
+          echo "==============================================="
           echo "Starting vLLM image build..."
 
           ./container/build.sh \
