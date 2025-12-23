@@ -4,6 +4,7 @@
 [workspace]
 members = [
     "launch/dynamo-run",
+    "launch/dynamo-tui",
     "lib/llm",
     "lib/runtime",
     "lib/config",
@@ -40,6 +41,7 @@ authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
 license = "Apache-2.0"
 homepage = "https://github.com/ai-dynamo/dynamo"
 repository = "https://github.com/ai-dynamo/dynamo.git"
+readme = "README.md"
 keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
