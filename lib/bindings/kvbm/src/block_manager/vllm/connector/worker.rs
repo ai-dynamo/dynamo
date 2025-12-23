@@ -382,11 +382,32 @@ impl Worker for KvConnectorWorker {
                     "possibly got a duplicate finished request; request_id already in the maybe_finished_offloading set"
                 );
             } else {
-                tracing::debug!(
-                    request_id,
-                    "received finished request; adding to maybe_finished_offloading set"
-                );
-                self.maybe_finished_offloading.insert(request_id.clone());
+                // Check if this is a "trivial" request with no operations.
+                // Trivial requests don't need async tracking. The leader returns `false`
+                // for these, telling vLLM to clean up immediately. We should NOT return
+                // these request_ids in get_finished() or vLLM will assert because the
+                // request was already removed.
+                let num_ops = self.connector.num_operations(&request_id);
+                if num_ops == 0 {
+                    tracing::debug!(
+                        request_id,
+                        "trivial request (0 operations); cleaning up slot silently (leader returned false)"
+                    );
+                    // DON'T add to maybe_finished_offloading - vLLM already removed this request!
+                    // Just clean up the slot if it exists.
+                    if self.connector.has_slot(&request_id) {
+                        self.connector.remove_slot(&request_id);
+                    }
+                    // Skip further processing for this request.
+                    continue;
+                } else {
+                    tracing::debug!(
+                        request_id,
+                        num_operations = num_ops,
+                        "received finished request; adding to maybe_finished_offloading set"
+                    );
+                    self.maybe_finished_offloading.insert(request_id.clone());
+                }
             }
         }
 

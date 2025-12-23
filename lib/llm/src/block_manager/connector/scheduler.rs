@@ -233,6 +233,15 @@ impl WorkerSchedulerClient {
             }
         }
     }
+
+    /// Returns the number of operations for a slot.
+    /// Returns 0 if the slot doesn't exist.
+    pub fn num_operations(&self, request_id: &str) -> usize {
+        match self.slots.get(request_id) {
+            Some(slot) => slot.operations.len(),
+            None => 0,
+        }
+    }
 }
 
 pub type Iteration = u64;
