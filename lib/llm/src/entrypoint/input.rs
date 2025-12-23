@@ -140,7 +140,7 @@ pub async fn run_input(
             batch::run(drt, path, engine_config).await?;
         }
         Input::Endpoint(path) => {
-            endpoint::run(drt, path, engine_config).await?;
+            endpoint::run(drt, path, engine_config, None).await?;
         }
     }
     Ok(())

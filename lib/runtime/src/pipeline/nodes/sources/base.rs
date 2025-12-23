@@ -61,7 +61,7 @@ impl<In: PipelineIO + Sync, Out: PipelineIO> AsyncEngine<In, Out, Error> for Fro
         let (tx, rx) = oneshot::channel::<Out>();
         {
             let mut sinks = self.sinks.lock().unwrap();
-            sinks.insert(request.id().to_string(), tx);
+            sinks.insert(request.id(), tx);
         }
         self.on_next(request, private::Token {}).await?;
         Ok(rx.await.map_err(|_| PipelineError::DetachedStreamSender)?)
