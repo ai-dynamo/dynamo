@@ -35,6 +35,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Explicitly set NATS server for KV event publishing
+export NATS_SERVER="nats://localhost:4222"
 
 # run ingress with KV router mode for disaggregated setup
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)

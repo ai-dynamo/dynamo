@@ -11,6 +11,9 @@ export PYTHONHASHSEED=0
 MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
 
+# Explicitly set NATS server for KV event publishing
+export NATS_SERVER="nats://localhost:4222"
+
 # Start frontend with KV routing
 # The frontend will automatically detect prefill workers and activate an internal prefill router
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)

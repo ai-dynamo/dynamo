@@ -10,6 +10,9 @@ export PYTHONHASHSEED=0
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
 
+# Explicitly set NATS server for KV event publishing
+export NATS_SERVER="nats://localhost:4222"
+
 # run frontend + KV router
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend \
