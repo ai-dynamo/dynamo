@@ -44,7 +44,7 @@ class KVRouterProcess(ManagedProcess):
         block_size: int,
         frontend_port: int,
         namespace: str,
-        store_backend: str = "etcd",
+        store_backend: str = "file",
         enforce_disagg: bool = False,
         blocks_threshold: float | None = None,
         tokens_threshold: float | None = None,
@@ -367,11 +367,11 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8)
     return False
 
 
-def get_runtime(store_backend="etcd", request_plane="tcp"):
+def get_runtime(store_backend="file", request_plane="tcp"):
     """Create a DistributedRuntime instance for testing.
 
     Args:
-        store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        store_backend: Storage backend to use ("etcd" or "file"). Defaults to "file".
         request_plane: How frontend talks to backend ("tcp", "http" or "nats"). Defaults to "tcp".
     """
     try:
@@ -618,7 +618,7 @@ def _test_router_basic(
     test_payload: dict,
     num_requests: int,
     frontend_timeout: int = 120,
-    store_backend: str = "etcd",
+    store_backend: str = "file",
     request_plane: str = "nats",
 ):
     """Basic router test: start router, wait for workers and send concurrent requests via HTTP frontend.
@@ -692,7 +692,7 @@ def _test_router_two_routers(
     router_ports: list[int],
     test_payload: dict,
     num_requests: int,
-    store_backend: str = "etcd",
+    store_backend: str = "file",
 ):
     """Test two KV routers with alternating requests and consumer lifecycle verification.
 
@@ -990,7 +990,7 @@ def _test_router_query_instance_id(
     request,
     frontend_port: int,
     test_payload: dict,
-    store_backend: str = "etcd",
+    store_backend: str = "file",
 ):
     """Test query_instance_id annotation returns worker_instance_id and token_data without routing.
 
@@ -1317,7 +1317,7 @@ def _test_router_indexers_sync(
     block_size: int,
     model_name: str,
     num_workers: int,
-    store_backend: str = "etcd",
+    store_backend: str = "file",
     request_plane: str = "nats",
     test_nats_interruption: bool = False,
     nats_server: Optional["NatsServer"] = None,
@@ -1674,7 +1674,7 @@ def _test_router_decisions_disagg(
     request,
     frontend_port: int,
     test_payload: dict,
-    store_backend: str = "etcd",
+    store_backend: str = "file",
     request_plane: str = "nats",
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
@@ -2143,7 +2143,7 @@ def _test_busy_threshold_endpoint(
     request,
     frontend_port: int,
     test_payload: dict,
-    store_backend: str = "etcd",
+    store_backend: str = "file",
     request_plane: str = "nats",
 ):
     """Test that the /busy_threshold endpoint can be hit and responds correctly.

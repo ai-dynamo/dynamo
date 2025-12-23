@@ -83,7 +83,7 @@ class TRTLLMProcess:
         num_workers: int = 2,
         single_gpu: bool = False,
         request_plane: str = "tcp",
-        store_backend: str = "etcd",
+        store_backend: str = "file",
     ):
         """Initialize TRT-LLM workers with dynamo integration.
 
@@ -397,11 +397,11 @@ def test_router_decisions_trtllm_multiple_workers(
 @pytest.mark.parametrize(
     "store_backend,use_nats_core,request_plane",
     [
+        ("file", False, "nats"),  # File backend (prioritized)
         ("etcd", False, "nats"),  # JetStream mode
         # ("etcd", True, "tcp"),  # ignored, needs unconditional nats_client
-        # ("file", False, "nats"),  # File backend - TODO: investigate file backend support for TRT-LLM
     ],
-    ids=["jetstream"],  # "nats_core" and "file" commented out
+    ids=["file_jetstream", "etcd_jetstream"],
 )
 def test_trtllm_indexers_sync(
     request,

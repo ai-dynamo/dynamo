@@ -86,7 +86,7 @@ class VLLMProcess:
         single_gpu: bool = False,
         data_parallel_size: Optional[int] = None,
         request_plane: str = "tcp",
-        store_backend: str = "etcd",
+        store_backend: str = "file",
     ):
         """Initialize vLLM workers with dynamo integration.
 
@@ -483,11 +483,12 @@ def test_router_decisions_vllm_dp(
 @pytest.mark.parametrize(
     "store_backend,use_nats_core,request_plane",
     [
+        ("file", False, "nats"),  # File backend (prioritized)
+        ("file", True, "tcp"),  # File backend with TCP
         ("etcd", False, "nats"),  # JetStream mode
         ("etcd", True, "tcp"),  # nats_core mode
-        # ("file", False, "nats"),  # File backend
     ],
-    ids=["jetstream", "tcp_nats_core"],
+    ids=["file_jetstream", "file_tcp", "etcd_jetstream", "etcd_tcp"],
 )
 def test_vllm_indexers_sync(
     request,

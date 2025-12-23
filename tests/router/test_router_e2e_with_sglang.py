@@ -86,7 +86,7 @@ class SGLangProcess:
         single_gpu: bool = False,
         data_parallel_size: Optional[int] = None,
         request_plane: str = "tcp",
-        store_backend: str = "etcd",
+        store_backend: str = "file",
     ):
         """Initialize SGLang workers with dynamo integration.
 
@@ -468,11 +468,11 @@ def test_router_decisions_sglang_dp(
 @pytest.mark.parametrize(
     "store_backend,use_nats_core,request_plane",
     [
+        ("file", False, "nats"),  # File backend (prioritized)
         ("etcd", False, "nats"),  # JetStream mode
         # ("etcd", True, "tcp"),  # ignored, needs unconditional nats_client
-        # ("file", False, "nats"),  # File backend - TODO: investigate file backend support for SGLang
     ],
-    ids=["jetstream"],  # "nats_core" and "file" commented out
+    ids=["file_jetstream", "etcd_jetstream"],
 )
 @pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
 def test_sglang_indexers_sync(

@@ -50,7 +50,7 @@ BLOCK_SIZE = 16
 def get_unique_ports(
     request,
     num_ports: int = 1,
-    store_backend: str = "etcd",
+    store_backend: str = "file",
     request_plane: str = "nats",
     registration_order: str = "prefill_first",
 ) -> list[int]:
@@ -167,7 +167,7 @@ class MockerProcess:
         request,
         mocker_args: Optional[Dict[str, Any]] = None,
         num_mockers: int = 1,
-        store_backend: str = "etcd",
+        store_backend: str = "file",
         request_plane: str = "nats",
     ):
         namespace_suffix = generate_random_suffix()
@@ -231,7 +231,7 @@ class DisaggMockerProcess:
         worker_type: str,
         mocker_args: Optional[Dict[str, Any]] = None,
         num_mockers: int = 1,
-        store_backend: str = "etcd",
+        store_backend: str = "file",
         request_plane: str = "nats",
     ):
         if worker_type not in ("prefill", "decode"):
@@ -481,15 +481,17 @@ def test_kv_push_router_bindings(
 @pytest.mark.parametrize(
     "store_backend,use_nats_core,request_plane",
     [
+        ("file", False, "nats"),  # File backend (prioritized)
+        ("file", True, "tcp"),  # File backend with TCP
         ("etcd", False, "nats"),  # JetStream mode
         ("etcd", True, "tcp"),  # NATS core mode (with gap detection)
-        ("file", False, "nats"),  # File backend
     ],
     ids=[
-        "jetstream",
-        "nats",
-        "file",
-    ],  # "nats_core" commented out to match commented test case
+        "file_jetstream",
+        "file_tcp",
+        "etcd_jetstream",
+        "etcd_tcp",
+    ],
 )
 @pytest.mark.timeout(90)  # TODO: figure out a timeout
 def test_indexers_sync(
