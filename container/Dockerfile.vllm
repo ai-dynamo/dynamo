@@ -186,7 +186,10 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         numactl-devel \
         # Libfabric support
         hwloc \
-        hwloc-devel
+        hwloc-devel \
+        # AWS SDK support for nixl OBJ backend
+        libuuid-devel \
+        zlib-devel
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
@@ -205,6 +208,57 @@ RUN set -eux; \
 
 # Point build tools explicitly at the modern protoc
 ENV PROTOC=/usr/local/bin/protoc
+
+# Build OpenSSL 3.x
+RUN yum install -y perl-IPC-Cmd perl-Test-Simple perl-Data-Dumper
+RUN cd /tmp && \
+    wget -q https://www.openssl.org/source/openssl-3.0.16.tar.gz && \
+    tar -xzf openssl-3.0.16.tar.gz && \
+    cd openssl-3.0.16 && \
+    ./Configure --prefix=/usr/local/openssl3 --openssldir=/usr/local/openssl3 \
+        shared zlib linux-x86_64 && \
+    make -j$(nproc) && \
+    make install_sw && \
+    echo "/usr/local/openssl3/lib64" > /etc/ld.so.conf.d/openssl3.conf && \
+    echo "/usr/local/openssl3/lib" >> /etc/ld.so.conf.d/openssl3.conf && \
+    ldconfig && \
+    rm -rf /tmp/openssl-3.0.16*
+
+# Set environment variables to use the new OpenSSL
+ENV PKG_CONFIG_PATH="/usr/local/openssl3/lib64/pkgconfig:/usr/local/openssl3/lib/pkgconfig:/usr/local/lib64/pkgconfig:$PKG_CONFIG_PATH"
+ENV LD_LIBRARY_PATH="/usr/local/openssl3/lib64:/usr/local/openssl3/lib:$LD_LIBRARY_PATH"
+ENV OPENSSL_ROOT_DIR="/usr/local/openssl3"
+ENV OPENSSL_LIBRARIES="/usr/local/openssl3/lib64:/usr/local/openssl3/lib"
+ENV OPENSSL_INCLUDE_DIR="/usr/local/openssl3/include"
+
+# The base image libcurl is linked against openssl 1.x, so we need to build from source
+# in order to use openssl 3.x. This is needed to build aws-sdk-cpp.
+RUN wget https://curl.se/download/curl-8.5.0.tar.gz && \
+    tar xzf curl-8.5.0.tar.gz && cd curl-8.5.0 && \
+    ./configure --prefix=/usr/local/curl8.5 --with-ssl=/usr/local/openssl3 --enable-shared && \
+    make -j$(nproc) && make install
+
+# Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
+ARG AWS_SDK_CPP_VERSION=1.11.581
+RUN git clone --recurse-submodules --depth 1 --branch ${AWS_SDK_CPP_VERSION} \
+        https://github.com/aws/aws-sdk-cpp.git /tmp/aws-sdk-cpp && \
+    mkdir -p /tmp/aws-sdk-cpp/build && \
+    cd /tmp/aws-sdk-cpp/build && \
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_ONLY="s3" \
+        -DENABLE_TESTING=OFF \
+        -DCURL_LIBRARY=/usr/local/curl8.5/lib/libcurl.so \
+        -DCURL_INCLUDE_DIR=/usr/local/curl8.5/include \
+        -DOPENSSL_USE_STATIC_LIBS=OFF \
+        -Dcrypto_INCLUDE_DIR=/usr/local/openssl3/include \
+        -Dcrypto_SHARED_LIBRARY="/usr/local/openssl3/lib64/libcrypto.so.3" \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DBUILD_SHARED_LIBS=ON && \
+    make -j$(nproc) && \
+    make install && \
+    rm -rf /tmp/aws-sdk-cpp && \
+    ldconfig
 
 ENV CUDA_PATH=/usr/local/cuda \
     PATH=/usr/local/cuda/bin:$PATH \
@@ -638,6 +692,10 @@ COPY --chown=dynamo:0 --from=framework /opt/vllm /opt/vllm
 
 # Copy UCX and NIXL to system directories (read-only, no group-write needed)
 COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo: --from=wheel_builder /usr/local/openssl3/lib64/ /usr/local/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/curl8.5/lib/ /usr/local/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libaws-*.so* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libs2n.so* /usr/local/lib/
 COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
