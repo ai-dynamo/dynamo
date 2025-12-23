@@ -7,6 +7,7 @@ use anyhow::Result;
 use image::{ColorType, GenericImageView, ImageFormat, ImageReader};
 use ndarray::Array3;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::super::common::EncodedMediaData;
 use super::super::rdma::DecodedMediaData;
@@ -15,7 +16,7 @@ use super::{DecodedMediaMetadata, Decoder};
 const DEFAULT_MAX_ALLOC: u64 = 128 * 1024 * 1024; // 128 MB
 
 /// Image decoder limits - can only be set via server config, not runtime kwargs.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImageDecoderLimits {
     #[serde(default)]
@@ -37,7 +38,7 @@ impl Default for ImageDecoderLimits {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImageDecoder {
     #[serde(default)]

@@ -54,12 +54,24 @@ use crate::http::service::RouteDoc;
     ),
     servers(
         (url = "/", description = "Current server")
+    ),
+    components(
+        schemas(
+            crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest,
+            crate::protocols::openai::completions::NvCreateCompletionRequest,
+            crate::protocols::openai::embeddings::NvCreateEmbeddingRequest,
+            crate::protocols::openai::responses::NvCreateResponse
+        )
     )
 )]
 struct ApiDoc;
 
 /// Generate OpenAPI specification from route documentation
-fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenApi {
+///
+/// This is the core helper used both by the embedded Swagger UI and by
+/// external tools (for example CI or NIM) which need to materialize the
+/// same frontend OpenAPI specification without running the HTTP service.
+pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenApi {
     let mut openapi = ApiDoc::openapi();
 
     // Build paths from route documentation
@@ -216,60 +228,8 @@ fn add_request_body_for_path(
 
 /// Create schema for chat completion request
 fn create_chat_completion_schema() -> RefOr<utoipa::openapi::schema::Schema> {
-    use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder};
-
-    RefOr::T(utoipa::openapi::schema::Schema::Object(
-        ObjectBuilder::new()
-            .property(
-                "model",
-                ObjectBuilder::new()
-                    .description(Some("ID of the model to use"))
-                    .build(),
-            )
-            .property(
-                "messages",
-                ArrayBuilder::new()
-                    .description(Some("A list of messages comprising the conversation so far"))
-                    .items(
-                        ObjectBuilder::new()
-                            .property(
-                                "role",
-                                ObjectBuilder::new()
-                                    .description(Some("The role of the message author (system, user, assistant)"))
-                                    .build(),
-                            )
-                            .property(
-                                "content",
-                                ObjectBuilder::new()
-                                    .description(Some("The contents of the message"))
-                                    .build(),
-                            )
-                            .build(),
-                    )
-                    .build(),
-            )
-            .property(
-                "temperature",
-                ObjectBuilder::new()
-                    .description(Some("Sampling temperature between 0 and 2. Higher values make output more random"))
-                    .build(),
-            )
-            .property(
-                "max_tokens",
-                ObjectBuilder::new()
-                    .description(Some("Maximum number of tokens to generate"))
-                    .build(),
-            )
-            .property(
-                "stream",
-                ObjectBuilder::new()
-                    .description(Some("Whether to stream back partial progress"))
-                    .build(),
-            )
-            .required("model")
-            .required("messages")
-            .build(),
-    ))
+    // Schema derived from actual NvCreateChatCompletionRequest type via ToSchema
+    <crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest as utoipa::PartialSchema>::schema()
 }
 
 /// Create example for chat completion request
@@ -294,44 +254,7 @@ fn create_chat_completion_example() -> serde_json::Value {
 
 /// Create schema for completion request
 fn create_completion_schema() -> RefOr<utoipa::openapi::schema::Schema> {
-    use utoipa::openapi::schema::ObjectBuilder;
-
-    RefOr::T(utoipa::openapi::schema::Schema::Object(
-        ObjectBuilder::new()
-            .property(
-                "model",
-                ObjectBuilder::new()
-                    .description(Some("ID of the model to use"))
-                    .build(),
-            )
-            .property(
-                "prompt",
-                ObjectBuilder::new()
-                    .description(Some("The prompt to generate completions for"))
-                    .build(),
-            )
-            .property(
-                "temperature",
-                ObjectBuilder::new()
-                    .description(Some("Sampling temperature between 0 and 2"))
-                    .build(),
-            )
-            .property(
-                "max_tokens",
-                ObjectBuilder::new()
-                    .description(Some("Maximum number of tokens to generate"))
-                    .build(),
-            )
-            .property(
-                "stream",
-                ObjectBuilder::new()
-                    .description(Some("Whether to stream back partial progress"))
-                    .build(),
-            )
-            .required("model")
-            .required("prompt")
-            .build(),
-    ))
+    <crate::protocols::openai::completions::NvCreateCompletionRequest as utoipa::PartialSchema>::schema()
 }
 
 /// Create example for completion request
@@ -347,28 +270,7 @@ fn create_completion_example() -> serde_json::Value {
 
 /// Create schema for embedding request
 fn create_embedding_schema() -> RefOr<utoipa::openapi::schema::Schema> {
-    use utoipa::openapi::schema::ObjectBuilder;
-
-    RefOr::T(utoipa::openapi::schema::Schema::Object(
-        ObjectBuilder::new()
-            .property(
-                "model",
-                ObjectBuilder::new()
-                    .description(Some("ID of the model to use"))
-                    .build(),
-            )
-            .property(
-                "input",
-                ObjectBuilder::new()
-                    .description(Some(
-                        "Input text to embed, encoded as a string or array of strings",
-                    ))
-                    .build(),
-            )
-            .required("model")
-            .required("input")
-            .build(),
-    ))
+    <crate::protocols::openai::embeddings::NvCreateEmbeddingRequest as utoipa::PartialSchema>::schema()
 }
 
 /// Create example for embedding request
@@ -381,26 +283,8 @@ fn create_embedding_example() -> serde_json::Value {
 
 /// Create schema for response request
 fn create_response_schema() -> RefOr<utoipa::openapi::schema::Schema> {
-    use utoipa::openapi::schema::ObjectBuilder;
-
-    RefOr::T(utoipa::openapi::schema::Schema::Object(
-        ObjectBuilder::new()
-            .property(
-                "model",
-                ObjectBuilder::new()
-                    .description(Some("ID of the model to use"))
-                    .build(),
-            )
-            .property(
-                "input",
-                ObjectBuilder::new()
-                    .description(Some("The input text"))
-                    .build(),
-            )
-            .required("model")
-            .required("input")
-            .build(),
-    ))
+    // Schema derived from NvCreateResponse type via ToSchema
+    <crate::protocols::openai::responses::NvCreateResponse as utoipa::PartialSchema>::schema()
 }
 
 /// Create example for response request

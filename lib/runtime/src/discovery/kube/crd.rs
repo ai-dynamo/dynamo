@@ -7,7 +7,7 @@
 //! which stores discovery metadata for Dynamo worker pods in Kubernetes.
 //!
 //! The CRD schema is defined in the Helm chart at:
-//! `deploy/cloud/helm/crds/templates/nvidia.com_dynamoworkermetadatas.yaml`
+//! `deploy/helm/charts/crds/templates/nvidia.com_dynamoworkermetadatas.yaml`
 
 use anyhow::Result;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;

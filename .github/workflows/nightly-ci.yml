@@ -746,7 +746,6 @@ jobs:
           export ISTIO_ENABLED=true
           export ISTIO_GATEWAY=istio-system/ingress-alb
           export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
-          export DYNAMO_CLOUD=https://${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
           # Install dynamo env secrets
           kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
           # Create docker pull secret for operator image
@@ -756,7 +755,7 @@ jobs:
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-operator-amd64 || echo "Operator image not found, will use SHA-based tag"
           # Install helm dependencies
           helm repo add bitnami https://charts.bitnami.com/bitnami
-          cd deploy/cloud/helm/platform/
+          cd deploy/helm/charts/platform/
           helm dep build .
           # Install platform with namespace restriction
           helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
