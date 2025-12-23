@@ -208,6 +208,32 @@ spec:
                         rule: '!has(self.create) || self.create == false || (has(self.size) && has(self.storageClass) && has(self.volumeAccessMode))'
                   maxItems: 100
                   type: array
+                restart:
+                  description: Restart specifies the restart policy for the graph deployment.
+                  properties:
+                    at:
+                      description: If set or modified, will trigger a restart of the graph deployment according to the strategy.
+                      format: date-time
+                      type: string
+                    strategy:
+                      description: Strategy specifies the restart strategy for the graph deployment.
+                      properties:
+                        order:
+                          description: Order specifies the order in which the services should be restarted.
+                          items:
+                            type: string
+                          type: array
+                        type:
+                          default: Sequential
+                          description: Type specifies the restart strategy type.
+                          enum:
+                            - Sequential
+                            - Parallel
+                          type: string
+                      type: object
+                  required:
+                    - at
+                  type: object
                 services:
                   additionalProperties:
                     properties:
@@ -10530,6 +10556,24 @@ spec:
                       - type
                     type: object
                   type: array
+                restart:
+                  description: Restart contains the status of the restart of the graph deployment.
+                  properties:
+                    inProgress:
+                      description: InProgress contains the names of the services that are currently being restarted.
+                      items:
+                        type: string
+                      type: array
+                    observedAt:
+                      description: |-
+                        ObservedAt is the time at which the restart was observed.
+                        Matches the Restart.At field in the spec.
+                      format: date-time
+                      type: string
+                    phase:
+                      description: Phase is the phase of the restart.
+                      type: string
+                  type: object
                 services:
                   additionalProperties:
                     description: ServiceReplicaStatus contains replica information for a single service.
