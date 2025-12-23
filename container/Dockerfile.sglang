@@ -518,6 +518,8 @@ ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
 ENV PATH=/home/dynamo/.local/bin:$PATH
+# PYTHONPATH for root user access to dynamo packages (NVBug 5762058)
+ENV PYTHONPATH=/home/dynamo/.local/lib/python3.12/site-packages:$PYTHONPATH
 
 ###########################################################
 ########## Development (run.sh, runs as root user) ########
