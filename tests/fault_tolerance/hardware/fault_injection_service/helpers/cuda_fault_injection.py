@@ -152,6 +152,7 @@ class CUDAFaultInjector:
         target_node: Optional[str] = None,
         xid_type: int = 79,
         passthrough_mode: bool = False,
+        soft_affinity: bool = True,
     ) -> bool:
         """
         Patch deployment to enable CUDA fault injection.
@@ -171,6 +172,9 @@ class CUDAFaultInjector:
             xid_type: XID error type to simulate (79, 48, 94, 95, 43, 74). Default: 79
             passthrough_mode: If True, set CUDA_FAULT_INJECTION_ENABLED=0
                             (library loaded but faults disabled for baseline)
+            soft_affinity: If True (default), use preferredDuringScheduling to allow pods
+                          to spill over to other nodes when target_node lacks capacity.
+                          If False, use requiredDuringScheduling which fails if node is full.
 
         Returns:
             True if patch succeeded
@@ -198,6 +202,7 @@ class CUDAFaultInjector:
                 target_node=target_node,
                 xid_type=xid_type,
                 passthrough_mode=passthrough_mode,
+                soft_affinity=soft_affinity,
             )
 
         except Exception as e:
@@ -397,6 +402,9 @@ class CUDAFaultInjector:
         This modifies the CUDA_FAULT_INJECTION_ENABLED env var in running pods
         without restarting them. Requires the CUDA library to already be loaded.
 
+        Only worker pods (with componentType=worker label) are toggled - frontend pods
+        don't have the CUDA library mounted.
+
         Args:
             pods: List of pods to toggle faults on
             namespace: Kubernetes namespace
@@ -408,15 +416,48 @@ class CUDAFaultInjector:
         if not pods:
             return False
 
+        # Filter to only worker pods that are Running (frontend doesn't have CUDA library)
+        worker_pods = []
+        skipped_pods = []
+        for pod in pods:
+            labels = pod.metadata.labels or {}
+            component_type = labels.get("nvidia.com/dynamo-component-type", "")
+            pod_phase = pod.status.phase if pod.status else "Unknown"
+
+            if component_type != "worker":
+                skipped_pods.append(
+                    (pod.metadata.name, f"not worker (type={component_type})")
+                )
+                continue
+
+            if pod_phase != "Running":
+                skipped_pods.append(
+                    (pod.metadata.name, f"not running (phase={pod_phase})")
+                )
+                continue
+
+            worker_pods.append(pod)
+
+        if skipped_pods:
+            print(f"    [INFO] Skipped {len(skipped_pods)} pods:")
+            for name, reason in skipped_pods:
+                print(f"       - {name}: {reason}")
+
+        if not worker_pods:
+            print("    [WARN] No running worker pods found to toggle")
+            return False  # This is a failure - we expected worker pods
+
         toggle_value = "1" if enable else "0"
         action = "Enabling" if enable else "Disabling"
 
-        print(f"\n[→] {action} CUDA faults via toggle on {len(pods)} pods...")
+        print(
+            f"\n[→] {action} CUDA faults via toggle on {len(worker_pods)} running worker pods..."
+        )
 
         success_count = 0
         failed_pods = []
 
-        for pod in pods:
+        for pod in worker_pods:
             pod_name = pod.metadata.name
 
             try:
@@ -481,8 +522,10 @@ class CUDAFaultInjector:
             for pod_name, error in failed_pods:
                 print(f"       - {pod_name}: {error}")
 
-        print(f"    → Result: {success_count}/{len(pods)} pods toggled successfully")
-        return success_count > 0
+        print(
+            f"    → Result: {success_count}/{len(worker_pods)} worker pods toggled successfully"
+        )
+        return success_count > 0 or len(worker_pods) == 0
 
     def disable_cuda_faults_via_toggle(
         self, pods: List[client.V1Pod], namespace: str
