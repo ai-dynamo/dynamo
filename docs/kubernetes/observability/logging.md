@@ -15,9 +15,9 @@ This guide demonstrates how to set up logging for Dynamo in Kubernetes using Gra
 
 ## Prerequisites
 
-### 1. Dynamo Cloud Kubernetes Operator
+### 1. Dynamo Kubernetes Platform
 
-This guide assumes you have installed Dynamo Cloud Kubernetes Operator. For more information, see [Dynamo Cloud Operator](../README.md).
+This guide assumes you have installed Dynamo Kubernetes Platform. For more information, see [Dynamo Kubernetes Platform](../README.md).
 
 ### 2. Kube-prometheus
 
@@ -29,7 +29,7 @@ While this guide does not use Prometheus, it assumes Grafana is pre-installed wi
 
 The following env variables are set:
 - `MONITORING_NAMESPACE`: The namespace where Loki is installed
-- `DYN_NAMESPACE`: The namespace where Dynamo Cloud Operator is installed
+- `DYN_NAMESPACE`: The namespace where Dynamo Kubernetes Platform is installed
 
 ```bash
 export MONITORING_NAMESPACE=monitoring

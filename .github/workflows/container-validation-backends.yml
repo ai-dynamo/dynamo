@@ -83,14 +83,14 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          cd deploy/cloud/operator
+          cd deploy/operator
           docker build --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
       - name: Tester
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          cd deploy/cloud/operator
+          cd deploy/operator
           docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
@@ -102,7 +102,7 @@ jobs:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           sudo apt-get update && sudo apt-get install -y make
-          cd deploy/cloud/operator
+          cd deploy/operator
           make check
       - name: Build Container
         id: build-image
@@ -110,7 +110,7 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          cd deploy/cloud/operator
+          cd deploy/operator
           docker buildx build --load \
               --platform linux/${{ matrix.platform.arch }} \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
@@ -370,7 +370,6 @@ jobs:
         export ISTIO_ENABLED=true
         export ISTIO_GATEWAY=istio-system/ingress-alb
         export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
-        export DYNAMO_CLOUD=https://${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
 
         # Install dynamo env secrets
         kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
@@ -378,7 +377,7 @@ jobs:
         kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
         # Install helm dependencies
         helm repo add bitnami https://charts.bitnami.com/bitnami
-        cd deploy/cloud/helm/platform/
+        cd deploy/helm/charts/platform/
         helm dep build .
         # Install platform with namespace restriction for single profile testing
         helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \

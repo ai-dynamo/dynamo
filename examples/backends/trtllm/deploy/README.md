@@ -102,7 +102,7 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
+1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for TensorRT-LLM runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
@@ -165,7 +165,7 @@ kubectl create secret generic hf-token-secret \
 
 Then, deploy the model using the deployment file.
 
-Export the NAMESPACE you used in your Dynamo Cloud Installation.
+Export the NAMESPACE you used in your Dynamo Kubernetes Platform Installation.
 
 ```bash
 cd dynamo/examples/backends/trtllm/deploy
@@ -264,7 +264,7 @@ Configure the `model` name and `host` based on your deployment.
 
 - **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create_deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
-- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/kubernetes/installation_guide.md)
+- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation_guide.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
 - **Architecture Docs**: [Disaggregated Serving](../../../../docs/design_docs/disagg_serving.md), [KV-Aware Routing](../../../../docs/router/kv_cache_routing.md)
 - **Multinode Deployment**: [Multinode Examples](../../../../docs/backends/trtllm/multinode/multinode-examples.md)

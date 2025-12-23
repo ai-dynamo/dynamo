@@ -97,7 +97,7 @@ Client-side benchmarking runs on your local machine and connects to Kubernetes d
 Follow these steps to benchmark Dynamo deployments using client-side benchmarking:
 
 ### Step 1: Establish Kubernetes Cluster and Install Dynamo
-Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Cloud platform. First follow the [installation guide](/docs/kubernetes/installation_guide.md) to install Dynamo Cloud, then use [deploy/utils/README](../../deploy/utils/README.md) to set up benchmarking resources.
+Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Kubernetes Platform. First follow the [installation guide](/docs/kubernetes/installation_guide.md) to install Dynamo Kubernetes Platform, then use [deploy/utils/README](../../deploy/utils/README.md) to set up benchmarking resources.
 
 ### Step 2: Deploy DynamoGraphDeployments
 Deploy your DynamoGraphDeployments separately using the [deployment documentation](../../examples/backends/). Each deployment should have a frontend service exposed.
@@ -325,7 +325,7 @@ The server-side benchmarking solution:
 
 ## Prerequisites
 
-1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Cloud/Platform docs](/docs/kubernetes/README.md))
+1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Kubernetes Platform docs](/docs/kubernetes/README.md))
 2. **Storage** PersistentVolumeClaim configured with appropriate permissions (see [deploy/utils README](../../deploy/utils/README.md))
 3. **Docker image** containing the Dynamo benchmarking tools
 
