@@ -4,12 +4,13 @@
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
-from dynamo._core import Component, Context
+from dynamo._core import Client, Component, Context
 from dynamo.sglang.args import Config, DisaggregationMode
+from dynamo.sglang.protocol import DisaggPreprocessedRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
@@ -26,6 +27,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher,
+        prefill_client: Optional[Client] = None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -34,12 +36,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Metrics publisher for the worker.
+            prefill_client: Optional client for prefill worker in disaggregated mode.
         """
         super().__init__(
             component,
             engine,
             config,
             publisher,
+            prefill_client,
         )
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
@@ -107,20 +111,54 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         input_param = self._get_input_param(request)
 
         if self.serving_mode == DisaggregationMode.DECODE:
-            # Check if bootstrap_info is in the request
+            # Check if bootstrap_info is pre-computed in the request (from frontend with --router-mode kv)
             bootstrap_info = request.get("bootstrap_info")
 
             if not bootstrap_info:
-                raise RuntimeError(
-                    "bootstrap_info is required for disaggregated decode but was not provided."
+                # Fallback: fetch bootstrap_info from prefill worker via round-robin routing
+                if self.prefill_client is None:
+                    raise RuntimeError(
+                        "bootstrap_info is required for disaggregated decode but was not provided, "
+                        "and no prefill_client is available for fallback."
+                    )
+
+                logging.debug("No bootstrap_info in request, fetching from prefill worker")
+                prefill_stream = await self.prefill_client.generate(
+                    DisaggPreprocessedRequest(
+                        request=request,
+                        sampling_params=sampling_params,
+                    ).model_dump(),
+                    context=context,
                 )
 
-            logging.debug(
-                f"Using bootstrap_info: "
-                f"host={bootstrap_info['bootstrap_host']}, "
-                f"port={bootstrap_info['bootstrap_port']}, "
-                f"room={bootstrap_info['bootstrap_room']}"
-            )
+                prefill_response = None
+                async for info in prefill_stream:
+                    prefill_response = info.data()
+                    break
+
+                if not prefill_response:
+                    raise RuntimeError("No response received from prefill worker")
+
+                # Extract bootstrap_info from disaggregated_params (PrefillWorkerHandler format)
+                bootstrap_info = prefill_response.get("disaggregated_params")
+                if not bootstrap_info:
+                    raise RuntimeError(
+                        "No bootstrap info (disaggregated_params) received from prefill worker"
+                    )
+
+                logging.debug(
+                    f"Received bootstrap_info from prefill worker: "
+                    f"host={bootstrap_info['bootstrap_host']}, "
+                    f"port={bootstrap_info['bootstrap_port']}, "
+                    f"room={bootstrap_info['bootstrap_room']}"
+                )
+            else:
+                logging.debug(
+                    f"Using pre-computed bootstrap_info: "
+                    f"host={bootstrap_info['bootstrap_host']}, "
+                    f"port={bootstrap_info['bootstrap_port']}, "
+                    f"room={bootstrap_info['bootstrap_room']}"
+                )
 
             if self.enable_trace:
                 self._propagate_trace_context_to_sglang(
