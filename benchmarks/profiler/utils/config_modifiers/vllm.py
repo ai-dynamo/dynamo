@@ -11,6 +11,7 @@ from benchmarks.profiler.utils.config import (
     break_arguments,
     get_service_name_by_type,
     get_worker_service_from_config,
+    remove_valued_arguments,
     set_argument_value,
     setup_worker_service_resources,
     update_image,
@@ -82,12 +83,10 @@ class VllmV1ConfigModifier:
         target: EngineType,
         is_moe_model: bool = False,
     ) -> dict:
-        if is_moe_model:
-            raise NotImplementedError(
-                "MoE model support is not implemented for VLLM backend"
-            )
-
         cfg = Config.model_validate(config)
+
+        # MoE flags (--enable-expert-parallel) are set in set_config_tep_size/set_config_dep_size
+        _ = is_moe_model
 
         # set metadata name
         cfg.metadata.name = "vllm-agg"
@@ -194,11 +193,9 @@ class VllmV1ConfigModifier:
         args = validate_and_get_worker_args(worker_service, backend="vllm")
         args = break_arguments(args)
 
-        try:
-            idx = args.index("--tensor-parallel-size")
-            args[idx + 1] = str(tp_size)
-        except ValueError:
-            args = append_argument(args, ["--tensor-parallel-size", str(tp_size)])
+        # Remove --tp alias if present, use --tensor-parallel-size as canonical form
+        args = remove_valued_arguments(args, "--tp")
+        args = set_argument_value(args, "--tensor-parallel-size", str(tp_size))
 
         worker_service.extraPodSpec.mainContainer.args = args
 
@@ -212,9 +209,38 @@ class VllmV1ConfigModifier:
         num_gpus_per_node: int,
         component_type: SubComponentType = SubComponentType.DECODE,
     ):
-        raise NotImplementedError(
-            "TEP (Tensor Expert Parallelism) is not implemented for VLLM backend"
+        """
+        Set Tensor Expert Parallelism (TEP) for vLLM MoE models.
+
+        vLLM derives expert parallelism size automatically:
+        expert_parallel_size = tensor_parallel_size * data_parallel_size
+
+        For TEP: TP=tep_size, DP=1 → EP size = tep_size
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="vllm", sub_component_type=component_type
         )
+
+        # Set up resources with multinode configuration
+        setup_worker_service_resources(worker_service, tep_size, num_gpus_per_node)
+
+        # Get and validate args
+        args = validate_and_get_worker_args(worker_service, backend="vllm")
+        args = break_arguments(args)
+
+        # Remove aliases, use canonical forms
+        args = remove_valued_arguments(args, "--tp")
+        args = set_argument_value(args, "--tensor-parallel-size", str(tep_size))
+        args = remove_valued_arguments(args, "--dp")
+        args = set_argument_value(args, "--data-parallel-size", "1")
+
+        # Enable expert parallel for MoE
+        if "--enable-expert-parallel" not in args:
+            args = append_argument(args, "--enable-expert-parallel")
+
+        worker_service.extraPodSpec.mainContainer.args = args
+        return cfg.model_dump()
 
     @classmethod
     def set_config_dep_size(
@@ -224,9 +250,38 @@ class VllmV1ConfigModifier:
         num_gpus_per_node: int,
         component_type: SubComponentType = SubComponentType.DECODE,
     ):
-        raise NotImplementedError(
-            "DEP (Data Expert Parallelism) is not implemented for VLLM backend"
+        """
+        Set Data Expert Parallelism (DEP) for vLLM MoE models.
+
+        vLLM derives expert parallelism size automatically:
+        expert_parallel_size = tensor_parallel_size * data_parallel_size
+
+        For DEP: TP=1, DP=dep_size → EP size = dep_size
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="vllm", sub_component_type=component_type
         )
+
+        # Set up resources with multinode configuration
+        setup_worker_service_resources(worker_service, dep_size, num_gpus_per_node)
+
+        # Get and validate args
+        args = validate_and_get_worker_args(worker_service, backend="vllm")
+        args = break_arguments(args)
+
+        # Remove aliases, use canonical forms
+        args = remove_valued_arguments(args, "--tp")
+        args = set_argument_value(args, "--tensor-parallel-size", "1")
+        args = remove_valued_arguments(args, "--dp")
+        args = set_argument_value(args, "--data-parallel-size", str(dep_size))
+
+        # Enable expert parallel for MoE
+        if "--enable-expert-parallel" not in args:
+            args = append_argument(args, "--enable-expert-parallel")
+
+        worker_service.extraPodSpec.mainContainer.args = args
+        return cfg.model_dump()
 
     @classmethod
     def get_model_name(cls, config: dict) -> str:
@@ -295,10 +350,13 @@ class VllmV1ConfigModifier:
                         )
                         concurrency = float(line.split(" tokens per request: ")[1][:-1])
 
+                        # Log shows per-rank KV cache; multiply by attention_dp_size for total
+                        kv_cache_per_rank = int(token_count * concurrency)
+                        total_kv_cache = kv_cache_per_rank * attention_dp_size
                         logger.info(
-                            f"Found KV cache info: {token_count} x {concurrency} = {int(token_count * concurrency)}"
+                            f"Found KV cache: {kv_cache_per_rank} per rank x {attention_dp_size} = {total_kv_cache} total"
                         )
-                        return int(token_count * concurrency)
+                        return total_kv_cache
         except Exception as e:
             logger.warning(
                 f"Failed to parse KV cache size from line: {line}. Error: {e}"
