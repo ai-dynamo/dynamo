@@ -90,7 +90,7 @@ jobs:
           docker compose down
       - name: Run pytest (parallel tests with xdist)
         env:
-          PYTEST_MARKS: "pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0 or gpu_1)"
+          PYTEST_MARKS: "((pre_merge and parallel) or mypy) and not (vllm or sglang or trtllm) and (gpu_0 or gpu_1)"
         run: |
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest_parallel \
