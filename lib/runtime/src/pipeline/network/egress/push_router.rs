@@ -258,6 +258,14 @@ where
                     );
                     tcp_endpoint.clone()
                 }
+                TransportType::Unix(unix_endpoint) => {
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        unix_endpoint = %unix_endpoint,
+                        "Using Unix socket transport for instance"
+                    );
+                    unix_endpoint.clone()
+                }
                 TransportType::Nats(subject) => {
                     tracing::debug!(
                         instance_id = instance_id,

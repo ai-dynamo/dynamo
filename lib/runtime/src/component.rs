@@ -82,6 +82,7 @@ pub enum TransportType {
     Nats(String),
     Http(String),
     Tcp(String),
+    Unix(String),
 }
 
 #[derive(Default)]

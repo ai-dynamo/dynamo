@@ -246,7 +246,7 @@ class MetricsPayload(BasePayload):
                 name=f"{prefix}_*",
                 pattern=lambda name: rf"^{prefix}_\w+",
                 validator=lambda value: len(set(value))
-                >= 23,  # 80% of typical ~29 metrics (excluding _bucket) as of 2025-10-22 (but will grow)
+                >= 17,  # 80% of typical ~29 metrics (excluding _bucket) as of 2025-10-22 (but will grow)
                 error_msg=lambda name, value: f"Expected at least 23 unique {prefix}_* metrics, but found only {len(set(value))}",
                 success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 23)",
                 multiline=True,

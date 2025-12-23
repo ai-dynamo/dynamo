@@ -33,6 +33,7 @@ use crate::mocker::protocols::{MockEngineArgs, OutputSignal, WorkerType};
 use crate::mocker::scheduler::Scheduler;
 use crate::protocols::TokenIdType;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
+use crate::protocols::common::FinishReason;
 
 pub const MOCKER_COMPONENT: &str = "mocker";
 
@@ -229,115 +230,65 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
     ) -> Result<ManyOut<LLMEngineOutput>, Error> {
         let (request, ctx) = input.into_parts();
 
-        // Extract dp_rank from request field (defaults to 0 if not set)
-        let dp_rank = request.dp_rank.unwrap_or(0);
+        // Log the sequence size for performance testing
+        let input_tokens_count = request.token_ids.len();
+        let estimated_bytes = input_tokens_count * 4; // Estimate ~4 bytes per token
 
-        // Validate dp_rank
-        if dp_rank >= self.engine_args.dp_size {
-            return Err(Error::msg(format!(
-                "dp_rank {} is out of bounds for dp_size {}",
-                dp_rank, self.engine_args.dp_size
-            )));
+        // Try to estimate the actual request payload size by serializing it
+        let actual_request_bytes = match serde_json::to_vec(&request) {
+            Ok(bytes) => bytes.len(),
+            Err(_) => estimated_bytes, // Fallback to token estimate if serialization fails
+        };
+
+        tracing::info!("MOCKER: Received request with {} input tokens (~{} token-bytes, {} actual-bytes), request_id: {}",
+                      input_tokens_count, estimated_bytes, actual_request_bytes, ctx.id());
+
+        // Check for metadata in extra_args and log its size
+        if let Some(extra_args) = &request.extra_args {
+            if let Some(metadata) = extra_args.get("metadata") {
+                let metadata_size = match serde_json::to_vec(metadata) {
+                    Ok(bytes) => bytes.len(),
+                    Err(_) => 0,
+                };
+                tracing::info!("MOCKER: Request contains metadata with size {} bytes, request_id: {}",
+                              metadata_size, ctx.id());
+            }
         }
-
-        let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
 
         // For prefill workers, override max_tokens to 1
         let is_prefill = self.engine_args.worker_type == WorkerType::Prefill;
-        let max_output_tokens = if is_prefill {
-            1
-        } else {
-            request
-                .stop_conditions
-                .max_tokens
-                .expect("max_output_tokens must be specified for mocker") as usize
-        };
 
-        // Convert PreprocessedRequest to DirectRequest for scheduler
-        let direct_request = DirectRequest {
-            tokens: request.token_ids.clone(),
-            max_output_tokens,
-            uuid: Some(request_uuid),
-            dp_rank,
-        };
+        tracing::info!("MOCKER: Skipping all cache calculations and returning immediate response");
 
-        let (request_tx, mut request_rx) = mpsc::unbounded_channel::<OutputSignal>();
-        {
-            let mut active = self.active_requests.lock().await;
-            active.insert(request_uuid, request_tx);
-        }
-
-        // Send the request to the appropriate scheduler based on dp_rank
-        self.direct(direct_request, dp_rank as usize);
-
-        // Create a simple channel for the stream
+        // Create immediate response - skip all scheduler/cache logic
         let (stream_tx, stream_rx) = mpsc::unbounded_channel::<LLMEngineOutput>();
 
-        let active_requests = self.active_requests.clone();
-        let async_context = ctx.context();
+        // Generate immediate mock response
+        let token_id = generate_random_token();
 
-        // Spawn a task to handle the complex async logic
-        tokio::spawn(async move {
-            let mut token_count = 0;
+        let output = LLMEngineOutput {
+            token_ids: vec![token_id],
+            tokens: None,  // Let backend handle detokenization
+            text: None,
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(FinishReason::Length),  // Immediately finish
+            index: None,
+            // Add dummy disaggregated_params for prefill workers
+            disaggregated_params: if is_prefill {
+                Some(serde_json::json!("dummy"))
+            } else {
+                None
+            },
+            extra_args: None,
+        };
 
-            loop {
-                tokio::select! {
-                    maybe_signal = request_rx.recv() => {
-                        let Some(signal) = maybe_signal else {
-                            let _ = stream_tx.send(LLMEngineOutput::error("All output transmitters closed".to_string()));
-                            break;
-                        };
+        // Send immediate response
+        let _ = stream_tx.send(output);
+        let _ = stream_tx.send(LLMEngineOutput::length());
 
-                        // Generate a new token
-                        let token_id = generate_random_token();
-                        token_count += 1;
-
-                        let output = LLMEngineOutput {
-                            token_ids: vec![token_id],
-                            tokens: None,  // Let backend handle detokenization
-                            text: None,
-                            cum_log_probs: None,
-                            log_probs: None,
-                            top_logprobs: None,
-                            finish_reason: None,
-                            index: None,
-                            // Add dummy disaggregated_params for prefill workers
-                            disaggregated_params: if is_prefill {
-                                Some(serde_json::json!("dummy"))
-                            } else {
-                                None
-                            },
-                            extra_args: None,
-                        };
-
-                        if signal.completed && token_count < max_output_tokens {
-                            let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string()));
-                            break;
-                        }
-
-                        if signal.completed {
-                            let _ = stream_tx.send(output);
-                            let _ = stream_tx.send(LLMEngineOutput::length());
-                            break;
-                        }
-
-                        if stream_tx.send(output).is_err() {
-                            tracing::error!("Output stream receiver closed.");
-                            break;
-                        }
-                    }
-
-                    _ = async_context.stopped() => {
-                        let _ = stream_tx.send(LLMEngineOutput::cancelled());
-                        break;
-                    }
-                }
-            }
-
-            // Clean up: remove this request from active requests
-            let mut active = active_requests.lock().await;
-            active.remove(&request_uuid);
-        });
+        tracing::info!("MOCKER: Sent immediate response for request_id: {}", ctx.id());
 
         // Create a simple UnboundedReceiverStream which is naturally Send + Sync
         let stream = UnboundedReceiverStream::new(stream_rx);

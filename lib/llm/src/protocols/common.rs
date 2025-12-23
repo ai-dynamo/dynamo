@@ -37,6 +37,10 @@ pub trait OutputOptionsProvider {
     fn extract_output_options(&self) -> Result<OutputOptions>;
 }
 
+pub trait MetadataProvider {
+    fn metadata(&self) -> Option<&serde_json::Value>;
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum FinishReason {
     #[serde(rename = "eos")]
