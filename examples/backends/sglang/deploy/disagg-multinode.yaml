@@ -17,6 +17,7 @@ spec:
   backendFramework: sglang
   services:
     Frontend:
+      envFromSecret: hf-token-secret
       dynamoNamespace: sglang-disagg-multinode
       componentType: frontend
       replicas: 1

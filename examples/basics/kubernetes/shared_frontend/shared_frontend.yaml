@@ -18,6 +18,7 @@ metadata:
 spec:
   services:
     Frontend:
+      envFromSecret: hf-token-secret
       componentType: frontend
       globalDynamoNamespace: true
       replicas: 1

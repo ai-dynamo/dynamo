@@ -8,6 +8,7 @@ metadata:
 spec:
   services:
     Frontend:
+      envFromSecret: hf-token-secret
       dynamoNamespace: vllm-disagg-kvbm-tp2
       componentType: frontend
       replicas: 1

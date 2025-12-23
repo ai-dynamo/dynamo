@@ -11,6 +11,7 @@ spec:
     value: "1"
   services:
     Frontend:
+      envFromSecret: hf-token-secret
       dynamoNamespace: sglang-agg
       componentType: frontend
       replicas: 1
