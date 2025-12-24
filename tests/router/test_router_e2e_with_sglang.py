@@ -324,7 +324,6 @@ def test_sglang_kv_router_basic(
     file_storage_backend,
     set_ucx_tls_no_mm,
     request_plane,
-    store_kv,
 ):
     """
     Quick e2e sanity test for KV router with SGLang engine instances.
@@ -346,7 +345,7 @@ def test_sglang_kv_router_basic(
             num_workers=N_SGLANG_WORKERS,
             single_gpu=True,  # fit workers into one GPU
             request_plane=request_plane,
-            store_backend=store_kv,
+            store_backend="file",
         )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
         sglang_workers.__enter__()

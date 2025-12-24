@@ -339,7 +339,6 @@ def test_vllm_kv_router_basic(
     file_storage_backend,
     set_ucx_tls_no_mm,
     request_plane,
-    store_kv,
 ):
     """
     Quick e2e sanity test for KV router with vLLM engine instances.
@@ -361,7 +360,7 @@ def test_vllm_kv_router_basic(
             num_workers=N_VLLM_WORKERS,
             single_gpu=True,  # fit workers into one GPU
             request_plane=request_plane,
-            store_backend=store_kv,
+            store_backend="file",
         )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
         vllm_workers.__enter__()
