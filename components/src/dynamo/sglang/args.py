@@ -123,6 +123,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": os.environ.get("DYN_LOCAL_INDEXER", "false"),
         "help": "Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     },
+    "this-seqlen": {
+        "flags": ["--this-seqlen"],
+        "type": int,
+        "default": None,
+        "help": "Sequence length tier for decode disaggregation. Workers with this_seqlen < context_length are intermediate tiers that will migrate requests to higher tiers when exceeded.",
+    },
 }
 
 
@@ -157,6 +163,8 @@ class DynamoArgs:
     dump_config_to: Optional[str] = None
     # local indexer option
     enable_local_indexer: bool = False
+    # decode disaggregation tier
+    this_seqlen: Optional[int] = None
 
 
 class DisaggregationMode(Enum):
@@ -425,6 +433,20 @@ async def parse_args(args: list[str]) -> Config:
         else:
             endpoint = f"dyn://{namespace}.backend.generate"
 
+    # For decode disaggregation: each tier needs its own endpoint for routing isolation
+    # Automatically modify endpoint when --this-seqlen is set (unless user explicitly provided endpoint)
+    if parsed_args.this_seqlen is not None and parsed_args.endpoint is None:
+        # Parse the default endpoint and add tier suffix to component name
+        # e.g., "dyn://dynamo.backend.generate" -> "dyn://dynamo.decode_128.generate"
+        endpoint_str = endpoint.replace("dyn://", "", 1)
+        parts = endpoint_str.split(".")
+        if len(parts) == 3:
+            ns, component, ep_name = parts
+            endpoint = f"dyn://{ns}.decode_{parsed_args.this_seqlen}.{ep_name}"
+            logging.info(
+                f"Decode disaggregation: auto-generated endpoint '{endpoint}' for tier {parsed_args.this_seqlen}"
+            )
+
     # Always parse the endpoint (whether auto-generated or user-provided)
     endpoint_str = endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")
@@ -487,6 +509,7 @@ async def parse_args(args: list[str]) -> Config:
         embedding_worker=parsed_args.embedding_worker,
         dump_config_to=parsed_args.dump_config_to,
         enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
+        this_seqlen=parsed_args.this_seqlen,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 
