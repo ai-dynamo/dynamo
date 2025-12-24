@@ -57,6 +57,8 @@ pub struct LocalModelBuilder {
     custom_backend_metrics_polling_interval: Option<f64>,
     media_decoder: Option<MediaDecoder>,
     media_fetcher: Option<MediaFetcher>,
+    /// Sequence length tier for decode disaggregation
+    this_seqlen: Option<u32>,
 }
 
 impl Default for LocalModelBuilder {
@@ -85,6 +87,7 @@ impl Default for LocalModelBuilder {
             custom_backend_metrics_polling_interval: Default::default(),
             media_decoder: Default::default(),
             media_fetcher: Default::default(),
+            this_seqlen: Default::default(),
         }
     }
 }
@@ -207,6 +210,14 @@ impl LocalModelBuilder {
         self
     }
 
+    /// Set sequence length tier for decode disaggregation.
+    /// Workers with this_seqlen < context_length are intermediate tiers
+    /// that will migrate requests to higher tiers when exceeded.
+    pub fn this_seqlen(&mut self, this_seqlen: Option<u32>) -> &mut Self {
+        self.this_seqlen = this_seqlen;
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face (and NGC in future) if necessary
     /// - Resolve the path
@@ -243,6 +254,10 @@ impl LocalModelBuilder {
                 mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
             self.runtime_config.enable_local_indexer = mocker_engine_args.enable_local_indexer;
             self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
+            // Set decode tier sequence length if provided
+            if mocker_engine_args.this_seqlen.is_some() {
+                self.this_seqlen = mocker_engine_args.this_seqlen;
+            }
             self.media_decoder = Some(MediaDecoder {
                 image: Some(ImageDecoder::default()),
                 #[cfg(feature = "media-ffmpeg")]
@@ -262,6 +277,7 @@ impl LocalModelBuilder {
             card.runtime_config = self.runtime_config.clone();
             card.media_decoder = self.media_decoder.clone();
             card.media_fetcher = self.media_fetcher.clone();
+            card.this_seqlen = self.this_seqlen;
 
             return Ok(LocalModel {
                 card,
@@ -315,6 +331,7 @@ impl LocalModelBuilder {
         card.runtime_config = self.runtime_config.clone();
         card.media_decoder = self.media_decoder.clone();
         card.media_fetcher = self.media_fetcher.clone();
+        card.this_seqlen = self.this_seqlen;
 
         Ok(LocalModel {
             card,

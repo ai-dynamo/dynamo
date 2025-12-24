@@ -114,6 +114,7 @@ def create_temp_engine_args_file(args) -> Path:
         "is_prefill": getattr(args, "is_prefill_worker", None),
         "is_decode": getattr(args, "is_decode_worker", None),
         "enable_local_indexer": getattr(args, "enable_local_indexer", None),
+        "this_seqlen": getattr(args, "this_seqlen", None),
     }
 
     # Remove None values to only include explicitly set arguments
@@ -290,6 +291,14 @@ def parse_args():
         action="store_true",
         default=False,
         help="Enable worker-local KV indexer for tracking this worker's own KV cache state (default: False)",
+    )
+    parser.add_argument(
+        "--this-seqlen",
+        type=int,
+        dest="this_seqlen",
+        default=None,
+        help="Sequence length tier for decode disaggregation. Workers with this_seqlen < context_length "
+        "are intermediate tiers that will migrate requests to higher tiers when exceeded (default: None)",
     )
     parser.add_argument(
         "--store-kv",

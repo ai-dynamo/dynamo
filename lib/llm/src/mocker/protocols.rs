@@ -124,6 +124,12 @@ pub struct MockEngineArgs {
     /// Enable worker-local KV indexer for tracking this worker's own KV cache state
     #[builder(default = "false")]
     pub enable_local_indexer: bool,
+
+    /// Sequence length tier for decode disaggregation.
+    /// Workers with this_seqlen < context_length are intermediate tiers
+    /// that will migrate requests to higher tiers when exceeded.
+    #[builder(default = "None")]
+    pub this_seqlen: Option<u32>,
 }
 
 impl Default for MockEngineArgs {
@@ -163,6 +169,7 @@ impl MockEngineArgs {
             "is_decode",
             "planner_profile_data",
             "enable_local_indexer",
+            "this_seqlen",
         ]
         .iter()
         .cloned()
@@ -248,6 +255,12 @@ impl MockEngineArgs {
             && let Some(enabled) = value.as_bool()
         {
             builder = builder.enable_local_indexer(enabled);
+        }
+
+        if let Some(value) = extra_args.get("this_seqlen")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.this_seqlen(Some(num as u32));
         }
 
         // Parse worker type from is_prefill and is_decode flags

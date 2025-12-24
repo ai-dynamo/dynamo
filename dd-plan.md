@@ -1,6 +1,6 @@
 # Decode disagg working plan
 
-NOTE: We will need api changes in the frameworks. This plan is _just_ for the core dynamo implementation such that it'll work on top of kv routing.
+NOTE: We will need api changes in the frameworks. This plan is _just_ for the core dynamo implementation such that it'll work on top of kv routing. Since long/short seqlen workers only take requests of their size, it doesn't make sense to share kv routing and each should get a distinct instance.
 
 1. We need multiple workers, each with different sequence lengths
 2. When a request exceeds the sequence length of a given worker, we want to migrate it to a new worker
