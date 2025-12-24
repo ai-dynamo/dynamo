@@ -192,10 +192,11 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "(pre_merge or mypy) and vllm and (gpu_0 or gpu_1)"
+          pytest_marks: "pre_merge and vllm and (gpu_0 or gpu_1)"
           framework: "vllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
 
   sglang:
     needs: changed-files
@@ -253,10 +254,11 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "(pre_merge or mypy) and sglang and (gpu_0 or gpu_1)"
+          pytest_marks: "pre_merge and sglang and (gpu_0 or gpu_1)"
           framework: "sglang"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
 
   trtllm:
     needs: changed-files
@@ -314,10 +316,11 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "(pre_merge or mypy) and trtllm and (gpu_0 or gpu_1)"
+          pytest_marks: "pre_merge and trtllm and (gpu_0 or gpu_1)"
           framework: "trtllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
