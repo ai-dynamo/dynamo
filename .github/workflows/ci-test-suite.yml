@@ -593,8 +593,7 @@ jobs:
           if [ "$HTTP_CODE" != "200" ]; then
             echo "Error: GitHub API returned non-200 status code"
             echo "Response: $JOBS"
-            echo "skip=true" >> $GITHUB_OUTPUT
-            exit 0
+            exit 1
           fi
 
           # Debug: Show total jobs and all job names
@@ -730,8 +729,7 @@ jobs:
           if [ "$HTTP_CODE" != "200" ]; then
             echo "Error: GitHub API returned non-200 status code"
             echo "Response: $JOBS"
-            echo "skip=true" >> $GITHUB_OUTPUT
-            exit 0
+            exit 1
           fi
 
           # Debug: Show total jobs and all job names
