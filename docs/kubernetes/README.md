@@ -32,9 +32,32 @@ High-level guide to Dynamo Kubernetes deployments. Start here, then dive into sp
 
 These are independent. A single Kubernetes namespace can host multiple Dynamo namespaces, and vice versa.
 
+## Prerequisites
+
+Before you begin, ensure you have the following tools installed:
+
+| Tool | Minimum Version | Installation Guide |
+|------|-----------------|-------------------|
+| **kubectl** | v1.24+ | [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) |
+| **Helm** | v3.0+ | [Install Helm](https://helm.sh/docs/intro/install/) |
+
+Verify your installation:
+```bash
+kubectl version --client  # Should show v1.24+
+helm version              # Should show v3.0+
+```
+
+For detailed installation instructions, see the [Prerequisites section](./installation_guide.md#prerequisites) in the Installation Guide.
+
 ## Pre-deployment Checks
 
-Before deploying the platform, it is recommended to run the pre-deployment checks to ensure the cluster is ready for deployment. Please refer to the [pre-deployment checks](../../deploy/pre-deployment/README.md) for more details.
+Before deploying the platform, run the pre-deployment checks to ensure the cluster is ready:
+
+```bash
+./deploy/pre-deployment/pre-deployment-check.sh
+```
+
+This validates kubectl connectivity, StorageClass configuration, and GPU availability. See [pre-deployment checks](../../deploy/pre-deployment/README.md) for more details.
 
 ## 1. Install Platform First
 

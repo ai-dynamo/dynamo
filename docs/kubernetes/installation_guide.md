@@ -85,28 +85,50 @@ helm install ...
 
 ## Prerequisites
 
-Verify before proceeding:
+Before installing the Dynamo Kubernetes Platform, ensure you have the following tools and access:
 
-- Kubernetes cluster v1.24+ access
-- kubectl v1.24+ installed and configured
-- Helm v3.0+ installed
-- Cluster type determined (shared vs dedicated)
-- CRD status checked if on shared cluster
-- NGC credentials if using NVIDIA images (optional for public images)
+### Required Tools
 
-Estimated time: 5-30 minutes depending on path
+| Tool | Minimum Version | Description | Installation |
+|------|-----------------|-------------|--------------|
+| **kubectl** | v1.24+ | Kubernetes command-line tool | [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) |
+| **Helm** | v3.0+ | Kubernetes package manager | [Install Helm](https://helm.sh/docs/intro/install/) |
+| **Docker** | Latest | Container runtime (Path B only) | [Install Docker](https://docs.docker.com/get-docker/) |
+
+### Cluster and Access Requirements
+
+- **Kubernetes cluster v1.24+** with admin or namespace-scoped access
+- **Cluster type determined** (shared vs dedicated) — see [Before You Start](#before-you-start)
+- **CRD status checked** if on a shared cluster
+- **NGC credentials** (optional) — required only if pulling NVIDIA images from NGC
+
+### Verify Installation
+
+Run the following to confirm your tools are correctly installed:
 
 ```bash
-# Check required tools
-kubectl version --client  # v1.24+
-helm version             # v3.0+
-docker version           # Running daemon (for Path D only)
+# Verify tools and versions
+kubectl version --client  # Should show v1.24+
+helm version              # Should show v3.0+
+docker version            # Required for Path B only
 
 # Set your release version
 export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
 ```
 
-> No cluster? See [Minikube Setup](deployment/minikube.md) for local development.
+### Pre-Deployment Checks
+
+Before proceeding, run the pre-deployment check script to verify your cluster meets all requirements:
+
+```bash
+./deploy/cloud/pre-deployment/pre-deployment-check.sh
+```
+
+This script validates kubectl connectivity, default StorageClass configuration, and GPU node availability. See [Pre-Deployment Checks](../../deploy/cloud/pre-deployment/README.md) for details.
+
+> **No cluster?** See [Minikube Setup](deployment/minikube.md) for local development.
+
+**Estimated installation time:** 5-30 minutes depending on path
 
 ## Path A: Production Install
 
