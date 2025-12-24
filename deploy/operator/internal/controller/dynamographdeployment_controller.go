@@ -359,14 +359,17 @@ func (r *DynamoGraphDeploymentReconciler) processRestartParallel(ctx context.Con
 		servicesToRestart = append(servicesToRestart, serviceName)
 	}
 
-	if dynamoDeployment.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhasePending {
+	if dynamoDeployment.Status.Restart != nil && dynamoDeployment.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhasePending {
 		err := r.triggerServiceRestarts(ctx, dynamoDeployment, servicesToRestart)
 		if err != nil {
 			return nil, fmt.Errorf("failed to trigger service restarts: %w", err)
 		}
 	}
 
-	inProgress := dynamoDeployment.Status.Restart.InProgress
+	var inProgress []string
+	if dynamoDeployment.Status.Restart != nil {
+		inProgress = dynamoDeployment.Status.Restart.InProgress
+	}
 	if len(inProgress) == 0 {
 		inProgress = servicesToRestart
 	}
@@ -404,7 +407,9 @@ func (r *DynamoGraphDeploymentReconciler) processRestartSequential(ctx context.C
 	}
 
 	// If Pending or InProgress is empty, trigger restarts for first service
-	if dynamoDeployment.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhasePending || len(dynamoDeployment.Status.Restart.InProgress) == 0 {
+	if dynamoDeployment.Status.Restart == nil ||
+		dynamoDeployment.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhasePending ||
+		len(dynamoDeployment.Status.Restart.InProgress) == 0 {
 		err := r.triggerServiceRestarts(ctx, dynamoDeployment, []string{orderedServicesToRestart[0]})
 		if err != nil {
 			return nil, fmt.Errorf("failed to trigger service restarts: %w", err)
@@ -522,7 +527,7 @@ func isRestartAlreadyProcessed(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) boo
 		return true
 	}
 
-	if dgd.Status.Restart.ObservedAt == nil {
+	if dgd.Status.Restart == nil || dgd.Status.Restart.ObservedAt == nil {
 		return false
 	}
 
@@ -540,7 +545,7 @@ func shouldRestartRestart(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
 		return true
 	}
 
-	if dgd.Status.Restart.ObservedAt == nil {
+	if dgd.Status.Restart == nil || dgd.Status.Restart.ObservedAt == nil {
 		return false
 	}
 
