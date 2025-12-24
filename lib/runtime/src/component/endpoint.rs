@@ -192,7 +192,52 @@ impl EndpointConfigBuilder {
             anyhow::Ok(())
         });
 
-        // Register this endpoint instance in the discovery plane
+        // Check for checkpoint job mode
+        // When DYNAMO_CHECKPOINT_SIGNAL_FILE is set, the worker is being used to create
+        // a checkpoint. In this mode:
+        // 1. Keep request plane registration (health checks work, pod becomes Ready in K8s)
+        // 2. Skip discovery registration (no traffic routed to this worker)
+        // 3. Wait for signal file from DaemonSet (written after checkpoint completes)
+        // 4. Exit gracefully
+        let checkpoint_signal_file = std::env::var("DYNAMO_CHECKPOINT_SIGNAL_FILE").ok();
+
+        if let Some(ref signal_file) = checkpoint_signal_file {
+            tracing::info!(
+                endpoint = %endpoint_name_for_task,
+                signal_file = %signal_file,
+                "Checkpoint job mode: skipping discovery registration, waiting for signal file"
+            );
+
+            // Poll for checkpoint signal file (DaemonSet writes this after checkpointing)
+            let signal_file_clone = signal_file.clone();
+            let poll_interval = std::time::Duration::from_secs(1);
+            loop {
+                if std::path::Path::new(&signal_file_clone).exists() {
+                    tracing::info!(
+                        signal_file = %signal_file_clone,
+                        "Checkpoint signal file detected, initiating graceful shutdown"
+                    );
+                    endpoint_shutdown_token.cancel();
+                    break;
+                }
+
+                // Check if we're being cancelled externally (e.g., SIGTERM)
+                tokio::select! {
+                    _ = endpoint_shutdown_token.cancelled() => {
+                        tracing::info!("Checkpoint job cancelled externally");
+                        break;
+                    }
+                    _ = tokio::time::sleep(poll_interval) => {
+                        // Continue polling
+                    }
+                }
+            }
+
+            task.await??;
+            return Ok(());
+        }
+
+        // Normal mode: Register this endpoint instance in the discovery plane
         // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
         // consistent registration/discovery across the system.
         let discovery = endpoint.drt().discovery();
