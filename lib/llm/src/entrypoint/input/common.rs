@@ -4,24 +4,13 @@
 use std::pin::Pin;
 
 use crate::{
-    backend::{Backend, ExecutionContext},
-    discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
-    engines::StreamingEngineAdapter,
-    entrypoint::{EngineConfig, RouterConfig},
-    http::service::metrics::Metrics,
-    kv_router::{KvPushRouter, KvRouter, PrefillRouter},
-    migration::Migration,
-    model_card::ModelDeploymentCard,
-    preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
-    protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
-    request_template::RequestTemplate,
-    types::{
+    backend::{Backend, ExecutionContext}, decode_disagger::DecodeDisagger, discovery::{KvWorkerMonitor, ModelManager, ModelWatcher}, engines::StreamingEngineAdapter, entrypoint::{EngineConfig, RouterConfig}, http::service::metrics::Metrics, kv_router::{KvPushRouter, KvRouter, PrefillRouter}, migration::Migration, model_card::ModelDeploymentCard, preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter}, protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest}, request_template::RequestTemplate, types::{
         Annotated,
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
             OpenAIChatCompletionsStreamingEngine,
         },
-    },
+    }
 };
 
 use dynamo_runtime::{
@@ -280,6 +269,7 @@ where
     let prefill_chooser =
         prefill_chooser.unwrap_or_else(|| PrefillRouter::disabled(router_mode, enforce_disagg));
     let prefill_op = prefill_chooser.into_operator();
+    let decode_disagger = DecodeDisagger::new().into_operator();
 
     // Link with prefill chooser including backward edge for response flow
     let engine = frontend
@@ -287,7 +277,9 @@ where
         .link(migration.forward_edge())?
         .link(backend.forward_edge())?
         .link(prefill_op.forward_edge())?
+        .link(decode_disagger.forward_edge())?
         .link(service_backend)?
+        .link(decode_disagger.backward_edge())?
         .link(prefill_op.backward_edge())?
         .link(backend.backward_edge())?
         .link(migration.backward_edge())?
