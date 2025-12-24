@@ -321,6 +321,7 @@ def test_sglang_kv_router_basic(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
+    file_storage_backend,
     set_ucx_tls_no_mm,
     request_plane,
 ):
@@ -344,7 +345,6 @@ def test_sglang_kv_router_basic(
             num_workers=N_SGLANG_WORKERS,
             single_gpu=True,  # fit workers into one GPU
             request_plane=request_plane,
-            store_backend="etcd",
         )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
         sglang_workers.__enter__()
@@ -377,6 +377,7 @@ def test_router_decisions_sglang_multiple_workers(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
+    file_storage_backend,
     set_ucx_tls_no_mm,
     request_plane,
 ):
@@ -393,7 +394,6 @@ def test_router_decisions_sglang_multiple_workers(
             num_workers=N_WORKERS,
             single_gpu=True,  # Worker uses GPU 0
             request_plane=request_plane,
-            store_backend="etcd",
         )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
 
@@ -424,6 +424,7 @@ def test_router_decisions_sglang_dp(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
+    file_storage_backend,
     set_ucx_tls_no_mm,
     request_plane,
 ):
@@ -446,7 +447,6 @@ def test_router_decisions_sglang_dp(
             single_gpu=False,
             data_parallel_size=DP_SIZE,  # Creates DP_SIZE processes (one per rank)
             request_plane=request_plane,
-            store_backend="etcd",
         )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
         sglang_workers.__enter__()
