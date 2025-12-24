@@ -191,7 +191,7 @@ RUN cd /tmp && \
     tar -xzf openssl-3.0.16.tar.gz && \
     cd openssl-3.0.16 && \
     ./Configure --prefix=/usr/local/openssl3 --openssldir=/usr/local/openssl3 \
-        shared zlib linux-x86_64 && \
+        shared zlib linux-${ARCH_ALT} && \
     make -j$(nproc) && \
     make install_sw && \
     echo "/usr/local/openssl3/lib64" > /etc/ld.so.conf.d/openssl3.conf && \
@@ -492,8 +492,8 @@ ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
 
 # Copy ucx and nixl libs
 COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
-COPY --chown=dynamo: --from=wheel_builder /usr/local/openssl3/lib64/ /usr/local/local/lib/
-COPY --chown=dynamo: --from=wheel_builder /usr/local/curl8.5/lib/ /usr/local/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/openssl3/lib64/ /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/curl8.5/lib/ /usr/local/lib/
 COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libaws-*.so* /usr/local/lib/
 COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libs2n.so* /usr/local/lib/
 COPY --chown=dynamo: --from=wheel_builder /usr/local/lib/ /usr/local/lib/
