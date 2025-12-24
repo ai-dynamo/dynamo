@@ -55,7 +55,7 @@ kubectl get clusterrolebinding -o json | \
 
 ## Installation Paths
 
-Platform is installed using Dynamo Kubernetes Platform [helm chart](../../deploy/cloud/helm/platform/README.md).
+Platform is installed using Dynamo Kubernetes Platform [helm chart](../../deploy/helm/charts/platform/README.md).
 
 **Path A: Pre-built Artifacts**
 - Use case: Production deployment, shared or dedicated clusters
@@ -85,28 +85,50 @@ helm install ...
 
 ## Prerequisites
 
-Verify before proceeding:
+Before installing the Dynamo Kubernetes Platform, ensure you have the following tools and access:
 
-- Kubernetes cluster v1.24+ access
-- kubectl v1.24+ installed and configured
-- Helm v3.0+ installed
-- Cluster type determined (shared vs dedicated)
-- CRD status checked if on shared cluster
-- NGC credentials if using NVIDIA images (optional for public images)
+### Required Tools
 
-Estimated time: 5-30 minutes depending on path
+| Tool | Minimum Version | Description | Installation |
+|------|-----------------|-------------|--------------|
+| **kubectl** | v1.24+ | Kubernetes command-line tool | [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) |
+| **Helm** | v3.0+ | Kubernetes package manager | [Install Helm](https://helm.sh/docs/intro/install/) |
+| **Docker** | Latest | Container runtime (Path B only) | [Install Docker](https://docs.docker.com/get-docker/) |
+
+### Cluster and Access Requirements
+
+- **Kubernetes cluster v1.24+** with admin or namespace-scoped access
+- **Cluster type determined** (shared vs dedicated) — see [Before You Start](#before-you-start)
+- **CRD status checked** if on a shared cluster
+- **NGC credentials** (optional) — required only if pulling NVIDIA images from NGC
+
+### Verify Installation
+
+Run the following to confirm your tools are correctly installed:
 
 ```bash
-# Check required tools
-kubectl version --client  # v1.24+
-helm version             # v3.0+
-docker version           # Running daemon (for Path D only)
+# Verify tools and versions
+kubectl version --client  # Should show v1.24+
+helm version              # Should show v3.0+
+docker version            # Required for Path B only
 
 # Set your release version
 export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
 ```
 
-> No cluster? See [Minikube Setup](deployment/minikube.md) for local development.
+### Pre-Deployment Checks
+
+Before proceeding, run the pre-deployment check script to verify your cluster meets all requirements:
+
+```bash
+./deploy/cloud/pre-deployment/pre-deployment-check.sh
+```
+
+This script validates kubectl connectivity, default StorageClass configuration, and GPU node availability. See [Pre-Deployment Checks](../../deploy/cloud/pre-deployment/README.md) for details.
+
+> **No cluster?** See [Minikube Setup](deployment/minikube.md) for local development.
+
+**Estimated installation time:** 5-30 minutes depending on path
 
 ## Path A: Production Install
 
@@ -198,7 +220,7 @@ export DOCKER_PASSWORD=<YOUR_NGC_CLI_API_KEY>
 export IMAGE_TAG=${RELEASE_VERSION}
 
 # 2. Build operator
-cd deploy/cloud/operator
+cd deploy/operator
 
 # 2.1 Alternative 1 : Build and push the operator image for multiple platforms
 docker buildx create --name multiplatform --driver docker-container --bootstrap
@@ -218,7 +240,7 @@ kubectl create secret docker-registry docker-imagepullsecret \
   --docker-password=${DOCKER_PASSWORD} \
   --namespace=${NAMESPACE}
 
-cd deploy/cloud/helm
+cd deploy/helm/charts
 
 # 4. Install CRDs
 helm upgrade --install dynamo-crds ./crds/ --namespace default
@@ -327,13 +349,37 @@ just add the following to the helm install command:
 ```
 
 **Clean uninstall?**
+
+To uninstall the platform, you can run the following command:
+```
+helm uninstall dynamo-platform --namespace ${NAMESPACE}
+```
+
+To uninstall the CRDs, follow these steps:
+
+Get all of the dynamo CRDs installed in your cluster:
 ```bash
-./uninstall.sh  # Removes all CRDs and platform
+kubectl get crd | grep "dynamo.*nvidia.com"
+```
+
+You should see something like this:
+```
+dynamocomponentdeployments.nvidia.com               2025-10-21T14:49:52Z
+dynamocomponents.nvidia.com                         2025-10-25T05:16:10Z
+dynamographdeploymentrequests.nvidia.com            2025-11-24T05:26:04Z
+dynamographdeployments.nvidia.com                   2025-09-04T20:56:40Z
+dynamographdeploymentscalingadapters.nvidia.com     2025-12-09T21:05:59Z
+dynamomodels.nvidia.com                             2025-11-07T00:19:43Z
+```
+
+Delete each CRD one by one:
+```bash
+kubectl delete crd <crd-name>
 ```
 
 ## Advanced Options
 
-- [Helm Chart Configuration](../../deploy/cloud/helm/platform/README.md)
+- [Helm Chart Configuration](../../deploy/helm/charts/platform/README.md)
 - [Create custom deployments](./deployment/create_deployment.md)
 - [Dynamo Operator details](./dynamo_operator.md)
 - [Model Express Server details](https://github.com/ai-dynamo/modelexpress)
