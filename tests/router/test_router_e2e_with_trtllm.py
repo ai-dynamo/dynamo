@@ -297,6 +297,7 @@ def test_trtllm_kv_router_basic(
     file_storage_backend,
     set_ucx_tls_no_mm,
     request_plane,
+    store_kv,
 ):
     """
     Quick e2e sanity test for KV router with TRT-LLM engine instances.
@@ -318,7 +319,7 @@ def test_trtllm_kv_router_basic(
             num_workers=N_TRTLLM_WORKERS,
             single_gpu=True,  # fit workers into one GPU
             request_plane=request_plane,
-            store_backend="file",
+            store_backend=store_kv,
         )
         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
         trtllm_workers.__enter__()
