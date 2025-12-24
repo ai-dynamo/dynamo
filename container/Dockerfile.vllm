@@ -793,7 +793,7 @@ RUN chmod g+w /usr/local/rustup /usr/local/cargo
 
 # Install maturin, for maturin develop
 # Editable install of dynamo
-COPY pyproject.toml README.md hatch_build.py /workspace/
+COPY --chown=dynamo:0 --chmod=664 pyproject.toml README.md hatch_build.py /workspace/
 RUN uv pip install maturin[patchelf] && \
     uv pip install --no-deps -e .
 
