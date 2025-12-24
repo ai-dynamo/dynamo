@@ -422,7 +422,10 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \
     fi && \
-    /tmp/use-sccache.sh show-stats "Dynamo"
+    /tmp/use-sccache.sh show-stats "Dynamo" && \
+    # Build gpu_memory wheel (Python package only, CUDA extensions built in runtime)
+    cd /opt/dynamo/lib/bindings/gpu_memory && \
+    uv build --wheel --out-dir /opt/dynamo/dist
 
 ##################################
 ########## Runtime Image #########
@@ -475,6 +478,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
+        /opt/dynamo/wheelhouse/gpu_memory*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
         sglang==${SGLANG_VERSION}
@@ -520,6 +524,15 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 ENV PATH=/home/dynamo/.local/bin:$PATH
 # PYTHONPATH for root user access to dynamo packages (NVBug 5762058)
 ENV PYTHONPATH=/home/dynamo/.local/lib/python3.12/site-packages:$PYTHONPATH
+
+# Build GPU Memory Service CUDA extensions
+# The gpu_memory wheel is installed earlier with ai-dynamo (which depends on it).
+# CUDA extensions require PyTorch, so we build them here in runtime.
+COPY --chmod=775 --chown=dynamo:0 lib/bindings/gpu_memory/python/gpu_memory/extensions/ /tmp/gpu_memory_extensions/
+RUN cd /tmp/gpu_memory_extensions && \
+    python3 setup.py build_ext --inplace && \
+    cp *.so $(python3 -c "import gpu_memory; print(gpu_memory.__path__[0])")/extensions/ && \
+    rm -rf /tmp/gpu_memory_extensions
 
 ###########################################################
 ########## Development (run.sh, runs as root user) ########
@@ -630,6 +643,9 @@ RUN cp -r --no-preserve=mode /home/dynamo/.local/lib/python3.12/site-packages/* 
 # Uninstall broken maturin from upstream, then reinstall properly into venv
 COPY --from=dynamo_base /bin/uv /opt/dynamo/venv/bin/uv
 RUN pip install --ignore-installed maturin[patchelf]
+
+# Install torch_memory_saver from source (GMS mode is monkey-patched in dynamo.sglang.gms_adapters)
+RUN pip install git+https://github.com/fzyzcjy/torch_memory_saver.git
 
 # Editable install of dynamo components
 COPY --chown=dynamo:0 --chmod=664 pyproject.toml README.md hatch_build.py /workspace/

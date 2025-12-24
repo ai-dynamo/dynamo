@@ -32,9 +32,8 @@ import logging
 from typing import TYPE_CHECKING, Any, Literal, Optional, Tuple
 
 if TYPE_CHECKING:
+    from gpu_memory.allocator import RPCCumemAllocator
     from torch.cuda.memory import MemPool
-
-    from dynamo.gpu_memory_service.core.rpc_cumem_allocator import RPCCumemAllocator
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +82,7 @@ def get_or_create_allocator(
     """
     global _allocator, _mem_pool, _pluggable_alloc
 
-    from dynamo.gpu_memory_service.core.rpc_cumem_allocator import RPCCumemAllocator
+    from gpu_memory.allocator import RPCCumemAllocator
 
     if _allocator is not None:
         # Allocator already exists - check mode compatibility
@@ -149,10 +148,9 @@ def _setup_pytorch_integration(
     """
     global _pluggable_alloc
 
+    from gpu_memory.extensions import _rpc_cumem_ext as cumem
     from torch.cuda import CUDAPluggableAllocator
     from torch.cuda.memory import MemPool
-
-    from dynamo.gpu_memory_service.core.csrc import _rpc_cumem_ext as cumem
 
     # Configure pluggable allocator pool
     so_path = cumem.__file__

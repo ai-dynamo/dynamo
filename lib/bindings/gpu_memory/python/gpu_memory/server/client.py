@@ -27,7 +27,7 @@ import logging
 import socket
 from typing import Dict, List, Optional, Tuple
 
-from .rpc_protocol import (
+from .protocol import (
     AllocateRequest,
     AllocateResponse,
     ClearAllRequest,

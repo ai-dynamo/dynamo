@@ -38,7 +38,7 @@ from typing import Any, Optional
 
 import torch
 
-from dynamo.gpu_memory_service.core import RPCCumemAllocator, get_or_create_allocator
+from dynamo.gpu_memory_service import RPCCumemAllocator, get_or_create_allocator
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ def _safe_empty_cache() -> None:
     global _original_empty_cache
     # Check if we have GMS VMM allocations
     try:
-        from dynamo.gpu_memory_service.core.csrc import _rpc_cumem_ext as cumem
+        from dynamo.gpu_memory_service import _rpc_cumem_ext as cumem
 
         allocations = cumem.get_all_allocations()
         if allocations:
@@ -267,9 +267,7 @@ class GPUServiceModelLoader:
 
         # Import the extension lazily so importing this module doesn't require it.
         try:
-            from dynamo.gpu_memory_service.core.csrc import (
-                _rpc_cumem_ext as cumem,  # type: ignore
-            )
+            from dynamo.gpu_memory_service import _rpc_cumem_ext as cumem
         except Exception as e:
             raise RuntimeError(
                 "Missing CUDA VMM pluggable allocator extension. "
@@ -298,9 +296,7 @@ class GPUServiceModelLoader:
         if mode in (GMSLoadMode.READ, GMSLoadMode.AUTO):
             ro_alloc: Optional[RPCCumemAllocator] = None
             try:
-                from dynamo.gpu_memory_service.tensor import (
-                    materialize_module_from_registry,
-                )
+                from dynamo.gpu_memory_service import materialize_module_from_registry
                 from dynamo.sglang.gms_adapters.import_only_loader import (
                     ImportOnlyModelLoader,
                 )
@@ -336,7 +332,7 @@ class GPUServiceModelLoader:
 
                 # Success! Register the allocator in the client module.
                 # We do this after success to avoid polluting the registry on failure.
-                from dynamo.gpu_memory_service.core import register_allocator
+                from dynamo.gpu_memory_service import register_allocator
 
                 register_allocator(ro_alloc)
                 logger.info(
@@ -398,7 +394,7 @@ class GPUServiceModelLoader:
             # caching allocator trying to cudaFree() our VMM memory.
 
         # Register all model tensors into the GMS registry
-        from dynamo.gpu_memory_service.tensor import register_module_tensors
+        from dynamo.gpu_memory_service import register_module_tensors
 
         total_bytes = register_module_tensors(
             allocator, model, registry_prefix=f"{config_hash}:"

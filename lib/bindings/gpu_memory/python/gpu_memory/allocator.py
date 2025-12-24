@@ -26,8 +26,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional, Tuple
 
 import torch
-
-from dynamo.gpu_memory_service.allocation_server.client import AllocationServerClient
+from gpu_memory.server.client import AllocationServerClient
 
 logger = logging.getLogger(__name__)
 
@@ -386,7 +385,7 @@ class RPCCumemAllocator:
 
         # Import the C++ extension for import_and_map
         try:
-            from dynamo.gpu_memory_service.core.csrc import _rpc_cumem_ext as cumem
+            from gpu_memory.extensions import _rpc_cumem_ext as cumem
         except ImportError as e:
             raise RuntimeError(
                 "Missing CUDA VMM pluggable allocator extension. "

@@ -27,8 +27,7 @@ from enum import Enum
 from typing import Dict, Optional, Set
 from uuid import uuid4
 
-from .registry import ArtifactRegistry
-from .rpc_protocol import (
+from .protocol import (
     AllocateRequest,
     AllocateResponse,
     ClearAllRequest,
@@ -64,6 +63,7 @@ from .rpc_protocol import (
     recv_message,
     send_message,
 )
+from .registry import ArtifactRegistry
 
 logger = logging.getLogger(__name__)
 

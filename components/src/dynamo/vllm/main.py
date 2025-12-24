@@ -25,8 +25,9 @@ from dynamo.llm import (
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     fetch_llm,
+    register_endpoint_instance,
     register_llm,
-    unregister_llm,
+    unregister_endpoint_instance,
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -477,21 +478,22 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             level: Sleep level (1=weights only, 2=weights+buffers, 3=everything)
 
         With GMS enabled, Worker patches handle VA-stable sleep for weights.
-        After sleeping, unregisters from etcd so frontend stops routing to this worker.
+        After sleeping, unregisters endpoint from etcd so frontend stops routing to this worker.
         """
         level = body.get("level", 1)
         try:
             await engine_client.sleep(level)
 
-            # Unregister from discovery so frontend stops routing to us
+            # Unregister endpoint instance from discovery so frontend stops routing to us
+            # This removes the worker from the routing pool entirely (not just the model card)
             try:
-                await unregister_llm(generate_endpoint)
+                await unregister_endpoint_instance(generate_endpoint)
                 logger.info(
-                    "[Sleep] Unregistered model from discovery - frontend will stop routing here"
+                    "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
                 )
             except Exception as unreg_err:
                 logger.warning(
-                    f"[Sleep] Failed to unregister from discovery: {unreg_err}"
+                    f"[Sleep] Failed to unregister endpoint from discovery: {unreg_err}"
                 )
 
             return {"status": "ok", "message": f"Engine slept (level={level})"}
@@ -506,13 +508,24 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             tags: List of tags to wake (e.g., ["weights", "kv_cache"]). None wakes all.
 
         With GMS enabled, Worker patches handle VA-stable wake for weights.
-        After waking, re-registers to etcd so frontend can route to this worker again.
+        After waking, re-registers endpoint to etcd so frontend can route to this worker again.
         """
         tags = body.get("tags")
         try:
             await engine_client.wake_up(tags)
 
-            # Re-register to discovery so frontend can route to us again
+            # Re-register endpoint instance to discovery so frontend can route to us again
+            try:
+                await register_endpoint_instance(generate_endpoint)
+                logger.info(
+                    "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
+                )
+            except Exception as reg_err:
+                logger.warning(
+                    f"[Wake] Failed to re-register endpoint to discovery: {reg_err}"
+                )
+
+            # Re-register the model card
             try:
                 model_input = (
                     ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
@@ -530,7 +543,9 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
                     "[Wake] Re-registered model to discovery - frontend can route here again"
                 )
             except Exception as reg_err:
-                logger.warning(f"[Wake] Failed to re-register to discovery: {reg_err}")
+                logger.warning(
+                    f"[Wake] Failed to re-register model to discovery: {reg_err}"
+                )
 
             return {"status": "ok", "message": f"Engine woke (tags={tags})"}
         except Exception as e:
@@ -681,21 +696,22 @@ async def init(runtime: DistributedRuntime, config: Config):
             level: Sleep level (1=weights only, 2=weights+buffers, 3=everything)
 
         With GMS enabled, Worker patches handle VA-stable sleep for weights.
-        After sleeping, unregisters from etcd so frontend stops routing to this worker.
+        After sleeping, unregisters endpoint from etcd so frontend stops routing to this worker.
         """
         level = body.get("level", 1)
         try:
             await engine_client.sleep(level)
 
-            # Unregister from discovery so frontend stops routing to us
+            # Unregister endpoint instance from discovery so frontend stops routing to us
+            # This removes the worker from the routing pool entirely (not just the model card)
             try:
-                await unregister_llm(generate_endpoint)
+                await unregister_endpoint_instance(generate_endpoint)
                 logger.info(
-                    "[Sleep] Unregistered model from discovery - frontend will stop routing here"
+                    "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
                 )
             except Exception as unreg_err:
                 logger.warning(
-                    f"[Sleep] Failed to unregister from discovery: {unreg_err}"
+                    f"[Sleep] Failed to unregister endpoint from discovery: {unreg_err}"
                 )
 
             return {"status": "ok", "message": f"Engine slept (level={level})"}
@@ -710,13 +726,24 @@ async def init(runtime: DistributedRuntime, config: Config):
             tags: List of tags to wake (e.g., ["weights", "kv_cache"]). None wakes all.
 
         With GMS enabled, Worker patches handle VA-stable wake for weights.
-        After waking, re-registers to etcd so frontend can route to this worker again.
+        After waking, re-registers endpoint to etcd so frontend can route to this worker again.
         """
         tags = body.get("tags")
         try:
             await engine_client.wake_up(tags)
 
-            # Re-register to discovery so frontend can route to us again
+            # Re-register endpoint instance to discovery so frontend can route to us again
+            try:
+                await register_endpoint_instance(generate_endpoint)
+                logger.info(
+                    "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
+                )
+            except Exception as reg_err:
+                logger.warning(
+                    f"[Wake] Failed to re-register endpoint to discovery: {reg_err}"
+                )
+
+            # Re-register the model card
             try:
                 model_input = (
                     ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
@@ -735,7 +762,9 @@ async def init(runtime: DistributedRuntime, config: Config):
                     "[Wake] Re-registered model to discovery - frontend can route here again"
                 )
             except Exception as reg_err:
-                logger.warning(f"[Wake] Failed to re-register to discovery: {reg_err}")
+                logger.warning(
+                    f"[Wake] Failed to re-register model to discovery: {reg_err}"
+                )
 
             return {"status": "ok", "message": f"Engine woke (tags={tags})"}
         except Exception as e:

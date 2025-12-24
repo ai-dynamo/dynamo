@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Tuple, Union
 import torch
 
 if TYPE_CHECKING:
-    from dynamo.gpu_memory_service.core.rpc_cumem_allocator import RPCCumemAllocator
+    from gpu_memory.allocator import RPCCumemAllocator
 
 logger = logging.getLogger(__name__)
 
@@ -612,7 +612,7 @@ def tensor_from_registry_spec(
         A tensor aliasing the mapped memory.
     """
     try:
-        import dynamo.gpu_memory_service.core.csrc._tensor_from_pointer as tfp
+        import gpu_memory.extensions._tensor_from_pointer as tfp
     except Exception as e:
         raise RuntimeError(
             "Missing gpu_memory_service.core.csrc._tensor_from_pointer extension "

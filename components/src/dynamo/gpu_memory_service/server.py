@@ -23,8 +23,7 @@ import threading
 from typing import Optional
 
 import uvloop
-
-from dynamo.gpu_memory_service.allocation_server import AllocationServer
+from gpu_memory.server import AllocationServer
 
 from .args import parse_args
 

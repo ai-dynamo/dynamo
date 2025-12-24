@@ -59,6 +59,20 @@ def _setup_gms_if_needed(config: Config) -> None:
     if load_format != "gpu_memory_service":
         return
 
+    # GMS provides its own VA-stable sleep/wake mechanism for weights.
+    # CPU backup would conflict with GMS's shared memory approach.
+    server_args = config.server_args
+    if getattr(server_args, "enable_weights_cpu_backup", False):
+        raise ValueError(
+            "Cannot use --enable-weights-cpu-backup with --load-format gpu_memory_service. "
+            "GPU Memory Service provides its own VA-stable sleep/wake mechanism for weights."
+        )
+    if getattr(server_args, "enable_draft_weights_cpu_backup", False):
+        raise ValueError(
+            "Cannot use --enable-draft-weights-cpu-backup with --load-format gpu_memory_service. "
+            "GPU Memory Service provides its own VA-stable sleep/wake mechanism for weights."
+        )
+
     logger.info("[GMS] Setting up GMS integration")
 
     # Set env var to trigger auto-registration in spawned workers
@@ -187,52 +201,85 @@ async def init(runtime: DistributedRuntime, config: Config):
     runtime.register_engine_route("start_profile", start_profile_handler)
     runtime.register_engine_route("stop_profile", stop_profile_handler)
 
-    # Register engine routes for pause/resume/status
-    async def pause_handler(body: dict) -> dict:
-        """Pause the engine to release GPU memory and unregister from discovery.
+    # Register engine routes for memory management (uses SGLang's built-in mechanism)
+    async def release_memory_occupation_handler(body: dict) -> dict:
+        """Release GPU memory occupation and unregister from discovery.
 
         Args:
-            tag: Memory tag to pause (default: "weights")
+            tags: List of memory tags to release. Valid tags: "kv_cache", "weights", "cuda_graph".
+                  Default: all tags (["kv_cache", "weights", "cuda_graph"])
 
-        With GMS enabled, torch_memory_saver handles VA-stable pause for weights.
-        After pausing, unregisters from etcd so frontend stops routing to this worker.
+        This uses SGLang's built-in release_memory_occupation which properly routes
+        the command to the scheduler subprocess where the memory is allocated.
+        After releasing, unregisters from etcd so frontend stops routing to this worker.
         """
-        tag = body.get("tag", "weights")
-        try:
-            from torch_memory_saver import torch_memory_saver
+        # Support both "tag" (single) and "tags" (list) for flexibility
+        tags = body.get("tags", body.get("tag", None))
+        if tags is None:
+            # Default: release all memory types
+            tags = ["kv_cache", "weights", "cuda_graph"]
+        elif isinstance(tags, str):
+            tags = [tags]
 
-            torch_memory_saver.pause(tag)
+        # Warn if trying to release "weights" while using GPU Memory Service
+        if "weights" in tags and _gms_setup_done:
+            logging.warning(
+                "[ReleaseMemory] 'weights' tag included but GPU Memory Service is active. "
+                "Weight memory is managed by GMS and will not be freed via this endpoint. "
+            )
+
+        try:
+            # Use async tokenizer_manager method directly (engine.release_memory_occupation
+            # uses run_until_complete which can't be called from async context)
+            from sglang.srt.managers.io_struct import ReleaseMemoryOccupationReqInput
+
+            obj = ReleaseMemoryOccupationReqInput(tags=tags)
+            await engine.tokenizer_manager.release_memory_occupation(obj, None)
+            logging.info(f"[ReleaseMemory] Released memory occupation for tags: {tags}")
 
             # Unregister from discovery so frontend stops routing to us
             try:
                 await unregister_llm(generate_endpoint)
                 logging.info(
-                    "[Pause] Unregistered model from discovery - frontend will stop routing here"
+                    "[ReleaseMemory] Unregistered model from discovery - frontend will stop routing here"
                 )
             except Exception as unreg_err:
                 logging.warning(
-                    f"[Pause] Failed to unregister from discovery: {unreg_err}"
+                    f"[ReleaseMemory] Failed to unregister from discovery: {unreg_err}"
                 )
 
-            return {"status": "ok", "message": f"Engine paused (tag={tag})"}
+            return {"status": "ok", "message": f"Memory released (tags={tags})"}
         except Exception as e:
-            logging.error(f"Failed to pause engine: {e}")
+            logging.error(f"Failed to release memory occupation: {e}")
             return {"status": "error", "message": str(e)}
 
-    async def resume_handler(body: dict) -> dict:
-        """Resume the engine to restore GPU memory and re-register to discovery.
+    async def resume_memory_occupation_handler(body: dict) -> dict:
+        """Resume GPU memory occupation and re-register to discovery.
 
         Args:
-            tag: Memory tag to resume (default: "weights")
+            tags: List of memory tags to resume. Valid tags: "kv_cache", "weights", "cuda_graph".
+                  Default: all tags (["kv_cache", "weights", "cuda_graph"])
 
-        With GMS enabled, torch_memory_saver handles VA-stable resume for weights.
+        This uses SGLang's built-in resume_memory_occupation which properly routes
+        the command to the scheduler subprocess where the memory is allocated.
         After resuming, re-registers to etcd so frontend can route to this worker again.
         """
-        tag = body.get("tag", "weights")
-        try:
-            from torch_memory_saver import torch_memory_saver
+        # Support both "tag" (single) and "tags" (list) for flexibility
+        tags = body.get("tags", body.get("tag", None))
+        if tags is None:
+            # Default: resume all memory types
+            tags = ["kv_cache", "weights", "cuda_graph"]
+        elif isinstance(tags, str):
+            tags = [tags]
 
-            torch_memory_saver.resume(tag)
+        try:
+            # Use async tokenizer_manager method directly (engine.resume_memory_occupation
+            # uses run_until_complete which can't be called from async context)
+            from sglang.srt.managers.io_struct import ResumeMemoryOccupationReqInput
+
+            obj = ResumeMemoryOccupationReqInput(tags=tags)
+            await engine.tokenizer_manager.resume_memory_occupation(obj, None)
+            logging.info(f"[ResumeMemory] Resumed memory occupation for tags: {tags}")
 
             # Re-register to discovery so frontend can route to us again
             try:
@@ -247,20 +294,20 @@ async def init(runtime: DistributedRuntime, config: Config):
                     output_type=model_type,
                 )
                 logging.info(
-                    "[Resume] Re-registered model to discovery - frontend can route here again"
+                    "[ResumeMemory] Re-registered model to discovery - frontend can route here again"
                 )
             except Exception as reg_err:
                 logging.warning(
-                    f"[Resume] Failed to re-register to discovery: {reg_err}"
+                    f"[ResumeMemory] Failed to re-register to discovery: {reg_err}"
                 )
 
-            return {"status": "ok", "message": f"Engine resumed (tag={tag})"}
+            return {"status": "ok", "message": f"Memory resumed (tags={tags})"}
         except Exception as e:
-            logging.error(f"Failed to resume engine: {e}")
+            logging.error(f"Failed to resume memory occupation: {e}")
             return {"status": "error", "message": str(e)}
 
     async def status_handler(body: dict) -> dict:
-        """Get engine pause/resume status."""
+        """Get engine memory status."""
         try:
             from dynamo.sglang.gms_adapters import _get_gms_allocator
 
@@ -273,7 +320,6 @@ async def init(runtime: DistributedRuntime, config: Config):
                     "model": server_args.served_model_name,
                 }
             else:
-                # Non-GMS mode - torch_memory_saver doesn't expose pause state directly
                 return {
                     "status": "ok",
                     "gms_enabled": False,
@@ -283,12 +329,16 @@ async def init(runtime: DistributedRuntime, config: Config):
             logging.error(f"Failed to get engine status: {e}")
             return {"status": "error", "message": str(e)}
 
-    runtime.register_engine_route("pause", pause_handler)
-    runtime.register_engine_route("resume", resume_handler)
+    runtime.register_engine_route(
+        "release_memory_occupation", release_memory_occupation_handler
+    )
+    runtime.register_engine_route(
+        "resume_memory_occupation", resume_memory_occupation_handler
+    )
     runtime.register_engine_route("status", status_handler)
     logging.info(
         "Registered engine routes: /engine/start_profile, /engine/stop_profile, "
-        "/engine/pause, /engine/resume, /engine/status"
+        "/engine/release_memory_occupation, /engine/resume_memory_occupation, /engine/status"
     )
 
     # publisher instantiates the metrics and kv event publishers
@@ -388,52 +438,85 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     runtime.register_engine_route("start_profile", start_profile_handler)
     runtime.register_engine_route("stop_profile", stop_profile_handler)
 
-    # Register engine routes for pause/resume/status
-    async def pause_handler(body: dict) -> dict:
-        """Pause the engine to release GPU memory and unregister from discovery.
+    # Register engine routes for memory management (uses SGLang's built-in mechanism)
+    async def release_memory_occupation_handler(body: dict) -> dict:
+        """Release GPU memory occupation and unregister from discovery.
 
         Args:
-            tag: Memory tag to pause (default: "weights")
+            tags: List of memory tags to release. Valid tags: "kv_cache", "weights", "cuda_graph".
+                  Default: all tags (["kv_cache", "weights", "cuda_graph"])
 
-        With GMS enabled, torch_memory_saver handles VA-stable pause for weights.
-        After pausing, unregisters from etcd so frontend stops routing to this worker.
+        This uses SGLang's built-in release_memory_occupation which properly routes
+        the command to the scheduler subprocess where the memory is allocated.
+        After releasing, unregisters from etcd so frontend stops routing to this worker.
         """
-        tag = body.get("tag", "weights")
-        try:
-            from torch_memory_saver import torch_memory_saver
+        # Support both "tag" (single) and "tags" (list) for flexibility
+        tags = body.get("tags", body.get("tag", None))
+        if tags is None:
+            # Default: release all memory types
+            tags = ["kv_cache", "weights", "cuda_graph"]
+        elif isinstance(tags, str):
+            tags = [tags]
 
-            torch_memory_saver.pause(tag)
+        # Warn if trying to release "weights" while using GPU Memory Service
+        if "weights" in tags and _gms_setup_done:
+            logging.warning(
+                "[ReleaseMemory] 'weights' tag included but GPU Memory Service is active. "
+                "Weight memory is managed by GMS and will not be freed via this endpoint. "
+            )
+
+        try:
+            # Use async tokenizer_manager method directly (engine.release_memory_occupation
+            # uses run_until_complete which can't be called from async context)
+            from sglang.srt.managers.io_struct import ReleaseMemoryOccupationReqInput
+
+            obj = ReleaseMemoryOccupationReqInput(tags=tags)
+            await engine.tokenizer_manager.release_memory_occupation(obj, None)
+            logging.info(f"[ReleaseMemory] Released memory occupation for tags: {tags}")
 
             # Unregister from discovery so frontend stops routing to us
             try:
                 await unregister_llm(generate_endpoint)
                 logging.info(
-                    "[Pause] Unregistered model from discovery - frontend will stop routing here"
+                    "[ReleaseMemory] Unregistered model from discovery - frontend will stop routing here"
                 )
             except Exception as unreg_err:
                 logging.warning(
-                    f"[Pause] Failed to unregister from discovery: {unreg_err}"
+                    f"[ReleaseMemory] Failed to unregister from discovery: {unreg_err}"
                 )
 
-            return {"status": "ok", "message": f"Engine paused (tag={tag})"}
+            return {"status": "ok", "message": f"Memory released (tags={tags})"}
         except Exception as e:
-            logging.error(f"Failed to pause engine: {e}")
+            logging.error(f"Failed to release memory occupation: {e}")
             return {"status": "error", "message": str(e)}
 
-    async def resume_handler(body: dict) -> dict:
-        """Resume the engine to restore GPU memory and re-register to discovery.
+    async def resume_memory_occupation_handler(body: dict) -> dict:
+        """Resume GPU memory occupation and re-register to discovery.
 
         Args:
-            tag: Memory tag to resume (default: "weights")
+            tags: List of memory tags to resume. Valid tags: "kv_cache", "weights", "cuda_graph".
+                  Default: all tags (["kv_cache", "weights", "cuda_graph"])
 
-        With GMS enabled, torch_memory_saver handles VA-stable resume for weights.
+        This uses SGLang's built-in resume_memory_occupation which properly routes
+        the command to the scheduler subprocess where the memory is allocated.
         After resuming, re-registers to etcd so frontend can route to this worker again.
         """
-        tag = body.get("tag", "weights")
-        try:
-            from torch_memory_saver import torch_memory_saver
+        # Support both "tag" (single) and "tags" (list) for flexibility
+        tags = body.get("tags", body.get("tag", None))
+        if tags is None:
+            # Default: resume all memory types
+            tags = ["kv_cache", "weights", "cuda_graph"]
+        elif isinstance(tags, str):
+            tags = [tags]
 
-            torch_memory_saver.resume(tag)
+        try:
+            # Use async tokenizer_manager method directly (engine.resume_memory_occupation
+            # uses run_until_complete which can't be called from async context)
+            from sglang.srt.managers.io_struct import ResumeMemoryOccupationReqInput
+
+            obj = ResumeMemoryOccupationReqInput(tags=tags)
+            await engine.tokenizer_manager.resume_memory_occupation(obj, None)
+            logging.info(f"[ResumeMemory] Resumed memory occupation for tags: {tags}")
 
             # Re-register to discovery so frontend can route to us again
             try:
@@ -448,20 +531,20 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
                     output_type=ModelType.Prefill,
                 )
                 logging.info(
-                    "[Resume] Re-registered model to discovery - frontend can route here again"
+                    "[ResumeMemory] Re-registered model to discovery - frontend can route here again"
                 )
             except Exception as reg_err:
                 logging.warning(
-                    f"[Resume] Failed to re-register to discovery: {reg_err}"
+                    f"[ResumeMemory] Failed to re-register to discovery: {reg_err}"
                 )
 
-            return {"status": "ok", "message": f"Engine resumed (tag={tag})"}
+            return {"status": "ok", "message": f"Memory resumed (tags={tags})"}
         except Exception as e:
-            logging.error(f"Failed to resume engine: {e}")
+            logging.error(f"Failed to resume memory occupation: {e}")
             return {"status": "error", "message": str(e)}
 
     async def status_handler(body: dict) -> dict:
-        """Get engine pause/resume status."""
+        """Get engine memory status."""
         try:
             from dynamo.sglang.gms_adapters import _get_gms_allocator
 
@@ -474,7 +557,6 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
                     "model": server_args.served_model_name,
                 }
             else:
-                # Non-GMS mode - torch_memory_saver doesn't expose pause state directly
                 return {
                     "status": "ok",
                     "gms_enabled": False,
@@ -484,12 +566,16 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             logging.error(f"Failed to get engine status: {e}")
             return {"status": "error", "message": str(e)}
 
-    runtime.register_engine_route("pause", pause_handler)
-    runtime.register_engine_route("resume", resume_handler)
+    runtime.register_engine_route(
+        "release_memory_occupation", release_memory_occupation_handler
+    )
+    runtime.register_engine_route(
+        "resume_memory_occupation", resume_memory_occupation_handler
+    )
     runtime.register_engine_route("status", status_handler)
     logging.info(
         "Registered engine routes: /engine/start_profile, /engine/stop_profile, "
-        "/engine/pause, /engine/resume, /engine/status"
+        "/engine/release_memory_occupation, /engine/resume_memory_occupation, /engine/status"
     )
 
     # Perform dummy warmup for prefill worker to avoid initial TTFT hit

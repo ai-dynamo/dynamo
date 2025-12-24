@@ -22,7 +22,7 @@ import os
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from dynamo.gpu_memory_service.core import RPCCumemAllocator
+    from dynamo.gpu_memory_service import RPCCumemAllocator
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ _original_init_device = None
 
 def get_gms_allocator() -> Optional["RPCCumemAllocator"]:
     """Get the GMS allocator from central registry."""
-    from dynamo.gpu_memory_service.core import get_allocator
+    from dynamo.gpu_memory_service import get_allocator
 
     return get_allocator()
 
@@ -152,9 +152,7 @@ def _get_gms_committed_bytes() -> int:
     socket_path = f"/tmp/gms_{local_rank}.sock"
 
     try:
-        from dynamo.gpu_memory_service.allocation_server.client import (
-            AllocationServerClient,
-        )
+        from dynamo.gpu_memory_service import AllocationServerClient
 
         client = AllocationServerClient(socket_path, lock_type="ro", timeout_ms=2000)
         allocations = client.list_allocations()

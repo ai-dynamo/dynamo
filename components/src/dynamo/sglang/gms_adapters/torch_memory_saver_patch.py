@@ -52,29 +52,20 @@ def patch_torch_memory_saver():
 
     def patched_ensure_initialized(self):
         """Patched _ensure_initialized that supports GMS mode."""
-        # Check if already initialized (handle both standard and GMS impl)
-        if self._impl is not None or getattr(self, "_gms_impl", None) is not None:
+        # Check if already initialized
+        if self._impl is not None:
             return
 
-        # Get hook mode from kwargs or auto-detect
+        # Check if GMS mode is enabled
         hook_mode = self._impl_ctor_kwargs.get("hook_mode")
-        if hook_mode is None:
-            # Check for GMS mode first (our extension)
-            if _is_gms_mode():
-                hook_mode = "gms"
-            else:
-                # Fall back to original detection logic
-                hook_mode = entrypoint_module._detect_hook_mode()
-            self._impl_ctor_kwargs["hook_mode"] = hook_mode
-
-        if hook_mode == "gms":
+        if hook_mode == "gms" or (hook_mode is None and _is_gms_mode()):
             # Use our GMS implementation
             from dynamo.sglang.gms_adapters.torch_memory_saver_gms import (
                 GMSMemorySaverImpl,
             )
 
-            # Ensure _gms_impl attribute exists
-            self._gms_impl = GMSMemorySaverImpl()
+            # Set _impl directly since all TorchMemorySaver methods access self._impl
+            self._impl = GMSMemorySaverImpl()
             logger.info("[TorchMemorySaver] Using GMS mode for VA-stable sleep/wake")
             del self._impl_ctor_kwargs
         else:
@@ -83,18 +74,6 @@ def patch_torch_memory_saver():
 
     # Patch the method
     entrypoint_module.TorchMemorySaver._ensure_initialized = patched_ensure_initialized
-
-    # Also patch _get_impl to check for _gms_impl
-    original_get_impl = entrypoint_module.TorchMemorySaver._get_impl
-
-    def patched_get_impl(self):
-        """Patched _get_impl that checks for GMS impl."""
-        gms_impl = getattr(self, "_gms_impl", None)
-        if gms_impl is not None:
-            return gms_impl
-        return original_get_impl(self)
-
-    entrypoint_module.TorchMemorySaver._get_impl = patched_get_impl
 
     _patched = True
     logger.debug("[GMS Patch] Successfully patched torch_memory_saver for GMS mode")

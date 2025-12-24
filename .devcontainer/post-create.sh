@@ -66,6 +66,16 @@ mkdir -p $CARGO_TARGET_DIR
 
 # Note: Build steps moved to after sanity check - see instructions at the end
 
+# Install torch_memory_saver from source (GMS mode is monkey-patched in dynamo.sglang.gms_adapters)
+echo "Installing torch_memory_saver..."
+pip install git+https://github.com/fzyzcjy/torch_memory_saver.git
+
+# Install gpu_memory package and build CUDA extensions
+echo "Installing gpu_memory package..."
+pip install -e $WORKSPACE_DIR/lib/bindings/gpu_memory
+echo "Building gpu_memory CUDA extensions..."
+cd $WORKSPACE_DIR/lib/bindings/gpu_memory/python/gpu_memory/extensions && python setup.py build_ext --inplace
+
 { set +x; } 2>/dev/null
 
 echo -e "\n" >> ~/.bashrc
@@ -107,6 +117,7 @@ cat <<EOF
 ========================================
 $SANITY_STATUS
 ✅ Pre-commit hooks configured
+✅ gpu_memory package installed with CUDA extensions
 
 Now build the project:
   cargo build --locked --profile dev --features dynamo-llm/block-manager
@@ -114,6 +125,9 @@ Now build the project:
   DYNAMO_BIN_PATH=$CARGO_TARGET_DIR/debug uv pip install -e .
 
 Optional: cd lib/bindings/kvbm && maturin develop --uv  # For KVBM support
+
+To rebuild gpu_memory CUDA extensions (if needed):
+  cd lib/bindings/gpu_memory/python/gpu_memory/extensions && python setup.py build_ext --inplace
 
 If cargo build fails with a Cargo.lock error, try to update it with 'cargo update'
 ========================================

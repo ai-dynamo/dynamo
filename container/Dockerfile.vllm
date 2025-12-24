@@ -462,6 +462,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \
     fi && \
+    # Build gpu_memory wheel (Python package only, CUDA extensions built in runtime)
+    cd /opt/dynamo/lib/bindings/gpu_memory && \
+    uv build --wheel --out-dir /opt/dynamo/dist && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
 ########################################################
@@ -588,6 +591,7 @@ COPY --from=dynamo_base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbin
 COPY --from=dynamo_base /usr/local/cuda/include/ /usr/local/cuda/include/
 COPY --from=dynamo_base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
 COPY --from=dynamo_base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
+COPY --from=dynamo_base /usr/local/cuda/lib64/stubs/ /usr/local/cuda/lib64/stubs/
 RUN CUDA_VERSION_MAJOR="${CUDA_VERSION%%.*}" &&\
     ln -s /usr/local/cuda/lib64/libcublas.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublas.so &&\
     ln -s /usr/local/cuda/lib64/libcublasLt.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublasLt.so
@@ -705,6 +709,7 @@ COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 ARG ENABLE_KVBM
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 RUN uv pip install \
+      /opt/dynamo/wheelhouse/gpu_memory*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
       /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
@@ -782,6 +787,14 @@ RUN cd /usr/local/lib && \
     ldconfig
 
 USER dynamo
+
+# Build GPU Memory Service CUDA extensions
+# The gpu_memory wheel is installed earlier with ai-dynamo (which depends on it).
+# CUDA extensions require PyTorch, so we build them here in runtime.
+RUN cd /workspace/lib/bindings/gpu_memory/python/gpu_memory/extensions && \
+    python3 setup.py build_ext --inplace && \
+    cp *.so $(python3 -c "import gpu_memory; print(gpu_memory.__path__[0])")/extensions/
+
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 

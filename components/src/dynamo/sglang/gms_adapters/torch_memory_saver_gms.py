@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 def _get_gms_allocator():
     """Get the GMS allocator from the central registry."""
     try:
-        from dynamo.gpu_memory_service.core import get_allocator
+        from dynamo.gpu_memory_service import get_allocator
 
         return get_allocator()
     except ImportError:
