@@ -332,6 +332,7 @@ class VLLMProcess:
 @pytest.mark.gpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 def test_vllm_kv_router_basic(
     request,
     runtime_services_dynamic_ports,
@@ -375,7 +376,7 @@ def test_vllm_kv_router_basic(
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
             frontend_timeout=180,  # 3 minutes should be plenty for TinyLlama
-            store_backend="etcd",  # Explicit for clarity
+            store_backend="file",  # Explicit for clarity
             request_plane=request_plane,
         )
 
@@ -388,6 +389,7 @@ def test_vllm_kv_router_basic(
 @pytest.mark.gpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 def test_router_decisions_vllm_multiple_workers(
     request,
     runtime_services_dynamic_ports,
@@ -435,6 +437,7 @@ def test_router_decisions_vllm_multiple_workers(
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
 def test_router_decisions_vllm_dp(
     request,
