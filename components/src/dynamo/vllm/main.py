@@ -26,6 +26,7 @@ from dynamo.llm import (
     ZmqKvEventPublisherConfig,
     fetch_llm,
     register_llm,
+    unregister_llm,
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -43,6 +44,52 @@ from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+# Track if GMS has been set up to avoid duplicate setup
+_gms_setup_done = False
+
+
+def _setup_gms_if_needed(config: Config) -> None:
+    """Setup GPU Memory Service if load_format indicates GMS usage.
+
+    This does TWO things:
+    1. Sets environment variables for patches (needed in spawned workers)
+    2. Registers the GMS loader and applies patches
+
+    The model loader reads config from load_config.model_loader_extra_config,
+    but the patches (memory accounting, sleep/wake) run at module import time
+    and rely on environment variables.
+    """
+    global _gms_setup_done
+    if _gms_setup_done:
+        return
+
+    load_format = getattr(config.engine_args, "load_format", None)
+    if load_format != "gpu_memory_service":
+        return
+
+    logger.info(
+        "[GMS] Detected load_format='gpu_memory_service', setting up GMS integration"
+    )
+
+    # Set env var to trigger auto-registration in spawned workers
+    os.environ["GMS_VLLM_AUTO_REGISTER"] = "1"
+
+    # Register loader and apply patches in main process
+    try:
+        from dynamo.vllm.gms_adapters import (
+            patch_model_runner_for_gms,
+            register_gpu_memory_service_loader,
+        )
+
+        register_gpu_memory_service_loader()
+        patch_model_runner_for_gms()
+        logger.info("[GMS] Registered GMS loader and applied patches")
+    except Exception as e:
+        logger.error(f"[GMS] Failed to setup GMS: {e}")
+        raise
+
+    _gms_setup_done = True
 
 
 async def graceful_shutdown(runtime):
@@ -237,6 +284,10 @@ def setup_kv_event_publisher(
 
 
 def setup_vllm_engine(config, stat_logger=None):
+    # Setup GMS if using gpu_memory_service load format
+    # This must be called before any vLLM imports in spawned workers
+    _setup_gms_if_needed(config)
+
     # vLLM v0.11.0 bug: vllm/v1.metrics/prometheus.py:79 passes TemporaryDirectory object
     # instead of .name string, causing false error on exit. Set PROMETHEUS_MULTIPROC_DIR
     # ourselves to avoid this and handle cleanup properly.
@@ -419,6 +470,91 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
+    async def sleep_handler(body: dict) -> dict:
+        """Sleep the engine to release GPU memory and unregister from discovery.
+
+        Args:
+            level: Sleep level (1=weights only, 2=weights+buffers, 3=everything)
+
+        With GMS enabled, Worker patches handle VA-stable sleep for weights.
+        After sleeping, unregisters from etcd so frontend stops routing to this worker.
+        """
+        level = body.get("level", 1)
+        try:
+            await engine_client.sleep(level)
+
+            # Unregister from discovery so frontend stops routing to us
+            try:
+                await unregister_llm(generate_endpoint)
+                logger.info(
+                    "[Sleep] Unregistered model from discovery - frontend will stop routing here"
+                )
+            except Exception as unreg_err:
+                logger.warning(
+                    f"[Sleep] Failed to unregister from discovery: {unreg_err}"
+                )
+
+            return {"status": "ok", "message": f"Engine slept (level={level})"}
+        except Exception as e:
+            logger.error(f"Failed to sleep engine: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def wake_handler(body: dict) -> dict:
+        """Wake the engine to restore GPU memory and re-register to discovery.
+
+        Args:
+            tags: List of tags to wake (e.g., ["weights", "kv_cache"]). None wakes all.
+
+        With GMS enabled, Worker patches handle VA-stable wake for weights.
+        After waking, re-registers to etcd so frontend can route to this worker again.
+        """
+        tags = body.get("tags")
+        try:
+            await engine_client.wake_up(tags)
+
+            # Re-register to discovery so frontend can route to us again
+            try:
+                model_input = (
+                    ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+                )
+                await register_vllm_model(
+                    model_input,
+                    ModelType.Prefill,
+                    generate_endpoint,
+                    config,
+                    engine_client,
+                    vllm_config,
+                    migration_limit=0,  # Prefill doesn't support migration
+                )
+                logger.info(
+                    "[Wake] Re-registered model to discovery - frontend can route here again"
+                )
+            except Exception as reg_err:
+                logger.warning(f"[Wake] Failed to re-register to discovery: {reg_err}")
+
+            return {"status": "ok", "message": f"Engine woke (tags={tags})"}
+        except Exception as e:
+            logger.error(f"Failed to wake engine: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def status_handler(body: dict) -> dict:
+        """Get engine sleep/wake status."""
+        try:
+            is_sleeping = await engine_client.is_sleeping()
+            return {
+                "status": "ok",
+                "is_sleeping": is_sleeping,
+                "model": config.served_model_name or config.model,
+            }
+        except Exception as e:
+            logger.error(f"Failed to get engine status: {e}")
+            return {"status": "error", "message": str(e)}
+
+    runtime.register_engine_route("sleep", sleep_handler)
+    runtime.register_engine_route("wake", wake_handler)
+    runtime.register_engine_route("status", status_handler)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake, /engine/status")
+
     # Register prefill model with ModelType.Prefill
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
         model_input = (
@@ -537,6 +673,92 @@ async def init(runtime: DistributedRuntime, config: Config):
         handler.kv_publishers = kv_publishers
 
     setup_metrics_collection(config, generate_endpoint, logger)
+
+    async def sleep_handler(body: dict) -> dict:
+        """Sleep the engine to release GPU memory and unregister from discovery.
+
+        Args:
+            level: Sleep level (1=weights only, 2=weights+buffers, 3=everything)
+
+        With GMS enabled, Worker patches handle VA-stable sleep for weights.
+        After sleeping, unregisters from etcd so frontend stops routing to this worker.
+        """
+        level = body.get("level", 1)
+        try:
+            await engine_client.sleep(level)
+
+            # Unregister from discovery so frontend stops routing to us
+            try:
+                await unregister_llm(generate_endpoint)
+                logger.info(
+                    "[Sleep] Unregistered model from discovery - frontend will stop routing here"
+                )
+            except Exception as unreg_err:
+                logger.warning(
+                    f"[Sleep] Failed to unregister from discovery: {unreg_err}"
+                )
+
+            return {"status": "ok", "message": f"Engine slept (level={level})"}
+        except Exception as e:
+            logger.error(f"Failed to sleep engine: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def wake_handler(body: dict) -> dict:
+        """Wake the engine to restore GPU memory and re-register to discovery.
+
+        Args:
+            tags: List of tags to wake (e.g., ["weights", "kv_cache"]). None wakes all.
+
+        With GMS enabled, Worker patches handle VA-stable wake for weights.
+        After waking, re-registers to etcd so frontend can route to this worker again.
+        """
+        tags = body.get("tags")
+        try:
+            await engine_client.wake_up(tags)
+
+            # Re-register to discovery so frontend can route to us again
+            try:
+                model_input = (
+                    ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+                )
+                model_type = parse_endpoint_types(config.dyn_endpoint_types)
+                await register_vllm_model(
+                    model_input,
+                    model_type,
+                    generate_endpoint,
+                    config,
+                    engine_client,
+                    vllm_config,
+                    migration_limit=config.migration_limit,
+                )
+                logger.info(
+                    "[Wake] Re-registered model to discovery - frontend can route here again"
+                )
+            except Exception as reg_err:
+                logger.warning(f"[Wake] Failed to re-register to discovery: {reg_err}")
+
+            return {"status": "ok", "message": f"Engine woke (tags={tags})"}
+        except Exception as e:
+            logger.error(f"Failed to wake engine: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def status_handler(body: dict) -> dict:
+        """Get engine sleep/wake status."""
+        try:
+            is_sleeping = await engine_client.is_sleeping()
+            return {
+                "status": "ok",
+                "is_sleeping": is_sleeping,
+                "model": config.served_model_name or config.model,
+            }
+        except Exception as e:
+            logger.error(f"Failed to get engine status: {e}")
+            return {"status": "error", "message": str(e)}
+
+    runtime.register_engine_route("sleep", sleep_handler)
+    runtime.register_engine_route("wake", wake_handler)
+    runtime.register_engine_route("status", status_handler)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake, /engine/status")
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
         # Parse endpoint types from --dyn-endpoint-types flag

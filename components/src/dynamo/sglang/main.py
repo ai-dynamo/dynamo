@@ -12,7 +12,7 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
-from dynamo.llm import ModelInput, ModelType
+from dynamo.llm import ModelInput, ModelType, unregister_llm
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
@@ -33,6 +33,55 @@ from dynamo.sglang.request_handlers import (
 )
 
 configure_dynamo_logging()
+logger = logging.getLogger(__name__)
+
+# Track if GMS has been set up to avoid duplicate setup
+_gms_setup_done = False
+
+
+def _setup_gms_if_needed(config: Config) -> None:
+    """Setup GPU Memory Service if --load-format gpu_memory_service is passed.
+
+    This does TWO things:
+    1. Sets environment variables for patches (needed in spawned workers)
+    2. Applies GMS patches and sets load_format to GPUServiceModelLoader class
+
+    Usage:
+        python -m dynamo.sglang --model-path ... \\
+            --load-format gpu_memory_service \\
+            --model-loader-extra-config '{"gms_socket_path": "/tmp/gms_{device}.sock"}'
+    """
+    global _gms_setup_done
+    if _gms_setup_done:
+        return
+
+    load_format = getattr(config.server_args, "load_format", None)
+    if load_format != "gpu_memory_service":
+        return
+
+    logger.info("[GMS] Setting up GMS integration")
+
+    # Set env var to trigger auto-registration in spawned workers
+    os.environ["GMS_SGLANG_AUTO_REGISTER"] = "1"
+
+    # Apply patches in main process
+    try:
+        from dynamo.sglang.gms_adapters import (
+            GPUServiceModelLoader,
+            patch_model_runner_for_gms,
+        )
+
+        patch_model_runner_for_gms()
+        logger.info("[GMS] Applied GMS patches for SGLang")
+
+        # Set load_format to the actual class so SGLang uses our custom loader
+        config.server_args.load_format = GPUServiceModelLoader
+        logger.info("[GMS] Set load_format=GPUServiceModelLoader")
+    except Exception as e:
+        logger.error(f"[GMS] Failed to setup GMS: {e}")
+        raise
+
+    _gms_setup_done = True
 
 
 async def _handle_non_leader_node(
@@ -68,6 +117,10 @@ async def _handle_non_leader_node(
 async def worker():
     config = await parse_args(sys.argv[1:])
     dump_config(config.dynamo_args.dump_config_to, config)
+
+    # Setup GMS if using gpu_memory_service load format
+    # This must be called before sgl.Engine() is created
+    _setup_gms_if_needed(config)
 
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(
@@ -133,8 +186,109 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     runtime.register_engine_route("start_profile", start_profile_handler)
     runtime.register_engine_route("stop_profile", stop_profile_handler)
+
+    # Register engine routes for pause/resume/status
+    async def pause_handler(body: dict) -> dict:
+        """Pause the engine to release GPU memory and unregister from discovery.
+
+        Args:
+            tag: Memory tag to pause (default: "weights")
+
+        With GMS enabled, torch_memory_saver handles VA-stable pause for weights.
+        After pausing, unregisters from etcd so frontend stops routing to this worker.
+        """
+        tag = body.get("tag", "weights")
+        try:
+            from torch_memory_saver import torch_memory_saver
+
+            torch_memory_saver.pause(tag)
+
+            # Unregister from discovery so frontend stops routing to us
+            try:
+                await unregister_llm(generate_endpoint)
+                logging.info(
+                    "[Pause] Unregistered model from discovery - frontend will stop routing here"
+                )
+            except Exception as unreg_err:
+                logging.warning(
+                    f"[Pause] Failed to unregister from discovery: {unreg_err}"
+                )
+
+            return {"status": "ok", "message": f"Engine paused (tag={tag})"}
+        except Exception as e:
+            logging.error(f"Failed to pause engine: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def resume_handler(body: dict) -> dict:
+        """Resume the engine to restore GPU memory and re-register to discovery.
+
+        Args:
+            tag: Memory tag to resume (default: "weights")
+
+        With GMS enabled, torch_memory_saver handles VA-stable resume for weights.
+        After resuming, re-registers to etcd so frontend can route to this worker again.
+        """
+        tag = body.get("tag", "weights")
+        try:
+            from torch_memory_saver import torch_memory_saver
+
+            torch_memory_saver.resume(tag)
+
+            # Re-register to discovery so frontend can route to us again
+            try:
+                from dynamo.sglang.register import _register_llm_with_runtime_config
+
+                model_type = parse_endpoint_types(dynamo_args.dyn_endpoint_types)
+                await _register_llm_with_runtime_config(
+                    engine,
+                    generate_endpoint,
+                    server_args,
+                    dynamo_args,
+                    output_type=model_type,
+                )
+                logging.info(
+                    "[Resume] Re-registered model to discovery - frontend can route here again"
+                )
+            except Exception as reg_err:
+                logging.warning(
+                    f"[Resume] Failed to re-register to discovery: {reg_err}"
+                )
+
+            return {"status": "ok", "message": f"Engine resumed (tag={tag})"}
+        except Exception as e:
+            logging.error(f"Failed to resume engine: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def status_handler(body: dict) -> dict:
+        """Get engine pause/resume status."""
+        try:
+            from dynamo.sglang.gms_adapters import _get_gms_allocator
+
+            allocator = _get_gms_allocator()
+            if allocator is not None:
+                return {
+                    "status": "ok",
+                    "is_paused": allocator.is_sleeping,
+                    "gms_enabled": True,
+                    "model": server_args.served_model_name,
+                }
+            else:
+                # Non-GMS mode - torch_memory_saver doesn't expose pause state directly
+                return {
+                    "status": "ok",
+                    "gms_enabled": False,
+                    "model": server_args.served_model_name,
+                }
+        except Exception as e:
+            logging.error(f"Failed to get engine status: {e}")
+            return {"status": "error", "message": str(e)}
+
+    runtime.register_engine_route("pause", pause_handler)
+    runtime.register_engine_route("resume", resume_handler)
+    runtime.register_engine_route("status", status_handler)
     logging.info(
-        "Registered engine routes: /engine/start_profile, /engine/stop_profile"
+        "Registered engine routes: /engine/start_profile, /engine/stop_profile, "
+        "/engine/pause, /engine/resume, /engine/status"
     )
 
     # publisher instantiates the metrics and kv event publishers
@@ -233,8 +387,109 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     runtime.register_engine_route("start_profile", start_profile_handler)
     runtime.register_engine_route("stop_profile", stop_profile_handler)
+
+    # Register engine routes for pause/resume/status
+    async def pause_handler(body: dict) -> dict:
+        """Pause the engine to release GPU memory and unregister from discovery.
+
+        Args:
+            tag: Memory tag to pause (default: "weights")
+
+        With GMS enabled, torch_memory_saver handles VA-stable pause for weights.
+        After pausing, unregisters from etcd so frontend stops routing to this worker.
+        """
+        tag = body.get("tag", "weights")
+        try:
+            from torch_memory_saver import torch_memory_saver
+
+            torch_memory_saver.pause(tag)
+
+            # Unregister from discovery so frontend stops routing to us
+            try:
+                await unregister_llm(generate_endpoint)
+                logging.info(
+                    "[Pause] Unregistered model from discovery - frontend will stop routing here"
+                )
+            except Exception as unreg_err:
+                logging.warning(
+                    f"[Pause] Failed to unregister from discovery: {unreg_err}"
+                )
+
+            return {"status": "ok", "message": f"Engine paused (tag={tag})"}
+        except Exception as e:
+            logging.error(f"Failed to pause engine: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def resume_handler(body: dict) -> dict:
+        """Resume the engine to restore GPU memory and re-register to discovery.
+
+        Args:
+            tag: Memory tag to resume (default: "weights")
+
+        With GMS enabled, torch_memory_saver handles VA-stable resume for weights.
+        After resuming, re-registers to etcd so frontend can route to this worker again.
+        """
+        tag = body.get("tag", "weights")
+        try:
+            from torch_memory_saver import torch_memory_saver
+
+            torch_memory_saver.resume(tag)
+
+            # Re-register to discovery so frontend can route to us again
+            try:
+                from dynamo.sglang.register import _register_llm_with_runtime_config
+
+                await _register_llm_with_runtime_config(
+                    engine,
+                    generate_endpoint,
+                    server_args,
+                    dynamo_args,
+                    input_type=ModelInput.Tokens,
+                    output_type=ModelType.Prefill,
+                )
+                logging.info(
+                    "[Resume] Re-registered model to discovery - frontend can route here again"
+                )
+            except Exception as reg_err:
+                logging.warning(
+                    f"[Resume] Failed to re-register to discovery: {reg_err}"
+                )
+
+            return {"status": "ok", "message": f"Engine resumed (tag={tag})"}
+        except Exception as e:
+            logging.error(f"Failed to resume engine: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def status_handler(body: dict) -> dict:
+        """Get engine pause/resume status."""
+        try:
+            from dynamo.sglang.gms_adapters import _get_gms_allocator
+
+            allocator = _get_gms_allocator()
+            if allocator is not None:
+                return {
+                    "status": "ok",
+                    "is_paused": allocator.is_sleeping,
+                    "gms_enabled": True,
+                    "model": server_args.served_model_name,
+                }
+            else:
+                # Non-GMS mode - torch_memory_saver doesn't expose pause state directly
+                return {
+                    "status": "ok",
+                    "gms_enabled": False,
+                    "model": server_args.served_model_name,
+                }
+        except Exception as e:
+            logging.error(f"Failed to get engine status: {e}")
+            return {"status": "error", "message": str(e)}
+
+    runtime.register_engine_route("pause", pause_handler)
+    runtime.register_engine_route("resume", resume_handler)
+    runtime.register_engine_route("status", status_handler)
     logging.info(
-        "Registered engine routes: /engine/start_profile, /engine/stop_profile"
+        "Registered engine routes: /engine/start_profile, /engine/stop_profile, "
+        "/engine/pause, /engine/resume, /engine/status"
     )
 
     # Perform dummy warmup for prefill worker to avoid initial TTFT hit
