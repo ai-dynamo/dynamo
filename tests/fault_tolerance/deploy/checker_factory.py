@@ -34,6 +34,10 @@ from tests.fault_tolerance.deploy.checkers import (
     ProcessTerminationChecker,
     SingleWorkerResultsChecker,
 )
+from tests.fault_tolerance.deploy.lora_checker import (
+    LoRADiscoveryChecker,
+    LoRAInferenceChecker,
+)
 from tests.fault_tolerance.deploy.scenarios import Scenario
 
 logger = logging.getLogger(__name__)
@@ -63,6 +67,15 @@ def get_checkers_for_scenario(test_name: str, scenario: Scenario) -> List[BaseCh
     logger.info(f"Using pattern-based checker selection for {test_name}")
 
     checkers: List[BaseChecker] = []
+
+    # Check if this is a LoRA scenario
+    is_lora_scenario = "-lora-" in test_name
+
+    # Add LoRA-specific checkers first if this is a LoRA test
+    if is_lora_scenario:
+        logger.info("Detected LoRA scenario, adding LoRA checkers")
+        checkers.append(LoRADiscoveryChecker())
+        checkers.append(LoRAInferenceChecker())
 
     # Stage 1: Scenario verification
     scenario_checker = get_scenario_checker(test_name, scenario)
@@ -136,7 +149,11 @@ def get_results_checker(test_name: str, scenario: Scenario) -> BaseChecker:
 
     # Determine worker service name based on backend and deployment type
     if scenario.backend == "vllm":
-        worker_service_name = "VllmDecodeWorker"
+        # Check if this is a LoRA aggregated deployment (uses VllmWorker)
+        if "-lora-agg-" in test_name:
+            worker_service_name = "VllmWorker"
+        else:
+            worker_service_name = "VllmDecodeWorker"
     elif scenario.backend == "sglang":
         worker_service_name = "decode"
     elif scenario.backend == "trtllm":

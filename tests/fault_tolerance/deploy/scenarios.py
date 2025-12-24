@@ -505,6 +505,43 @@ def _create_moe_deployments_for_backend(
     return deployments
 
 
+def _create_lora_deployments_for_backend(
+    backend: str = "vllm",
+) -> Dict[str, DeploymentInfo]:
+    """Create LoRA-specific deployment configurations with k8s discovery.
+
+    Args:
+        backend: Backend type (default: "vllm")
+
+    Returns:
+        Dictionary mapping deployment names to DeploymentInfo objects
+    """
+    deployments: Dict[str, DeploymentInfo] = {}
+
+    # Test with tp=1, replicas=2 for LoRA discovery testing
+    tp_size = 1
+    replicas = 2
+
+    template_dir = "tests/fault_tolerance/deploy/templates"
+    yaml_files = {
+        "agg": f"{template_dir}/{backend}/lora_agg.yaml",
+        "disagg": f"{template_dir}/{backend}/lora_disagg.yaml",
+    }
+
+    for deploy_type in ["agg", "disagg"]:
+        scenario_name = f"{backend}-lora-{deploy_type}-tp-{tp_size}-replicas-{replicas}"
+        deployment = DeploymentInfo(
+            spec=DeploymentSpec(yaml_files[deploy_type]),
+            backend=backend,
+            model="Qwen/Qwen3-0.6B",
+            is_moe=False,
+        )
+
+        deployments[scenario_name] = deployment
+
+    return deployments
+
+
 # Create all deployment specifications
 DEPLOYMENT_SPECS: Dict[str, DeploymentInfo] = {}
 DEPLOYMENT_SPECS.update(_create_deployments_for_backend("vllm"))
@@ -513,6 +550,9 @@ DEPLOYMENT_SPECS.update(_create_deployments_for_backend("trtllm"))
 
 # Add MoE deployments for vLLM only
 DEPLOYMENT_SPECS.update(_create_moe_deployments_for_backend("vllm"))
+
+# Add LoRA deployments for vLLM only
+DEPLOYMENT_SPECS.update(_create_lora_deployments_for_backend("vllm"))
 
 
 # Each failure scenaro contains a list of failure injections
@@ -707,6 +747,18 @@ moe_load = Load(
     sla=None,
     client_type="aiperf",
     max_request_rate=0.5,  # Lower rate for MoE
+)
+
+# LoRA-specific load configuration
+lora_load = Load(
+    clients=5,  # Moderate number of clients for LoRA testing
+    requests_per_client=50,  # Moderate request count for LoRA
+    input_token_length=100,
+    output_token_length=100,
+    max_retries=3,
+    sla=None,
+    client_type="aiperf",
+    max_request_rate=1.0,  # Standard rate for LoRA
 )
 
 # model = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
@@ -967,3 +1019,112 @@ add_token_overflow_scenarios()
 
 # Add the rolling upgrade scenarios
 add_rolling_upgrade_scenarios()
+
+
+def add_lora_scenarios():
+    """
+    Add test scenarios for LoRA deployments with Kubernetes backed discovery.
+
+    These scenarios test:
+    1. LoRA loading and inference with k8s discovery
+    2. LoRA registration in etcd
+    3. LoRA discovery by frontend
+    4. Fault tolerance with LoRA-enabled workers
+    """
+    # Only add LoRA scenarios for vLLM backend
+    backend = "vllm"
+
+    # Create failure scenarios for LoRA deployments
+    lora_failure_configs = {
+        "agg": {
+            "worker_name": "VllmWorker",
+            "process_name": "dynamo.vllm",
+        },
+        "disagg": {
+            "decode_worker": "VllmDecodeWorker",
+            "prefill_worker": "VllmPrefillWorker",
+            "process_name": "dynamo.vllm",
+        },
+    }
+
+    for deploy_type in ["agg", "disagg"]:
+        deployment_key = f"{backend}-lora-{deploy_type}-tp-1-replicas-2"
+
+        # Skip if deployment doesn't exist
+        if deployment_key not in DEPLOYMENT_SPECS:
+            continue
+
+        deployment_info = DEPLOYMENT_SPECS[deployment_key]
+        deployment_spec = deployment_info["spec"]
+        scenario_model = deployment_info.get("model", "Qwen/Qwen3-0.6B")
+
+        # Define failure scenarios for LoRA deployments
+        if deploy_type == "agg":
+            failure_scenarios = {
+                "worker_restart": [
+                    TerminateProcessFailure(
+                        30,
+                        [lora_failure_configs["agg"]["worker_name"]],
+                        "SIGKILL",
+                        process_name=lora_failure_configs["agg"]["process_name"],
+                    )
+                ],
+                "worker_pod_delete": [
+                    DeletePodFailure(30, [lora_failure_configs["agg"]["worker_name"]])
+                ],
+                "none": [],  # Test without failures to verify LoRA discovery
+            }
+        else:  # disagg
+            failure_scenarios = {
+                "decode_worker_restart": [
+                    TerminateProcessFailure(
+                        30,
+                        [lora_failure_configs["disagg"]["decode_worker"]],
+                        "SIGKILL",
+                        process_name=lora_failure_configs["disagg"]["process_name"],
+                    )
+                ],
+                "prefill_worker_restart": [
+                    TerminateProcessFailure(
+                        30,
+                        [lora_failure_configs["disagg"]["prefill_worker"]],
+                        "SIGKILL",
+                        process_name=lora_failure_configs["disagg"]["process_name"],
+                    )
+                ],
+                "decode_worker_pod_delete": [
+                    DeletePodFailure(
+                        30, [lora_failure_configs["disagg"]["decode_worker"]]
+                    )
+                ],
+                "prefill_worker_pod_delete": [
+                    DeletePodFailure(
+                        30, [lora_failure_configs["disagg"]["prefill_worker"]]
+                    )
+                ],
+                "none": [],  # Test without failures to verify LoRA discovery
+            }
+
+        # Create scenarios for each failure type
+        for failure_name, failure_list in failure_scenarios.items():
+            scenario_name = f"{deployment_key}-{failure_name}"
+
+            # Create scenario
+            scenario = Scenario(
+                deployment=deployment_spec,
+                load=lora_load,
+                failures=failure_list,
+                model=scenario_model,
+                backend=backend,
+                checkers=None,  # Will be populated by factory
+                requires_custom_build=False,
+            )
+
+            # Generate checkers for this scenario
+            scenario.checkers = _get_checkers_for_scenario(scenario_name, scenario)
+
+            scenarios[scenario_name] = scenario
+
+
+# Add the LoRA scenarios
+add_lora_scenarios()
