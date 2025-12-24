@@ -1,0 +1,139 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: disagg-router-6p-2d
+spec:
+  pvcs:
+  - create: false
+    name: model-cache
+  - create: false
+    name: compilation-cache
+  services:
+    Frontend:
+      componentType: frontend
+      dynamoNamespace: disagg-router-6p-2d
+      envs:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+      extraPodSpec:
+        mainContainer:
+          args:
+            - --router-mode
+            - kv
+            - --router-reset-states
+          command:
+            - python
+            - -m
+            - dynamo.frontend
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        requests:
+          cpu: "8"
+        limits:
+          cpu: "8"
+      subComponentType: null
+    VllmDecodeWorker:
+      componentType: worker
+      dynamoNamespace: disagg-router-6p-2d
+      envFromSecret: hf-token-secret
+      extraPodSpec:
+        mainContainer:
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --tensor-parallel-size
+          - '2'
+          - --disable-log-requests
+          - --gpu-memory-utilization
+          - '0.90'
+          - --no-enable-prefix-caching
+          - --async-scheduling
+          - --block-size
+          - '64'
+          - --hf-overrides
+          - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+          - --max-model-len
+          - '131072'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace
+          env:
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: "false"
+          - name: HF_HOME
+            value: /home/dynamo/.cache/huggingface
+      replicas: 2
+      resources:
+        limits:
+          gpu: '2'
+          custom:
+            rdma/ib: "2"
+        requests:
+          gpu: '2'
+      subComponentType: decode
+      volumeMounts:
+      - name: model-cache
+        mountPoint: /home/dynamo/.cache/huggingface
+      - name: compilation-cache
+        mountPoint: /home/dynamo/.cache/vllm
+        useAsCompilationCache: true
+    VllmPrefillWorker:
+      componentType: worker
+      dynamoNamespace: disagg-router-6p-2d
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/port: "9400"
+          prometheus.io/path: "/metrics"
+      extraPodSpec:
+        mainContainer:
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --is-prefill-worker
+          - --tensor-parallel-size
+          - '2'
+          - --disable-log-requests
+          - --gpu-memory-utilization
+          - '0.90'
+          - --async-scheduling
+          - --block-size
+          - '64'
+          - --hf-overrides
+          - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+          - --max-model-len
+          - '131072'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          env:
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: "false"
+          - name: HF_HOME
+            value: /home/dynamo/.cache/huggingface
+          workingDir: /workspace
+      replicas: 6
+      resources:
+        limits:
+          gpu: '2'
+          custom:
+            rdma/ib: "2"
+        requests:
+          gpu: '2'
+      subComponentType: prefill
+      volumeMounts:
+      - name: model-cache
+        mountPoint: /home/dynamo/.cache/huggingface
+      - name: compilation-cache
+        mountPoint: /home/dynamo/.cache/vllm
+        useAsCompilationCache: true

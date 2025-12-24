@@ -34,7 +34,7 @@ golang-base:
 
 operator-src:
     FROM +golang-base
-    COPY ./deploy/cloud/operator /artifacts/operator
+    COPY ./deploy/operator /artifacts/operator
     SAVE ARTIFACT /artifacts/operator
 
 
@@ -172,15 +172,15 @@ dynamo-base-docker:
 
 ############### ALL TARGETS ##############################
 all-test:
-    BUILD ./deploy/cloud/operator+test
+    BUILD ./deploy/operator+test
 
 all-docker:
     ARG DOCKER_SERVER=my-registry
     ARG IMAGE_TAG=latest
-    BUILD ./deploy/cloud/operator+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+    BUILD ./deploy/operator+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 
 all-lint:
-    BUILD ./deploy/cloud/operator+lint
+    BUILD ./deploy/operator+lint
 
 all:
     BUILD +all-test

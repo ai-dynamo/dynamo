@@ -195,6 +195,37 @@ pub mod kvbm {
             "DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS";
     }
 
+    /// Object storage configuration
+    pub mod object_storage {
+        /// Enable object storage. Set to "1" to enable.
+        pub const DYN_KVBM_OBJECT_ENABLED: &str = "DYN_KVBM_OBJECT_ENABLED";
+
+        /// Bucket name for object storage cache
+        /// Supports `{worker_id}` template for per-worker buckets
+        /// Example: "kv-cache-{worker_id}"
+        pub const DYN_KVBM_OBJECT_BUCKET: &str = "DYN_KVBM_OBJECT_BUCKET";
+
+        /// Endpoint for object storage
+        pub const DYN_KVBM_OBJECT_ENDPOINT: &str = "DYN_KVBM_OBJECT_ENDPOINT";
+
+        /// Region for object storage
+        pub const DYN_KVBM_OBJECT_REGION: &str = "DYN_KVBM_OBJECT_REGION";
+
+        /// Access key for authentication
+        pub const DYN_KVBM_OBJECT_ACCESS_KEY: &str = "DYN_KVBM_OBJECT_ACCESS_KEY";
+
+        /// Secret key for authentication
+        pub const DYN_KVBM_OBJECT_SECRET_KEY: &str = "DYN_KVBM_OBJECT_SECRET_KEY";
+
+        /// Number of blocks to store in object storage
+        pub const DYN_KVBM_OBJECT_NUM_BLOCKS: &str = "DYN_KVBM_OBJECT_NUM_BLOCKS";
+    }
+    /// Transfer configuration
+    pub mod transfer {
+        /// Maximum number of blocks per transfer batch
+        pub const DYN_KVBM_TRANSFER_BATCH_SIZE: &str = "DYN_KVBM_TRANSFER_BATCH_SIZE";
+    }
+
     /// KVBM leader (distributed mode) configuration
     pub mod leader {
         /// Timeout in seconds for KVBM leader and worker initialization

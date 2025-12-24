@@ -114,7 +114,7 @@ sglang_configs = {
         name="kv_events",
         directory=sglang_dir,
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         env={
             "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
@@ -227,6 +227,7 @@ sglang_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.post_merge,
             pytest.mark.timeout(
                 420
             ),  # Total test timeout: 2x measured average (79.36s) + download time (240s) for 7B model
@@ -253,14 +254,21 @@ def sglang_config_test(request):
 
 @pytest.mark.e2e
 @pytest.mark.sglang
+# Use 2 system ports because some `sglang_configs` validate metrics on multiple ports.
+# This test iterates over all configs via `sglang_config_test`.
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_sglang_deployment(
     sglang_config_test,
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
+    num_system_ports,
     predownload_models,
 ):
     """Test SGLang deployment scenarios using common helpers"""
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     config = dataclasses.replace(
         sglang_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
@@ -269,7 +277,7 @@ def test_sglang_deployment(
 
 @pytest.mark.e2e
 @pytest.mark.sglang
-@pytest.mark.gpu_1
+@pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.skip(
     reason="Requires 4 GPUs - enable when hardware is consistently available"

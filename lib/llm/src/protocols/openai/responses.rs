@@ -11,6 +11,7 @@ use dynamo_async_openai::types::{
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 use validator::Validate;
 
@@ -18,8 +19,9 @@ use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatComplet
 use super::nvext::{NvExt, NvExtProvider};
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateResponse {
+    /// Flattened CreateResponse fields (model, input, temperature, etc.)
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::responses::CreateResponse,
 
@@ -27,8 +29,9 @@ pub struct NvCreateResponse {
     pub nvext: Option<NvExt>,
 }
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvResponse {
+    /// Flattened Response fields.
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::responses::Response,
 
@@ -193,6 +196,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             common: Default::default(),
             nvext: resp.nvext,
             chat_template_args: None,
+            media_io_kwargs: None,
             unsupported_fields: Default::default(),
         })
     }

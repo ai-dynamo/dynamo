@@ -18,3 +18,19 @@ def test_raise_http_error():
 def test_invalid_http_error_code():
     with pytest.raises(ValueError):
         HttpError(1700, "Invalid Code")
+
+
+def test_invalid_http_error_message():
+    with pytest.raises(ValueError):
+        # The second argument must be a string, not bytes.
+        HttpError(400, b"Bad Request")
+
+
+def test_long_http_error_message():
+    message = ("A" * 8192) + "B"
+    error = HttpError(400, message)
+    assert len(error.message) == 8192
+
+    # Ensure the exception string uses the truncated message too.
+    assert message[:8189] in str(error)
+    assert "B" not in str(error)

@@ -530,9 +530,18 @@ pub struct DistributedConfig {
 impl DistributedConfig {
     pub fn from_settings() -> DistributedConfig {
         let request_plane = RequestPlaneMode::from_env();
+        // NATS is used for more than just NATS request-plane RPC:
+        // - KV router events (JetStream or NATS core + local indexer)
+        // - inter-router replica sync (NATS core)
+        //
+        // Historically we only connected to NATS when the request plane was NATS, which made
+        // `DYN_REQUEST_PLANE=tcp|http` incompatible with KV routing modes that rely on NATS.
+        // If a NATS server is configured via env, enable the client regardless of request plane.
+        let nats_enabled = request_plane.is_nats()
+            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
         DistributedConfig {
             store_backend: kv::Selector::Etcd(Box::default()),
-            nats_config: if request_plane.is_nats() {
+            nats_config: if nats_enabled {
                 Some(nats::ClientOptions::default())
             } else {
                 None
@@ -547,9 +556,11 @@ impl DistributedConfig {
             ..Default::default()
         };
         let request_plane = RequestPlaneMode::from_env();
+        let nats_enabled = request_plane.is_nats()
+            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
         DistributedConfig {
             store_backend: kv::Selector::Etcd(Box::new(etcd_config)),
-            nats_config: if request_plane.is_nats() {
+            nats_config: if nats_enabled {
                 Some(nats::ClientOptions::default())
             } else {
                 None
@@ -574,12 +585,12 @@ impl DistributedConfig {
 /// Request plane transport mode configuration
 ///
 /// This determines how requests are distributed from routers to workers:
-/// - `Nats`: Use NATS for request distribution (default, legacy)
+/// - `Nats`: Use NATS for request distribution (legacy)
 /// - `Http`: Use HTTP/2 for request distribution
-/// - `Tcp`: Use raw TCP for request distribution with msgpack support
+/// - `Tcp`: Use raw TCP for request distribution with msgpack support (default)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestPlaneMode {
-    /// Use NATS for request plane (default for backward compatibility)
+    /// Use NATS for request plane
     Nats,
     /// Use HTTP/2 for request plane
     Http,
@@ -589,7 +600,7 @@ pub enum RequestPlaneMode {
 
 impl Default for RequestPlaneMode {
     fn default() -> Self {
-        Self::Nats
+        Self::Tcp
     }
 }
 
