@@ -6,7 +6,10 @@
 //! - Connect it to an Input
 
 pub mod input;
-pub use input::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
+pub use input::{
+    build_routed_pipeline, build_routed_pipeline_with_decode_disagger,
+    build_routed_pipeline_with_preprocessor,
+};
 
 use std::future::Future;
 use std::pin::Pin;
@@ -39,6 +42,8 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens utilization (literal token count)
     pub active_prefill_tokens_threshold: Option<u64>,
     pub enforce_disagg: bool,
+    /// Enable decode disaggregation routing across sequence length tiers
+    pub enable_decode_disagg: bool,
 }
 
 impl RouterConfig {
@@ -49,6 +54,7 @@ impl RouterConfig {
             active_decode_blocks_threshold: None,
             active_prefill_tokens_threshold: None,
             enforce_disagg: false,
+            enable_decode_disagg: false,
         }
     }
 
@@ -64,6 +70,11 @@ impl RouterConfig {
 
     pub fn with_enforce_disagg(mut self, enforce_disagg: bool) -> Self {
         self.enforce_disagg = enforce_disagg;
+        self
+    }
+
+    pub fn with_enable_decode_disagg(mut self, enable: bool) -> Self {
+        self.enable_decode_disagg = enable;
         self
     }
 }

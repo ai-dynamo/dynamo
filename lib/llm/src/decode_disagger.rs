@@ -139,11 +139,45 @@ impl DecodeDisagger {
             cancel_token: cancel_token.clone(),
         });
 
+        // Get existing tiers that were activated before we subscribed
+        let existing_tiers = model_manager.get_existing_decode_tiers(model_name);
+        tracing::info!(
+            model_name = model_name,
+            existing_tiers = existing_tiers.len(),
+            "DecodeDisagger checking for existing tiers"
+        );
+
         // Subscribe to tier notifications and spawn background task
         let mut tier_rx = model_manager.subscribe_decode_tiers(model_name);
         let model_name = model_name.to_string();
 
         tokio::spawn(async move {
+            // First, activate any existing tiers
+            for (seqlen, endpoint) in existing_tiers {
+                tracing::info!(
+                    model_name = %model_name,
+                    seqlen = seqlen,
+                    "Activating existing decode tier"
+                );
+
+                if let Err(e) = Self::activate_tier_inner(
+                    &tiers,
+                    seqlen,
+                    endpoint,
+                    router_mode,
+                    kv_router_config,
+                    kv_cache_block_size,
+                    Some(model_manager.clone()),
+                ).await {
+                    tracing::error!(
+                        seqlen = seqlen,
+                        error = %e,
+                        "Failed to activate existing tier"
+                    );
+                }
+            }
+
+            // Now listen for new tiers
             loop {
                 tokio::select! {
                     result = tier_rx.recv() => {
@@ -356,26 +390,56 @@ impl
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        let num_tiers = self.tiers.read().len();
+        tracing::info!(
+            num_tiers,
+            "DecodeDisagger::generate called"
+        );
+
         // If no tiers configured, just forward to next (passthrough mode)
         if !self.has_tiers() {
+            tracing::info!("DecodeDisagger: No tiers configured, using passthrough mode");
             return next.generate(request).await;
         }
 
         let (req, context) = request.into_parts();
         let isl = req.token_ids.len();
 
+        tracing::info!(
+            isl,
+            num_tiers,
+            "DecodeDisagger: Routing request with ISL"
+        );
+
+        // Log available tiers
+        {
+            let tiers = self.tiers.read();
+            for tier in tiers.iter() {
+                tracing::info!(
+                    tier_seqlen = tier.seqlen,
+                    "DecodeDisagger: Available tier"
+                );
+            }
+        }
+
         // Select initial tier based on ISL
         let Some(current_tier) = self.select_tier(isl) else {
             // No tier can handle this, forward to next (let it fail there)
-            tracing::warn!(isl, "No tier available for sequence length, forwarding");
+            tracing::warn!(isl, "No tier available for sequence length, forwarding to next");
             return next.generate(context.map(|_| req)).await;
         };
 
         let current_seqlen = current_tier.seqlen;
 
+        tracing::info!(
+            isl,
+            selected_tier = current_seqlen,
+            "DecodeDisagger: Selected tier for request"
+        );
+
         // If this is the max tier, just forward (no migration possible)
         if self.is_max_tier(current_seqlen) {
-            tracing::debug!(isl, tier_seqlen = current_seqlen, "Using max tier, forwarding");
+            tracing::info!(isl, tier_seqlen = current_seqlen, "DecodeDisagger: Using max tier, forwarding to next");
             return next.generate(context.map(|_| req)).await;
         }
 

@@ -40,18 +40,6 @@ enum PrefillActivationState {
     PrefillReady(oneshot::Receiver<Endpoint>),
 }
 
-/// State for decode tier activation rendezvous
-/// Key is (model_name, seqlen) - each tier activates independently
-enum DecodeTierActivationState {
-    /// Frontend registered, waiting for tier endpoint
-    FrontendWaiting(oneshot::Sender<Endpoint>),
-    /// Tier endpoint arrived, waiting for frontend to register
-    TierReady(oneshot::Receiver<Endpoint>),
-}
-
-/// Key for decode tier activators: (model_name, sequence_length)
-type DecodeTierKey = (String, u32);
-
 /// Notification sent when a decode tier is discovered
 #[derive(Clone, Debug)]
 pub struct DecodeTierNotification {
@@ -89,13 +77,14 @@ pub struct ModelManager {
     cards: Mutex<HashMap<String, ModelDeploymentCard>>,
     kv_choosers: Mutex<HashMap<EndpointId, Arc<KvRouter>>>,
     prefill_router_activators: Mutex<HashMap<String, PrefillActivationState>>,
-    /// Decode tier activators for sequence length disaggregation
-    /// Key: (model_name, seqlen), Value: activation state
-    decode_tier_activators: Mutex<HashMap<DecodeTierKey, DecodeTierActivationState>>,
 
     /// Broadcast channels for decode tier notifications (dynamic discovery)
     /// Key: model_name, Value: broadcast sender
     decode_tier_broadcasters: Mutex<HashMap<String, broadcast::Sender<DecodeTierNotification>>>,
+
+    /// Storage for activated decode tier endpoints (for late subscribers)
+    /// Key: model_name, Value: list of (seqlen, endpoint) pairs
+    decode_tier_endpoints: Mutex<HashMap<String, Vec<(u32, Endpoint)>>>,
 
     /// Per-model worker monitors for dynamic KV cache load rejection.
     /// Key: model name, Value: cloneable monitor (all fields are Arc).
@@ -120,8 +109,8 @@ impl ModelManager {
             cards: Mutex::new(HashMap::new()),
             kv_choosers: Mutex::new(HashMap::new()),
             prefill_router_activators: Mutex::new(HashMap::new()),
-            decode_tier_activators: Mutex::new(HashMap::new()),
             decode_tier_broadcasters: Mutex::new(HashMap::new()),
+            decode_tier_endpoints: Mutex::new(HashMap::new()),
             worker_monitors: RwLock::new(HashMap::new()),
         }
     }
@@ -508,53 +497,6 @@ impl ModelManager {
         }
     }
 
-    /// Register a decode tier for a model. Returns a receiver that will be
-    /// activated when the corresponding tier component is discovered.
-    /// Returns None if the tier was already registered.
-    ///
-    /// Used by DecodeDisagger to receive tier endpoints for routing.
-    pub fn register_decode_tier(
-        &self,
-        model_name: String,
-        seqlen: u32,
-    ) -> Option<oneshot::Receiver<Endpoint>> {
-        let key = (model_name.clone(), seqlen);
-        let mut activators = self.decode_tier_activators.lock();
-
-        match activators.remove(&key) {
-            Some(DecodeTierActivationState::TierReady(rx)) => {
-                // Tier endpoint already arrived - rx will immediately resolve
-                tracing::debug!(
-                    model_name = %model_name,
-                    seqlen = seqlen,
-                    "Decode tier endpoint already available, returning receiver"
-                );
-                Some(rx)
-            }
-            Some(DecodeTierActivationState::FrontendWaiting(tx)) => {
-                // Frontend already registered - this shouldn't happen, restore state
-                tracing::error!(
-                    model_name = %model_name,
-                    seqlen = seqlen,
-                    "Frontend already registered for this decode tier"
-                );
-                activators.insert(key, DecodeTierActivationState::FrontendWaiting(tx));
-                None
-            }
-            None => {
-                // New registration: create tx/rx pair, store sender and return receiver
-                let (tx, rx) = oneshot::channel();
-                activators.insert(key, DecodeTierActivationState::FrontendWaiting(tx));
-                tracing::debug!(
-                    model_name = %model_name,
-                    seqlen = seqlen,
-                    "No decode tier endpoint available yet, storing sender for activation"
-                );
-                Some(rx)
-            }
-        }
-    }
-
     /// Subscribe to decode tier notifications for a model.
     /// Returns a broadcast receiver that will receive notifications when new tiers are discovered.
     ///
@@ -586,7 +528,23 @@ impl ModelManager {
         seqlen: u32,
         endpoint: Endpoint,
     ) -> anyhow::Result<()> {
-        // First, broadcast to any subscribers (dynamic discovery)
+        // Store endpoint for late subscribers (dynamic discovery)
+        {
+            let mut endpoints = self.decode_tier_endpoints.lock();
+            let model_tiers = endpoints.entry(model_name.to_string()).or_default();
+            // Only add if not already present
+            if !model_tiers.iter().any(|(s, _)| *s == seqlen) {
+                model_tiers.push((seqlen, endpoint.clone()));
+                tracing::info!(
+                    model_name = %model_name,
+                    seqlen = seqlen,
+                    total_tiers = model_tiers.len(),
+                    "Stored decode tier endpoint for model"
+                );
+            }
+        }
+
+        // Broadcast to any current subscribers (dynamic discovery)
         {
             let broadcasters = self.decode_tier_broadcasters.lock();
             if let Some(sender) = broadcasters.get(model_name) {
@@ -599,61 +557,14 @@ impl ModelManager {
             }
         }
 
-        // Then handle legacy oneshot activation
-        let key = (model_name.to_string(), seqlen);
-        let mut activators = self.decode_tier_activators.lock();
+        Ok(())
+    }
 
-        match activators.remove(&key) {
-            Some(DecodeTierActivationState::FrontendWaiting(sender)) => {
-                // Frontend already registered - send the endpoint
-                sender.send(endpoint).map_err(|_| {
-                    anyhow::anyhow!(
-                        "Failed to send endpoint to decode tier activator for model {} seqlen {}",
-                        model_name,
-                        seqlen
-                    )
-                })?;
-
-                tracing::info!(
-                    model_name = %model_name,
-                    seqlen = seqlen,
-                    "Activated decode tier for already-registered frontend"
-                );
-
-                Ok(())
-            }
-            Some(DecodeTierActivationState::TierReady(_)) => {
-                // Tier already activated - this shouldn't happen
-                anyhow::bail!(
-                    "Decode tier for model {} seqlen {} already activated",
-                    model_name,
-                    seqlen
-                );
-            }
-            None => {
-                // Frontend not registered yet - create pair and immediately send endpoint
-                let (tx, rx) = oneshot::channel();
-
-                tx.send(endpoint).map_err(|_| {
-                    anyhow::anyhow!(
-                        "Failed to send endpoint for decode tier: {} seqlen {}",
-                        model_name,
-                        seqlen
-                    )
-                })?;
-
-                // Store the receiver for when frontend registers
-                activators.insert(key, DecodeTierActivationState::TierReady(rx));
-
-                tracing::info!(
-                    model_name = %model_name,
-                    seqlen = seqlen,
-                    "Stored decode tier endpoint for future frontend registration"
-                );
-
-                Ok(())
-            }
-        }
+    /// Get all existing decode tier endpoints for a model.
+    /// Used by late subscribers (DecodeDisagger) to get tiers that were activated before subscription.
+    pub fn get_existing_decode_tiers(&self, model_name: &str) -> Vec<(u32, Endpoint)> {
+        let endpoints = self.decode_tier_endpoints.lock();
+        endpoints.get(model_name).cloned().unwrap_or_default()
     }
 
     pub fn get_model_tool_call_parser(&self, model: &str) -> Option<String> {

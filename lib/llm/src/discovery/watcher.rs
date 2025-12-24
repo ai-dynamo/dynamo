@@ -20,6 +20,7 @@ use dynamo_runtime::{
 
 use crate::{
     backend::Backend,
+    decode_disagger::DecodeDisagger,
     entrypoint::{self, EngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::PrefillRouter,
@@ -340,7 +341,67 @@ impl ModelWatcher {
         tracing::debug!(model_name = card.name(), "adding model");
         self.manager.save_model_card(key, card.clone())?;
 
-        // Skip duplicate registrations based on model type.
+        // Handle decode tier detection for decode disaggregation
+        // IMPORTANT: This must happen BEFORE the duplicate registration check,
+        // because different workers can contribute different tiers even if
+        // the model is already registered.
+        // Workers with this_seqlen < context_length are intermediate tiers
+        // Workers with this_seqlen == context_length (or None) publish the model
+        let is_intermediate_tier = match card.this_seqlen {
+            Some(seqlen) if seqlen < card.context_length => {
+                tracing::info!(
+                    model_name = card.name(),
+                    seqlen = seqlen,
+                    context_length = card.context_length,
+                    component = %endpoint_id.component,
+                    "Intermediate decode tier detected, activating tier (not publishing model)"
+                );
+
+                if let Err(e) = self.manager.activate_decode_tier(card.name(), seqlen, endpoint.clone()) {
+                    tracing::warn!(
+                        model_name = card.name(),
+                        seqlen = seqlen,
+                        error = %e,
+                        "Failed to activate decode tier - may already be activated"
+                    );
+                }
+                true // This is an intermediate tier
+            }
+            Some(seqlen) => {
+                // this_seqlen == context_length: main decode worker, also register as tier
+                tracing::info!(
+                    model_name = card.name(),
+                    seqlen = seqlen,
+                    context_length = card.context_length,
+                    component = %endpoint_id.component,
+                    "Main decode tier detected (seqlen == context_length), will publish model"
+                );
+
+                if let Err(e) = self.manager.activate_decode_tier(card.name(), seqlen, endpoint.clone()) {
+                    tracing::warn!(
+                        model_name = card.name(),
+                        seqlen = seqlen,
+                        error = %e,
+                        "Failed to activate decode tier - may already be activated"
+                    );
+                }
+                false // This is the main tier, should publish model
+            }
+            None => false, // No decode disaggregation, publish model normally
+        };
+
+        // Intermediate tiers only register, they don't publish the model
+        if is_intermediate_tier {
+            tracing::debug!(
+                model_name = card.name(),
+                "Skipping model publish for intermediate decode tier"
+            );
+            return Ok(());
+        }
+
+        // Skip duplicate model registrations based on model type.
+        // This check comes AFTER tier activation so that all tiers get registered
+        // even if the model itself was already registered by another worker.
         // Prefill and decode models are tracked separately, so registering one
         // doesn't block the other (they can arrive in any order).
         let already_registered = if card.model_type.supports_prefill() {
@@ -354,29 +415,9 @@ impl ModelWatcher {
                 model_name = card.name(),
                 namespace = endpoint_id.namespace,
                 model_type = %card.model_type,
-                "Model already registered, skipping"
+                "Model already registered, skipping pipeline creation"
             );
             return Ok(());
-        }
-
-        // Activate decode tier if this_seqlen is set
-        // This enables sequence-length-based routing for decode disaggregation
-        if let Some(seqlen) = card.this_seqlen {
-            tracing::info!(
-                model_name = card.name(),
-                seqlen = seqlen,
-                component = %endpoint_id.component,
-                "Decode tier detected, activating tier for sequence length"
-            );
-
-            if let Err(e) = self.manager.activate_decode_tier(card.name(), seqlen, endpoint.clone()) {
-                tracing::warn!(
-                    model_name = card.name(),
-                    seqlen = seqlen,
-                    error = %e,
-                    "Failed to activate decode tier - may already be activated"
-                );
-            }
         }
 
         if let Some(tx) = &self.model_update_tx {
@@ -455,6 +496,23 @@ impl ModelWatcher {
                 None
             };
 
+            // Create DecodeDisagger if decode disaggregation is enabled and this is a tiered model
+            let decode_disagger = if self.router_config.enable_decode_disagg && card.this_seqlen.is_some() {
+                tracing::info!(
+                    model_name = card.name(),
+                    "Creating DecodeDisagger with dynamic tier discovery"
+                );
+                Some(DecodeDisagger::with_dynamic_tiers(
+                    card.name(),
+                    self.manager.clone(),
+                    self.router_config.router_mode,
+                    Some(self.router_config.kv_router_config),
+                    card.kv_cache_block_size,
+                ))
+            } else {
+                None
+            };
+
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
                 // Work in progress. This will allow creating  a chat_engine from Python.
@@ -463,7 +521,16 @@ impl ModelWatcher {
                         .await
                         .context("python engine_factory")?
                 } else {
-                    entrypoint::build_routed_pipeline::<
+                    // Create preprocessor for chat (using model's chat template)
+                    let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
+                    let chat_preprocessor = OpenAIPreprocessor::new_with_parts(
+                        card.clone(),
+                        formatter,
+                        tokenizer_hf.clone(),
+                    )
+                    .context("OpenAIPreprocessor::new_with_parts for chat")?;
+
+                    entrypoint::build_routed_pipeline_with_decode_disagger::<
                         NvCreateChatCompletionRequest,
                         NvCreateChatCompletionStreamResponse,
                     >(
@@ -472,13 +539,15 @@ impl ModelWatcher {
                         self.router_config.router_mode,
                         worker_monitor.clone(),
                         kv_chooser.clone(),
+                        chat_preprocessor,
                         tokenizer_hf.clone(),
                         prefill_chooser.clone(),
                         self.router_config.enforce_disagg,
                         self.metrics.clone(),
+                        decode_disagger.clone(),
                     )
                     .await
-                    .context("build_routed_pipeline")?
+                    .context("build_routed_pipeline_with_decode_disagger")?
                 };
                 self.manager
                     .add_chat_completions_model(card.name(), checksum, chat_engine)
@@ -496,7 +565,7 @@ impl ModelWatcher {
                     tokenizer_hf.clone(),
                 )
                 .context("OpenAIPreprocessor::new_with_parts")?;
-                let completions_engine = entrypoint::build_routed_pipeline_with_preprocessor::<
+                let completions_engine = entrypoint::build_routed_pipeline_with_decode_disagger::<
                     NvCreateCompletionRequest,
                     NvCreateCompletionResponse,
                 >(
@@ -510,9 +579,10 @@ impl ModelWatcher {
                     prefill_chooser,
                     self.router_config.enforce_disagg,
                     self.metrics.clone(),
+                    decode_disagger,
                 )
                 .await
-                .context("build_routed_pipeline_with_preprocessor")?;
+                .context("build_routed_pipeline_with_decode_disagger")?;
                 self.manager
                     .add_completions_model(card.name(), checksum, completions_engine)
                     .context("add_completions_model")?;

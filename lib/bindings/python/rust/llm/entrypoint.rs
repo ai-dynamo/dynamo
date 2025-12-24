@@ -91,18 +91,21 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens utilization (literal token count)
     active_prefill_tokens_threshold: Option<u64>,
     enforce_disagg: bool,
+    /// Enable decode disaggregation routing across sequence length tiers
+    enable_decode_disagg: bool,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, enforce_disagg=false))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, enforce_disagg=false, enable_decode_disagg=false))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
         active_decode_blocks_threshold: Option<f64>,
         active_prefill_tokens_threshold: Option<u64>,
         enforce_disagg: bool,
+        enable_decode_disagg: bool,
     ) -> Self {
         Self {
             router_mode: mode,
@@ -110,6 +113,7 @@ impl RouterConfig {
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             enforce_disagg,
+            enable_decode_disagg,
         }
     }
 }
@@ -122,6 +126,7 @@ impl From<RouterConfig> for RsRouterConfig {
             active_decode_blocks_threshold: rc.active_decode_blocks_threshold,
             active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,
             enforce_disagg: rc.enforce_disagg,
+            enable_decode_disagg: rc.enable_decode_disagg,
         }
     }
 }

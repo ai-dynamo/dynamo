@@ -209,6 +209,12 @@ def parse_args():
         help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
     )
     parser.add_argument(
+        "--enable-decode-disagg",
+        action="store_true",
+        default=False,
+        help="Enable decode disaggregation routing across sequence length tiers. Workers with this_seqlen register as tiers, and the DecodeDisagger routes requests to appropriate tiers based on sequence length.",
+    )
+    parser.add_argument(
         "--active-decode-blocks-threshold",
         type=float,
         default=None,
@@ -365,6 +371,7 @@ async def async_main():
             active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
             active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
             enforce_disagg=flags.enforce_disagg,
+            enable_decode_disagg=flags.enable_decode_disagg,
         ),
     }
 
