@@ -208,10 +208,12 @@ ENV OPENSSL_INCLUDE_DIR="/usr/local/openssl3/include"
 
 # The base image libcurl is linked against openssl 1.x, so we need to build from source
 # in order to use openssl 3.x. This is needed to build aws-sdk-cpp.
-RUN wget https://curl.se/download/curl-8.5.0.tar.gz && \
+RUN cd /tmp && \
+    wget https://curl.se/download/curl-8.5.0.tar.gz && \
     tar xzf curl-8.5.0.tar.gz && cd curl-8.5.0 && \
     ./configure --prefix=/usr/local/curl8.5 --with-ssl=/usr/local/openssl3 --enable-shared && \
-    make -j$(nproc) && make install
+    make -j$(nproc) && make install && \
+    rm -rf /tmp/curl-8.5.0*
 
 # Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
 ARG AWS_SDK_CPP_VERSION=1.11.581
