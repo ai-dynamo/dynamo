@@ -4,8 +4,10 @@
 //! Transfer options for configuring block and layer transfers.
 
 use super::BounceBuffer;
+use cudarc::driver::CudaStream;
 use derive_builder::Builder;
 use std::ops::Range;
+use std::sync::Arc;
 
 /// Options for configuring transfer operations.
 ///
@@ -45,6 +47,17 @@ pub struct TransferOptions {
     /// source → bounce buffer → destination.
     #[builder(default, setter(strip_option, into))]
     pub bounce_buffer: Option<BounceBuffer>,
+
+    /// Optional caller-provided CUDA stream for the transfer.
+    ///
+    /// When provided, the transfer executor will use this stream instead of
+    /// acquiring one from the pool. The caller is responsible for synchronization -
+    /// no event is recorded by the executor.
+    ///
+    /// This is useful for layer-wise transfers where all layers must execute
+    /// on the same stream to allow proper event sequencing.
+    #[builder(default, setter(strip_option))]
+    pub cuda_stream: Option<Arc<CudaStream>>,
 }
 
 impl TransferOptions {

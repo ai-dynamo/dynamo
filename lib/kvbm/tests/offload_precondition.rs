@@ -140,10 +140,10 @@ async fn test_offload_precondition_single_worker() -> Result<()> {
 
     // 5. Verify metadata contains events
     assert!(
-        metadata.forward_pass_events.is_some(),
+        metadata.foward_pass_completion_events.is_some(),
         "Should have forward pass events"
     );
-    let events = metadata.forward_pass_events.as_ref().unwrap();
+    let events = metadata.foward_pass_completion_events.as_ref().unwrap();
     assert_eq!(events.len(), 1, "Should have 1 event for 1 worker");
 
     tracing::info!("Verified event map: {} events", events.len());
@@ -250,10 +250,10 @@ async fn test_offload_precondition_two_workers_merge() -> Result<()> {
 
     // 5. Verify metadata contains events for both workers
     assert!(
-        metadata.forward_pass_events.is_some(),
+        metadata.foward_pass_completion_events.is_some(),
         "Should have forward pass events"
     );
-    let events = metadata.forward_pass_events.as_ref().unwrap();
+    let events = metadata.foward_pass_completion_events.as_ref().unwrap();
     assert_eq!(events.len(), 2, "Should have 2 events for 2 workers");
 
     tracing::info!("Verified event map: {} events", events.len());
@@ -456,7 +456,7 @@ async fn test_offload_precondition_cached_request() -> Result<()> {
     let metadata1 = instance.leader.process_scheduler_output(initial_output)?;
 
     // Trigger events for initial iteration
-    if let Some(events) = metadata1.forward_pass_events.as_ref() {
+    if let Some(events) = metadata1.foward_pass_completion_events.as_ref() {
         for event_handle in events.values() {
             instance.leader_nova.events().trigger(*event_handle).await?;
         }
@@ -495,11 +495,11 @@ async fn test_offload_precondition_cached_request() -> Result<()> {
 
     // 7. Verify events and trigger
     assert!(
-        metadata2.forward_pass_events.is_some(),
+        metadata2.foward_pass_completion_events.is_some(),
         "Should have events for cached request"
     );
 
-    if let Some(events) = metadata2.forward_pass_events.as_ref() {
+    if let Some(events) = metadata2.foward_pass_completion_events.as_ref() {
         for event_handle in events.values() {
             instance.leader_nova.events().trigger(*event_handle).await?;
         }

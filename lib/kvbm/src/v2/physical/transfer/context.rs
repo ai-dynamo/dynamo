@@ -13,8 +13,8 @@ use dynamo_kvbm_kernels::OperationalCopyBackend;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use dynamo_memory::nixl::{NixlAgent, NixlBackendConfig, XferRequest};
 use dynamo_memory::CudaMemPool;
+use dynamo_memory::nixl::{NixlAgent, NixlBackendConfig, XferRequest};
 use dynamo_nova::events::LocalEventSystem;
 
 use crate::v2::physical::manager::TransferManager;
@@ -361,6 +361,28 @@ impl TransferContext {
     pub(crate) fn next_h2d_streams(&self) -> Arc<CudaStream> {
         let current_h2d_stream = self.current_h2d_stream.fetch_add(1, Ordering::Relaxed);
         self.h2d_streams[current_h2d_stream % self.h2d_streams.len()].clone()
+    }
+
+    /// Acquire an H2D stream for use by caller.
+    ///
+    /// This returns a stream from the pool that the caller can use for multiple
+    /// sequential operations. The caller is responsible for all synchronization
+    /// (e.g., recording events after operations).
+    ///
+    /// Used for layer-wise transfers where all layers must execute on the same stream.
+    pub fn acquire_h2d_stream(&self) -> Arc<CudaStream> {
+        self.next_h2d_streams()
+    }
+
+    /// Acquire a D2H stream for use by caller.
+    ///
+    /// This returns a stream from the pool that the caller can use for multiple
+    /// sequential operations. The caller is responsible for all synchronization
+    /// (e.g., recording events after operations).
+    ///
+    /// Used for layer-wise transfers where all layers must execute on the same stream.
+    pub fn acquire_d2h_stream(&self) -> Arc<CudaStream> {
+        self.next_d2h_streams()
     }
 
     #[allow(dead_code)]

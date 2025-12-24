@@ -12,6 +12,7 @@ mod nixl;
 mod nova;
 mod object;
 mod offload;
+mod onboard;
 mod rayon;
 mod tokio;
 
@@ -25,6 +26,7 @@ pub use object::{NixlObjectConfig, ObjectClientConfig, ObjectConfig, S3ObjectCon
 pub use offload::{
     OffloadConfig, PolicyType, PresenceFilterConfig, PresenceLfuFilterConfig, TierOffloadConfig,
 };
+pub use onboard::{OnboardConfig, OnboardMode};
 pub use rayon::RayonConfig;
 pub use tokio::TokioConfig;
 
@@ -80,6 +82,10 @@ pub struct KvbmConfig {
     #[validate(nested)]
     #[serde(default)]
     pub offload: OffloadConfig,
+
+    /// Onboard configuration (G2→G1 loading strategy).
+    #[serde(default)]
+    pub onboard: OnboardConfig,
 
     /// Object storage configuration (G4 tier).
     /// None = object storage disabled.

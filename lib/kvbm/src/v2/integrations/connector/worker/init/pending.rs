@@ -21,6 +21,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
+use derive_builder::Builder;
 use dynamo_memory::TensorDescriptor;
 
 use crate::{
@@ -39,13 +40,12 @@ use crate::{
     },
 };
 
-use super::GpuInfo;
-
 /// Cached state from `register_kv_caches` for deferred initialization.
 ///
 /// This struct holds all the information needed to complete NIXL registration
 /// once the leader triggers initialization via the `configure_layouts` handler.
-#[derive(Debug)]
+#[derive(Debug, Builder)]
+#[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
 pub struct PendingWorkerState {
     /// CUDA device ID where tensors are allocated.
     pub cuda_device_id: usize,
@@ -57,13 +57,12 @@ pub struct PendingWorkerState {
     pub num_device_blocks: usize,
 
     /// Block/page size for the KV cache.
+    #[expect(dead_code)]
     pub page_size: usize,
 
     /// Data type width in bytes (e.g., 2 for fp16).
+    #[expect(dead_code)]
     pub dtype_width_bytes: usize,
-
-    /// GPU info for logging.
-    pub gpu_info: GpuInfo,
 
     /// Layout configuration determined from tensor shapes.
     pub layout_config: LayoutConfig,
@@ -72,7 +71,7 @@ pub struct PendingWorkerState {
     pub block_dim: BlockDimension,
 }
 
-impl PendingWorkerState {
+impl PendingWorkerStateBuilder {
     /// Create a new PendingWorkerState from register_kv_caches arguments.
     ///
     /// Validates that all tensors are on the same CUDA device.
@@ -89,22 +88,21 @@ impl PendingWorkerState {
     /// - If tensors is empty
     /// - If tensors are on different CUDA devices
     /// - If first tensor is not on a CUDA device
-    pub fn new(
-        tensors: Vec<Arc<dyn TensorDescriptor>>,
-        num_device_blocks: usize,
-        page_size: usize,
-        dtype_width_bytes: usize,
-        layout_config: LayoutConfig,
-        block_dim: BlockDimension,
-    ) -> Result<Self> {
+    pub fn build(mut self) -> Result<PendingWorkerState> {
         use anyhow::{bail, ensure};
         use dynamo_memory::TensorDescriptorExt;
+
+        // Validate tensors first (before build_internal which requires cuda_device_id)
+        let tensors = self
+            .tensors
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("`tensors` must be initialized"))?;
 
         if tensors.is_empty() {
             bail!("no tensors to register");
         }
 
-        // Validate and extract CUDA device ID
+        // Extract and validate CUDA device ID from tensors
         let cuda_device_id = tensors[0]
             .cuda_device_id()
             .ok_or_else(|| anyhow::anyhow!("first tensor not on CUDA device"))?;
@@ -117,30 +115,18 @@ impl PendingWorkerState {
             );
         }
 
-        let gpu_info = GpuInfo::from_device_index(cuda_device_id);
+        // Set cuda_device_id on builder before calling build_internal
+        self.cuda_device_id = Some(cuda_device_id);
 
-        tracing::debug!(
-            cuda_device = cuda_device_id,
-            gpu_uuid = ?gpu_info.uuid,
-            num_tensors = tensors.len(),
-            num_device_blocks,
-            page_size,
-            dtype_width_bytes,
-            ?layout_config,
-            ?block_dim,
-            "Created PendingWorkerState - NIXL registration deferred"
-        );
+        self.build_internal()
+            .map_err(|e| anyhow::anyhow!("failed to build PendingWorkerState: {}", e))
+    }
+}
 
-        Ok(Self {
-            cuda_device_id,
-            tensors,
-            num_device_blocks,
-            page_size,
-            dtype_width_bytes,
-            gpu_info,
-            layout_config,
-            block_dim,
-        })
+impl PendingWorkerState {
+    /// Create a new PendingWorkerState builder.
+    pub fn builder() -> PendingWorkerStateBuilder {
+        PendingWorkerStateBuilder::default()
     }
 
     /// Complete NIXL registration and create DirectWorker.

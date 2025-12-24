@@ -253,6 +253,7 @@ impl TransferManager {
             layer_range,
             nixl_write_notification,
             bounce_buffer,
+            cuda_stream,
         } = options;
 
         let mut internal_options = TransferOptionsInternal::builder();
@@ -269,6 +270,10 @@ impl TransferManager {
             let (handle, block_ids) = bounce.into_parts();
             let bounce_buffer = self.create_bounce_buffer(handle, block_ids)?;
             internal_options = internal_options.bounce_buffer(bounce_buffer);
+        }
+
+        if let Some(stream) = cuda_stream {
+            internal_options = internal_options.cuda_stream(stream);
         }
 
         let options = internal_options.build()?;

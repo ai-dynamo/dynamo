@@ -13,7 +13,9 @@ use crate::distributed::worker::NovaWorkerClient;
 use crate::v2::distributed::leader::InstanceLeader;
 use crate::v2::distributed::offload::OffloadEngine;
 use crate::v2::distributed::worker::SerializedLayout;
-use crate::{BlockId, InstanceId, KvbmRuntime};
+use crate::v2::logical::blocks::ImmutableBlock;
+use crate::{BlockId, G2, InstanceId, KvbmRuntime};
+use dynamo_kvbm_config::OnboardMode;
 
 use anyhow::{Result, anyhow, bail};
 use dashmap::DashMap;
@@ -45,6 +47,13 @@ pub struct ConnectorLeader {
     /// Control server shutdown handle (initialized in initialize_async)
     #[allow(dead_code)] // Kept for RAII-based shutdown on drop
     control_server_shutdown: OnceLock<oneshot::Sender<()>>,
+    /// Accumulated G2 blocks for intra-pass onboarding.
+    ///
+    /// These blocks are collected from each request's find session during
+    /// `prepare_intra_pass_onboarding` and held until the forward pass completes.
+    /// A cleanup task (spawned in `process_scheduler_output`) waits on the
+    /// forward pass completion event and then drops these blocks.
+    pending_intra_pass_g2_blocks: Mutex<Vec<ImmutableBlock<G2>>>,
 }
 
 #[derive(Default, Clone)]
@@ -78,6 +87,13 @@ pub mod scheduler;
 
 impl ConnectorLeader {
     pub fn new(runtime: Arc<KvbmRuntime>, block_size: usize) -> Self {
+        // Pull onboard mode from runtime config
+        let onboard_mode = runtime.config().onboard.mode;
+        tracing::info!(
+            ?onboard_mode,
+            "ConnectorLeader initialized with onboard mode"
+        );
+
         Self {
             runtime,
             block_size,
@@ -88,7 +104,13 @@ impl ConnectorLeader {
             oracle: Arc::new(DefaultOracle::default()),
             offload_engine: OnceLock::new(),
             control_server_shutdown: OnceLock::new(),
+            pending_intra_pass_g2_blocks: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Get the current onboard mode.
+    pub fn onboard_mode(&self) -> OnboardMode {
+        self.runtime.config.onboard.mode
     }
 
     /// Get the block size.
@@ -166,10 +188,15 @@ impl ConnectorLeader {
     /// This implements the vLLM KVConnector interface for `get_num_new_matched_tokens`:
     /// - Returns `(None, false)` while the find operation is still in progress
     /// - Returns `(Some(0), false)` if no external blocks are found
-    /// - Returns `(Some(n), true)` if n tokens worth of blocks can be loaded asynchronously
+    /// - Returns `(Some(n), true)` if n tokens can be loaded asynchronously (inter-pass mode)
+    /// - Returns `(Some(n), false)` if n tokens will be loaded synchronously (intra-pass mode)
     ///
     /// The first call for a request starts the find operation. Subsequent calls check
     /// the status of the operation and return results when complete.
+    ///
+    /// The second boolean in the return tuple indicates whether async loading is in progress:
+    /// - `true` for inter-pass mode (async out-of-band via Nova messages)
+    /// - `false` for intra-pass mode (sync layer-wise during forward pass)
     #[tracing::instrument(level = "debug", skip(self), fields(?request_id), ret)]
     pub fn get_num_new_matched_tokens(
         &self,
@@ -208,7 +235,16 @@ impl ConnectorLeader {
 
         // Single point for state transition
         match slot.finalize_match_check(outcome) {
-            Ok(ok) => Ok(ok),
+            Ok((count, uses_async)) => {
+                // For intra-pass mode, we always return false for the async flag
+                // since loading happens synchronously during the forward pass.
+                // For inter-pass mode, we preserve the async flag from finalize_match_check.
+                let actual_async = match self.onboard_mode() {
+                    OnboardMode::Intra => false,
+                    OnboardMode::Inter => uses_async,
+                };
+                Ok((count, actual_async))
+            }
             Err(e) => {
                 self.recover_from_match_error(&mut slot);
                 if cfg!(debug_assertions) {
@@ -233,6 +269,11 @@ impl ConnectorLeader {
     ///
     /// If this is called with `num_external_tokens` == 0, we will be given the remainder of the blocks destined
     /// for prefill.
+    ///
+    /// The behavior depends on the configured onboard mode:
+    /// - **Inter-pass mode**: Spawns an async task to transfer blocks from G2 to G1 via Nova messages.
+    /// - **Intra-pass mode**: Stores G2/G1 block pairs for later aggregation in `process_scheduler_output`,
+    ///   which will pass them to workers via `KvConnectorMetadata.intra_pass_load`.
     #[tracing::instrument(level = "debug", skip(self), fields(?request_id))]
     pub fn update_state_after_alloc(
         self: &Arc<Self>,
@@ -257,7 +298,16 @@ impl ConnectorLeader {
             );
         }
 
-        let result = self.start_onboarding(request_id, block_ids, num_external_tokens);
+        let result = match self.onboard_mode() {
+            OnboardMode::Inter => {
+                // Async out-of-band onboarding via Nova messages
+                self.start_onboarding(request_id, block_ids, num_external_tokens)
+            }
+            OnboardMode::Intra => {
+                // Sync layer-wise onboarding - store G2/G1 pairs for later
+                self.prepare_intra_pass_onboarding(request_id, block_ids, num_external_tokens)
+            }
+        };
 
         match result {
             Ok(()) => Ok(()),

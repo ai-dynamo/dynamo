@@ -37,6 +37,9 @@ pub enum StateTransitionError {
 /// The `session_id` is `None` while preparing (searching/staging) and becomes `Some` when
 /// actively onboarding.
 pub struct OnboardingState {
+    /// The number of tokens that match tokens already in the G1 storage
+    pub num_computed_tokens: usize,
+
     /// The active find session for discovering external blocks.
     pub find_session: FindMatchesResult,
 }
@@ -65,6 +68,20 @@ pub struct OffloadingState {
 pub enum ActiveStateData {
     Onboarding(OnboardingState),
     Offloading(OffloadingState),
+}
+
+/// Pending intra-pass onboarding data.
+///
+/// This holds the G2 source and G1 destination block IDs that need to be
+/// transferred during the forward pass. Set by `update_state_after_alloc`
+/// when intra-pass onboarding mode is configured, consumed by
+/// `process_scheduler_output` to build `KvConnectorMetadata.intra_pass_load`.
+#[derive(Debug, Clone)]
+pub struct IntraPassPending {
+    /// G2 (host memory) source block IDs.
+    pub g2_block_ids: Vec<BlockId>,
+    /// G1 (GPU memory) destination block IDs.
+    pub g1_block_ids: Vec<BlockId>,
 }
 
 // ============================================================================
@@ -481,6 +498,13 @@ pub struct RequestSlot {
 
     /// If `get_num_new_matched_tokens` is called again, we should reset the state of the slot.
     match_requires_reset: bool,
+
+    /// Pending intra-pass onboarding data.
+    ///
+    /// Set when intra-pass mode is configured and `update_state_after_alloc` is called
+    /// with external tokens to load. Consumed by `process_scheduler_output` to build
+    /// the `KvConnectorMetadata.intra_pass_load` field.
+    pending_intra_pass: Option<IntraPassPending>,
 }
 
 #[derive(Default)]
@@ -672,6 +696,7 @@ impl RequestSlot {
             evaluated_tokens: 0,
             finished_evaluating: false,
             match_requires_reset: false,
+            pending_intra_pass: None,
         })
     }
 
@@ -783,9 +808,13 @@ impl RequestSlot {
     /// Only valid when in `Inactive` state and slot is not marked for deletion.
     pub fn txn_prepare_to_onboard(
         &mut self,
+        num_computed_tokens: usize,
         find_session: FindMatchesResult,
     ) -> Result<(), StateTransitionError> {
-        let state = OnboardingState { find_session };
+        let state = OnboardingState {
+            num_computed_tokens,
+            find_session,
+        };
         self.evaluated_tokens = 0;
         self.state.txn_prepare_to_onboard(state)
     }
@@ -913,6 +942,7 @@ impl RequestSlot {
     /// - Resets evaluation tracking
     /// - Transitions any active transaction to Inactive
     /// - Clears the reset flag
+    /// - Clears any pending intra-pass onboarding
     ///
     /// Note: The token sequence is intentionally NOT reset - the tokens themselves
     /// are still valid, only the G1 block mappings are invalidated.
@@ -931,6 +961,51 @@ impl RequestSlot {
 
         // Clear the reset flag
         self.match_requires_reset = false;
+
+        // Clear pending intra-pass onboarding
+        self.pending_intra_pass = None;
+    }
+
+    // ------------------------------------------------------------------------
+    // Intra-Pass Onboarding Methods
+    // ------------------------------------------------------------------------
+
+    /// Check if there is pending intra-pass onboarding data.
+    pub fn has_pending_intra_pass(&self) -> bool {
+        self.pending_intra_pass.is_some()
+    }
+
+    /// Extend the pending intra-pass onboarding data.
+    ///
+    /// Called by `update_state_after_alloc` when intra-pass mode is configured.
+    /// If pending data already exists, the new block IDs are appended.
+    /// This allows multiple requests/slots to accumulate intra-pass loads
+    /// within a single scheduling iteration.
+    pub fn extend_pending_intra_pass(
+        &mut self,
+        g2_block_ids: Vec<BlockId>,
+        g1_block_ids: Vec<BlockId>,
+    ) {
+        match &mut self.pending_intra_pass {
+            Some(pending) => {
+                pending.g2_block_ids.extend(g2_block_ids);
+                pending.g1_block_ids.extend(g1_block_ids);
+            }
+            None => {
+                self.pending_intra_pass = Some(IntraPassPending {
+                    g2_block_ids,
+                    g1_block_ids,
+                });
+            }
+        }
+    }
+
+    /// Take the pending intra-pass onboarding data, leaving `None` in its place.
+    ///
+    /// Called by `process_scheduler_output` to aggregate intra-pass data
+    /// across all slots into `KvConnectorMetadata.intra_pass_load`.
+    pub fn take_pending_intra_pass(&mut self) -> Option<IntraPassPending> {
+        self.pending_intra_pass.take()
     }
 
     /// Finalize a match check by transitioning state and returning the vLLM-compatible tuple.

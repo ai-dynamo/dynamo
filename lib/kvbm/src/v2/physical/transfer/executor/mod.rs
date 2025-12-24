@@ -14,45 +14,11 @@ use crate::BlockId;
 use crate::physical::transfer::BounceBufferInternal;
 use crate::v2::physical::transfer::{StorageKind, context::TransferCompleteNotification};
 use anyhow::Result;
+use cudarc::driver::CudaStream;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
-
-// pub(crate) struct G4OnboardContext {}
-// pub(crate) struct G4OffloadContext {}
-
-// pub(crate) fn g4_read(
-//     src: &G4OnboardContext,
-//     src_seq_hash: &[SequenceHash],
-//     dst: &PhysicalLayout,
-//     dst_block_ids: &[BlockId],
-//     ctx: &TransferContext,
-// ) -> Result<()> {
-//     unimplemented!()
-// }
-
-// pub(crate) fn g4_write(
-//     src: &PhysicalLayout,
-//     src_block_ids: &[BlockId],
-//     dst: &G4OffloadContext,
-//     dst_seq_hash: &[SequenceHash],
-//     ctx: &TransferContext,
-// ) -> Result<()> {
-//     if !src.layout().is_fully_contiguous() {
-//         anyhow::bail!("G4 write source layout must be fully contiguous");
-//     }
-
-//     // logical instance has created a multi-part upload
-//     // this method simply dumps the full block into the offload context
-//     // the offload context will consist of:
-//     // - bucket name
-//     // - object name
-//     // - upload id
-//     // - part number
-
-//     unimplemented!()
-// }
 
 // Re-export the NIXL transfer builder for public use
 pub use nixl::NixlTransferBuilder;
@@ -63,6 +29,9 @@ pub(crate) struct TransferOptionsInternal {
     layer_range: Option<Range<usize>>,
     nixl_write_notification: Option<u64>,
     bounce_buffer: Option<BounceBufferInternal>,
+    /// If provided, use this stream instead of acquiring from pool.
+    /// Caller manages synchronization - no event is recorded by the executor.
+    pub(crate) cuda_stream: Option<Arc<CudaStream>>,
 }
 
 impl TransferOptionsInternal {
@@ -76,6 +45,7 @@ pub(crate) struct TransferOptionsInternalBuilder {
     layer_range: Option<Range<usize>>,
     nixl_write_notification: Option<u64>,
     bounce_buffer: Option<BounceBufferInternal>,
+    cuda_stream: Option<Arc<CudaStream>>,
 }
 
 impl TransferOptionsInternalBuilder {
@@ -94,11 +64,25 @@ impl TransferOptionsInternalBuilder {
         self
     }
 
+    /// Set a specific CUDA stream to use for this transfer.
+    ///
+    /// When provided, the executor will use this stream instead of acquiring
+    /// one from the pool. The caller is responsible for synchronization -
+    /// no event is recorded by the executor.
+    ///
+    /// This is useful for layer-wise transfers where all layers must execute
+    /// on the same stream to allow proper event sequencing.
+    pub(crate) fn cuda_stream(mut self, stream: Arc<CudaStream>) -> Self {
+        self.cuda_stream = Some(stream);
+        self
+    }
+
     pub(crate) fn build(self) -> Result<TransferOptionsInternal> {
         Ok(TransferOptionsInternal {
             layer_range: self.layer_range,
             nixl_write_notification: self.nixl_write_notification,
             bounce_buffer: self.bounce_buffer,
+            cuda_stream: self.cuda_stream,
         })
     }
 }
@@ -113,7 +97,7 @@ impl TransferOptionsInternalBuilder {
 /// * `dst` - Destination physical layout
 /// * `src_block_ids` - Source block IDs to transfer
 /// * `dst_block_ids` - Destination block IDs to transfer
-/// * `layer_range` - Optional range of layers to transfer (None = all layers)
+/// * `options` - Transfer options
 /// * `ctx` - Transfer context with CUDA stream and NIXL agent
 pub(crate) fn execute_transfer(
     src: &PhysicalLayout,
@@ -138,6 +122,7 @@ pub(crate) fn execute_transfer(
             dst_block_ids,
             options.layer_range,
             strategy,
+            options.cuda_stream,
             ctx,
         ),
         TransferPlan::TwoHop {
@@ -166,17 +151,25 @@ fn execute_direct_transfer(
     dst_block_ids: &[BlockId],
     layer_range: Option<Range<usize>>,
     strategy: TransferStrategy,
+    cuda_stream: Option<Arc<CudaStream>>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     match strategy {
-        TransferStrategy::Memcpy => memcpy::execute_memcpy_transfer(
-            src,
-            dst,
-            src_block_ids,
-            dst_block_ids,
-            layer_range,
-            ctx,
-        ),
+        TransferStrategy::Memcpy => {
+            if cuda_stream.is_some() {
+                return Err(anyhow::anyhow!(
+                    "cuda_stream option is not supported for Memcpy strategy"
+                ));
+            }
+            memcpy::execute_memcpy_transfer(
+                src,
+                dst,
+                src_block_ids,
+                dst_block_ids,
+                layer_range,
+                ctx,
+            )
+        }
         TransferStrategy::CudaAsyncH2D
         | TransferStrategy::CudaAsyncD2H
         | TransferStrategy::CudaAsyncD2D
@@ -188,12 +181,18 @@ fn execute_direct_transfer(
             dst_block_ids,
             layer_range,
             strategy,
+            cuda_stream,
             ctx,
         )?),
         TransferStrategy::NixlRead
         | TransferStrategy::NixlWrite
         | TransferStrategy::NixlReadFlipped
         | TransferStrategy::NixlWriteFlipped => {
+            if cuda_stream.is_some() {
+                return Err(anyhow::anyhow!(
+                    "cuda_stream option is not supported for NIXL strategies"
+                ));
+            }
             let mut builder = NixlTransferBuilder::new()
                 .src(src)
                 .dst(dst)
@@ -317,6 +316,7 @@ async fn execute_two_hop_transfer_chunk(
         bounce_ids_to_use,
         layer_range.clone(),
         first_strategy,
+        None, // Two-hop transfers don't support caller-provided streams
         ctx,
     )?
     .await?;
@@ -328,6 +328,7 @@ async fn execute_two_hop_transfer_chunk(
         dst_block_ids,
         layer_range.clone(),
         second_strategy,
+        None, // Two-hop transfers don't support caller-provided streams
         ctx,
     )?
     .await?;
