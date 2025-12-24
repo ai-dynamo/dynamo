@@ -66,6 +66,10 @@ class ServiceSpec:
         self._spec["extraPodSpec"]["mainContainer"]["image"] = value
 
     @property
+    def component_type(self):
+        return self._spec["componentType"]
+
+    @property
     def envs(self) -> list[dict[str, str]]:
         """Environment variables for the service"""
         return self._spec.get("envs", [])
@@ -233,6 +237,12 @@ class DeploymentSpec:
         return self._endpoint
 
     @property
+    def frontend_service(self) -> ServiceSpec:
+        for service in self.services:
+            if service.component_type == "frontend":
+                return service
+
+    @property
     def namespace(self) -> str:
         """Deployment namespace"""
         return self._deployment_spec["metadata"]["namespace"]
@@ -247,6 +257,16 @@ class DeploymentSpec:
         self._deployment_spec["metadata"]["annotations"][
             "nvidia.com/enable-grove"
         ] = "false"
+
+    def get_model(self, service_name: Optional[str] = None) -> Optional[str]:
+        if service_name is None:
+            services = self.services
+        else:
+            services = [self[service_name]]
+        for service in services:
+            if service.model:
+                return service.model
+        return None
 
     def set_model(self, model: str, service_name: Optional[str] = None):
         if service_name is None:
@@ -491,9 +511,6 @@ class ManagedDeployment:
     log_dir: str
     deployment_spec: DeploymentSpec
     namespace: str
-    # TODO: this should be determined by the deployment_spec
-    # the service containing component_type: Frontend determines what is actually the frontend service
-    frontend_service_name: str = "Frontend"
     skip_service_restart: bool = False
 
     _custom_api: Optional[client.CustomObjectsApi] = None
@@ -504,6 +521,10 @@ class ManagedDeployment:
     _deployment_name: Optional[str] = None
     _apps_v1: Optional[Any] = None
     _active_port_forwards: List[Any] = field(default_factory=list)
+
+    @property
+    def frontend_service_name(self):
+        return self.deployment_spec.frontend_service.name
 
     def __post_init__(self):
         self._deployment_name = self.deployment_spec.name
