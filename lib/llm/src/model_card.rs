@@ -220,6 +220,12 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_data: Option<serde_json::Value>,
 
+    /// Sequence length tier this worker serves for decode disaggregation.
+    /// Component name derived as llm-{this_seqlen}.
+    /// If None, uses context_length (max tier, no migration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub this_seqlen: Option<u32>,
+
     #[serde(default)]
     pub runtime_config: ModelRuntimeConfig,
 
@@ -559,6 +565,7 @@ impl ModelDeploymentCard {
             model_type: Default::default(),  // set later
             model_input: Default::default(), // set later
             user_data: None,
+            this_seqlen: None,
             runtime_config: ModelRuntimeConfig::default(),
             media_decoder: None,
             media_fetcher: None,

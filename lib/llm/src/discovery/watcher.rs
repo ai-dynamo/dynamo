@@ -359,6 +359,26 @@ impl ModelWatcher {
             return Ok(());
         }
 
+        // Activate decode tier if this_seqlen is set
+        // This enables sequence-length-based routing for decode disaggregation
+        if let Some(seqlen) = card.this_seqlen {
+            tracing::info!(
+                model_name = card.name(),
+                seqlen = seqlen,
+                component = %endpoint_id.component,
+                "Decode tier detected, activating tier for sequence length"
+            );
+
+            if let Err(e) = self.manager.activate_decode_tier(card.name(), seqlen, endpoint.clone()) {
+                tracing::warn!(
+                    model_name = card.name(),
+                    seqlen = seqlen,
+                    error = %e,
+                    "Failed to activate decode tier - may already be activated"
+                );
+            }
+        }
+
         if let Some(tx) = &self.model_update_tx {
             tx.send(ModelUpdate::Added(card.clone())).await.ok();
         }

@@ -220,6 +220,47 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
         >,
 {
+    // Build with no decode disaggregation
+    build_routed_pipeline_with_decode_disagger(
+        card,
+        client,
+        router_mode,
+        worker_monitor,
+        chooser,
+        preprocessor,
+        hf_tokenizer,
+        prefill_chooser,
+        enforce_disagg,
+        metrics,
+        None, // No decode disaggregation
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn build_routed_pipeline_with_decode_disagger<Req, Resp>(
+    card: &ModelDeploymentCard,
+    client: &Client,
+    router_mode: RouterMode,
+    worker_monitor: Option<KvWorkerMonitor>,
+    chooser: Option<Arc<KvRouter>>,
+    preprocessor: Arc<OpenAIPreprocessor>,
+    hf_tokenizer: tokenizers::Tokenizer,
+    prefill_chooser: Option<Arc<PrefillRouter>>,
+    enforce_disagg: bool,
+    metrics: Arc<Metrics>,
+    decode_disagger: Option<Arc<DecodeDisagger>>,
+) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
+where
+    Req: Data,
+    Resp: Data,
+    OpenAIPreprocessor: Operator<
+            Context<Req>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+            Context<PreprocessedRequest>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+        >,
+{
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
@@ -269,7 +310,10 @@ where
     let prefill_chooser =
         prefill_chooser.unwrap_or_else(|| PrefillRouter::disabled(router_mode, enforce_disagg));
     let prefill_op = prefill_chooser.into_operator();
-    let decode_disagger = DecodeDisagger::new().into_operator();
+
+    // Use provided decode disagger or create a disabled (passthrough) one
+    let decode_disagger = decode_disagger.unwrap_or_else(DecodeDisagger::disabled);
+    let decode_disagger_op = decode_disagger.into_operator();
 
     // Link with prefill chooser including backward edge for response flow
     let engine = frontend
@@ -277,9 +321,9 @@ where
         .link(migration.forward_edge())?
         .link(backend.forward_edge())?
         .link(prefill_op.forward_edge())?
-        .link(decode_disagger.forward_edge())?
+        .link(decode_disagger_op.forward_edge())?
         .link(service_backend)?
-        .link(decode_disagger.backward_edge())?
+        .link(decode_disagger_op.backward_edge())?
         .link(prefill_op.backward_edge())?
         .link(backend.backward_edge())?
         .link(migration.backward_edge())?
