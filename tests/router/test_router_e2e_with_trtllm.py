@@ -83,7 +83,7 @@ class TRTLLMProcess:
         num_workers: int = 2,
         single_gpu: bool = False,
         request_plane: str = "tcp",
-        store_backend: str = "etcd",
+        store_backend: str = "file",
     ):
         """Initialize TRT-LLM workers with dynamo integration.
 
@@ -140,6 +140,8 @@ class TRTLLMProcess:
                 model,
                 "--kv-block-size",
                 str(TRTLLM_BLOCK_SIZE),
+                "--store-kv",
+                self.store_backend,
                 # Enable KV events publishing for router integration
                 "--publish-events-and-metrics",
             ]
@@ -287,11 +289,13 @@ class TRTLLMProcess:
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_trtllm_kv_router_basic(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
+    file_storage_backend,
     set_ucx_tls_no_mm,
     request_plane,
 ):
@@ -315,6 +319,7 @@ def test_trtllm_kv_router_basic(
             num_workers=N_TRTLLM_WORKERS,
             single_gpu=True,  # fit workers into one GPU
             request_plane=request_plane,
+            store_backend="file",
         )
         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
         trtllm_workers.__enter__()
@@ -341,11 +346,13 @@ def test_trtllm_kv_router_basic(
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_router_decisions_trtllm_multiple_workers(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
+    file_storage_backend,
     set_ucx_tls_no_mm,
     request_plane,
 ):
@@ -364,6 +371,7 @@ def test_router_decisions_trtllm_multiple_workers(
             num_workers=N_WORKERS,
             single_gpu=True,  # Worker uses GPU 0
             request_plane=request_plane,
+            store_backend="file",
         )
         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
 
@@ -397,11 +405,11 @@ def test_router_decisions_trtllm_multiple_workers(
 @pytest.mark.parametrize(
     "store_backend,use_nats_core,request_plane",
     [
+        ("file", False, "nats"),  # File backend (prioritized)
         ("etcd", False, "nats"),  # JetStream mode
         # ("etcd", True, "tcp"),  # ignored, needs unconditional nats_client
-        # ("file", False, "nats"),  # File backend - TODO: investigate file backend support for TRT-LLM
     ],
-    ids=["jetstream"],  # "nats_core" and "file" commented out
+    ids=["file_jetstream", "etcd_jetstream"],
 )
 def test_trtllm_indexers_sync(
     request,

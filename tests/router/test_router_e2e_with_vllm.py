@@ -86,7 +86,7 @@ class VLLMProcess:
         single_gpu: bool = False,
         data_parallel_size: Optional[int] = None,
         request_plane: str = "tcp",
-        store_backend: str = "etcd",
+        store_backend: str = "file",
     ):
         """Initialize vLLM workers with dynamo integration.
 
@@ -160,6 +160,8 @@ class VLLMProcess:
                 model,
                 "--block-size",
                 str(block_size),
+                "--store-kv",
+                self.store_backend,
             ]
 
             # Disable CUDA graphs for faster startup & lower memory
@@ -330,10 +332,12 @@ class VLLMProcess:
 @pytest.mark.gpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 def test_vllm_kv_router_basic(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
+    file_storage_backend,
     set_ucx_tls_no_mm,
     request_plane,
 ):
@@ -357,6 +361,7 @@ def test_vllm_kv_router_basic(
             num_workers=N_VLLM_WORKERS,
             single_gpu=True,  # fit workers into one GPU
             request_plane=request_plane,
+            store_backend="file",
         )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
         vllm_workers.__enter__()
@@ -371,7 +376,7 @@ def test_vllm_kv_router_basic(
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
             frontend_timeout=180,  # 3 minutes should be plenty for TinyLlama
-            store_backend="etcd",  # Explicit for clarity
+            store_backend="file",  # Explicit for clarity
             request_plane=request_plane,
         )
 
@@ -384,10 +389,12 @@ def test_vllm_kv_router_basic(
 @pytest.mark.gpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 def test_router_decisions_vllm_multiple_workers(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
+    file_storage_backend,
     set_ucx_tls_no_mm,
     request_plane,
 ):
@@ -404,6 +411,7 @@ def test_router_decisions_vllm_multiple_workers(
             num_workers=N_WORKERS,
             single_gpu=True,  # Worker uses GPU 0
             request_plane=request_plane,
+            store_backend="file",
         )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
 
@@ -429,11 +437,13 @@ def test_router_decisions_vllm_multiple_workers(
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
 def test_router_decisions_vllm_dp(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
+    file_storage_backend,
     set_ucx_tls_no_mm,
     request_plane,
 ):
@@ -456,6 +466,7 @@ def test_router_decisions_vllm_dp(
             single_gpu=False,
             data_parallel_size=DP_SIZE,  # Creates DP_SIZE processes (one per rank)
             request_plane=request_plane,
+            store_backend="file",
         )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
         vllm_workers.__enter__()
@@ -483,11 +494,12 @@ def test_router_decisions_vllm_dp(
 @pytest.mark.parametrize(
     "store_backend,use_nats_core,request_plane",
     [
+        ("file", False, "nats"),  # File backend (prioritized)
+        ("file", True, "tcp"),  # File backend with TCP
         ("etcd", False, "nats"),  # JetStream mode
         ("etcd", True, "tcp"),  # nats_core mode
-        # ("file", False, "nats"),  # File backend
     ],
-    ids=["jetstream", "tcp_nats_core"],
+    ids=["file_jetstream", "file_tcp", "etcd_jetstream", "etcd_tcp"],
 )
 def test_vllm_indexers_sync(
     request,

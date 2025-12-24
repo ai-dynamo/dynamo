@@ -86,7 +86,7 @@ class SGLangProcess:
         single_gpu: bool = False,
         data_parallel_size: Optional[int] = None,
         request_plane: str = "tcp",
-        store_backend: str = "etcd",
+        store_backend: str = "file",
     ):
         """Initialize SGLang workers with dynamo integration.
 
@@ -151,6 +151,8 @@ class SGLangProcess:
                 model,
                 "--page-size",
                 str(page_size),
+                "--store-kv",
+                self.store_backend,
             ]
 
             # Disable CUDA graphs for faster startup & lower memory
@@ -314,11 +316,13 @@ class SGLangProcess:
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
 def test_sglang_kv_router_basic(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
+    file_storage_backend,
     set_ucx_tls_no_mm,
     request_plane,
 ):
@@ -342,6 +346,7 @@ def test_sglang_kv_router_basic(
             num_workers=N_SGLANG_WORKERS,
             single_gpu=True,  # fit workers into one GPU
             request_plane=request_plane,
+            store_backend="file",
         )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
         sglang_workers.__enter__()
@@ -370,10 +375,12 @@ def test_sglang_kv_router_basic(
 @pytest.mark.skip(reason="Broken by sglang changes")
 # TODO: Re-enable this test once https://github.com/sgl-project/sglang/pull/14934 is merged
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 def test_router_decisions_sglang_multiple_workers(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
+    file_storage_backend,
     set_ucx_tls_no_mm,
     request_plane,
 ):
@@ -390,6 +397,7 @@ def test_router_decisions_sglang_multiple_workers(
             num_workers=N_WORKERS,
             single_gpu=True,  # Worker uses GPU 0
             request_plane=request_plane,
+            store_backend="file",
         )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
 
@@ -415,11 +423,13 @@ def test_router_decisions_sglang_multiple_workers(
 @pytest.mark.gpu_2
 @pytest.mark.post_merge
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
 def test_router_decisions_sglang_dp(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
+    file_storage_backend,
     set_ucx_tls_no_mm,
     request_plane,
 ):
@@ -442,6 +452,7 @@ def test_router_decisions_sglang_dp(
             single_gpu=False,
             data_parallel_size=DP_SIZE,  # Creates DP_SIZE processes (one per rank)
             request_plane=request_plane,
+            store_backend="file",
         )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
         sglang_workers.__enter__()
@@ -468,11 +479,11 @@ def test_router_decisions_sglang_dp(
 @pytest.mark.parametrize(
     "store_backend,use_nats_core,request_plane",
     [
+        ("file", False, "nats"),  # File backend (prioritized)
         ("etcd", False, "nats"),  # JetStream mode
         # ("etcd", True, "tcp"),  # ignored, needs unconditional nats_client
-        # ("file", False, "nats"),  # File backend - TODO: investigate file backend support for SGLang
     ],
-    ids=["jetstream"],  # "nats_core" and "file" commented out
+    ids=["file_jetstream", "etcd_jetstream"],
 )
 @pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
 def test_sglang_indexers_sync(

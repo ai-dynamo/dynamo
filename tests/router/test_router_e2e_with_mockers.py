@@ -50,7 +50,7 @@ BLOCK_SIZE = 16
 def get_unique_ports(
     request,
     num_ports: int = 1,
-    store_backend: str = "etcd",
+    store_backend: str = "file",
     request_plane: str = "nats",
     registration_order: str = "prefill_first",
 ) -> list[int]:
@@ -167,7 +167,7 @@ class MockerProcess:
         request,
         mocker_args: Optional[Dict[str, Any]] = None,
         num_mockers: int = 1,
-        store_backend: str = "etcd",
+        store_backend: str = "file",
         request_plane: str = "nats",
     ):
         namespace_suffix = generate_random_suffix()
@@ -231,7 +231,7 @@ class DisaggMockerProcess:
         worker_type: str,
         mocker_args: Optional[Dict[str, Any]] = None,
         num_mockers: int = 1,
-        store_backend: str = "etcd",
+        store_backend: str = "file",
         request_plane: str = "nats",
     ):
         if worker_type not in ("prefill", "decode"):
@@ -293,6 +293,7 @@ class DisaggMockerProcess:
 
 @pytest.mark.timeout(42)  # ~3x average (~13.80s), rounded up
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 def test_mocker_kv_router(
     request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
 ):
@@ -399,6 +400,7 @@ def test_mocker_two_kv_router(
 
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
 @pytest.mark.timeout(60)  # ~3x average (~19.86s), rounded up (when enabled)
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 def test_mocker_kv_router_overload_503(
     request, runtime_services_dynamic_ports, predownload_tokenizers
 ):
@@ -438,6 +440,7 @@ def test_mocker_kv_router_overload_503(
 
 @pytest.mark.timeout(22)  # ~3x average (~7.10s), rounded up
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 def test_kv_push_router_bindings(
     request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
 ):
@@ -481,15 +484,17 @@ def test_kv_push_router_bindings(
 @pytest.mark.parametrize(
     "store_backend,use_nats_core,request_plane",
     [
+        ("file", False, "nats"),  # File backend (prioritized)
+        ("file", True, "tcp"),  # File backend with TCP
         ("etcd", False, "nats"),  # JetStream mode
         ("etcd", True, "tcp"),  # NATS core mode (with gap detection)
-        ("file", False, "nats"),  # File backend
     ],
     ids=[
-        "jetstream",
-        "nats",
-        "file",
-    ],  # "nats_core" commented out to match commented test case
+        "file_jetstream",
+        "file_tcp",
+        "etcd_jetstream",
+        "etcd_tcp",
+    ],
 )
 @pytest.mark.timeout(90)  # TODO: figure out a timeout
 def test_indexers_sync(
@@ -560,6 +565,7 @@ def test_indexers_sync(
 
 
 @pytest.mark.timeout(42)  # ~3x average (~13.80s), rounded up
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 def test_query_instance_id_returns_worker_and_tokens(
     request, runtime_services_dynamic_ports, predownload_tokenizers
 ):
@@ -597,6 +603,7 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.timeout(29)  # ~3x average (~9.55s), rounded up
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.parametrize("use_nats_core", [False, True], ids=["jetstream", "nats_core"])
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 def test_router_decisions(
     request,
     runtime_services_dynamic_ports,
@@ -655,6 +662,7 @@ def test_router_decisions(
 
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 @pytest.mark.timeout(59)  # ~3x average (~19.51s), rounded up
 def test_router_decisions_disagg(
     request,
@@ -766,6 +774,7 @@ def test_router_decisions_disagg(
 
 
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("store_kv", ["file"], indirect=True)
 @pytest.mark.timeout(39)  # ~3x average (~12.84s), rounded up
 def test_busy_threshold_endpoint(
     request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
