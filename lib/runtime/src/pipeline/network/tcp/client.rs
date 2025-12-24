@@ -324,3 +324,306 @@ async fn handle_writer(
     drop(alive_rx);
     Ok(framed_writer)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::context::Controller;
+    use bytes::Bytes;
+    use std::sync::Arc;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
+    /// Helper to create a real TCP connection pair for testing
+    async fn create_tcp_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+
+        (client, server)
+    }
+
+    /// Test that handle_writer forwards messages from the channel to the framed writer
+    #[tokio::test]
+    async fn test_handle_writer_forwards_messages() {
+        let (client, mut server) = create_tcp_pair().await;
+        let (_, write_half) = tokio::io::split(client);
+        let framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel(64);
+        let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
+        let controller = Arc::new(Controller::default());
+
+        // Send test messages
+        let test_msg = TwoPartMessage::from_data(Bytes::from("test data"));
+        bytes_tx.send(test_msg).await.unwrap();
+
+        // Close the sender to trigger normal termination
+        drop(bytes_tx);
+
+        let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
+
+        assert!(result.is_ok());
+
+        // Read from server side to verify data was sent
+        let mut buffer = vec![0u8; 1024];
+        let n = server.read(&mut buffer).await.unwrap();
+
+        // Buffer should contain the encoded message and sentinel
+        assert!(n > 0, "Expected data to be written to the TCP stream");
+    }
+
+    /// Test that handle_writer sends sentinel on normal channel closure
+    #[tokio::test]
+    async fn test_handle_writer_sends_sentinel_on_normal_closure() {
+        let (client, mut server) = create_tcp_pair().await;
+        let (_, write_half) = tokio::io::split(client);
+        let framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel(64);
+        let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
+        let controller = Arc::new(Controller::default());
+
+        // Close the sender immediately to trigger normal termination
+        drop(bytes_tx);
+
+        let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
+
+        assert!(result.is_ok());
+
+        // Read from server side to verify sentinel was sent
+        let mut buffer = vec![0u8; 1024];
+        let n = server.read(&mut buffer).await.unwrap();
+
+        // Buffer should contain the sentinel message
+        assert!(n > 0, "Expected sentinel to be written to the TCP stream");
+
+        // Verify it contains the sentinel message by checking for the JSON
+        let sentinel_json = serde_json::to_vec(&ControlMessage::Sentinel).unwrap();
+        assert!(
+            buffer[..n]
+                .windows(sentinel_json.len())
+                .any(|w| w == sentinel_json.as_slice()),
+            "Buffer should contain sentinel message. Buffer: {:?}",
+            String::from_utf8_lossy(&buffer[..n])
+        );
+    }
+
+    /// Test that handle_writer does NOT send sentinel when context is killed
+    #[tokio::test]
+    async fn test_handle_writer_no_sentinel_on_context_killed() {
+        let (client, mut server) = create_tcp_pair().await;
+        let (_, write_half) = tokio::io::split(client);
+        let framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let (_bytes_tx, bytes_rx) = tokio::sync::mpsc::channel(64);
+        let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
+        let controller = Arc::new(Controller::default());
+
+        // Kill the context
+        controller.kill();
+
+        let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
+
+        assert!(result.is_ok());
+
+        // Drop the writer to close the connection, then try to read. Otherwise,
+        // the test will hang on `server.read()`
+        drop(result);
+
+        // Read from server side - should get no sentinel
+        let mut buffer = vec![0u8; 1024];
+        let n = server.read(&mut buffer).await.unwrap();
+
+        // Buffer should be empty (no sentinel sent)
+        let sentinel_json = serde_json::to_vec(&ControlMessage::Sentinel).unwrap();
+        assert!(
+            n == 0
+                || !buffer[..n]
+                    .windows(sentinel_json.len())
+                    .any(|w| w == sentinel_json.as_slice()),
+            "Buffer should NOT contain sentinel message when context is killed"
+        );
+    }
+
+    /// Test that handle_writer does NOT send sentinel when context is stopped
+    #[tokio::test]
+    async fn test_handle_writer_no_sentinel_on_context_stopped() {
+        let (client, mut server) = create_tcp_pair().await;
+        let (_, write_half) = tokio::io::split(client);
+        let framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let (_bytes_tx, bytes_rx) = tokio::sync::mpsc::channel(64);
+        let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
+        let controller = Arc::new(Controller::default());
+
+        // Stop the context
+        controller.stop();
+
+        let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
+
+        assert!(result.is_ok());
+
+        // Drop the writer to close the connection, then try to read. Otherwise,
+        // the test will hang on `server.read()`
+        drop(result);
+
+        // Read from server side - should get no sentinel
+        let mut buffer = vec![0u8; 1024];
+        let n = server.read(&mut buffer).await.unwrap();
+
+        // Buffer should be empty (no sentinel sent)
+        let sentinel_json = serde_json::to_vec(&ControlMessage::Sentinel).unwrap();
+        assert!(
+            n == 0
+                || !buffer[..n]
+                    .windows(sentinel_json.len())
+                    .any(|w| w == sentinel_json.as_slice()),
+            "Buffer should NOT contain sentinel message when context is stopped"
+        );
+    }
+
+    /// Test that handle_writer handles multiple messages correctly
+    #[tokio::test]
+    async fn test_handle_writer_multiple_messages() {
+        let (client, mut server) = create_tcp_pair().await;
+        let (_, write_half) = tokio::io::split(client);
+        let framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel(64);
+        let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
+        let controller = Arc::new(Controller::default());
+
+        // Send multiple messages
+        for i in 0..5 {
+            let test_msg = TwoPartMessage::from_data(Bytes::from(format!("message {}", i)));
+            bytes_tx.send(test_msg).await.unwrap();
+        }
+
+        // Close the sender to trigger normal termination
+        drop(bytes_tx);
+
+        let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
+
+        assert!(result.is_ok());
+
+        // Read from server side to verify data was sent
+        let mut buffer = vec![0u8; 4096];
+        let n = server.read(&mut buffer).await.unwrap();
+
+        // Buffer should contain all messages plus sentinel
+        assert!(n > 0, "Expected messages to be written to the TCP stream");
+
+        // Verify sentinel is present
+        let sentinel_json = serde_json::to_vec(&ControlMessage::Sentinel).unwrap();
+        assert!(
+            buffer[..n]
+                .windows(sentinel_json.len())
+                .any(|w| w == sentinel_json.as_slice()),
+            "Buffer should contain sentinel message"
+        );
+    }
+
+    /// Test that alive_rx is dropped after handle_writer completes
+    #[tokio::test]
+    async fn test_handle_writer_drops_alive_rx() {
+        let (client, _server) = create_tcp_pair().await;
+        let (_, write_half) = tokio::io::split(client);
+        let framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel(64);
+        let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
+        let controller = Arc::new(Controller::default());
+
+        // Close the sender to trigger normal termination
+        drop(bytes_tx);
+
+        let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
+
+        assert!(result.is_ok());
+
+        // alive_tx should now be closed because alive_rx was dropped
+        assert!(alive_tx.is_closed());
+    }
+
+    /// Test handle_writer with header-only messages (control messages)
+    #[tokio::test]
+    async fn test_handle_writer_header_only_messages() {
+        let (client, mut server) = create_tcp_pair().await;
+        let (_, write_half) = tokio::io::split(client);
+        let framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel(64);
+        let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
+        let controller = Arc::new(Controller::default());
+
+        // Send a header-only message
+        let header_msg = TwoPartMessage::from_header(Bytes::from("header content"));
+        bytes_tx.send(header_msg).await.unwrap();
+
+        // Close the sender
+        drop(bytes_tx);
+
+        let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
+
+        assert!(result.is_ok());
+
+        // Read from server side to verify data was sent
+        let mut buffer = vec![0u8; 1024];
+        let n = server.read(&mut buffer).await.unwrap();
+
+        // Buffer should contain the header message and sentinel
+        assert!(
+            n > 0,
+            "Expected header message to be written to the TCP stream"
+        );
+    }
+
+    /// Test handle_writer with mixed header and data messages
+    #[tokio::test]
+    async fn test_handle_writer_mixed_messages() {
+        let (client, mut server) = create_tcp_pair().await;
+        let (_, write_half) = tokio::io::split(client);
+        let framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel(64);
+        let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
+        let controller = Arc::new(Controller::default());
+
+        // Send mixed messages
+        bytes_tx
+            .send(TwoPartMessage::from_header(Bytes::from("header1")))
+            .await
+            .unwrap();
+        bytes_tx
+            .send(TwoPartMessage::from_data(Bytes::from("data1")))
+            .await
+            .unwrap();
+        bytes_tx
+            .send(TwoPartMessage::from_parts(
+                Bytes::from("header2"),
+                Bytes::from("data2"),
+            ))
+            .await
+            .unwrap();
+
+        // Close the sender
+        drop(bytes_tx);
+
+        let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
+
+        assert!(result.is_ok());
+
+        // Read from server side to verify data was sent
+        let mut buffer = vec![0u8; 4096];
+        let n = server.read(&mut buffer).await.unwrap();
+
+        // Buffer should contain all messages plus sentinel
+        assert!(
+            n > 0,
+            "Expected mixed messages to be written to the TCP stream"
+        );
+    }
+}
