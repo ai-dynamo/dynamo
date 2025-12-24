@@ -444,7 +444,7 @@ class SystemInfo(NodeInfo):
                 self.add_child(MaturinInfo())
 
             # Add Python info
-            self.add_child(PythonInfo())
+            self.add_child(PythonInfo(runtime_check=self.runtime_check))
         else:
             # In terse mode, only add components that have errors
             self._add_error_only_components()
@@ -630,7 +630,7 @@ class SystemInfo(NodeInfo):
                     thorough_check=self.thorough_check, runtime_check=self.runtime_check
                 ),
             ),
-            ("Python", PythonInfo()),
+            ("Python", PythonInfo(runtime_check=self.runtime_check)),
         ]
 
         # Skip compile-time dependencies in runtime-check mode
@@ -1325,8 +1325,8 @@ class FilePermissionsInfo(NodeInfo):
                 self.add_child(
                     NodeInfo(
                         label="Dynamo workspace",
-                        desc="not needed for runtime container",
-                        status=NodeStatus.INFO,
+                        desc="workspace not found (runtime check does not require a checkout)",
+                        status=NodeStatus.WARNING,
                     )
                 )
             else:
@@ -1340,6 +1340,15 @@ class FilePermissionsInfo(NodeInfo):
             return
 
         if not DynamoInfo.is_dynamo_workspace(dynamo_root):
+            if self.runtime_check:
+                self.add_child(
+                    NodeInfo(
+                        label="Dynamo workspace",
+                        desc="not a valid dynamo workspace (runtime check does not require a checkout)",
+                        status=NodeStatus.WARNING,
+                    )
+                )
+                return
             self.add_child(
                 NodeInfo(
                     label="Dynamo workspace",
@@ -1358,6 +1367,8 @@ class FilePermissionsInfo(NodeInfo):
             exclude_files=[".git"],
         )
         for result in results:
+            if self.runtime_check and result.status == NodeStatus.ERROR:
+                result.status = NodeStatus.WARNING
             self.add_child(result)
 
         # Check .git directory separately
@@ -1367,6 +1378,8 @@ class FilePermissionsInfo(NodeInfo):
                 [git_dir], "Dynamo .git directory", recursive=recursive
             )
             for result in git_results:
+                if self.runtime_check and result.status == NodeStatus.ERROR:
+                    result.status = NodeStatus.WARNING
                 self.add_child(result)
         else:
             self.add_child(
@@ -1419,16 +1432,19 @@ class FilePermissionsInfo(NodeInfo):
                 for result in results:
                     # If we have at least one writable site-packages,
                     # downgrade ERROR to WARNING for non-writable ones
-                    if has_writable_site_packages and result.status == NodeStatus.ERROR:
+                    if (
+                        has_writable_site_packages or self.runtime_check
+                    ) and result.status == NodeStatus.ERROR:
                         result.status = NodeStatus.WARNING
                     self.add_child(result)
 
         except Exception as e:
+            status = NodeStatus.WARNING if self.runtime_check else NodeStatus.ERROR
             self.add_child(
                 NodeInfo(
                     label="Python site-packages",
                     desc=f"Permission check failed: {str(e)}",
-                    status=NodeStatus.ERROR,
+                    status=status,
                 )
             )
 
@@ -1999,17 +2015,27 @@ class MaturinInfo(NodeInfo):
 
 
 class PythonInfo(NodeInfo):
-    """Python installation information"""
+    """Python installation information.
 
-    def __init__(self):
+    In `--runtime-check` mode, Python is still useful to report, but failures should not
+    block the container sanity check, so missing/broken Python is downgraded to WARNING.
+    """
+
+    def __init__(self, runtime_check: bool = False):
+        self.runtime_check = runtime_check
         py_version = platform.python_version()
         py_exec = sys.executable or "python"
         display_py_exec = self._replace_home_with_var(py_exec)
 
+        if os.path.exists(py_exec):
+            status = NodeStatus.OK
+        else:
+            status = NodeStatus.WARNING if self.runtime_check else NodeStatus.ERROR
+
         super().__init__(
             label="Python",
             desc=f"{py_version}, {display_py_exec}",
-            status=NodeStatus.OK if os.path.exists(py_exec) else NodeStatus.ERROR,
+            status=status,
         )
 
         # Check for PyTorch (optional)
@@ -2682,8 +2708,8 @@ class DynamoInfo(NodeInfo):
         if self.runtime_check and not workspace_dir:
             super().__init__(
                 label="Dynamo",
-                desc="Runtime container - checking installed packages",
-                status=NodeStatus.INFO,
+                desc="workspace not found (runtime container) - checking installed packages",
+                status=NodeStatus.WARNING,
             )
             # Check runtime components even without workspace
             runtime_info = DynamoRuntimeInfo(
