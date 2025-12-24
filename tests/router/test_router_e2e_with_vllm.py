@@ -160,6 +160,8 @@ class VLLMProcess:
                 model,
                 "--block-size",
                 str(block_size),
+                "--store-kv",
+                self.store_backend,
             ]
 
             # Disable CUDA graphs for faster startup & lower memory
