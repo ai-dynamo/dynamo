@@ -140,6 +140,8 @@ class TRTLLMProcess:
                 model,
                 "--kv-block-size",
                 str(TRTLLM_BLOCK_SIZE),
+                "--store-kv",
+                self.store_backend,
                 # Enable KV events publishing for router integration
                 "--publish-events-and-metrics",
             ]

@@ -151,6 +151,8 @@ class SGLangProcess:
                 model,
                 "--page-size",
                 str(page_size),
+                "--store-kv",
+                self.store_backend,
             ]
 
             # Disable CUDA graphs for faster startup & lower memory
