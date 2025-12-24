@@ -38,6 +38,7 @@ pub mod tokenizers;
 pub mod tokens;
 pub mod types;
 pub mod utils;
+pub mod decode_disagger;
 
 #[cfg(feature = "block-manager")]
 pub mod block_manager;

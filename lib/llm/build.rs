@@ -9,13 +9,21 @@ const DYNAMO_FATBIN_PATH: &str = "DYNAMO_FATBIN_PATH";
 const OUT_DIR: &str = "OUT_DIR";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Declare all rerun-if-changed FIRST to enable proper caching
+    // This prevents the build script from running on every source file change
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/grpc/protos/kserve.proto");
+    println!("cargo:rerun-if-changed=src/grpc/protos/model_config.proto");
+    println!("cargo:rerun-if-changed=src/block_manager/block/transfer/kernels/vectorized_copy.fatbin");
+    println!("cargo:rerun-if-env-changed=DYNAMO_FATBIN_PATH");
+
     // Declare our custom cfg flag to avoid unexpected_cfgs warnings
     println!("cargo:rustc-check-cfg=cfg(have_vec_copy_fatbin)");
 
-    println!("cargo:warning=Building with CUDA KV off");
     build_protos()?;
 
     // Get FATBIN path and copy it to OUT_DIR for embedding
+    // Note: CUDA KV features are currently disabled
     if let Some(fatbin_path) = find_fatbin_file() {
         // Copy FATBIN to OUT_DIR so we can include it with a predictable path
         let out_dir = env::var(OUT_DIR).unwrap();
@@ -32,8 +40,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        // Tell cargo to rerun if FATBIN file changes
-        println!("cargo:rerun-if-changed={}", fatbin_path.display());
     } else {
         println!(
             "cargo:warning=CUDA FATBIN not found - run 'make fatbin' in cuda_kernels directory"
@@ -41,16 +47,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:warning=Set DYNAMO_FATBIN_PATH env var to specify custom location");
     }
 
-    // Rerun build if environment variable changes
-    println!("cargo:rerun-if-env-changed=DYNAMO_FATBIN_PATH");
-
     Ok(())
 }
 
 fn build_protos() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .type_attribute(".", "#[derive(serde::Serialize,serde::Deserialize)]")
-        .compile_protos(&["kserve.proto"], &["src/grpc/protos"])?;
+        .compile_protos(&["src/grpc/protos/kserve.proto"], &["src/grpc/protos"])?;
     Ok(())
 }
 
