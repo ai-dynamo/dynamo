@@ -220,7 +220,6 @@ def frontend_server(test_directory, runtime_services):
     # Create separate log directory for frontend to avoid conflicts with vllm
     frontend_log_dir = test_directory / "frontend"
     frontend_log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = frontend_log_dir / "python.log.txt"
 
     # Create managed process and start via context manager
     with ManagedProcess(
@@ -232,7 +231,9 @@ def frontend_server(test_directory, runtime_services):
         display_output=False,
         log_dir=str(frontend_log_dir),  # Separate log directory
     ) as frontend_process:
-        logger.info(f"Frontend started on port {FRONTEND_PORT}")
+        # Get actual log file path from ManagedProcess (it may modify log_dir to use temp directory)
+        log_file = Path(frontend_process._log_path)
+        logger.info(f"Frontend started on port {FRONTEND_PORT}, log file: {log_file}")
 
         yield {
             "process": frontend_process,
@@ -272,6 +273,7 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
             "--connector",
             "kvbm",
             "--enforce-eager",  # For faster startup in tests
+            # "--enable-prefix-caching",  # Required for KV event consolidator
         ]
     else:  # trtllm
         # Create TensorRT-LLM config file with KVBM connector
@@ -311,7 +313,6 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
     # Create separate log directory for worker to avoid conflicts with frontend
     worker_log_dir = test_directory / engine
     worker_log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = worker_log_dir / "python.log.txt"
 
     # Create managed process and start via context manager
     with ManagedProcess(
@@ -324,6 +325,10 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
         log_dir=str(worker_log_dir),  # Separate log directory
         terminate_existing=False,
     ) as worker_process:
+        # Get actual log file path from ManagedProcess (it may modify log_dir to use temp directory)
+        log_file = Path(worker_process._log_path)
+        logger.info(f"Worker log file: {log_file}")
+
         logger.info(
             f"Waiting for {engine.upper()} worker and consolidator to initialize..."
         )
