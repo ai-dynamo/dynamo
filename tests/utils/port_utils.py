@@ -17,7 +17,6 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
 
 # Port allocation lock file
 _PORT_LOCK_FILE = Path(tempfile.gettempdir()) / "pytest_port_allocations.lock"
@@ -38,7 +37,7 @@ class ServicePorts:
     """
 
     frontend_port: int
-    system_ports: List[int]
+    system_ports: list[int]
 
 
 def _load_port_registry() -> dict:
@@ -87,7 +86,7 @@ def _cleanup_stale_allocations(registry: dict, max_age: float = 900.0) -> dict:
     return cleaned
 
 
-def allocate_ports(count: int, start_port: int) -> List[int]:
+def allocate_ports(count: int, start_port: int) -> list[int]:
     """Find and return available ports in i16 range with flock-based locking.
 
     Uses file locking (flock) to prevent race conditions when multiple test processes
@@ -103,7 +102,7 @@ def allocate_ports(count: int, start_port: int) -> List[int]:
         start_port: Starting port number for allocation (required)
 
     Returns:
-        List[int]: List of available port numbers
+        list[int]: List of available port numbers
     """
     # Get caller information for debugging
     caller_file = "unknown"
@@ -143,7 +142,7 @@ def allocate_ports(count: int, start_port: int) -> List[int]:
             registry = _cleanup_stale_allocations(registry)
 
             allocated_ports = set(int(p) for p in registry.keys())
-            ports: List[int] = []
+            ports: list[int] = []
 
             # Start searching from desired port + random offset
             current_port = start_port + random.randint(0, 100)
@@ -211,7 +210,7 @@ def allocate_port(start_port: int) -> int:
     return allocate_ports(1, start_port)[0]
 
 
-def deallocate_ports(ports: List[int]) -> None:
+def deallocate_ports(ports: list[int]) -> None:
     """Release previously allocated ports back to the pool.
 
     Args:
