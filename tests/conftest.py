@@ -501,14 +501,14 @@ class SharedNatsServer(SharedManagedProcess):
 @pytest.fixture
 def store_kv(request):
     """
-    KV store for runtime. Defaults to "file".
+    KV store for runtime. Defaults to "etcd".
 
     To iterate over multiple stores in a test:
         @pytest.mark.parametrize("store_kv", ["file", "etcd"], indirect=True)
         def test_example(runtime_services):
             ...
     """
-    return getattr(request, "param", "file")
+    return getattr(request, "param", "etcd")
 
 
 @pytest.fixture
