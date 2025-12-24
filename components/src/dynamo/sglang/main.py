@@ -12,7 +12,12 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
-from dynamo.llm import ModelInput, ModelType
+from dynamo.llm import (
+    ModelInput,
+    ModelType,
+    register_endpoint_instance,
+    unregister_endpoint_instance,
+)
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
@@ -33,6 +38,71 @@ from dynamo.sglang.request_handlers import (
 )
 
 configure_dynamo_logging()
+logger = logging.getLogger(__name__)
+
+# Track if GPU Memory Service has been set up to avoid duplicate setup
+_gpu_memory_service_setup_done = False
+
+
+def _setup_gpu_memory_service_if_needed(config: Config) -> None:
+    """Setup GPU Memory Service if --load-format gpu_memory_service is passed.
+
+    This does TWO things:
+    1. Sets environment variables for patches (needed in spawned workers)
+    2. Applies GPU Memory Service patches and sets load_format to GPUServiceModelLoader class
+
+    Usage:
+        python -m dynamo.sglang --model-path ... \\
+            --load-format gpu_memory_service \\
+            --model-loader-extra-config '{"gpu_memory_service_socket_path": "/tmp/gpu_memory_service_{device}.sock"}'
+    """
+    global _gpu_memory_service_setup_done
+    if _gpu_memory_service_setup_done:
+        return
+
+    load_format = getattr(config.server_args, "load_format", None)
+    if load_format != "gpu_memory_service":
+        return
+
+    # GPU Memory Service provides its own VA-stable sleep/wake mechanism for weights.
+    # CPU backup would conflict with GPU Memory Service's shared memory approach.
+    server_args = config.server_args
+    if getattr(server_args, "enable_weights_cpu_backup", False):
+        raise ValueError(
+            "Cannot use --enable-weights-cpu-backup with --load-format gpu_memory_service. "
+            "GPU Memory Service provides its own VA-stable sleep/wake mechanism for weights."
+        )
+    if getattr(server_args, "enable_draft_weights_cpu_backup", False):
+        raise ValueError(
+            "Cannot use --enable-draft-weights-cpu-backup with --load-format gpu_memory_service. "
+            "GPU Memory Service provides its own VA-stable sleep/wake mechanism for weights."
+        )
+
+    logger.info("[GPU Memory Service] Setting up GPU Memory Service integration")
+
+    # Set env var to trigger auto-registration in spawned workers
+    os.environ["GPU_MEMORY_SERVICE_SGLANG_AUTO_REGISTER"] = "1"
+
+    # Apply patches in main process
+    try:
+        from dynamo.sglang.gpu_memory_service_adapters import (
+            GPUServiceModelLoader,
+            patch_model_runner_for_gpu_memory_service,
+        )
+
+        patch_model_runner_for_gpu_memory_service()
+        logger.info(
+            "[GPU Memory Service] Applied GPU Memory Service patches for SGLang"
+        )
+
+        # Set load_format to the actual class so SGLang uses our custom loader
+        config.server_args.load_format = GPUServiceModelLoader
+        logger.info("[GPU Memory Service] Set load_format=GPUServiceModelLoader")
+    except Exception as e:
+        logger.error(f"[GPU Memory Service] Failed to setup GPU Memory Service: {e}")
+        raise
+
+    _gpu_memory_service_setup_done = True
 
 
 async def _handle_non_leader_node(
@@ -68,6 +138,10 @@ async def _handle_non_leader_node(
 async def worker():
     config = await parse_args(sys.argv[1:])
     dump_config(config.dynamo_args.dump_config_to, config)
+
+    # Setup GPU Memory Service if using gpu_memory_service load format
+    # This must be called before sgl.Engine() is created
+    _setup_gpu_memory_service_if_needed(config)
 
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(
@@ -133,8 +207,157 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     runtime.register_engine_route("start_profile", start_profile_handler)
     runtime.register_engine_route("stop_profile", stop_profile_handler)
+
+    # Register engine routes for memory management (uses SGLang's built-in mechanism)
+    async def release_memory_occupation_handler(body: dict) -> dict:
+        """Release GPU memory occupation and unregister from discovery.
+
+        Args:
+            tags: List of memory tags to release. Valid tags: "kv_cache", "weights", "cuda_graph".
+                  Default: all tags (["kv_cache", "weights", "cuda_graph"])
+
+        This uses SGLang's built-in release_memory_occupation which properly routes
+        the command to the scheduler subprocess where the memory is allocated.
+
+        Order of operations:
+        1. Unregister from discovery - stop accepting new requests
+        2. Pause generation with abort mode - drain/abort existing requests
+        3. Release memory occupation - safe now that no requests are in flight
+        """
+        # Support both "tag" (single) and "tags" (list) for flexibility
+        tags = body.get("tags", body.get("tag", None))
+        if tags is None:
+            # Default: release all memory types
+            tags = ["kv_cache", "weights", "cuda_graph"]
+        elif isinstance(tags, str):
+            tags = [tags]
+
+        # Warn if trying to release "weights" while using GPU Memory Service
+        if "weights" in tags and _gpu_memory_service_setup_done:
+            logging.warning(
+                "[ReleaseMemory] 'weights' tag included but GPU Memory Service is active. "
+                "Weight memory is managed by GPU Memory Service and will not be freed via this endpoint. "
+            )
+
+        try:
+            # Step 1: Unregister endpoint instance to remove from routing table
+            try:
+                await unregister_endpoint_instance(generate_endpoint)
+                logging.info(
+                    "[ReleaseMemory] Unregistered endpoint instance - frontend will stop routing here"
+                )
+            except Exception as unreg_err:
+                logging.warning(
+                    f"[ReleaseMemory] Failed to unregister endpoint instance: {unreg_err}"
+                )
+
+            # Step 2: Pause generation with abort mode to drain/abort existing requests
+            # This waits until model_update_lock is not held (all requests completed)
+            from sglang.srt.managers.io_struct import (
+                PauseGenerationReqInput,
+                ReleaseMemoryOccupationReqInput,
+            )
+
+            pause_obj = PauseGenerationReqInput(mode="abort")
+            await engine.tokenizer_manager.pause_generation(pause_obj)
+            logging.info("[ReleaseMemory] Paused generation and drained all requests")
+
+            # Step 3: Now safe to release memory - no requests in flight
+            obj = ReleaseMemoryOccupationReqInput(tags=tags)
+            await engine.tokenizer_manager.release_memory_occupation(obj, None)
+            logging.info(f"[ReleaseMemory] Released memory occupation for tags: {tags}")
+
+            return {"status": "ok", "message": f"Memory released (tags={tags})"}
+        except Exception as e:
+            logging.error(f"Failed to release memory occupation: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def resume_memory_occupation_handler(body: dict) -> dict:
+        """Resume GPU memory occupation and re-register to discovery.
+
+        Args:
+            tags: List of memory tags to resume. Valid tags: "kv_cache", "weights", "cuda_graph".
+                  Default: all tags (["kv_cache", "weights", "cuda_graph"])
+
+        This uses SGLang's built-in resume_memory_occupation which properly routes
+        the command to the scheduler subprocess where the memory is allocated.
+
+        Order of operations:
+        1. Resume memory occupation - restore GPU memory
+        2. Continue generation - unpause the engine (was paused during release)
+        3. Re-register to discovery - allow frontend to route requests here again
+        """
+        # Support both "tag" (single) and "tags" (list) for flexibility
+        tags = body.get("tags", body.get("tag", None))
+        if tags is None:
+            # Default: resume all memory types
+            tags = ["kv_cache", "weights", "cuda_graph"]
+        elif isinstance(tags, str):
+            tags = [tags]
+
+        try:
+            from sglang.srt.managers.io_struct import (
+                ContinueGenerationReqInput,
+                ResumeMemoryOccupationReqInput,
+            )
+
+            # Step 1: Resume memory occupation (waits for completion via communicator)
+            obj = ResumeMemoryOccupationReqInput(tags=tags)
+            await engine.tokenizer_manager.resume_memory_occupation(obj, None)
+            logging.info(f"[ResumeMemory] Resumed memory occupation for tags: {tags}")
+
+            # Step 2: Continue generation (unpause the engine)
+            continue_obj = ContinueGenerationReqInput()
+            await engine.tokenizer_manager.continue_generation(continue_obj)
+            logging.info("[ResumeMemory] Continued generation - engine unpaused")
+
+            # Step 3: Re-register to discovery so frontend can route to us again
+            # We need to call BOTH register functions:
+            # - _register_llm_with_runtime_config: registers the Model Deployment Card (MDC)
+            # - register_endpoint_instance: adds to instances bucket (routing table)
+            try:
+                from dynamo.sglang.register import _register_llm_with_runtime_config
+
+                model_type = parse_endpoint_types(dynamo_args.dyn_endpoint_types)
+                await _register_llm_with_runtime_config(
+                    engine,
+                    generate_endpoint,
+                    server_args,
+                    dynamo_args,
+                    output_type=model_type,
+                )
+                logging.info(
+                    "[ResumeMemory] Re-registered model card to discovery"
+                )
+            except Exception as reg_err:
+                logging.warning(
+                    f"[ResumeMemory] Failed to re-register model card: {reg_err}"
+                )
+
+            try:
+                await register_endpoint_instance(generate_endpoint)
+                logging.info(
+                    "[ResumeMemory] Re-registered endpoint instance - frontend can route here"
+                )
+            except Exception as reg_err:
+                logging.warning(
+                    f"[ResumeMemory] Failed to re-register endpoint instance: {reg_err}"
+                )
+
+            return {"status": "ok", "message": f"Memory resumed (tags={tags})"}
+        except Exception as e:
+            logging.error(f"Failed to resume memory occupation: {e}")
+            return {"status": "error", "message": str(e)}
+
+    runtime.register_engine_route(
+        "release_memory_occupation", release_memory_occupation_handler
+    )
+    runtime.register_engine_route(
+        "resume_memory_occupation", resume_memory_occupation_handler
+    )
     logging.info(
-        "Registered engine routes: /engine/start_profile, /engine/stop_profile"
+        "Registered engine routes: /engine/start_profile, /engine/stop_profile, "
+        "/engine/release_memory_occupation, /engine/resume_memory_occupation"
     )
 
     # publisher instantiates the metrics and kv event publishers
@@ -233,8 +456,157 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     runtime.register_engine_route("start_profile", start_profile_handler)
     runtime.register_engine_route("stop_profile", stop_profile_handler)
+
+    # Register engine routes for memory management (uses SGLang's built-in mechanism)
+    async def release_memory_occupation_handler(body: dict) -> dict:
+        """Release GPU memory occupation and unregister from discovery.
+
+        Args:
+            tags: List of memory tags to release. Valid tags: "kv_cache", "weights", "cuda_graph".
+                  Default: all tags (["kv_cache", "weights", "cuda_graph"])
+
+        This uses SGLang's built-in release_memory_occupation which properly routes
+        the command to the scheduler subprocess where the memory is allocated.
+
+        Order of operations:
+        1. Unregister from discovery - stop accepting new requests
+        2. Pause generation with abort mode - drain/abort existing requests
+        3. Release memory occupation - safe now that no requests are in flight
+        """
+        # Support both "tag" (single) and "tags" (list) for flexibility
+        tags = body.get("tags", body.get("tag", None))
+        if tags is None:
+            # Default: release all memory types
+            tags = ["kv_cache", "weights", "cuda_graph"]
+        elif isinstance(tags, str):
+            tags = [tags]
+
+        # Warn if trying to release "weights" while using GPU Memory Service
+        if "weights" in tags and _gpu_memory_service_setup_done:
+            logging.warning(
+                "[ReleaseMemory] 'weights' tag included but GPU Memory Service is active. "
+                "Weight memory is managed by GPU Memory Service and will not be freed via this endpoint. "
+            )
+
+        try:
+            # Step 1: Unregister endpoint instance to remove from routing table
+            try:
+                await unregister_endpoint_instance(generate_endpoint)
+                logging.info(
+                    "[ReleaseMemory] Unregistered endpoint instance - frontend will stop routing here"
+                )
+            except Exception as unreg_err:
+                logging.warning(
+                    f"[ReleaseMemory] Failed to unregister endpoint instance: {unreg_err}"
+                )
+
+            # Step 2: Pause generation with abort mode to drain/abort existing requests
+            # This waits until model_update_lock is not held (all requests completed)
+            from sglang.srt.managers.io_struct import (
+                PauseGenerationReqInput,
+                ReleaseMemoryOccupationReqInput,
+            )
+
+            pause_obj = PauseGenerationReqInput(mode="abort")
+            await engine.tokenizer_manager.pause_generation(pause_obj)
+            logging.info("[ReleaseMemory] Paused generation and drained all requests")
+
+            # Step 3: Now safe to release memory - no requests in flight
+            obj = ReleaseMemoryOccupationReqInput(tags=tags)
+            await engine.tokenizer_manager.release_memory_occupation(obj, None)
+            logging.info(f"[ReleaseMemory] Released memory occupation for tags: {tags}")
+
+            return {"status": "ok", "message": f"Memory released (tags={tags})"}
+        except Exception as e:
+            logging.error(f"Failed to release memory occupation: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def resume_memory_occupation_handler(body: dict) -> dict:
+        """Resume GPU memory occupation and re-register to discovery.
+
+        Args:
+            tags: List of memory tags to resume. Valid tags: "kv_cache", "weights", "cuda_graph".
+                  Default: all tags (["kv_cache", "weights", "cuda_graph"])
+
+        This uses SGLang's built-in resume_memory_occupation which properly routes
+        the command to the scheduler subprocess where the memory is allocated.
+
+        Order of operations:
+        1. Resume memory occupation - restore GPU memory
+        2. Continue generation - unpause the engine (was paused during release)
+        3. Re-register to discovery - allow frontend to route requests here again
+        """
+        # Support both "tag" (single) and "tags" (list) for flexibility
+        tags = body.get("tags", body.get("tag", None))
+        if tags is None:
+            # Default: resume all memory types
+            tags = ["kv_cache", "weights", "cuda_graph"]
+        elif isinstance(tags, str):
+            tags = [tags]
+
+        try:
+            from sglang.srt.managers.io_struct import (
+                ContinueGenerationReqInput,
+                ResumeMemoryOccupationReqInput,
+            )
+
+            # Step 1: Resume memory occupation (waits for completion via communicator)
+            obj = ResumeMemoryOccupationReqInput(tags=tags)
+            await engine.tokenizer_manager.resume_memory_occupation(obj, None)
+            logging.info(f"[ResumeMemory] Resumed memory occupation for tags: {tags}")
+
+            # Step 2: Continue generation (unpause the engine)
+            continue_obj = ContinueGenerationReqInput()
+            await engine.tokenizer_manager.continue_generation(continue_obj)
+            logging.info("[ResumeMemory] Continued generation - engine unpaused")
+
+            # Step 3: Re-register to discovery so frontend can route to us again
+            # We need to call BOTH register functions:
+            # - _register_llm_with_runtime_config: registers the Model Deployment Card (MDC)
+            # - register_endpoint_instance: adds to instances bucket (routing table)
+            try:
+                from dynamo.sglang.register import _register_llm_with_runtime_config
+
+                await _register_llm_with_runtime_config(
+                    engine,
+                    generate_endpoint,
+                    server_args,
+                    dynamo_args,
+                    input_type=ModelInput.Tokens,
+                    output_type=ModelType.Prefill,
+                )
+                logging.info(
+                    "[ResumeMemory] Re-registered model to discovery - frontend can route here again"
+                )
+            except Exception as reg_err:
+                logging.warning(
+                    f"[ResumeMemory] Failed to re-register to discovery: {reg_err}"
+                )
+
+            try:
+                await register_endpoint_instance(generate_endpoint)
+                logging.info(
+                    "[ResumeMemory] Re-registered endpoint instance - frontend can route here"
+                )
+            except Exception as reg_err:
+                logging.warning(
+                    f"[ResumeMemory] Failed to re-register endpoint instance: {reg_err}"
+                )
+
+            return {"status": "ok", "message": f"Memory resumed (tags={tags})"}
+        except Exception as e:
+            logging.error(f"Failed to resume memory occupation: {e}")
+            return {"status": "error", "message": str(e)}
+
+    runtime.register_engine_route(
+        "release_memory_occupation", release_memory_occupation_handler
+    )
+    runtime.register_engine_route(
+        "resume_memory_occupation", resume_memory_occupation_handler
+    )
     logging.info(
-        "Registered engine routes: /engine/start_profile, /engine/stop_profile"
+        "Registered engine routes: /engine/start_profile, /engine/stop_profile, "
+        "/engine/release_memory_occupation, /engine/resume_memory_occupation"
     )
 
     # Perform dummy warmup for prefill worker to avoid initial TTFT hit

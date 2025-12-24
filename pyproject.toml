@@ -70,6 +70,10 @@ vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
 
+# vLLM plugin entry point - registers GPU Memory Service loader in all vLLM processes
+[project.entry-points."vllm.general_plugins"]
+dynamo_gpu_memory_service = "dynamo.vllm.gpu_memory_service_adapters:vllm_plugin_init"
+
 [dependency-groups]
 docs = [
     # Core Sphinx
