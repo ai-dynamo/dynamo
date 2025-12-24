@@ -214,7 +214,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
                 // Update Prometheus metrics
                 let host_rate = cache_stats_clone.host_hit_rate();
                 let disk_rate = cache_stats_clone.disk_hit_rate();
-                kvbm_metrics_clone.update_cache_hit_rates(host_rate, disk_rate);
+                kvbm_metrics_clone.update_cache_hit_rates(host_rate, disk_rate, 0.0);
                 // Also log cache hit rates periodically
                 cache_stats_clone.maybe_log();
             }
