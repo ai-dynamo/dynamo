@@ -40,6 +40,7 @@
 pub mod capabilities;
 pub mod checksum;
 pub mod context;
+pub mod cuda_pool;
 pub mod executor;
 pub mod fill;
 pub mod notifications;

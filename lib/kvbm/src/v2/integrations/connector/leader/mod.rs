@@ -188,14 +188,14 @@ impl ConnectorLeader {
             // Check for inflight offloads - potential race with block freeing
             // vLLM preemption frees G1 blocks immediately, but we may still have
             // offload transfers reading from those blocks.
-            if slot.has_inflight_offloads() {
-                tracing::error!(
-                    request_id,
-                    "Preemption detected while offloads inflight - deferring reset until transfers complete"
-                );
-                // Return (None, false) to signal "not ready" - vLLM will retry next cycle
-                return Ok((None, false));
-            }
+            // if slot.has_inflight_offloads() {
+            //     tracing::error!(
+            //         request_id,
+            //         "Preemption detected while offloads inflight - deferring reset until transfers complete"
+            //     );
+            //     // Return (None, false) to signal "not ready" - vLLM will retry next cycle
+            //     return Ok((None, false));
+            // }
 
             // Safe to reset - no inflight offloads
             tracing::debug!(request_id, "Resetting slot state after preemption");

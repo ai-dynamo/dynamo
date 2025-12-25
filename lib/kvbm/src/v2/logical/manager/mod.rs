@@ -459,6 +459,12 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         self
     }
 
+    /// Use lineage backend
+    pub fn with_lineage_backend(mut self) -> Self {
+        self.inactive_backend = Some(InactiveBackendConfig::Lineage);
+        self
+    }
+
     /// Validate the configuration
     fn validate(&self) -> Result<(), String> {
         let registry = self.registry.as_ref().ok_or("registry is required")?;

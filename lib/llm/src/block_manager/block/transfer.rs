@@ -222,6 +222,9 @@ where
                 let transfer_mode =
                     resolve_cuda_transfer_mode(RB::write_to_strategy(), is_contiguous);
 
+
+                let transfer_mode = CudaTransferMode::Default;
+
                 match transfer_mode {
                     CudaTransferMode::Custom => {
                         let selected_stream = ctx.stream();

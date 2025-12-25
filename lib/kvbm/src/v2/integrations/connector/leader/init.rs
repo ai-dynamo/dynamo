@@ -326,7 +326,7 @@ impl ConnectorLeader {
                 .block_count(host_block_count)
                 .block_size(reference_config.page_size)
                 .registry(registry.clone())
-                .with_lru_backend()
+                .with_lineage_backend()
                 .duplication_policy(BlockDuplicationPolicy::Reject)
                 .build()
                 .expect("Should build G2 manager"),
@@ -345,7 +345,7 @@ impl ConnectorLeader {
                     .block_count(count)
                     .block_size(reference_config.page_size)
                     .registry(registry.clone())
-                    .with_lru_backend()
+                    .with_lineage_backend()
                     .duplication_policy(BlockDuplicationPolicy::Reject)
                     .build()
                     .expect("Should build G3 manager"),

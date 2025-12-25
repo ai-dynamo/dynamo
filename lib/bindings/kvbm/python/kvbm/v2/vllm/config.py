@@ -17,8 +17,8 @@ from vllm.version import __version_tuple__
 
 from . import KvbmVllmConfig
 
-if __version_tuple__ >= (0, 12, 0):
-    raise ImportError("vLLM versions after 0.11 are not yet supported")
+if __version_tuple__ >= (0, 12, 2):
+   raise ImportError("vLLM versions after 0.12.2 are not yet supported")
 
 if __version_tuple__ <= (0, 11, 0):
     raise ImportError("vLLM versions before 0.11 are not supported")

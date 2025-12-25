@@ -35,7 +35,7 @@ pub struct BatchConfig {
 impl Default for BatchConfig {
     fn default() -> Self {
         Self {
-            max_batch_size: 64,
+            max_batch_size: 1024,
             flush_interval: Duration::from_millis(10),
             min_batch_size: 8,
         }
