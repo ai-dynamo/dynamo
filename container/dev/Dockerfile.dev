@@ -232,9 +232,34 @@ ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
 
-# Set LD_LIBRARY_PATH to include NIXL/UCX paths (matches main Dockerfile dev stage line 488)
-# Now that NIXL_*_DIR vars are set above, we can use them uniformly for all frameworks
-ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda/compat/lib.real:${LD_LIBRARY_PATH}
+# Set universal CUDA development environment variables (all frameworks)
+# vLLM: Dockerfile.vllm line 533, 597
+# TRT-LLM: Dockerfile.trtllm lines 600-606
+ENV CUDA_HOME=/usr/local/cuda \
+    CPATH=/usr/local/cuda/include \
+    CUDA_DEVICE_ORDER=PCI_BUS_ID \
+    TRITON_CUPTI_PATH=/usr/local/cuda/include \
+    TRITON_CUDACRT_PATH=/usr/local/cuda/include \
+    TRITON_CUOBJDUMP_PATH=/usr/local/cuda/bin/cuobjdump \
+    TRITON_NVDISASM_PATH=/usr/local/cuda/bin/nvdisasm \
+    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
+    TRITON_CUDART_PATH=/usr/local/cuda/include \
+    NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+
+# Base LD_LIBRARY_PATH with universal paths (all frameworks have these)
+# Framework-specific paths are conditionally added in /etc/profile.d/50-framework-paths.sh
+ARG PYTHON_VERSION
+ENV LD_LIBRARY_PATH=\
+${NIXL_LIB_DIR}:\
+${NIXL_PLUGIN_DIR}:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+/usr/local/cuda/compat/lib.real:\
+${LD_LIBRARY_PATH}
+
+# Copy shell profile script for framework-specific environment variables
+# This script conditionally adds PATH/LD_LIBRARY_PATH entries based on what exists
+COPY --chmod=755 container/dev/50-framework-paths.sh /etc/profile.d/50-framework-paths.sh
 
 # Set umask for group-writable files in dev stage (runs as root)
 RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
@@ -261,6 +286,7 @@ COPY --from=runtime_base /usr/bin/python3 /usr/bin/python3
 ARG WORKSPACE_DIR=/workspace
 
 # Dev environment variables (aligned with framework dev stages)
+# Framework-specific PATH additions are handled in /etc/profile.d/50-framework-paths.sh
 ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     DYNAMO_HOME=${WORKSPACE_DIR} \
     RUSTUP_HOME=/usr/local/rustup \
@@ -304,12 +330,21 @@ RUN git lfs install
 
 # Install common and test dependencies (matches main Dockerfile dev stage)
 # This installs pytest-benchmark and other test dependencies required for CI
+# TRT-LLM specific: Also installs cupy-cuda13x with special index strategy (Dockerfile.trtllm lines 768-776)
+# SGLang specific: Reinstall pytest to ensure venv has pytest executable with correct shebang
+ARG FRAMEWORK
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     UV_GIT_LFS=1 uv pip install \
         --no-cache \
+        --index-strategy unsafe-best-match \
+        --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
+        --requirement /tmp/requirements.test.txt \
+        cupy-cuda13x && \
+    if [ "${FRAMEWORK}" = "sglang" ]; then \
+        uv pip install --force-reinstall --no-deps pytest; \
+    fi
 
 # Copy entire workspace (old design - simpler for CI)
 # .dockerignore filters out unwanted files (.git, build artifacts, etc.)
@@ -321,6 +356,17 @@ RUN chmod g+w ${WORKSPACE_DIR}
 # Install benchmarks package (includes prefix_data_generator, tabulate, etc.)
 RUN cd ${WORKSPACE_DIR}/benchmarks && \
     UV_GIT_LFS=1 uv pip install --no-cache .
+
+# Install KVBM wheel if enabled (matches framework Dockerfile dev stages)
+ARG ENABLE_KVBM
+RUN if [ "${ENABLE_KVBM}" = "true" ]; then \
+        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
+        if [ -z "$KVBM_WHEEL" ]; then \
+            echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
+            exit 1; \
+        fi; \
+        uv pip install --no-cache "$KVBM_WHEEL"; \
+    fi
 
 # Install maturin and create editable install entry points.
 RUN if [ -f pyproject.toml ]; then \
