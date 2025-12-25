@@ -72,7 +72,15 @@ Before running any examples, ensure you have:
 
 - **Docker & Docker Compose** - For containerized services
 - **CUDA-compatible GPU** - For LLM inference (except hello_world, which is non-GPU aware)
-- **Python 3.9++** - For client scripts and utilities
-- **Kubernetes cluster** - For any cloud deployment/K8s examples
+- **Python 3.9+** - For client scripts and utilities
 
+### For Kubernetes Deployments
 
+If you're running Kubernetes/cloud deployment examples (EKS, AKS, GKE), you'll also need:
+
+| Tool | Minimum Version | Installation |
+|------|-----------------|--------------|
+| **kubectl** | v1.24+ | [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) |
+| **Helm** | v3.0+ | [Install Helm](https://helm.sh/docs/intro/install/) |
+
+See the [Kubernetes Installation Guide](../docs/kubernetes/installation_guide.md#prerequisites) for detailed setup instructions and pre-deployment checks.
