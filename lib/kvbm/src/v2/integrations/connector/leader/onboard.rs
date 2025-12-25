@@ -5,6 +5,7 @@ use anyhow::Context;
 use futures::future::{BoxFuture, Either, Ready};
 
 use crate::{logical::LogicalLayoutHandle, physical::TransferOptions};
+use std::time::Instant;
 
 use super::*;
 
@@ -144,6 +145,10 @@ async fn execute_onboarding(
         .await?;
     let end_time = Instant::now();
     let duration = end_time.duration_since(start_time);
-    tracing::info!("G2 to G1 transfer: blocks={}, duration={:?}, bandwidth={:.2} GB/s", g2_block_ids.len(), duration, get_bandwidth_gbs(duration, g2_block_ids.len()));
+    // tracing::info!(
+    //     "G2 to G1 transfer: blocks={}, duration={:?}"
+    //     g2_block_ids.len(),
+    //     duration,
+    // );
     Ok(())
 }

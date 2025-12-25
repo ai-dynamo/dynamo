@@ -40,7 +40,6 @@
 pub mod capabilities;
 pub mod checksum;
 pub mod context;
-pub mod cuda_pool;
 pub mod executor;
 pub mod fill;
 pub mod notifications;
@@ -53,7 +52,7 @@ pub mod validation;
 mod tests;
 
 // Re-export StorageKind
-pub use dynamo_memory::StorageKind;
+pub use dynamo_memory::{StorageKind, pool as cuda_pool};
 
 pub use capabilities::TransferCapabilities;
 pub use checksum::{BlockChecksum, compute_block_checksums, compute_layer_checksums};

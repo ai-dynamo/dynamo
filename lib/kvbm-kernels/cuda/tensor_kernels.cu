@@ -274,6 +274,93 @@ operational_unpack_kernel(
   }
 }
 
+// Vectorized operational copy kernel using int64_t (8-byte) loads for maximum bandwidth.
+// This kernel handles both pack (block->operational) and unpack (operational->block) directions.
+// Inspired by LMCache's approach of using 64-bit vectorized memory access.
+__global__ void
+operational_copy_vectorized_kernel(
+    const int64_t* const* src_chunks, int64_t* const* dst_chunks,
+    size_t chunk_stride,           // nl * no for block side
+    size_t chunk_elements_64bit,   // inner * elem_size / 8
+    size_t total_per_block_64bit,  // chunk_elements_64bit * chunk_count
+    size_t num_blocks,
+    bool pack_direction)  // true = block->operational (pack)
+{
+  // Use 128 threads per block for better occupancy with 64-bit loads
+  size_t thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+  size_t stride = blockDim.x * gridDim.x;
+  size_t total = total_per_block_64bit * num_blocks;
+
+  while (thread_id < total) {
+    size_t block_idx = thread_id / total_per_block_64bit;
+    size_t residual = thread_id % total_per_block_64bit;
+
+    size_t chunk_idx = residual / chunk_elements_64bit;
+    size_t inner_idx = residual % chunk_elements_64bit;
+
+    if (pack_direction) {
+      // Block -> Operational (pack)
+      const int64_t* const* block_base = src_chunks + block_idx * chunk_stride;
+      const int64_t* block_chunk = block_base[chunk_idx];
+      int64_t* operational_base = dst_chunks[block_idx];
+      operational_base[residual] = block_chunk[inner_idx];
+    } else {
+      // Operational -> Block (unpack)
+      const int64_t* operational_base = src_chunks[block_idx];
+      int64_t* const* block_base = dst_chunks + block_idx * chunk_stride;
+      int64_t* block_chunk = block_base[chunk_idx];
+      block_chunk[inner_idx] = operational_base[residual];
+    }
+
+    thread_id += stride;
+  }
+}
+
+// Launch the vectorized operational copy kernel
+cudaError_t
+launch_operational_copy_vectorized(
+    void* const* operational_ptrs_device, void* const* block_ptrs_device, size_t num_blocks, size_t nl, size_t no,
+    size_t inner_bytes, OperationalCopyDirection direction, cudaStream_t stream)
+{
+  size_t chunk_count = nl * no;
+  size_t chunk_elements_64bit = inner_bytes / 8;
+  size_t total_per_block_64bit = chunk_elements_64bit * chunk_count;
+  size_t total = total_per_block_64bit * num_blocks;
+
+  if (total == 0) {
+    return cudaSuccess;
+  }
+
+  if (!operational_ptrs_device || !block_ptrs_device) {
+    return cudaErrorInvalidValue;
+  }
+
+  // Use 128 threads for better occupancy with 64-bit loads (following LMCache pattern)
+  constexpr int kBlockDim = 128;
+  int grid_dim = compute_grid_dim(total, kBlockDim);
+  if (grid_dim == 0) {
+    return cudaSuccess;
+  }
+
+  bool pack_direction = (direction == OperationalCopyDirection::BlockToOperational);
+
+  if (pack_direction) {
+    // Block -> Operational
+    const int64_t* const* src = reinterpret_cast<const int64_t* const*>(block_ptrs_device);
+    int64_t* const* dst = reinterpret_cast<int64_t* const*>(operational_ptrs_device);
+    operational_copy_vectorized_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+        src, dst, chunk_count, chunk_elements_64bit, total_per_block_64bit, num_blocks, true);
+  } else {
+    // Operational -> Block
+    const int64_t* const* src = reinterpret_cast<const int64_t* const*>(operational_ptrs_device);
+    int64_t* const* dst = reinterpret_cast<int64_t* const*>(block_ptrs_device);
+    operational_copy_vectorized_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+        src, dst, chunk_count, chunk_elements_64bit, total_per_block_64bit, num_blocks, false);
+  }
+
+  return cudaGetLastError();
+}
+
 template <typename T>
 cudaError_t
 launch_block_to_universal_impl(
@@ -391,7 +478,7 @@ launch_operational_copy_impl(
 }  // namespace
 
 extern "C" cudaError_t
-launch_universal_from_block(
+kvbm_kernels_launch_universal_from_block(
     void* const* universal_ptrs_device, const void* const* block_ptrs_device, size_t num_blocks, size_t nh, size_t nl,
     size_t no, size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
 {
@@ -417,7 +504,7 @@ launch_universal_from_block(
 }
 
 extern "C" cudaError_t
-launch_block_from_universal(
+kvbm_kernels_launch_block_from_universal(
     const void* const* universal_ptrs_device, void* const* block_ptrs_device, size_t num_blocks, size_t nh, size_t nl,
     size_t no, size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
 {
@@ -444,13 +531,14 @@ launch_block_from_universal(
 
 enum class OperationalCopyBackend : int {
   Auto = 0,
-  KernelOnly = 1,
-  MemcpyAsync = 2,
-  MemcpyBatch = 3,
+  VectorizedKernel = 1,  // Force vectorized 64-bit kernel
+  KernelOnly = 2,        // Force dtype-specific kernel
+  MemcpyAsync = 3,
+  MemcpyBatch = 4,
 };
 
 extern "C" cudaError_t
-launch_operational_copy(
+kvbm_kernels_launch_operational_copy(
     const void* const* block_ptrs_host, const void* const* block_ptrs_device, void* const* operational_ptrs_host,
     void* const* operational_ptrs_device, size_t num_blocks, size_t nl, size_t no, size_t inner, size_t elem_size,
     int dtype_value, int direction_value, int backend_value, cudaStream_t stream)
@@ -586,8 +674,24 @@ launch_operational_copy(
 #endif
   };
 
+  // Check if data is 8-byte aligned for vectorized kernel
+  size_t total_bytes = inner * elem_size;
+  bool is_8byte_aligned = (total_bytes % 8 == 0) && block_ptrs_device;
+
+  auto launch_vectorized = [&]() -> cudaError_t {
+    if (!is_8byte_aligned || !block_ptrs_device) {
+      return cudaErrorNotSupported;
+    }
+    return launch_operational_copy_vectorized(
+        operational_ptrs_device, const_cast<void* const*>(block_ptrs_device), num_blocks, nl, no, total_bytes,
+        direction, stream);
+  };
+
   cudaError_t status = cudaErrorInvalidValue;
   switch (backend) {
+    case OperationalCopyBackend::VectorizedKernel:
+      status = launch_vectorized();
+      break;
     case OperationalCopyBackend::KernelOnly:
       status = launch_kernel();
       break;
@@ -599,13 +703,16 @@ launch_operational_copy(
       break;
     case OperationalCopyBackend::Auto:
     default:
-      // Priority: batch copy (CUDA 12.9+) -> memcpy async -> kernel fallback
+      // Priority: vectorized kernel (if 8-byte aligned) -> batch copy (CUDA 12.9+) -> memcpy async
+      if (is_8byte_aligned) {
+        status = launch_vectorized();
+        if (status == cudaSuccess) {
+          break;
+        }
+      }
       status = launch_memcpy_batch();
       if (status == cudaErrorNotSupported) {
         status = launch_memcpy_async();
-      }
-      if (status == cudaErrorNotSupported || status == cudaErrorInvalidValue) {
-        status = launch_kernel();
       }
       break;
   }
@@ -616,7 +723,7 @@ launch_operational_copy(
 /// Check if cudaMemcpyBatchAsync is available at compile time.
 /// Returns true if CUDA 12.9+ was used to compile this library.
 extern "C" bool
-has_memcpy_batch_async()
+kvbm_kernels_has_memcpy_batch_async()
 {
 #if CUDART_VERSION >= 12090
   return true;
@@ -628,7 +735,97 @@ has_memcpy_batch_async()
 /// Returns false - this is the real CUDA implementation, not stubs.
 /// Downstream crates can use this to skip CUDA tests at runtime when stubs are linked.
 extern "C" bool
-is_stub_build()
+kvbm_kernels_is_stub_build()
 {
   return false;
+}
+
+// Vectorized copy kernel for arbitrary pointer pairs.
+// Design choices:
+// - Each CUDA block handles one or more pairs (grid-strided loop)
+// - All threads in a block cooperate on the SAME pair (no warp divergence)
+// - Alignment is checked PER PAIR inside the loop (fixes bug where first pair's alignment was used for all)
+// - Prefers 16-byte > 8-byte > 4-byte vectorization for maximum memory bandwidth
+// - Falls back to byte-by-byte for remainder or unaligned data
+//
+// Performance notes:
+// - 128 threads per block provides good occupancy
+// - int4 (16-byte) loads achieve peak memory bandwidth on modern GPUs
+// - Alignment check is cheap compared to memory access time
+__global__ void
+vectorised_copy(void** src_ptrs, void** dst_ptrs, size_t copy_size_in_bytes, int num_pairs)
+{
+  int pair_id = blockIdx.x;
+  int block_stride = gridDim.x;
+  int tid = threadIdx.x;
+  int block_size = blockDim.x;
+
+  for (; pair_id < num_pairs; pair_id += block_stride) {
+    char* src = static_cast<char*>(src_ptrs[pair_id]);
+    char* dst = static_cast<char*>(dst_ptrs[pair_id]);
+
+    // Check alignment for THIS specific pair (all threads in block see same values)
+    uintptr_t src_addr = reinterpret_cast<uintptr_t>(src);
+    uintptr_t dst_addr = reinterpret_cast<uintptr_t>(dst);
+
+    size_t vectorized_bytes = 0;
+
+    if ((src_addr % 16 == 0) && (dst_addr % 16 == 0) && (copy_size_in_bytes >= 16)) {
+      // Best case: 16-byte vectorized copy using int4
+      size_t num_int4 = copy_size_in_bytes / 16;
+      for (size_t i = tid; i < num_int4; i += block_size) {
+        reinterpret_cast<int4*>(dst)[i] = reinterpret_cast<const int4*>(src)[i];
+      }
+      vectorized_bytes = num_int4 * 16;
+    } else if ((src_addr % 8 == 0) && (dst_addr % 8 == 0) && (copy_size_in_bytes >= 8)) {
+      // 8-byte vectorized copy using int2 (matches LMCache int64_t approach)
+      size_t num_int2 = copy_size_in_bytes / 8;
+      for (size_t i = tid; i < num_int2; i += block_size) {
+        reinterpret_cast<int2*>(dst)[i] = reinterpret_cast<const int2*>(src)[i];
+      }
+      vectorized_bytes = num_int2 * 8;
+    } else if ((src_addr % 4 == 0) && (dst_addr % 4 == 0) && (copy_size_in_bytes >= 4)) {
+      // 4-byte vectorized copy
+      size_t num_int = copy_size_in_bytes / 4;
+      for (size_t i = tid; i < num_int; i += block_size) {
+        reinterpret_cast<int*>(dst)[i] = reinterpret_cast<const int*>(src)[i];
+      }
+      vectorized_bytes = num_int * 4;
+    }
+
+    // Handle remaining bytes (from vectorized remainder or full scalar fallback)
+    size_t remaining = copy_size_in_bytes - vectorized_bytes;
+    for (size_t i = tid; i < remaining; i += block_size) {
+      dst[vectorized_bytes + i] = src[vectorized_bytes + i];
+    }
+  }
+}
+
+/// Launch the vectorized copy kernel for copying between arbitrary pointer pairs.
+/// This kernel automatically selects optimal vectorization (4/8/16 bytes) based on alignment.
+///
+/// @param src_ptrs Device pointer to array of source pointers
+/// @param dst_ptrs Device pointer to array of destination pointers
+/// @param copy_size_bytes Size of each copy in bytes
+/// @param num_pairs Number of pointer pairs to copy
+/// @param stream CUDA stream for async execution
+extern "C" cudaError_t
+kvbm_kernels_launch_vectorized_copy(
+    void** src_ptrs_device, void** dst_ptrs_device, size_t copy_size_bytes, int num_pairs, cudaStream_t stream)
+{
+  if (num_pairs == 0 || copy_size_bytes == 0) {
+    return cudaSuccess;
+  }
+
+  if (!src_ptrs_device || !dst_ptrs_device) {
+    return cudaErrorInvalidValue;
+  }
+
+  // Use 128 threads per block, one block per pair (up to 65535 blocks)
+  constexpr int kBlockDim = 128;
+  int grid_dim = std::min(num_pairs, 65535);
+
+  vectorised_copy<<<grid_dim, kBlockDim, 0, stream>>>(src_ptrs_device, dst_ptrs_device, copy_size_bytes, num_pairs);
+
+  return cudaGetLastError();
 }

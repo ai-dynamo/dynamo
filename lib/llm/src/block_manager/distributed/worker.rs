@@ -231,7 +231,7 @@ async fn perform_allocation_and_build_handler(
             worker_id,
         )?);
         // host
-        tracing::info!("leader_meta.num_host_blocks: {}", leader_meta.num_host_blocks);
+        tracing::info!("Number of host blocks: {}", leader_meta.num_host_blocks);
         let host_blocks = if leader_meta.num_host_blocks > 0 {
             let host_allocator = Arc::new(PinnedAllocator::default());
             let host_layout = layout_builder
@@ -248,7 +248,7 @@ async fn perform_allocation_and_build_handler(
             None
         };
         // disk
-        tracing::info!("leader_meta.num_disk_blocks: {}", leader_meta.num_disk_blocks);
+        tracing::info!("Number of disk blocks: {}", leader_meta.num_disk_blocks);
         let disk_blocks = if leader_meta.num_disk_blocks > 0 {
             let disk_allocator = Arc::new(DiskAllocator);
             let disk_layout = layout_builder

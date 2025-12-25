@@ -17,20 +17,20 @@ typedef int cudaError_t;
 // cudaStream_t is an opaque pointer
 typedef void* cudaStream_t;
 
-#define STUB_ABORT(name)                                                   \
-  do {                                                                     \
-    fprintf(                                                               \
-        stderr,                                                            \
-        "FATAL: %s called but CUDA kernels not available.\n"               \
-        "This binary was built with stub kernels. To use CUDA:\n"          \
-        "  1. Build with nvcc available, or\n"                             \
-        "  2. Set LD_LIBRARY_PATH to include real libtensor_kernels.so\n", \
-        name);                                                             \
-    abort();                                                               \
+#define STUB_ABORT(name)                                                 \
+  do {                                                                   \
+    fprintf(                                                             \
+        stderr,                                                          \
+        "FATAL: %s called but CUDA kernels not available.\n"             \
+        "This binary was built with stub kernels. To use CUDA:\n"        \
+        "  1. Build with nvcc available, or\n"                           \
+        "  2. Set LD_LIBRARY_PATH to include real libkvbm_kernels.so\n", \
+        name);                                                           \
+    abort();                                                             \
   } while (0)
 
 cudaError_t
-launch_universal_from_block(
+kvbm_kernels_launch_universal_from_block(
     void* const* universal_ptrs_device, const void* const* block_ptrs_device, size_t num_blocks, size_t nh, size_t nl,
     size_t no, size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
 {
@@ -45,12 +45,12 @@ launch_universal_from_block(
   (void)dtype_value;
   (void)layout_value;
   (void)stream;
-  STUB_ABORT("launch_universal_from_block");
+  STUB_ABORT("kvbm_kernels_launch_universal_from_block");
   return 1;  // Unreachable, but silences compiler warning
 }
 
 cudaError_t
-launch_block_from_universal(
+kvbm_kernels_launch_block_from_universal(
     const void* const* universal_ptrs_device, void* const* block_ptrs_device, size_t num_blocks, size_t nh, size_t nl,
     size_t no, size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
 {
@@ -65,12 +65,12 @@ launch_block_from_universal(
   (void)dtype_value;
   (void)layout_value;
   (void)stream;
-  STUB_ABORT("launch_block_from_universal");
+  STUB_ABORT("kvbm_kernels_launch_block_from_universal");
   return 1;  // Unreachable
 }
 
 cudaError_t
-launch_operational_copy(
+kvbm_kernels_launch_operational_copy(
     const void* const* block_ptrs_host, const void* const* block_ptrs_device, void* const* operational_ptrs_host,
     void* const* operational_ptrs_device, size_t num_blocks, size_t nl, size_t no, size_t inner, size_t elem_size,
     int dtype_value, int direction_value, int backend_value, cudaStream_t stream)
@@ -88,14 +88,27 @@ launch_operational_copy(
   (void)direction_value;
   (void)backend_value;
   (void)stream;
-  STUB_ABORT("launch_operational_copy");
+  STUB_ABORT("kvbm_kernels_launch_operational_copy");
+  return 1;  // Unreachable
+}
+
+cudaError_t
+kvbm_kernels_launch_vectorized_copy(
+    void** src_ptrs_device, void** dst_ptrs_device, size_t copy_size_bytes, int num_pairs, cudaStream_t stream)
+{
+  (void)src_ptrs_device;
+  (void)dst_ptrs_device;
+  (void)copy_size_bytes;
+  (void)num_pairs;
+  (void)stream;
+  STUB_ABORT("kvbm_kernels_launch_vectorized_copy");
   return 1;  // Unreachable
 }
 
 // This function is safe to call even with stubs - it just returns false
 // indicating that batch async is not available.
 bool
-has_memcpy_batch_async(void)
+kvbm_kernels_has_memcpy_batch_async(void)
 {
   return false;
 }
@@ -103,7 +116,7 @@ has_memcpy_batch_async(void)
 // Returns true if this is the stub library (no real CUDA kernels).
 // Downstream crates can use this to skip CUDA tests at runtime.
 bool
-is_stub_build(void)
+kvbm_kernels_is_stub_build(void)
 {
   return true;
 }

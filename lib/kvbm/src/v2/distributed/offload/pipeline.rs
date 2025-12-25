@@ -1226,7 +1226,7 @@ impl<T: BlockMetadata> PreconditionAwaiter<T> {
                     match awaiter_result {
                         Ok(awaiter) => {
                             // Now await the LocalEventWaiter with timeout
-                            match tokio::time::timeout(Duration::from_secs(30), awaiter).await {
+                            match tokio::time::timeout(Duration::from_secs(300), awaiter).await {
                                 Ok(Ok(())) => {
                                     tracing::debug!(?event_handle, "Precondition satisfied");
                                 }

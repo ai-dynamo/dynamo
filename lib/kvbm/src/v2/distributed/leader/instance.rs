@@ -9,7 +9,7 @@ use dynamo_nova::{am::Nova, events::LocalEventSystem};
 use tokio::sync::{Mutex, mpsc, watch};
 use uuid::Uuid;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use crate::{
     logical::{
@@ -18,9 +18,8 @@ use crate::{
     },
     physical::transfer::{TransferCompleteNotification, TransferOptions},
     v2::{
-        BlockId, G2, G3, InstanceId, SequenceHash, distributed::worker::RemoteDescriptor,
-        distributed::object::ObjectBlockOps,
-        logical::LogicalLayoutHandle,
+        BlockId, G2, G3, InstanceId, SequenceHash, distributed::object::ObjectBlockOps,
+        distributed::worker::RemoteDescriptor, logical::LogicalLayoutHandle,
     },
 };
 

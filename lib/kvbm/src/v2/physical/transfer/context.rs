@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use dynamo_memory::nixl::{NixlAgent, NixlBackendConfig, XferRequest};
+use dynamo_memory::CudaMemPool;
 use dynamo_nova::events::LocalEventSystem;
 
 use crate::v2::physical::manager::TransferManager;
@@ -52,6 +53,16 @@ pub struct TransferConfig {
 
     #[builder(default = "OperationalCopyBackend::Auto")]
     operational_backend: OperationalCopyBackend,
+
+    /// Size in bytes to pre-allocate for the CUDA memory pool (default: 64 MiB)
+    #[builder(default = "64 * 1024 * 1024")]
+    cuda_pool_reserve_size: usize,
+
+    /// Release threshold for the CUDA memory pool (default: Some(64 MiB))
+    /// Memory above this threshold is returned to the system when freed.
+    /// If None, no release threshold is set.
+    #[builder(default = "Some(64 * 1024 * 1024)")]
+    cuda_pool_release_threshold: Option<u64>,
 }
 
 impl TransferConfigBuilder {
@@ -135,6 +146,8 @@ impl TransferConfigBuilder {
             config.tokio_runtime,
             config.capabilities,
             config.operational_backend,
+            config.cuda_pool_reserve_size,
+            config.cuda_pool_release_threshold,
         )?;
         Ok(TransferManager::from_context(context))
     }
@@ -161,6 +174,8 @@ impl TransferConfigBuilderWithAgent {
             config.tokio_runtime,
             config.capabilities,
             config.operational_backend,
+            config.cuda_pool_reserve_size,
+            config.cuda_pool_release_threshold,
         )?;
         Ok(TransferManager::from_context(context))
     }
@@ -220,6 +235,8 @@ pub(crate) struct TransferContext {
     // todo: make this optional and use as an override for the default behavior
     _operational_backend: OperationalCopyBackend,
     event_system: Arc<LocalEventSystem>,
+    // CUDA memory pool for kernel allocations
+    cuda_pool: Arc<CudaMemPool>,
     // Channels for background notification handlers
     tx_nixl_status: mpsc::Sender<RegisterPollingNotification<notifications::NixlStatusChecker>>,
     tx_cuda_event: mpsc::Sender<RegisterPollingNotification<notifications::CudaEventChecker>>,
@@ -239,8 +256,17 @@ impl TransferContext {
         tokio_runtime: TokioRuntime,
         capabilities: TransferCapabilities,
         operational_backend: OperationalCopyBackend,
+        cuda_pool_reserve_size: usize,
+        cuda_pool_release_threshold: Option<u64>,
     ) -> Result<Self> {
         unsafe { cuda_context.disable_event_tracking() };
+
+        // Create CUDA memory pool for kernel allocations
+        let mut pool_builder = CudaMemPool::builder(cuda_context.clone(), cuda_pool_reserve_size);
+        if let Some(threshold) = cuda_pool_release_threshold {
+            pool_builder = pool_builder.release_threshold(threshold);
+        }
+        let cuda_pool = Arc::new(pool_builder.build()?);
 
         // Create channels for background notification handlers
         let (tx_nixl_status, rx_nixl_status) = mpsc::channel(64);
@@ -297,6 +323,7 @@ impl TransferContext {
             capabilities,
             _operational_backend: operational_backend,
             event_system,
+            cuda_pool,
             tx_nixl_status,
             tx_cuda_event,
             tx_nixl_events,
@@ -352,6 +379,11 @@ impl TransferContext {
 
     pub(crate) fn event_system(&self) -> &Arc<LocalEventSystem> {
         &self.event_system
+    }
+
+    /// Get the CUDA memory pool for kernel allocations.
+    pub(crate) fn cuda_pool(&self) -> &Arc<CudaMemPool> {
+        &self.cuda_pool
     }
 
     /// Register a NIXL transfer request for status polling completion.
