@@ -214,11 +214,17 @@ dynamo-operator:
 grove:
   # -- Whether to enable Grove for multi-node inference coordination, if enabled, the Grove operator will be deployed cluster-wide
   enabled: false
+  # -- Node tolerations for Grove pods
+  tolerations: []
 
 # Kai Scheduler component - advanced workload scheduling
 kai-scheduler:
   # -- Whether to enable Kai Scheduler for intelligent resource allocation, if enabled, the Kai Scheduler operator will be deployed cluster-wide
   enabled: false
+  # Global configuration for kai-scheduler (applies to all components including crd-upgrader)
+  global:
+    # -- Node tolerations for kai-scheduler pods
+    tolerations: []
 
 # etcd configuration - distributed key-value store for operator state
 etcd:
