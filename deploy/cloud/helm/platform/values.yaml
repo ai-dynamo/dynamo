@@ -281,6 +281,9 @@ etcd:
   # Node tolerations for etcd pods (allows scheduling on specific nodes)
   tolerations: []
 
+  # Affinity for etcd pods
+  affinity: {}
+
 # NATS configuration - messaging system for operator communication
 nats:
   # -- Whether to enable NATS deployment, disable if you want to use an external NATS instance. For complete configuration options, see: https://github.com/nats-io/k8s/tree/main/helm/charts/nats , all nats settings should be prefixed with "nats."
@@ -599,6 +602,8 @@ nats:
       spec:
         # Node tolerations for NATS pods (allows scheduling on specific nodes)
         tolerations: []
+        # Affinity for NATS pods
+        affinity: {}
     patch: []
 
   # Headless service for StatefulSet pod discovery
@@ -718,4 +723,6 @@ nats:
         spec:
           # Node tolerations for NATS Box pods
           tolerations: []
+          # Affinity for NATS Box pods
+          affinity: {}
       patch: []

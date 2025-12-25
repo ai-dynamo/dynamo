@@ -155,7 +155,13 @@ The chart includes built-in validation to prevent all operator conflicts:
 | kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
 | etcd.enabled | bool | `true` | Whether to enable etcd deployment, disable if you want to use an external etcd instance. For complete configuration options, see: https://github.com/bitnami/charts/tree/main/bitnami/etcd , all etcd settings should be prefixed with "etcd." |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
+| etcd.tolerations | list | `[]` | Node tolerations for etcd pods |
+| etcd.affinity | object | `{}` | Affinity for etcd pods |
 | nats.enabled | bool | `true` | Whether to enable NATS deployment, disable if you want to use an external NATS instance. For complete configuration options, see: https://github.com/nats-io/k8s/tree/main/helm/charts/nats , all nats settings should be prefixed with "nats." |
+| nats.podTemplate.merge.spec.tolerations | list | `[]` | Node tolerations for NATS pods |
+| nats.podTemplate.merge.spec.affinity | object | `{}` | Affinity for NATS pods |
+| nats.natsBox.podTemplate.merge.spec.tolerations | list | `[]` | Node tolerations for NATS Box pods |
+| nats.natsBox.podTemplate.merge.spec.affinity | object | `{}` | Affinity for NATS Box pods |
 
 ### NATS Configuration
 
