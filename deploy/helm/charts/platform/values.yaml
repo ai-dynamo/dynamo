@@ -55,7 +55,7 @@ dynamo-operator:
     tolerations: []
 
     # -- Affinity for controller manager pods
-    affinity: []
+    affinity: {}
 
     # Leader election configuration for cluster-wide coordination
     leaderElection:

@@ -121,10 +121,10 @@ export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://gi
 Before proceeding, run the pre-deployment check script to verify your cluster meets all requirements:
 
 ```bash
-./deploy/cloud/pre-deployment/pre-deployment-check.sh
+./deploy/pre-deployment/pre-deployment-check.sh
 ```
 
-This script validates kubectl connectivity, default StorageClass configuration, and GPU node availability. See [Pre-Deployment Checks](../../deploy/cloud/pre-deployment/README.md) for details.
+This script validates kubectl connectivity, default StorageClass configuration, and GPU node availability. See [Pre-Deployment Checks](../../deploy/pre-deployment/README.md) for details.
 
 > **No cluster?** See [Minikube Setup](deployment/minikube.md) for local development.
 
