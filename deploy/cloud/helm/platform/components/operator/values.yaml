@@ -33,6 +33,7 @@ namespaceRestriction:
     renewInterval: 10s
 controllerManager:
   tolerations: []
+  affinity: {}
 
   # Leader election configuration
   leaderElection:
