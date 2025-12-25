@@ -1,6 +1,6 @@
 """GPU Memory Service allocator lifecycle management.
 
-This module manages the singleton GMS allocator and its integrated PyTorch
+This module manages the singleton GPU Memory Service allocator and its integrated PyTorch
 MemPool for routing weight allocations through the GPU Memory Service.
 
 Key principles:
@@ -32,7 +32,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Literal, Optional, Tuple
 
 if TYPE_CHECKING:
-    from gpu_memory.allocator import RPCCumemAllocator
+    from gpu_memory_service.allocator import RPCCumemAllocator
     from torch.cuda.memory import MemPool
 
 logger = logging.getLogger(__name__)
@@ -82,7 +82,7 @@ def get_or_create_allocator(
     """
     global _allocator, _mem_pool, _pluggable_alloc
 
-    from gpu_memory.allocator import RPCCumemAllocator
+    from gpu_memory_service.allocator import RPCCumemAllocator
 
     if _allocator is not None:
         # Allocator already exists - check mode compatibility
@@ -91,7 +91,8 @@ def get_or_create_allocator(
         if mode == "write":
             if current_mode == "write":
                 logger.debug(
-                    "[GMS] Returning existing write allocator (device=%d)", device
+                    "[GPU Memory Service] Returning existing write allocator (device=%d)",
+                    device,
                 )
                 return _allocator, _mem_pool
             else:
@@ -102,7 +103,8 @@ def get_or_create_allocator(
         else:  # mode == "read"
             if current_mode == "read":
                 logger.debug(
-                    "[GMS] Returning existing read allocator (device=%d)", device
+                    "[GPU Memory Service] Returning existing read allocator (device=%d)",
+                    device,
                 )
                 return _allocator, None
             else:
@@ -122,7 +124,7 @@ def get_or_create_allocator(
         pool = _setup_pytorch_integration(allocator, tag=tag)
         _mem_pool = pool
         logger.debug(
-            "[GMS] Created write allocator with MemPool (device=%d, socket=%s)",
+            "[GPU Memory Service] Created write allocator with MemPool (device=%d, socket=%s)",
             device,
             socket_path,
         )
@@ -130,7 +132,7 @@ def get_or_create_allocator(
     else:
         # Read mode doesn't need MemPool
         logger.debug(
-            "[GMS] Created read allocator (device=%d, socket=%s)",
+            "[GPU Memory Service] Created read allocator (device=%d, socket=%s)",
             device,
             socket_path,
         )
@@ -143,12 +145,12 @@ def _setup_pytorch_integration(
 ) -> "MemPool":
     """Set up PyTorch CUDAPluggableAllocator and MemPool for the allocator.
 
-    This creates the MemPool that routes allocations through GMS and sets up
+    This creates the MemPool that routes allocations through GPU Memory Service and sets up
     the malloc/free callbacks.
     """
     global _pluggable_alloc
 
-    from gpu_memory.extensions import _rpc_cumem_ext as cumem
+    from gpu_memory_service.extensions import _rpc_cumem_ext as cumem
     from torch.cuda import CUDAPluggableAllocator
     from torch.cuda.memory import MemPool
 
@@ -165,13 +167,13 @@ def _setup_pytorch_integration(
     def malloc_cb(
         va: int, size: int, aligned_size: int, device: int, stream: int
     ) -> None:
-        """Callback for PyTorch allocations - routes to GMS allocator."""
+        """Callback for PyTorch allocations - routes to GPU Memory Service allocator."""
         allocator.allocate_to_va(
             int(size), int(va), int(aligned_size), int(device), tag=tag
         )
         _malloc_count[0] += 1
         logger.debug(
-            "[GMS] malloc_cb #%d: va=0x%x size=%d aligned=%d device=%d",
+            "[GPU Memory Service] malloc_cb #%d: va=0x%x size=%d aligned=%d device=%d",
             _malloc_count[0],
             va,
             size,
@@ -183,7 +185,7 @@ def _setup_pytorch_integration(
         """Callback for PyTorch frees - handles during write phase."""
         _free_count[0] += 1
         logger.warning(
-            "[GMS] free_cb #%d called for va=0x%x - memory being unmapped",
+            "[GPU Memory Service] free_cb #%d called for va=0x%x - memory being unmapped",
             _free_count[0],
             va,
         )
@@ -233,11 +235,13 @@ def register_allocator(allocator: "RPCCumemAllocator") -> None:
         )
 
     _allocator = allocator
-    logger.debug("[GMS] Registered allocator (device=%s)", allocator.device)
+    logger.debug(
+        "[GPU Memory Service] Registered allocator (device=%s)", allocator.device
+    )
 
 
 def get_allocator() -> Optional["RPCCumemAllocator"]:
-    """Get the active GMS allocator without creating one.
+    """Get the active GPU Memory Service allocator without creating one.
 
     Returns:
         The allocator, or None if no allocator exists.
@@ -262,7 +266,7 @@ def clear_allocator() -> None:
     global _allocator, _mem_pool, _pluggable_alloc
 
     if _allocator is not None:
-        logger.debug("[GMS] Cleared allocator and PyTorch components")
+        logger.debug("[GPU Memory Service] Cleared allocator and PyTorch components")
     _allocator = None
     _mem_pool = None
     _pluggable_alloc = None

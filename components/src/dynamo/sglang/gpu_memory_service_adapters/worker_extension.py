@@ -1,13 +1,13 @@
 """SGLang worker-side helpers for GPU Memory Service integration.
 
 This module provides patches for SGLang to work correctly with GPU Memory Service:
-1. Memory accounting fixes when weights are pre-loaded via GMS
+1. Memory accounting fixes when weights are pre-loaded via GPU Memory Service
 
-Call `patch_model_runner_for_gms()` before constructing the SGLang runtime.
+Call `patch_model_runner_for_gpu_memory_service()` before constructing the SGLang runtime.
 
 For multiprocessing with spawn mode (which SGLang uses), set the environment
-variable GMS_SGLANG_AUTO_REGISTER=1 to automatically apply patches in child
-processes when the dynamo.sglang.gms_adapters module is imported.
+variable GPU Memory Service_SGLANG_AUTO_REGISTER=1 to automatically apply patches in child
+processes when the dynamo.sglang.gpu_memory_service_adapters module is imported.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ _model_runner_patched = False
 _original_init_memory_pool = None
 
 
-def patch_model_runner_for_gms() -> None:
+def patch_model_runner_for_gpu_memory_service() -> None:
     """Monkey-patch SGLang for GPU Memory Service compatibility.
 
     This applies multiple patches:
@@ -46,7 +46,9 @@ def patch_model_runner_for_gms() -> None:
     global _model_runner_patched, _original_init_memory_pool
 
     # Always patch empty_cache first - this is critical for VMM safety
-    from dynamo.sglang.gms_adapters.model_loader import _patch_empty_cache_if_needed
+    from dynamo.sglang.gpu_memory_service_adapters.model_loader import (
+        _patch_empty_cache_if_needed,
+    )
 
     _patch_empty_cache_if_needed()
 
@@ -57,7 +59,7 @@ def patch_model_runner_for_gms() -> None:
         from sglang.srt.model_executor.model_runner import ModelRunner  # type: ignore
     except Exception:
         logger.warning(
-            "[GMSPatch] Could not import SGLang ModelRunner; patch not applied"
+            "[GPU Memory ServicePatch] Could not import SGLang ModelRunner; patch not applied"
         )
         return
 
@@ -84,14 +86,16 @@ def patch_model_runner_for_gms() -> None:
             # weights were loaded (before or during init_torch_distributed)
             if float(total_gpu_memory) < device_total_gb * 0.95:  # Allow 5% tolerance
                 logger.info(
-                    "[GMSPatch] Correcting total_gpu_memory for overhead calculation: "
+                    "[GPU Memory ServicePatch] Correcting total_gpu_memory for overhead calculation: "
                     "%.2f GB -> %.2f GB (device total)",
                     float(total_gpu_memory),
                     device_total_gb,
                 )
                 total_gpu_memory = device_total_gb
         except Exception as e:
-            logger.warning("[GMSPatch] Could not correct total_gpu_memory: %s", e)
+            logger.warning(
+                "[GPU Memory ServicePatch] Could not correct total_gpu_memory: %s", e
+            )
 
         assert _original_init_memory_pool is not None
         return _original_init_memory_pool(self, total_gpu_memory, *args, **kwargs)
@@ -99,11 +103,11 @@ def patch_model_runner_for_gms() -> None:
     ModelRunner.init_memory_pool = patched_init_memory_pool
     _model_runner_patched = True
     logger.info(
-        "[GMSPatch] Patched SGLang ModelRunner.init_memory_pool for memory accounting safety"
+        "[GPU Memory ServicePatch] Patched SGLang ModelRunner.init_memory_pool for memory accounting safety"
     )
 
 
-def unpatch_model_runner_for_gms() -> None:
+def unpatch_model_runner_for_gpu_memory_service() -> None:
     """Remove the ModelRunner.init_memory_pool patch."""
     global _model_runner_patched, _original_init_memory_pool
 

@@ -14,7 +14,6 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==0.8.0",
-    "gpu-memory==0.8.0",
     "transformers>=4.56.0,<=4.57.1",
     "pytest>=8.3.4",
     "types-psutil>=7.0.0.20250218",
@@ -73,7 +72,7 @@ sglang_tests = "dynamo.sglang.tests.conftest"
 
 # vLLM plugin entry point - registers GPU Memory Service loader in all vLLM processes
 [project.entry-points."vllm.general_plugins"]
-dynamo_gms = "dynamo.vllm.gms_adapters:vllm_plugin_init"
+dynamo_gpu_memory_service = "dynamo.vllm.gpu_memory_service_adapters:vllm_plugin_init"
 
 [dependency-groups]
 docs = [

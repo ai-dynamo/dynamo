@@ -1,8 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "gpu-memory"
+name = "gpu-memory-service"
 version = "0.8.0"
 description = "GPU Memory Service for Dynamo - CUDA VMM-based GPU memory allocation and sharing"
 readme = "README.md"
@@ -35,14 +39,3 @@ test = [
     "pytest>=8.3.4",
     "pytest-asyncio",
 ]
-
-[build-system]
-requires = ["setuptools>=61", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools.packages.find]
-where = ["python"]
-
-[tool.setuptools.package-data]
-gpu_memory = ["extensions/*.cpp"]
-

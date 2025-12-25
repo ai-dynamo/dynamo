@@ -8,11 +8,11 @@ GPU memory allocations with connection-based RW/RO locking.
 
 Workers connect via the socket path, which should be passed to vLLM/SGLang via:
     --load-format gpu_memory_service
-    --model-loader-extra-config '{"gms_socket_path": "/tmp/gms_{device}.sock"}'
+    --model-loader-extra-config '{"gpu_memory_service_socket_path": "/tmp/gpu_memory_service_{device}.sock"}'
 
 Usage:
     python -m dynamo.gpu_memory_service --device 0
-    python -m dynamo.gpu_memory_service --device 0 --socket-path /tmp/gms_{device}.sock
+    python -m dynamo.gpu_memory_service --device 0 --socket-path /tmp/gpu_memory_service_{device}.sock
 """
 
 import asyncio
@@ -23,7 +23,7 @@ import threading
 from typing import Optional
 
 import uvloop
-from gpu_memory.server import AllocationServer
+from gpu_memory_service.server import AllocationServer
 
 from .args import parse_args
 
@@ -92,7 +92,7 @@ async def worker() -> None:
         logging.getLogger().setLevel(logging.DEBUG)
         logging.getLogger("dynamo.gpu_memory_service").setLevel(logging.DEBUG)
 
-    logger.info(f"Starting GMS Server for device {config.device}")
+    logger.info(f"Starting GPU Memory Service Server for device {config.device}")
     logger.info(f"Socket path: {config.socket_path}")
 
     loop = asyncio.get_running_loop()
@@ -116,23 +116,23 @@ async def worker() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
-    logger.info("GMS Server ready, waiting for connections...")
+    logger.info("GPU Memory Service Server ready, waiting for connections...")
     logger.info(
         f"To connect vLLM workers, use: --load-format gpu_memory_service "
-        f'--model-loader-extra-config \'{{"gms_socket_path": "{config.socket_path}"}}\''
+        f'--model-loader-extra-config \'{{"gpu_memory_service_socket_path": "{config.socket_path}"}}\''
     )
 
     # Wait for shutdown signal
     try:
         await shutdown_event.wait()
     finally:
-        logger.info("Shutting down GMS Server...")
+        logger.info("Shutting down GPU Memory Service Server...")
         server.stop()
-        logger.info("GMS Server shutdown complete")
+        logger.info("GPU Memory Service Server shutdown complete")
 
 
 def main() -> None:
-    """Entry point for GMS server."""
+    """Entry point for GPU Memory Service server."""
     uvloop.install()
     asyncio.run(worker())
 

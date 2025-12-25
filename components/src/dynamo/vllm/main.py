@@ -46,23 +46,23 @@ from .publisher import StatLoggerFactory
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
-# Track if GMS has been set up to avoid duplicate setup
-_gms_setup_done = False
+# Track if GPU Memory Service has been set up to avoid duplicate setup
+_gpu_memory_service_setup_done = False
 
 
-def _setup_gms_if_needed(config: Config) -> None:
-    """Setup GPU Memory Service if load_format indicates GMS usage.
+def _setup_gpu_memory_service_if_needed(config: Config) -> None:
+    """Setup GPU Memory Service if load_format indicates GPU Memory Service usage.
 
     This does TWO things:
     1. Sets environment variables for patches (needed in spawned workers)
-    2. Registers the GMS loader and applies patches
+    2. Registers the GPU Memory Service loader and applies patches
 
     The model loader reads config from load_config.model_loader_extra_config,
     but the patches (memory accounting, sleep/wake) run at module import time
     and rely on environment variables.
     """
-    global _gms_setup_done
-    if _gms_setup_done:
+    global _gpu_memory_service_setup_done
+    if _gpu_memory_service_setup_done:
         return
 
     load_format = getattr(config.engine_args, "load_format", None)
@@ -70,27 +70,29 @@ def _setup_gms_if_needed(config: Config) -> None:
         return
 
     logger.info(
-        "[GMS] Detected load_format='gpu_memory_service', setting up GMS integration"
+        "[GPU Memory Service] Detected load_format='gpu_memory_service', setting up GPU Memory Service integration"
     )
 
     # Set env var to trigger auto-registration in spawned workers
-    os.environ["GMS_VLLM_AUTO_REGISTER"] = "1"
+    os.environ["GPU Memory Service_VLLM_AUTO_REGISTER"] = "1"
 
     # Register loader and apply patches in main process
     try:
-        from dynamo.vllm.gms_adapters import (
-            patch_model_runner_for_gms,
+        from dynamo.vllm.gpu_memory_service_adapters import (
+            patch_model_runner_for_gpu_memory_service,
             register_gpu_memory_service_loader,
         )
 
         register_gpu_memory_service_loader()
-        patch_model_runner_for_gms()
-        logger.info("[GMS] Registered GMS loader and applied patches")
+        patch_model_runner_for_gpu_memory_service()
+        logger.info(
+            "[GPU Memory Service] Registered GPU Memory Service loader and applied patches"
+        )
     except Exception as e:
-        logger.error(f"[GMS] Failed to setup GMS: {e}")
+        logger.error(f"[GPU Memory Service] Failed to setup GPU Memory Service: {e}")
         raise
 
-    _gms_setup_done = True
+    _gpu_memory_service_setup_done = True
 
 
 async def graceful_shutdown(runtime):
@@ -285,9 +287,9 @@ def setup_kv_event_publisher(
 
 
 def setup_vllm_engine(config, stat_logger=None):
-    # Setup GMS if using gpu_memory_service load format
+    # Setup GPU Memory Service if using gpu_memory_service load format
     # This must be called before any vLLM imports in spawned workers
-    _setup_gms_if_needed(config)
+    _setup_gpu_memory_service_if_needed(config)
 
     # vLLM v0.11.0 bug: vllm/v1.metrics/prometheus.py:79 passes TemporaryDirectory object
     # instead of .name string, causing false error on exit. Set PROMETHEUS_MULTIPROC_DIR
@@ -477,7 +479,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         Args:
             level: Sleep level (1=weights only, 2=weights+buffers, 3=everything)
 
-        With GMS enabled, Worker patches handle VA-stable sleep for weights.
+        With GPU Memory Service enabled, Worker patches handle VA-stable sleep for weights.
         After sleeping, unregisters endpoint from etcd so frontend stops routing to this worker.
         """
         level = body.get("level", 1)
@@ -507,7 +509,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         Args:
             tags: List of tags to wake (e.g., ["weights", "kv_cache"]). None wakes all.
 
-        With GMS enabled, Worker patches handle VA-stable wake for weights.
+        With GPU Memory Service enabled, Worker patches handle VA-stable wake for weights.
         After waking, re-registers endpoint to etcd so frontend can route to this worker again.
         """
         tags = body.get("tags")
@@ -552,23 +554,9 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             logger.error(f"Failed to wake engine: {e}")
             return {"status": "error", "message": str(e)}
 
-    async def status_handler(body: dict) -> dict:
-        """Get engine sleep/wake status."""
-        try:
-            is_sleeping = await engine_client.is_sleeping()
-            return {
-                "status": "ok",
-                "is_sleeping": is_sleeping,
-                "model": config.served_model_name or config.model,
-            }
-        except Exception as e:
-            logger.error(f"Failed to get engine status: {e}")
-            return {"status": "error", "message": str(e)}
-
     runtime.register_engine_route("sleep", sleep_handler)
     runtime.register_engine_route("wake", wake_handler)
-    runtime.register_engine_route("status", status_handler)
-    logger.info("Registered engine routes: /engine/sleep, /engine/wake, /engine/status")
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake")
 
     # Register prefill model with ModelType.Prefill
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
@@ -695,7 +683,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         Args:
             level: Sleep level (1=weights only, 2=weights+buffers, 3=everything)
 
-        With GMS enabled, Worker patches handle VA-stable sleep for weights.
+        With GPU Memory Service enabled, Worker patches handle VA-stable sleep for weights.
         After sleeping, unregisters endpoint from etcd so frontend stops routing to this worker.
         """
         level = body.get("level", 1)
@@ -725,7 +713,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         Args:
             tags: List of tags to wake (e.g., ["weights", "kv_cache"]). None wakes all.
 
-        With GMS enabled, Worker patches handle VA-stable wake for weights.
+        With GPU Memory Service enabled, Worker patches handle VA-stable wake for weights.
         After waking, re-registers endpoint to etcd so frontend can route to this worker again.
         """
         tags = body.get("tags")

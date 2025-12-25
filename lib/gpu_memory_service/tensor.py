@@ -1,6 +1,6 @@
 """Tensor utilities for GPU Memory Service.
 
-This module consolidates all tensor-related functionality for GMS:
+This module consolidates all tensor-related functionality for GPU Memory Service:
 - Tensor metadata serialization/deserialization
 - Module tree extraction (params, buffers, tensor_attrs)
 - Registry operations (reading/writing tensor specs)
@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Tuple, Union
 import torch
 
 if TYPE_CHECKING:
-    from gpu_memory.allocator import RPCCumemAllocator
+    from gpu_memory_service.allocator import RPCCumemAllocator
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class TensorMeta:
-    """Metadata for a tensor stored in the GMS registry (serialization format).
+    """Metadata for a tensor stored in the GPU Memory Service registry (serialization format).
 
     This is the canonical format for tensor metadata stored in the artifact
     registry. The dtype is stored as a string for JSON serialization.
@@ -434,7 +434,7 @@ def load_registry_tensor_specs(
     """Load and parse all registry entries under a given prefix.
 
     Args:
-        allocator: The GMS allocator with registry access.
+        allocator: The GPU Memory Service allocator with registry access.
         prefix: Registry key prefix (e.g., "abc123:").
 
     Returns:
@@ -472,13 +472,13 @@ def register_tensor(
     registry_prefix: str,
     tensor_type: str = "parameter",
 ) -> int:
-    """Register a tensor's metadata in the GMS registry.
+    """Register a tensor's metadata in the GPU Memory Service registry.
 
     Args:
-        allocator: The GMS allocator (must be in write mode).
+        allocator: The GPU Memory Service allocator (must be in write mode).
         name: The tensor name (e.g., "model.layers.0.self_attn.q_proj.weight").
         tensor: The CUDA tensor to register.
-        allocation_id: The GMS allocation ID containing this tensor.
+        allocation_id: The GPU Memory Service allocation ID containing this tensor.
         base_va: The base virtual address of the allocation.
         registry_prefix: Prefix for registry keys (e.g., "abc123:").
         tensor_type: Type classification ("parameter", "buffer", "tensor_attr").
@@ -505,13 +505,13 @@ def register_module_tensors(
     model: torch.nn.Module,
     registry_prefix: str,
 ) -> int:
-    """Register all tensors from a model into the GMS registry.
+    """Register all tensors from a model into the GPU Memory Service registry.
 
     This extracts all parameters, buffers, and tensor attributes from the model
-    and registers them in the GMS registry.
+    and registers them in the GPU Memory Service registry.
 
     Args:
-        allocator: The GMS allocator (must be in write mode).
+        allocator: The GPU Memory Service allocator (must be in write mode).
         model: The PyTorch model to register.
         registry_prefix: Prefix for registry keys (e.g., "abc123:").
 
@@ -533,7 +533,7 @@ def register_module_tensors(
             attr_count += 1
 
     logger.info(
-        "[GMS] Registering tensors: %d params, %d buffers, %d tensor_attrs",
+        "[GPU Memory Service] Registering tensors: %d params, %d buffers, %d tensor_attrs",
         param_count,
         buffer_count,
         attr_count,
@@ -565,7 +565,7 @@ def register_module_tensors(
 
             if alloc_info is None:
                 logger.debug(
-                    "[GMS] Skipping non-GMS tensor %s (type=%s) ptr=0x%x",
+                    "[GPU Memory Service] Skipping non-GPU Memory Service tensor %s (type=%s) ptr=0x%x",
                     name,
                     tensor_type,
                     ptr,
@@ -585,7 +585,9 @@ def register_module_tensors(
             total_bytes += nbytes
 
         except Exception as e:
-            logger.debug("[GMS] Could not register tensor %s: %s", name, e)
+            logger.debug(
+                "[GPU Memory Service] Could not register tensor %s: %s", name, e
+            )
 
     return total_bytes
 
@@ -604,7 +606,7 @@ def tensor_from_registry_spec(
     """Create a torch.Tensor that aliases mapped CUDA memory for a registry spec.
 
     Args:
-        allocator: The GMS allocator (imports the allocation if needed).
+        allocator: The GPU Memory Service allocator (imports the allocation if needed).
         spec: The registry tensor specification.
         device_index: CUDA device index.
 
@@ -612,7 +614,7 @@ def tensor_from_registry_spec(
         A tensor aliasing the mapped memory.
     """
     try:
-        import gpu_memory.extensions._tensor_from_pointer as tfp
+        import gpu_memory_service.extensions._tensor_from_pointer as tfp
     except Exception as e:
         raise RuntimeError(
             "Missing gpu_memory_service.core.csrc._tensor_from_pointer extension "
@@ -651,7 +653,7 @@ def materialize_module_from_registry(
     - Tensor attributes (via setattr, for things like _k_scale, _v_scale)
 
     Args:
-        allocator: The GMS allocator in read mode.
+        allocator: The GPU Memory Service allocator in read mode.
         model: The model to populate with tensors.
         prefix: Registry key prefix (e.g., "abc123:").
         device_index: CUDA device index.
@@ -673,7 +675,7 @@ def materialize_module_from_registry(
     registry_buffers = set(buffer_specs.keys())
 
     logger.info(
-        "[GMS] Registry contains: %d params, %d buffers, %d tensor_attrs",
+        "[GPU Memory Service] Registry contains: %d params, %d buffers, %d tensor_attrs",
         len(param_specs),
         len(buffer_specs),
         len(attr_specs),
@@ -688,13 +690,13 @@ def materialize_module_from_registry(
 
     if in_registry_not_model:
         logger.warning(
-            "[GMS] Registry params/buffers NOT in model (%d): %s",
+            "[GPU Memory Service] Registry params/buffers NOT in model (%d): %s",
             len(in_registry_not_model),
             list(in_registry_not_model)[:10],
         )
     if in_model_not_registry:
         logger.warning(
-            "[GMS] Model params/buffers NOT in registry (%d): %s",
+            "[GPU Memory Service] Model params/buffers NOT in registry (%d): %s",
             len(in_model_not_registry),
             list(in_model_not_registry)[:10],
         )
@@ -770,7 +772,7 @@ def materialize_module_from_registry(
             setattr(mod, attr, t if tensor_type == "parameter" else t.detach().clone())
         else:
             logger.debug(
-                "[GMS] Creating new %s for registry entry not in model: %s",
+                "[GPU Memory Service] Creating new %s for registry entry not in model: %s",
                 tensor_type,
                 name,
             )
@@ -790,7 +792,8 @@ def materialize_module_from_registry(
 
     if tensor_attr_count > 0:
         logger.info(
-            "[GMS] Materialized %d tensor_attrs from registry", tensor_attr_count
+            "[GPU Memory Service] Materialized %d tensor_attrs from registry",
+            tensor_attr_count,
         )
 
     # Handle remaining meta tensors
@@ -836,7 +839,8 @@ def materialize_module_from_registry(
 
     if meta_initialized > 0:
         logger.info(
-            "[GMS] Initialized %d meta tensors with default values", meta_initialized
+            "[GPU Memory Service] Initialized %d meta tensors with default values",
+            meta_initialized,
         )
 
     if strict:
@@ -849,7 +853,7 @@ def materialize_module_from_registry(
                 meta_params.append(n)
         if meta_params:
             logger.warning(
-                "[GMS] Model still has %d meta tensors after initialization: %s",
+                "[GPU Memory Service] Model still has %d meta tensors after initialization: %s",
                 len(meta_params),
                 meta_params[:10],
             )

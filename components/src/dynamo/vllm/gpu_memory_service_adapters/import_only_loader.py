@@ -10,7 +10,7 @@ applied before registry entries were created). Post-processing can create/destro
 parameters, so it must be run before materializing from registry.
 
 Usage:
-    from dynamo.vllm.gms_adapters.import_only_loader import ImportOnlyModelLoader
+    from dynamo.vllm.gpu_memory_service_adapters.import_only_loader import ImportOnlyModelLoader
 
     # Register the loader (once, at startup)
     ImportOnlyModelLoader.register()
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Default load format name for registration
-DEFAULT_LOAD_FORMAT = "gms_import_only"
+DEFAULT_LOAD_FORMAT = "gpu_memory_service_import_only"
 
 
 class ImportOnlyModelLoader:
@@ -69,7 +69,7 @@ class ImportOnlyModelLoader:
     def register(cls, load_format: str = DEFAULT_LOAD_FORMAT) -> None:
         """Register this loader with vLLM's model loader registry.
 
-        After registration, you can use load_format="gms_import_only" in LoadConfig.
+        After registration, you can use load_format="gpu_memory_service_import_only" in LoadConfig.
         """
         if cls._registered:
             return
@@ -203,7 +203,7 @@ class ImportOnlyModelLoaderMeta(ImportOnlyModelLoader):
     """
 
     @classmethod
-    def register(cls, load_format: str = "gms_import_only_meta") -> None:
+    def register(cls, load_format: str = "gpu_memory_service_import_only_meta") -> None:
         """Register this loader with vLLM's model loader registry."""
         if cls._registered:
             return

@@ -6,15 +6,15 @@ allocations through the GPU Memory Service (RW session), publishes via Commit(),
 and then holds an RO lock for inference lifetime.
 
 Configuration via model_loader_extra_config:
-- gms_socket_path: Unix socket path for the Allocation Server (per GPU). You may
+- gpu_memory_service_socket_path: Unix socket path for the Allocation Server (per GPU). You may
   include `{device}` which will be formatted with the GPU device index.
-  Default: /tmp/gms_{device}.sock
-- gms_load_mode: Load mode - "write" (cold start), "read" (import only), or "auto".
+  Default: /tmp/gpu_memory_service_{device}.sock
+- gpu_memory_service_load_mode: Load mode - "write" (cold start), "read" (import only), or "auto".
   Default: auto
 
 IMPORTANT: Sleep/Wake Memory Behavior
 -------------------------------------
-When using GMS with SGLang's --enable-memory-saver, the sleep/wake functionality
+When using GPU Memory Service with SGLang's --enable-memory-saver, the sleep/wake functionality
 does NOT actually free GPU memory. The physical memory for model weights remains
 allocated by the Allocation Server. This is by design for weight sharing:
 
@@ -23,7 +23,7 @@ allocated by the Allocation Server. This is by design for weight sharing:
 - On wake, the client remaps the same weights without reloading from disk
 
 This enables fast context switching between inference instances. If you need to
-actually free GPU memory during sleep, use native torch_memory_saver (without GMS).
+actually free GPU memory during sleep, use native torch_memory_saver (without GPU Memory Service).
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ _empty_cache_patched = False
 def _safe_empty_cache() -> None:
     """Safe replacement for torch.cuda.empty_cache that skips when VMM allocations exist."""
     global _original_empty_cache
-    # Check if we have GMS VMM allocations
+    # Check if we have GPU Memory Service VMM allocations
     try:
         from dynamo.gpu_memory_service import _rpc_cumem_ext as cumem
 
@@ -69,13 +69,13 @@ def _safe_empty_cache() -> None:
         if allocations:
             # We have VMM allocations - skip empty_cache to prevent segfault
             logger.debug(
-                "[GMS] Skipping torch.cuda.empty_cache() - %d VMM allocations active",
+                "[GPU Memory Service] Skipping torch.cuda.empty_cache() - %d VMM allocations active",
                 len(allocations),
             )
             return
     except Exception:
         pass
-    # No GMS allocations, safe to call original
+    # No GPU Memory Service allocations, safe to call original
     _original_empty_cache()
 
 
@@ -86,7 +86,9 @@ def _patch_empty_cache_if_needed() -> None:
         return
     torch.cuda.empty_cache = _safe_empty_cache
     _empty_cache_patched = True
-    logger.info("[GMS] Patched torch.cuda.empty_cache for VMM allocation safety")
+    logger.info(
+        "[GPU Memory Service] Patched torch.cuda.empty_cache for VMM allocation safety"
+    )
 
 
 # Apply patch immediately at module import
@@ -140,10 +142,10 @@ def _parse_extra_config(load_config: Any = None) -> dict:
     return raw_config
 
 
-DEFAULT_GMS_SOCKET_PATH = "/tmp/gms_{device}.sock"
+DEFAULT_GPU_MEMORY_SERVICE_SOCKET_PATH = "/tmp/gpu_memory_service_{device}.sock"
 
 
-class GMSLoadMode(Enum):
+class GPUMemoryServiceLoadMode(Enum):
     """GPU Memory Service load modes."""
 
     WRITE = "write"  # Cold-start from disk and publish
@@ -151,23 +153,30 @@ class GMSLoadMode(Enum):
     AUTO = "auto"  # Try read first; if not READY, fall back to write
 
 
-# Keys that GMS adds to model_loader_extra_config - must be stripped before
+# Keys that GPU Memory Service adds to model_loader_extra_config - must be stripped before
 # passing to DefaultModelLoader which validates unknown keys
-GMS_EXTRA_CONFIG_KEYS = {"gms_socket_path", "gms_load_mode"}
+GPU_MEMORY_SERVICE_EXTRA_CONFIG_KEYS = {
+    "gpu_memory_service_socket_path",
+    "gpu_memory_service_load_mode",
+}
 
 
-def _strip_gms_extra_config(load_config: Any) -> Any:
-    """Return a copy of load_config with GMS keys removed from model_loader_extra_config.
+def _strip_gpu_memory_service_extra_config(load_config: Any) -> Any:
+    """Return a copy of load_config with GPU Memory Service keys removed from model_loader_extra_config.
 
     SGLang's DefaultModelLoader validates model_loader_extra_config and rejects
-    unknown keys. This strips GMS-specific keys so we can delegate to DefaultModelLoader.
+    unknown keys. This strips GPU Memory Service-specific keys so we can delegate to DefaultModelLoader.
     """
     extra_config = _parse_extra_config(load_config)
     if not extra_config:
         return load_config
 
-    # Remove GMS keys
-    cleaned = {k: v for k, v in extra_config.items() if k not in GMS_EXTRA_CONFIG_KEYS}
+    # Remove GPU Memory Service keys
+    cleaned = {
+        k: v
+        for k, v in extra_config.items()
+        if k not in GPU_MEMORY_SERVICE_EXTRA_CONFIG_KEYS
+    }
 
     # Create new load_config with cleaned extra_config
     # SGLang's DefaultModelLoader expects model_loader_extra_config as a dict (not None, not string)
@@ -189,11 +198,11 @@ def _resolve_socket_path(
     """
     # Try model_loader_extra_config
     extra_config = _parse_extra_config(load_config)
-    socket_path = extra_config.get("gms_socket_path")
+    socket_path = extra_config.get("gpu_memory_service_socket_path")
 
-    # Fallback to default (matches GMS server default)
+    # Fallback to default (matches GPU Memory Service server default)
     if not socket_path:
-        socket_path = DEFAULT_GMS_SOCKET_PATH
+        socket_path = DEFAULT_GPU_MEMORY_SERVICE_SOCKET_PATH
 
     local_rank = device_index if device_index is not None else _get_local_rank()
     # Support both {local_rank} and {device} placeholders for consistency with allocation server
@@ -204,29 +213,33 @@ def _resolve_socket_path(
     return socket_path
 
 
-def _get_gms_load_mode(load_config: Any = None) -> GMSLoadMode:
+def _get_gpu_memory_service_load_mode(
+    load_config: Any = None,
+) -> GPUMemoryServiceLoadMode:
     """Return the GPU Memory Service load mode.
 
     Args:
         load_config: SGLang LoadConfig object with model_loader_extra_config.
 
     Returns:
-        GMSLoadMode enum value.
+        GPU Memory ServiceLoadMode enum value.
     """
     # Try model_loader_extra_config
     extra_config = _parse_extra_config(load_config)
-    raw = extra_config.get("gms_load_mode")
+    raw = extra_config.get("gpu_memory_service_load_mode")
 
     # Default to auto mode (tries read first, falls back to write)
     if not raw:
-        return GMSLoadMode.AUTO
+        return GPUMemoryServiceLoadMode.AUTO
 
     raw = raw.strip().lower()
     try:
-        return GMSLoadMode(raw)
+        return GPUMemoryServiceLoadMode(raw)
     except ValueError:
-        valid = [m.value for m in GMSLoadMode]
-        raise ValueError(f"Invalid gms_load_mode={raw!r}. Expected one of: {valid}")
+        valid = [m.value for m in GPUMemoryServiceLoadMode]
+        raise ValueError(
+            f"Invalid gpu_memory_service_load_mode={raw!r}. Expected one of: {valid}"
+        )
 
 
 def compute_sglang_config_hash(model_config: Any) -> str:
@@ -254,8 +267,8 @@ class GPUServiceModelLoader:
             from sglang.srt.model_loader.loader import DefaultModelLoader
         except ImportError as e:
             raise RuntimeError(f"SGLang not installed or incompatible: {e}")
-        # Create a copy with valid load_format and stripped GMS keys for DefaultModelLoader
-        disk_load_config = _strip_gms_extra_config(self.load_config)
+        # Create a copy with valid load_format and stripped GPU Memory Service keys for DefaultModelLoader
+        disk_load_config = _strip_gpu_memory_service_extra_config(self.load_config)
         disk_load_config = replace(disk_load_config, load_format="auto")
         DefaultModelLoader(disk_load_config).download_model(model_config)
 
@@ -283,7 +296,7 @@ class GPUServiceModelLoader:
             device_config.gpu_id if device_config.gpu_id >= 0 else _get_local_rank()
         )
         logger.info(
-            "[GMS] Using device_index=%d (device_config.gpu_id=%d)",
+            "[GPU Memory Service] Using device_index=%d (device_config.gpu_id=%d)",
             device_index,
             device_config.gpu_id,
         )
@@ -291,13 +304,13 @@ class GPUServiceModelLoader:
         # Resolve socket path and load mode from config or env vars
         socket_path = _resolve_socket_path(device_index, self.load_config)
         config_hash = compute_sglang_config_hash(model_config)
-        mode = _get_gms_load_mode(self.load_config)
+        mode = _get_gpu_memory_service_load_mode(self.load_config)
 
-        if mode in (GMSLoadMode.READ, GMSLoadMode.AUTO):
+        if mode in (GPUMemoryServiceLoadMode.READ, GPUMemoryServiceLoadMode.AUTO):
             ro_alloc: Optional[RPCCumemAllocator] = None
             try:
                 from dynamo.gpu_memory_service import materialize_module_from_registry
-                from dynamo.sglang.gms_adapters.import_only_loader import (
+                from dynamo.sglang.gpu_memory_service_adapters.import_only_loader import (
                     ImportOnlyModelLoader,
                 )
 
@@ -307,7 +320,7 @@ class GPUServiceModelLoader:
                 # In auto mode, do an immediate readiness check (timeout=0).
                 # For read mode, we create the allocator directly first to handle
                 # timeout gracefully - if it times out, we can fall back to write mode.
-                ro_timeout = 0 if mode == GMSLoadMode.AUTO else None
+                ro_timeout = 0 if mode == GPUMemoryServiceLoadMode.AUTO else None
                 ro_alloc = RPCCumemAllocator(
                     socket_path, mode="read", device=device_index, timeout_ms=ro_timeout
                 )
@@ -336,25 +349,25 @@ class GPUServiceModelLoader:
 
                 register_allocator(ro_alloc)
                 logger.info(
-                    "[GMS] Import-only loaded %.2f GiB from GPU memory service",
+                    "[GPU Memory Service] Import-only loaded %.2f GiB from GPU memory service",
                     imported_bytes / (1 << 30),
                 )
                 return model.eval()
             except TimeoutError:
                 if ro_alloc is not None:
                     ro_alloc.close()
-                if mode == GMSLoadMode.READ:
+                if mode == GPUMemoryServiceLoadMode.READ:
                     raise
                 logger.info(
-                    "[GMS] Import-only fast path not READY; falling back to disk load+publish"
+                    "[GPU Memory Service] Import-only fast path not READY; falling back to disk load+publish"
                 )
             except Exception as e:
                 if ro_alloc is not None:
                     ro_alloc.close()
-                if mode == GMSLoadMode.READ:
+                if mode == GPUMemoryServiceLoadMode.READ:
                     raise
                 logger.info(
-                    f"[GMS] Import-only fast path failed; falling back to disk load+publish: {e}"
+                    f"[GPU Memory Service] Import-only fast path failed; falling back to disk load+publish: {e}"
                 )
 
         # Get or create allocator in write mode with PyTorch MemPool.
@@ -370,8 +383,8 @@ class GPUServiceModelLoader:
         # Create a copy of load_config with a valid load_format for DefaultModelLoader.
         # When GPUServiceModelLoader is used as load_format (a class), we need to
         # replace it with "auto" so DefaultModelLoader can parse weight files correctly.
-        # Also strip GMS keys from extra_config since DefaultModelLoader validates them.
-        disk_load_config = _strip_gms_extra_config(self.load_config)
+        # Also strip GPU Memory Service keys from extra_config since DefaultModelLoader validates them.
+        disk_load_config = _strip_gpu_memory_service_extra_config(self.load_config)
         disk_load_config = replace(disk_load_config, load_format="auto")
 
         # Route allocations to the pool while loading weights.
@@ -393,7 +406,7 @@ class GPUServiceModelLoader:
             # calls when VMM allocations exist, preventing segfaults from the
             # caching allocator trying to cudaFree() our VMM memory.
 
-        # Register all model tensors into the GMS registry
+        # Register all model tensors into the GPU Memory Service registry
         from dynamo.gpu_memory_service import register_module_tensors
 
         total_bytes = register_module_tensors(
@@ -401,7 +414,7 @@ class GPUServiceModelLoader:
         )
         GPUServiceModelLoader._imported_weights_bytes = total_bytes
         logger.info(
-            "[GMS] Write mode registered %.2f GiB to GPU memory service",
+            "[GPU Memory Service] Write mode registered %.2f GiB to GPU memory service",
             total_bytes / (1 << 30),
         )
 
@@ -419,7 +432,7 @@ class GPUServiceModelLoader:
         # No need to register again.
 
         logger.info(
-            "[GMS] Write mode published %.2f GiB, switched to read mode with %d mappings",
+            "[GPU Memory Service] Write mode published %.2f GiB, switched to read mode with %d mappings",
             total_bytes / (1 << 30),
             len(allocator._mappings),
         )

@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional, Tuple
 
 import torch
-from gpu_memory.server.client import AllocationServerClient
+from gpu_memory_service.server.client import AllocationServerClient
 
 logger = logging.getLogger(__name__)
 
@@ -385,7 +385,7 @@ class RPCCumemAllocator:
 
         # Import the C++ extension for import_and_map
         try:
-            from gpu_memory.extensions import _rpc_cumem_ext as cumem
+            from gpu_memory_service.extensions import _rpc_cumem_ext as cumem
         except ImportError as e:
             raise RuntimeError(
                 "Missing CUDA VMM pluggable allocator extension. "
@@ -685,7 +685,9 @@ class RPCCumemAllocator:
         # Ensure we're in the correct CUDA context before any operations
         if torch.cuda.is_available():
             torch.cuda.set_device(self.device)
-            logger.debug(f"[GMS] Set CUDA device to {self.device} for wake")
+            logger.debug(
+                f"[GPU Memory Service] Set CUDA device to {self.device} for wake"
+            )
 
         eff_timeout = timeout_ms if timeout_ms is not None else self._timeout_ms
         self._connect(lock_type="ro", timeout_ms=eff_timeout)
@@ -712,7 +714,7 @@ class RPCCumemAllocator:
                 failed_count += 1
 
         logger.info(
-            f"[GMS] Wake complete on device {self.device}: "
+            f"[GPU Memory Service] Wake complete on device {self.device}: "
             f"remapped {remapped_count} allocations ({total_bytes / (1 << 30):.2f} GiB), "
             f"{failed_count} failed"
         )
@@ -882,7 +884,7 @@ class RPCCumemAllocator:
                     f"Error unmapping VA 0x{va:x} (preserving reservation): {e}"
                 )
         logger.info(
-            f"[GMS] Unmapped {unmapped_count} allocations ({total_bytes / (1 << 30):.2f} GiB), preserving {len(self._mappings)} VA reservations"
+            f"[GPU Memory Service] Unmapped {unmapped_count} allocations ({total_bytes / (1 << 30):.2f} GiB), preserving {len(self._mappings)} VA reservations"
         )
         # Note: We do NOT clear _mappings or _allocation_id_to_va
         # The VA reservations remain valid
@@ -975,12 +977,12 @@ class RPCCumemAllocator:
             err_str = ctypes.c_char_p()
             cuda.cuGetErrorString(result, byref(err_str))
             logger.warning(
-                f"[GMS] cuPointerGetAttribute failed for VA 0x{va:x} after remap: "
+                f"[GPU Memory Service] cuPointerGetAttribute failed for VA 0x{va:x} after remap: "
                 f"error {result} ({err_str.value.decode() if err_str.value else 'unknown'})"
             )
         else:
             logger.debug(
-                f"[GMS] Remapped VA 0x{va:x} validated OK (device={self.device})"
+                f"[GPU Memory Service] Remapped VA 0x{va:x} validated OK (device={self.device})"
             )
 
         # Update mapping with new handle

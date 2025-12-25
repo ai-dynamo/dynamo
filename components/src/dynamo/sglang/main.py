@@ -35,32 +35,32 @@ from dynamo.sglang.request_handlers import (
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
-# Track if GMS has been set up to avoid duplicate setup
-_gms_setup_done = False
+# Track if GPU Memory Service has been set up to avoid duplicate setup
+_gpu_memory_service_setup_done = False
 
 
-def _setup_gms_if_needed(config: Config) -> None:
+def _setup_gpu_memory_service_if_needed(config: Config) -> None:
     """Setup GPU Memory Service if --load-format gpu_memory_service is passed.
 
     This does TWO things:
     1. Sets environment variables for patches (needed in spawned workers)
-    2. Applies GMS patches and sets load_format to GPUServiceModelLoader class
+    2. Applies GPU Memory Service patches and sets load_format to GPUServiceModelLoader class
 
     Usage:
         python -m dynamo.sglang --model-path ... \\
             --load-format gpu_memory_service \\
-            --model-loader-extra-config '{"gms_socket_path": "/tmp/gms_{device}.sock"}'
+            --model-loader-extra-config '{"gpu_memory_service_socket_path": "/tmp/gpu_memory_service_{device}.sock"}'
     """
-    global _gms_setup_done
-    if _gms_setup_done:
+    global _gpu_memory_service_setup_done
+    if _gpu_memory_service_setup_done:
         return
 
     load_format = getattr(config.server_args, "load_format", None)
     if load_format != "gpu_memory_service":
         return
 
-    # GMS provides its own VA-stable sleep/wake mechanism for weights.
-    # CPU backup would conflict with GMS's shared memory approach.
+    # GPU Memory Service provides its own VA-stable sleep/wake mechanism for weights.
+    # CPU backup would conflict with GPU Memory Service's shared memory approach.
     server_args = config.server_args
     if getattr(server_args, "enable_weights_cpu_backup", False):
         raise ValueError(
@@ -73,29 +73,31 @@ def _setup_gms_if_needed(config: Config) -> None:
             "GPU Memory Service provides its own VA-stable sleep/wake mechanism for weights."
         )
 
-    logger.info("[GMS] Setting up GMS integration")
+    logger.info("[GPU Memory Service] Setting up GPU Memory Service integration")
 
     # Set env var to trigger auto-registration in spawned workers
-    os.environ["GMS_SGLANG_AUTO_REGISTER"] = "1"
+    os.environ["GPU Memory Service_SGLANG_AUTO_REGISTER"] = "1"
 
     # Apply patches in main process
     try:
-        from dynamo.sglang.gms_adapters import (
+        from dynamo.sglang.gpu_memory_service_adapters import (
             GPUServiceModelLoader,
-            patch_model_runner_for_gms,
+            patch_model_runner_for_gpu_memory_service,
         )
 
-        patch_model_runner_for_gms()
-        logger.info("[GMS] Applied GMS patches for SGLang")
+        patch_model_runner_for_gpu_memory_service()
+        logger.info(
+            "[GPU Memory Service] Applied GPU Memory Service patches for SGLang"
+        )
 
         # Set load_format to the actual class so SGLang uses our custom loader
         config.server_args.load_format = GPUServiceModelLoader
-        logger.info("[GMS] Set load_format=GPUServiceModelLoader")
+        logger.info("[GPU Memory Service] Set load_format=GPUServiceModelLoader")
     except Exception as e:
-        logger.error(f"[GMS] Failed to setup GMS: {e}")
+        logger.error(f"[GPU Memory Service] Failed to setup GPU Memory Service: {e}")
         raise
 
-    _gms_setup_done = True
+    _gpu_memory_service_setup_done = True
 
 
 async def _handle_non_leader_node(
@@ -132,9 +134,9 @@ async def worker():
     config = await parse_args(sys.argv[1:])
     dump_config(config.dynamo_args.dump_config_to, config)
 
-    # Setup GMS if using gpu_memory_service load format
+    # Setup GPU Memory Service if using gpu_memory_service load format
     # This must be called before sgl.Engine() is created
-    _setup_gms_if_needed(config)
+    _setup_gpu_memory_service_if_needed(config)
 
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(
@@ -222,10 +224,10 @@ async def init(runtime: DistributedRuntime, config: Config):
             tags = [tags]
 
         # Warn if trying to release "weights" while using GPU Memory Service
-        if "weights" in tags and _gms_setup_done:
+        if "weights" in tags and _gpu_memory_service_setup_done:
             logging.warning(
                 "[ReleaseMemory] 'weights' tag included but GPU Memory Service is active. "
-                "Weight memory is managed by GMS and will not be freed via this endpoint. "
+                "Weight memory is managed by GPU Memory Service and will not be freed via this endpoint. "
             )
 
         try:
@@ -306,39 +308,15 @@ async def init(runtime: DistributedRuntime, config: Config):
             logging.error(f"Failed to resume memory occupation: {e}")
             return {"status": "error", "message": str(e)}
 
-    async def status_handler(body: dict) -> dict:
-        """Get engine memory status."""
-        try:
-            from dynamo.sglang.gms_adapters import _get_gms_allocator
-
-            allocator = _get_gms_allocator()
-            if allocator is not None:
-                return {
-                    "status": "ok",
-                    "is_paused": allocator.is_sleeping,
-                    "gms_enabled": True,
-                    "model": server_args.served_model_name,
-                }
-            else:
-                return {
-                    "status": "ok",
-                    "gms_enabled": False,
-                    "model": server_args.served_model_name,
-                }
-        except Exception as e:
-            logging.error(f"Failed to get engine status: {e}")
-            return {"status": "error", "message": str(e)}
-
     runtime.register_engine_route(
         "release_memory_occupation", release_memory_occupation_handler
     )
     runtime.register_engine_route(
         "resume_memory_occupation", resume_memory_occupation_handler
     )
-    runtime.register_engine_route("status", status_handler)
     logging.info(
         "Registered engine routes: /engine/start_profile, /engine/stop_profile, "
-        "/engine/release_memory_occupation, /engine/resume_memory_occupation, /engine/status"
+        "/engine/release_memory_occupation, /engine/resume_memory_occupation"
     )
 
     # publisher instantiates the metrics and kv event publishers
@@ -459,10 +437,10 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             tags = [tags]
 
         # Warn if trying to release "weights" while using GPU Memory Service
-        if "weights" in tags and _gms_setup_done:
+        if "weights" in tags and _gpu_memory_service_setup_done:
             logging.warning(
                 "[ReleaseMemory] 'weights' tag included but GPU Memory Service is active. "
-                "Weight memory is managed by GMS and will not be freed via this endpoint. "
+                "Weight memory is managed by GPU Memory Service and will not be freed via this endpoint. "
             )
 
         try:
@@ -546,20 +524,22 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     async def status_handler(body: dict) -> dict:
         """Get engine memory status."""
         try:
-            from dynamo.sglang.gms_adapters import _get_gms_allocator
+            from dynamo.sglang.gpu_memory_service_adapters import (
+                _get_gpu_memory_service_allocator,
+            )
 
-            allocator = _get_gms_allocator()
+            allocator = _get_gpu_memory_service_allocator()
             if allocator is not None:
                 return {
                     "status": "ok",
                     "is_paused": allocator.is_sleeping,
-                    "gms_enabled": True,
+                    "gpu_memory_service_enabled": True,
                     "model": server_args.served_model_name,
                 }
             else:
                 return {
                     "status": "ok",
-                    "gms_enabled": False,
+                    "gpu_memory_service_enabled": False,
                     "model": server_args.served_model_name,
                 }
         except Exception as e:

@@ -422,10 +422,31 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \
     fi && \
-    /tmp/use-sccache.sh show-stats "Dynamo" && \
-    # Build gpu_memory wheel (Python package only, CUDA extensions built in runtime)
-    cd /opt/dynamo/lib/bindings/gpu_memory && \
-    uv build --wheel --out-dir /opt/dynamo/dist
+    /tmp/use-sccache.sh show-stats "Dynamo"
+
+# Build gpu_memory_service and torch_memory_saver wheels
+# torch_memory_saver is only used by SGLang's GPU Memory Service adapters
+# Install pip, setuptools, wheel for building, torch for CUDA extensions
+# IMPORTANT: Use --no-build-isolation so the build inherits CUDA_PATH and can find nvcc
+# With --no-build-isolation, build deps (setuptools, wheel) must be pre-installed
+RUN source ${VIRTUAL_ENV}/bin/activate && \
+    uv pip install pip setuptools wheel && \
+    uv pip install torch --index-url https://download.pytorch.org/whl/cu124 --no-cache-dir && \
+    cd /opt/dynamo/lib/gpu_memory_service && \
+    pip wheel --no-deps --no-build-isolation --wheel-dir /tmp/gpu_memory_service_wheels . && \
+    auditwheel repair \
+        --only-plat \
+        --exclude libcuda.so.1 \
+        --exclude libc10.so \
+        --exclude libtorch.so \
+        --exclude libtorch_python.so \
+        --exclude libtorch_cpu.so \
+        --plat manylinux_2_28_${ARCH_ALT} \
+        --wheel-dir /opt/dynamo/dist \
+        /tmp/gpu_memory_service_wheels/gpu_memory_service*.whl && \
+    pip wheel --no-deps --no-build-isolation --wheel-dir /opt/dynamo/dist \
+        git+https://github.com/fzyzcjy/torch_memory_saver.git && \
+    uv pip uninstall torch pip setuptools wheel
 
 ##################################
 ########## Runtime Image #########
@@ -478,10 +499,14 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
-        /opt/dynamo/wheelhouse/gpu_memory*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        /opt/dynamo/wheelhouse/gpu_memory_service*.whl \
+        /opt/dynamo/wheelhouse/torch_memory_saver*.whl \
         sglang==${SGLANG_VERSION}
+
+# Copy lib/ for reference/tests (using pre-built wheels above)
+COPY --chmod=775 --chown=dynamo:0 lib/ /workspace/lib/
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
@@ -525,14 +550,6 @@ ENV PATH=/home/dynamo/.local/bin:$PATH
 # PYTHONPATH for root user access to dynamo packages (NVBug 5762058)
 ENV PYTHONPATH=/home/dynamo/.local/lib/python3.12/site-packages:$PYTHONPATH
 
-# Build GPU Memory Service CUDA extensions
-# The gpu_memory wheel is installed earlier with ai-dynamo (which depends on it).
-# CUDA extensions require PyTorch, so we build them here in runtime.
-COPY --chmod=775 --chown=dynamo:0 lib/bindings/gpu_memory/python/gpu_memory/extensions/ /tmp/gpu_memory_extensions/
-RUN cd /tmp/gpu_memory_extensions && \
-    python3 setup.py build_ext --inplace && \
-    cp *.so $(python3 -c "import gpu_memory; print(gpu_memory.__path__[0])")/extensions/ && \
-    rm -rf /tmp/gpu_memory_extensions
 
 ###########################################################
 ########## Development (run.sh, runs as root user) ########
@@ -644,7 +661,7 @@ RUN cp -r --no-preserve=mode /home/dynamo/.local/lib/python3.12/site-packages/* 
 COPY --from=dynamo_base /bin/uv /opt/dynamo/venv/bin/uv
 RUN pip install --ignore-installed maturin[patchelf]
 
-# Install torch_memory_saver from source (GMS mode is monkey-patched in dynamo.sglang.gms_adapters)
+# Install torch_memory_saver from source
 RUN pip install git+https://github.com/fzyzcjy/torch_memory_saver.git
 
 # Editable install of dynamo components

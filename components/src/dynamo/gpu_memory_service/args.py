@@ -14,19 +14,19 @@ logger = logging.getLogger(__name__)
 class Config:
     """Configuration for GPU Memory Service server."""
 
-    # GMS specific
+    # GPU Memory Service specific
     device: int
     socket_path: str
     verbose: bool
 
 
 def parse_args() -> Config:
-    """Parse command line arguments for GMS server."""
+    """Parse command line arguments for GPU Memory Service server."""
     parser = argparse.ArgumentParser(
         description="GPU Memory Service allocation server for Dynamo."
     )
 
-    # GMS specific arguments
+    # GPU Memory Service specific arguments
     parser.add_argument(
         "--device",
         type=int,
@@ -37,7 +37,7 @@ def parse_args() -> Config:
         "--socket-path",
         type=str,
         default=None,
-        help="Path for Unix domain socket. Default: /tmp/gms_{device}.sock. "
+        help="Path for Unix domain socket. Default: /tmp/gpu_memory_service_{device}.sock. "
         "Supports {device} placeholder for multi-GPU setups.",
     )
     parser.add_argument(
@@ -52,7 +52,7 @@ def parse_args() -> Config:
     # Generate default socket path if not provided
     socket_path = args.socket_path
     if socket_path is None:
-        socket_path = f"/tmp/gms_{args.device}.sock"
+        socket_path = f"/tmp/gpu_memory_service_{args.device}.sock"
     else:
         # Expand {device} placeholder
         socket_path = socket_path.format(device=args.device)

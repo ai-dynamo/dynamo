@@ -3,8 +3,8 @@
 
 """GPU Memory Service - CUDA VMM-based GPU memory allocation and sharing."""
 
-from gpu_memory.allocator import RPCCumemAllocator, StaleWeightsError
-from gpu_memory.lifecycle import (
+from gpu_memory_service.allocator import RPCCumemAllocator, StaleWeightsError
+from gpu_memory_service.lifecycle import (
     clear_allocator,
     get_allocator,
     get_mem_pool,

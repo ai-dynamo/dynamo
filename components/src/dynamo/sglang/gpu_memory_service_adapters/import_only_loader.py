@@ -10,7 +10,7 @@ applied before registry entries were created). Post-processing can create/destro
 parameters, so it must be run before materializing from registry.
 
 Usage:
-    from dynamo.sglang.gms_adapters.import_only_loader import ImportOnlyModelLoader
+    from dynamo.sglang.gpu_memory_service_adapters.import_only_loader import ImportOnlyModelLoader
 
     # In read mode, use this loader to create model with final structure
     loader = ImportOnlyModelLoader(load_config)

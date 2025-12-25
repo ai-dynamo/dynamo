@@ -3,20 +3,20 @@
 import logging
 import os
 
-from dynamo.vllm.gms_adapters.import_only_loader import (
+from dynamo.vllm.gpu_memory_service_adapters.import_only_loader import (
     ImportOnlyModelLoader,
     ImportOnlyModelLoaderMeta,
 )
-from dynamo.vllm.gms_adapters.model_loader import (
+from dynamo.vllm.gpu_memory_service_adapters.model_loader import (
     compute_vllm_config_hash,
     get_imported_weights_bytes,
     register_gpu_memory_service_loader,
 )
-from dynamo.vllm.gms_adapters.worker_extension import (
+from dynamo.vllm.gpu_memory_service_adapters.worker_extension import (
     is_worker_patched,
-    patch_model_runner_for_gms,
+    patch_model_runner_for_gpu_memory_service,
     patch_worker_sleep_wake,
-    unpatch_model_runner_for_gms,
+    unpatch_model_runner_for_gpu_memory_service,
     unpatch_worker_sleep_wake,
 )
 
@@ -28,8 +28,8 @@ __all__ = [
     "ImportOnlyModelLoaderMeta",
     "compute_vllm_config_hash",
     "get_imported_weights_bytes",
-    "patch_model_runner_for_gms",
-    "unpatch_model_runner_for_gms",
+    "patch_model_runner_for_gpu_memory_service",
+    "unpatch_model_runner_for_gpu_memory_service",
     "is_worker_patched",
     "patch_worker_sleep_wake",
     "unpatch_worker_sleep_wake",
@@ -42,19 +42,27 @@ def vllm_plugin_init():
 
     This function is called by vLLM's plugin system in all processes (main process,
     engine core, and worker processes). It registers the GPU Memory Service loader
-    if the GMS_VLLM_AUTO_REGISTER environment variable is set.
+    if the GPU Memory Service_VLLM_AUTO_REGISTER environment variable is set.
     """
-    if os.environ.get("GMS_VLLM_AUTO_REGISTER", "").lower() in ("1", "true", "yes"):
+    if os.environ.get("GPU Memory Service_VLLM_AUTO_REGISTER", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
         register_gpu_memory_service_loader()
-        patch_model_runner_for_gms()
+        patch_model_runner_for_gpu_memory_service()
         logger.info(
-            "[GMS] vLLM plugin initialized - GPU Memory Service loader registered"
+            "[GPU Memory Service] vLLM plugin initialized - GPU Memory Service loader registered"
         )
 
 
 # Auto-register the GPU Memory Service loader when environment variable is set.
 # This is necessary for vLLM's multiprocessing with spawn mode, where child
 # processes start fresh and don't inherit the parent's loader registration.
-if os.environ.get("GMS_VLLM_AUTO_REGISTER", "").lower() in ("1", "true", "yes"):
+if os.environ.get("GPU Memory Service_VLLM_AUTO_REGISTER", "").lower() in (
+    "1",
+    "true",
+    "yes",
+):
     register_gpu_memory_service_loader()
-    patch_model_runner_for_gms()
+    patch_model_runner_for_gpu_memory_service()

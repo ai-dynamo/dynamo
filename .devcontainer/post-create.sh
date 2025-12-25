@@ -66,15 +66,15 @@ mkdir -p $CARGO_TARGET_DIR
 
 # Note: Build steps moved to after sanity check - see instructions at the end
 
-# Install torch_memory_saver from source (GMS mode is monkey-patched in dynamo.sglang.gms_adapters)
-echo "Installing torch_memory_saver..."
-pip install git+https://github.com/fzyzcjy/torch_memory_saver.git
-
-# Install gpu_memory package and build CUDA extensions
-echo "Installing gpu_memory package..."
-pip install -e $WORKSPACE_DIR/lib/bindings/gpu_memory
-echo "Building gpu_memory CUDA extensions..."
-cd $WORKSPACE_DIR/lib/bindings/gpu_memory/python/gpu_memory/extensions && python setup.py build_ext --inplace
+# Install gpu_memory_service package and build CUDA extensions
+# First uninstall any existing install from the Docker image, then do editable install
+# Use --no-build-isolation so uv uses the current environment (with PyTorch) instead of an isolated one
+echo "Installing gpu_memory_service package..."
+uv pip uninstall gpu-memory-service 2>/dev/null || true
+# Use dynamic path detection instead of hardcoded python3.12
+PYTHON_SITE_PACKAGES=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")
+rm -rf "${PYTHON_SITE_PACKAGES}/gpu_memory_service/" 2>/dev/null || true
+uv pip install --no-build-isolation -e $WORKSPACE_DIR/lib/gpu_memory_service
 
 { set +x; } 2>/dev/null
 
@@ -117,7 +117,7 @@ cat <<EOF
 ========================================
 $SANITY_STATUS
 ✅ Pre-commit hooks configured
-✅ gpu_memory package installed with CUDA extensions
+✅ gpu_memory_service package installed with CUDA extensions
 
 Now build the project:
   cargo build --locked --profile dev --features dynamo-llm/block-manager
@@ -125,9 +125,6 @@ Now build the project:
   DYNAMO_BIN_PATH=$CARGO_TARGET_DIR/debug uv pip install -e .
 
 Optional: cd lib/bindings/kvbm && maturin develop --uv  # For KVBM support
-
-To rebuild gpu_memory CUDA extensions (if needed):
-  cd lib/bindings/gpu_memory/python/gpu_memory/extensions && python setup.py build_ext --inplace
 
 If cargo build fails with a Cargo.lock error, try to update it with 'cargo update'
 ========================================

@@ -2,7 +2,7 @@
 
 NOTE: Due to meta-model creation, this will not work with MoE in vLLM specifically (among other paths) because of .item() calls in \_\_init__.
 
-### Step 1: Start GPU Memory Service (GMS)
+### Step 1: Start GPU Memory Service (GPU Memory Service)
 For each device you intend to on, run in a separate terminal:
 
 ```bash
