@@ -32,6 +32,10 @@ inputs:
     description: 'Start MinIO service for LoRA tests (true/false)'
     required: false
     default: 'true'
+  enable_mypy:
+    description: 'Enable mypy type checking during test run (true/false)'
+    required: false
+    default: 'false'
 
 
 runs:
@@ -110,7 +114,12 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          PYTEST_CMD="pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          MYPY_FLAG=""
+          if [[ "${{ inputs.enable_mypy }}" == "true" ]]; then
+            echo "🔍 Mypy type checking enabled"
+            MYPY_FLAG="--mypy"
+          fi
+          PYTEST_CMD="pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
