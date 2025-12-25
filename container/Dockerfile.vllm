@@ -464,6 +464,27 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
+# Build gpu_memory_service wheel with CUDA extensions
+# Install pip, setuptools, wheel for building, torch for CUDA extensions
+# IMPORTANT: Use --no-build-isolation so the build inherits CUDA_PATH and can find nvcc
+# With --no-build-isolation, build deps (setuptools, wheel) must be pre-installed
+RUN source ${VIRTUAL_ENV}/bin/activate && \
+    uv pip install pip setuptools wheel && \
+    uv pip install torch --index-url https://download.pytorch.org/whl/cu124 --no-cache-dir && \
+    cd /opt/dynamo/lib/gpu_memory_service && \
+    pip wheel --no-deps --no-build-isolation --wheel-dir /tmp/gpu_memory_service_wheels . && \
+    auditwheel repair \
+        --only-plat \
+        --exclude libcuda.so.1 \
+        --exclude libc10.so \
+        --exclude libtorch.so \
+        --exclude libtorch_python.so \
+        --exclude libtorch_cpu.so \
+        --plat manylinux_2_28_${ARCH_ALT} \
+        --wheel-dir /opt/dynamo/dist \
+        /tmp/gpu_memory_service_wheels/gpu_memory_service*.whl && \
+    uv pip uninstall torch pip setuptools wheel
+
 ########################################################
 ########## Framework Development Image ################
 ########################################################
@@ -588,6 +609,7 @@ COPY --from=dynamo_base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbin
 COPY --from=dynamo_base /usr/local/cuda/include/ /usr/local/cuda/include/
 COPY --from=dynamo_base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
 COPY --from=dynamo_base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
+COPY --from=dynamo_base /usr/local/cuda/lib64/stubs/ /usr/local/cuda/lib64/stubs/
 RUN CUDA_VERSION_MAJOR="${CUDA_VERSION%%.*}" &&\
     ln -s /usr/local/cuda/lib64/libcublas.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublas.so &&\
     ln -s /usr/local/cuda/lib64/libcublasLt.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublasLt.so
@@ -782,6 +804,10 @@ RUN cd /usr/local/lib && \
     ldconfig
 
 USER dynamo
+
+# Install GPU Memory Service from pre-built wheel (extensions compiled in wheel_builder)
+RUN uv pip install /opt/dynamo/wheelhouse/gpu_memory_service*.whl
+
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
