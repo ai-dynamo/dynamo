@@ -17,7 +17,7 @@ name: Cherry-Pick Validation
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     branches:
       - 'release/**'
 
@@ -39,6 +39,10 @@ jobs:
         run: |
           git fetch origin main:main
 
+      - name: Fetch base branch
+        run: |
+          git fetch origin ${{ github.base_ref }}
+
       - name: Validate cherry-pick requirements
         id: validate
         uses: actions/github-script@v7
@@ -50,6 +54,7 @@ jobs:
             const baseBranch = context.payload.pull_request.base.ref;
             const headSha = context.payload.pull_request.head.sha;
             const prNumber = context.payload.pull_request.number;
+            const labels = (context.payload.pull_request.labels || []).map(l => l.name);
 
             // Guard: ensure we're targeting a release branch
             if (!baseBranch.startsWith('release/')) {
@@ -57,11 +62,59 @@ jobs:
               return;
             }
 
+            // Guard: Check for bypass labels
+            let skipped = false;
+            let skipReason = '';
+            if (labels.includes('release-exclusive') || labels.includes('skip-cp-check')) {
+              console.log('Skipping validation due to bypass label.');
+              skipped = true;
+              skipReason = 'Skipped due to bypass label (`release-exclusive` or `skip-cp-check`).';
+            }
+
             console.log(`Validating cherry-pick PR #${prNumber} targeting ${baseBranch}`);
 
             // Get commits in this PR (excluding merge commits)
             const mergeBase = execSync(`git merge-base origin/${baseBranch} ${headSha}`).toString().trim();
             const allCommits = execSync(`git rev-list --no-merges ${mergeBase}..${headSha}`).toString().trim().split('\n').filter(Boolean);
+
+            if (skipped) {
+              const summary = `## 🍒 Cherry-Pick Validation Results\n\n` +
+                `**Target Branch:** \`${baseBranch}\`\n` +
+                `**Commits Checked:** 0\n\n` +
+                `### ⏭️ Skipped\n${skipReason}\n\n` +
+                `If this is a release-only change, ensure \`release-exclusive\` is applied.`;
+
+              core.setOutput('summary', summary);
+              core.setOutput('has_errors', false);
+
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+              });
+
+              const botComment = comments.find(comment =>
+                comment.user.type === 'Bot' &&
+                comment.body.includes('Cherry-Pick Validation Results')
+              );
+
+              if (botComment) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: botComment.id,
+                  body: summary,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body: summary,
+                });
+              }
+              return;
+            }
 
             console.log(`Found ${allCommits.length} non-merge commit(s) to validate`);
 
@@ -83,8 +136,8 @@ jobs:
             function findInMainByPatchId(patchId) {
               if (!patchId) return null;
               try {
-                // Search recent main commits (last 1000) for matching patch-id
-                const mainCommits = execSync(`git rev-list main -1000`).toString().trim().split('\n');
+                // Search main commits for matching patch-id
+                const mainCommits = execSync(`git rev-list main`).toString().trim().split('\n');
                 for (const mainSha of mainCommits) {
                   const mainPatchId = getPatchId(mainSha);
                   if (mainPatchId === patchId) {
@@ -157,8 +210,7 @@ jobs:
                     const mainCommit = execSync(`git log main --format="%H" --grep="${escapedSubject}" -1 2>/dev/null || true`).toString().trim();
 
                     if (mainCommit) {
-                      validCommits.push(`✅ Commit \`${shortSha}\` appears to match \`${mainCommit.substring(0, 8)}\` in main (by subject)`);
-                      foundInMain = true;
+                      warnings.push(`⚠️ Commit \`${shortSha}\` shares a subject with \`${mainCommit.substring(0, 8)}\` in main, but content match was not confirmed.`);
                     }
                   } catch (e) {
                     // Subject search failed
@@ -166,7 +218,7 @@ jobs:
                 }
 
                 if (!foundInMain) {
-                  errors.push(`❌ Commit \`${shortSha}\` ("${subject.substring(0, 50)}...") has no matching commit in main. Changes must be merged to main first!`);
+                  errors.push(`❌ Commit \`${shortSha}\` ("${subject.substring(0, 50)}...") has no matching commit in main. Changes must be merged to main first! If this is release-only, apply the \`release-exclusive\` label.`);
                 }
               }
             }
@@ -195,7 +247,8 @@ jobs:
               summary += `   git checkout -b yourname/cherrypick-feature ${baseBranch}\n`;
               summary += `   git cherry-pick -x --signoff <merge-commit-sha-from-main>\n`;
               summary += `   \`\`\`\n`;
-              summary += `3. **Update the Cherry Pick table** in #swdl-dynamo-release\n\n`;
+              summary += `3. If this is a release-only change, apply the \`release-exclusive\` label to bypass this check.\n`;
+              summary += `4. **Update the Cherry Pick table** in #swdl-dynamo-release\n\n`;
               summary += `See [CONTRIBUTING.md](https://github.com/ai-dynamo/dynamo/blob/main/CONTRIBUTING.md#cherry-pick-process-for-release-branches) for details.\n`;
             } else {
               summary += `### ✅ All Checks Passed\n`;
