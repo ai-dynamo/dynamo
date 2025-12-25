@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
 
-use scheduler::{DefaultOracle, Oracle};
+use scheduler::{DefaultOracle, ForwardPassSample, Oracle};
 use slot::{MatchCheckOutcome, RequestSlot, TransactionState};
 
 pub use request::Request;
@@ -54,6 +54,8 @@ pub struct ConnectorLeader {
     /// A cleanup task (spawned in `process_scheduler_output`) waits on the
     /// forward pass completion event and then drops these blocks.
     pending_intra_pass_g2_blocks: Mutex<Vec<ImmutableBlock<G2>>>,
+
+    forward_pass_samples: Mutex<Option<ForwardPassSample>>,
 }
 
 #[derive(Default, Clone)]
@@ -105,6 +107,7 @@ impl ConnectorLeader {
             offload_engine: OnceLock::new(),
             control_server_shutdown: OnceLock::new(),
             pending_intra_pass_g2_blocks: Mutex::new(Vec::new()),
+            forward_pass_samples: Mutex::new(None),
         }
     }
 

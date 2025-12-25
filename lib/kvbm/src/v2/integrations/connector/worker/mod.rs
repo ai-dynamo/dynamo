@@ -50,6 +50,7 @@ use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use crate::KvbmRuntime;
 use crate::v2::distributed::worker::DirectWorker;
@@ -149,6 +150,9 @@ pub struct ConnectorWorker {
     forward_pass_completion_active: Arc<AtomicBool>,
     /// Flag for direct offloading (stub for future use, always false for now).
     is_direct_offloading_active: Arc<AtomicBool>,
+
+    /// Start Forward Pass
+    forward_pass_start: Mutex<Option<Instant>>,
 }
 
 impl ConnectorWorker {
@@ -170,6 +174,7 @@ impl ConnectorWorker {
             intra_pass_onboard_active: Arc::new(AtomicBool::new(false)),
             forward_pass_completion_active: Arc::new(AtomicBool::new(false)),
             is_direct_offloading_active: Arc::new(AtomicBool::new(false)),
+            forward_pass_start: Mutex::new(None),
         }
     }
 
@@ -393,6 +398,8 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             }
         }
 
+        tracing::info!("Forward pass start: {:?}", metadata);
+
         // Store the metadata for use by start_load_kv
         *self.metadata.lock() = Some(metadata);
 
@@ -431,6 +438,8 @@ impl ConnectorWorkerInterface for ConnectorWorker {
                 .as_mut()
                 .and_then(|m| m.intra_pass_load.take())
         };
+
+        *self.forward_pass_start.lock() = Some(Instant::now());
 
         if let Some(load) = intra_pass_load {
             tracing::debug!(

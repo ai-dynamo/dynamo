@@ -8,6 +8,7 @@ use crate::{
     v2::logical::blocks::ImmutableBlock,
 };
 
+use derive_builder::Builder;
 use dynamo_nova::events::EventHandle;
 
 use anyhow::Result;
@@ -182,6 +183,25 @@ pub struct ForwardPassBuilder {
     pub iteration: usize,
 }
 
+#[derive(Debug, Clone, Builder)]
+#[builder(pattern = "owned")]
+pub struct ForwardPassSample {
+    pub iteration: usize,
+    pub total_scheduled_tokens: usize,
+    pub new_reqs: usize,
+    pub cached_reqs: usize,
+    pub active_slots: usize,
+
+    #[builder(default = "std::time::Instant::now()")]
+    pub forward_pass_start: Instant,
+}
+
+impl ForwardPassSample {
+    pub fn builder() -> ForwardPassSampleBuilder {
+        ForwardPassSampleBuilder::default()
+    }
+}
+
 impl ConnectorLeader {
     /// Process the scheduler output and return the connector metadata.
     ///
@@ -192,14 +212,14 @@ impl ConnectorLeader {
         &self,
         scheduler_output: SchedulerOutput,
     ) -> Result<KvConnectorMetadata> {
-        tracing::debug!(
-            iteration = scheduler_output.iteration,
-            total_scheduled_tokens = scheduler_output.total_num_scheduled_tokens,
-            new_reqs = scheduler_output.scheduled_new_reqs.len(),
-            cached_reqs = scheduler_output.scheduled_cached_reqs.len(),
-            active_slots = self.slots.len(),
-            "process_scheduler_output ENTRY"
-        );
+        if let Some(forward_pass_sample) = self.forward_pass_samples.lock().take() {
+            tracing::info!(
+                iteration = forward_pass_sample.iteration,
+                "Previous forward pass took {:?}; {:?}",
+                forward_pass_sample.forward_pass_start.elapsed(),
+                forward_pass_sample
+            );
+        }
 
         if scheduler_output.total_num_scheduled_tokens == 0 {
             tracing::debug!(
@@ -210,6 +230,18 @@ impl ConnectorLeader {
             );
             return Ok(KvConnectorMetadata::new(scheduler_output.iteration));
         }
+
+        let forward_pass_sample = ForwardPassSample::builder()
+            .iteration(scheduler_output.iteration)
+            .total_scheduled_tokens(scheduler_output.total_num_scheduled_tokens)
+            .new_reqs(scheduler_output.scheduled_new_reqs.len())
+            .cached_reqs(scheduler_output.scheduled_cached_reqs.len())
+            .active_slots(self.slots.len())
+            .build()?;
+
+        tracing::info!("Forward pass sample: {:?}", forward_pass_sample);
+
+        *self.forward_pass_samples.lock() = Some(forward_pass_sample);
 
         // Create per-worker forward pass completion events
         let worker_events = self.create_worker_foward_pass_completion_events()?;
@@ -412,11 +444,6 @@ impl ConnectorLeader {
 
         // Aggregate pending intra-pass onboarding data from all slots
         let intra_pass_load = self.aggregate_intra_pass_onboarding();
-
-
-        if intra_pass_load.is_some() {
-            tracing::info!("using intra-pass onboarding mode");
-        }
 
         // Take accumulated G2 blocks for cleanup
         let g2_blocks = std::mem::take(&mut *self.pending_intra_pass_g2_blocks.lock());
