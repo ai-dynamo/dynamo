@@ -55,7 +55,7 @@ dynamo-operator:
     tolerations: []
 
     # -- Affinity for controller manager pods
-    affinity: []
+    affinity: {}
 
     # Leader election configuration for cluster-wide coordination
     leaderElection:
@@ -225,6 +225,8 @@ kai-scheduler:
   global:
     # -- Node tolerations for kai-scheduler pods
     tolerations: []
+    # -- Affinity for kai-scheduler pods
+    affinity: {}
 
 # etcd configuration - distributed key-value store for operator state
 etcd:
