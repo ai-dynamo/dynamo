@@ -221,9 +221,9 @@ class DynamoConnector(KVConnectorBase_V1):
             raise RuntimeError("Cannot call worker methods on SCHEDULER role")
         # Must call super() to set _connector_metadata so has_connector_metadata() returns True
         # This is required for save_kv_layer to be called during the forward pass
-        super().bind_connector_metadata(connector_metadata)
         assert isinstance(connector_metadata.metadata, bytes)
-        self._worker.bind_connector_metadata(connector_metadata.metadata)
+        if self._worker.bind_connector_metadata(connector_metadata.metadata):
+            super().bind_connector_metadata(connector_metadata)
 
     @override
     def clear_connector_metadata(self) -> None:

@@ -3,10 +3,12 @@
 
 use super::ConnectorLeader;
 use crate::{
-    G1, InstanceId, distributed::offload::ExternalBlock,
+    G1, G2, InstanceId, distributed::offload::ExternalBlock,
     integrations::connector::leader::slot::RequestSlot, v2::BlockId,
+    v2::logical::blocks::ImmutableBlock,
 };
 
+use derive_builder::Builder;
 use dynamo_nova::events::EventHandle;
 
 use anyhow::Result;
@@ -156,13 +158,48 @@ pub struct IterationSession {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvConnectorMetadata {
     pub iteration: usize,
+
     /// Map of worker instance_id to event handle for forward pass completion.
     /// Workers trigger their corresponding event in clear_connector_metadata.
-    pub forward_pass_events: Option<HashMap<InstanceId, EventHandle>>,
+    pub foward_pass_completion_events: Option<HashMap<InstanceId, EventHandle>>,
+
+    /// This will hold the G2 source and G1 destination block_ids
+    pub intra_pass_load: Option<IntraPassLoad>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntraPassLoad {
+    pub g2_src_block_ids: Vec<BlockId>,
+    pub g1_dst_block_ids: Vec<BlockId>,
+}
+
+impl KvConnectorMetadata {
+    pub fn should_bind(&self) -> bool {
+        self.foward_pass_completion_events.is_some() || self.intra_pass_load.is_some()
+    }
 }
 
 pub struct ForwardPassBuilder {
     pub iteration: usize,
+}
+
+#[derive(Debug, Clone, Builder)]
+#[builder(pattern = "owned")]
+pub struct ForwardPassSample {
+    pub iteration: usize,
+    pub total_scheduled_tokens: usize,
+    pub new_reqs: usize,
+    pub cached_reqs: usize,
+    pub active_slots: usize,
+
+    #[builder(default = "std::time::Instant::now()")]
+    pub forward_pass_start: Instant,
+}
+
+impl ForwardPassSample {
+    pub fn builder() -> ForwardPassSampleBuilder {
+        ForwardPassSampleBuilder::default()
+    }
 }
 
 impl ConnectorLeader {
@@ -175,14 +212,14 @@ impl ConnectorLeader {
         &self,
         scheduler_output: SchedulerOutput,
     ) -> Result<KvConnectorMetadata> {
-        tracing::debug!(
-            iteration = scheduler_output.iteration,
-            total_scheduled_tokens = scheduler_output.total_num_scheduled_tokens,
-            new_reqs = scheduler_output.scheduled_new_reqs.len(),
-            cached_reqs = scheduler_output.scheduled_cached_reqs.len(),
-            active_slots = self.slots.len(),
-            "process_scheduler_output ENTRY"
-        );
+        if let Some(forward_pass_sample) = self.forward_pass_samples.lock().take() {
+            tracing::info!(
+                iteration = forward_pass_sample.iteration,
+                "Previous forward pass took {:?}; {:?}",
+                forward_pass_sample.forward_pass_start.elapsed(),
+                forward_pass_sample
+            );
+        }
 
         if scheduler_output.total_num_scheduled_tokens == 0 {
             tracing::debug!(
@@ -194,11 +231,29 @@ impl ConnectorLeader {
             return Ok(KvConnectorMetadata::new(scheduler_output.iteration));
         }
 
-        // Create per-worker forward pass completion events
-        let worker_events = self.create_worker_forward_pass_events()?;
+        let forward_pass_sample = ForwardPassSample::builder()
+            .iteration(scheduler_output.iteration)
+            .total_scheduled_tokens(scheduler_output.total_num_scheduled_tokens)
+            .new_reqs(scheduler_output.scheduled_new_reqs.len())
+            .cached_reqs(scheduler_output.scheduled_cached_reqs.len())
+            .active_slots(self.slots.len())
+            .build()?;
 
-        // Create precondition event for offload (single or merged)
-        let precondition = self.create_offload_precondition(&worker_events)?;
+        tracing::info!("Forward pass sample: {:?}", forward_pass_sample);
+
+        *self.forward_pass_samples.lock() = Some(forward_pass_sample);
+
+        // Create per-worker forward pass completion events
+        let worker_events = self.create_worker_foward_pass_completion_events()?;
+
+        // Create cheap local event as the "promise" for forward pass completion.
+        // This is passed to process_request_offload as the precondition.
+        // The actual merge event is only created at the end if any actions were scheduled.
+        let forward_pass_promise = Arc::new(self.runtime.nova().events().new_event()?);
+        let forward_pass_handle = Some(forward_pass_promise.handle());
+
+        // Track if any offload actions were scheduled
+        let mut scheduled_actions: bool = false;
 
         // Process new requests
         for req in scheduler_output.scheduled_new_reqs {
@@ -232,17 +287,32 @@ impl ConnectorLeader {
                         "new_request: evaluating blocks for offload"
                     );
 
-                    if let Err(e) = self.process_request_offload(
+                    match self.process_request_offload(
                         &req.req_id,
                         &mut slot,
                         total_tokens,
-                        precondition,
+                        forward_pass_handle,
                     ) {
-                        tracing::error!(
-                            "failed to process offload for new req_id {}: {}",
-                            req.req_id,
-                            e
-                        );
+                        Ok(OffloadAction::NoAction) => {
+                            tracing::trace!(
+                                "no offload action for new request for req_id: {}",
+                                req.req_id
+                            );
+                        }
+                        Ok(OffloadAction::InterPassOffloadScheduled) => {
+                            scheduled_actions = true;
+                            tracing::trace!(
+                                "inter-pass offload scheduled for new request for req_id: {}",
+                                req.req_id
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "failed to process offload for new req_id {}: {}",
+                                req.req_id,
+                                e
+                            );
+                        }
                     }
                 }
                 Err(_) => {
@@ -334,17 +404,33 @@ impl ConnectorLeader {
 
                     // Always process offload - may have completed blocks from previous allocations
                     // even if no new block IDs were allocated this step
-                    if let Err(e) = self.process_request_offload(
+
+                    match self.process_request_offload(
                         &req.req_id,
                         &mut slot,
                         num_scheduled_tokens,
-                        precondition,
+                        forward_pass_handle,
                     ) {
-                        tracing::error!(
-                            "failed to process offload for cached req_id {}: {}",
-                            req.req_id,
-                            e
-                        );
+                        Ok(OffloadAction::NoAction) => {
+                            tracing::trace!(
+                                "no offload action for cached request for req_id: {}",
+                                req.req_id
+                            );
+                        }
+                        Ok(OffloadAction::InterPassOffloadScheduled) => {
+                            scheduled_actions = true;
+                            tracing::trace!(
+                                "inter-pass offload scheduled for cached request for req_id: {}",
+                                req.req_id
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "failed to process offload for cached req_id {}: {}",
+                                req.req_id,
+                                e
+                            );
+                        }
                     }
                 }
                 Err(_) => {
@@ -356,17 +442,76 @@ impl ConnectorLeader {
             }
         }
 
-        // Convert worker events to event map for metadata
-        let event_map: HashMap<InstanceId, EventHandle> = worker_events
-            .into_iter()
-            .map(|(instance_id, event)| (instance_id, event.handle()))
-            .collect();
+        // Aggregate pending intra-pass onboarding data from all slots
+        let intra_pass_load = self.aggregate_intra_pass_onboarding();
 
-        Ok(KvConnectorMetadata::new(scheduler_output.iteration).with_events(event_map))
+        // Take accumulated G2 blocks for cleanup
+        let g2_blocks = std::mem::take(&mut *self.pending_intra_pass_g2_blocks.lock());
+        if !g2_blocks.is_empty() {
+            assert!(intra_pass_load.is_some());
+            scheduled_actions = true;
+        }
+
+        let mut metadata = KvConnectorMetadata::new(scheduler_output.iteration);
+
+        if scheduled_actions {
+            // Convert worker events to event map for metadata
+            let event_map: HashMap<InstanceId, EventHandle> = worker_events
+                .iter()
+                .map(|(instance_id, event)| (*instance_id, event.handle()))
+                .collect();
+
+            metadata = metadata.with_events(event_map);
+
+            if let Some(ref load) = intra_pass_load {
+                metadata.intra_pass_load = Some(load.clone());
+                tracing::debug!(
+                    iteration = scheduler_output.iteration,
+                    g2_count = load.g2_src_block_ids.len(),
+                    g1_count = load.g1_dst_block_ids.len(),
+                    "Added intra-pass load to connector metadata"
+                );
+            }
+
+            // Spawn unified cleanup task that:
+            // 1. Awaits the merge of all worker events (lazy - only creates merge here)
+            // 2. Triggers the forward_pass_promise (unblocks preconditions)
+            // 3. Drops G2 blocks (releases back to cache)
+            self.spawn_forward_pass_cleanup_task(worker_events, forward_pass_promise, g2_blocks);
+        }
+
+        Ok(metadata)
+    }
+
+    /// Aggregate pending intra-pass onboarding data from all active slots.
+    ///
+    /// This method iterates through all slots, takes any pending intra-pass data,
+    /// and combines it into a single `IntraPassLoad` for the workers.
+    fn aggregate_intra_pass_onboarding(&self) -> Option<IntraPassLoad> {
+        let mut g2_src_all = Vec::new();
+        let mut g1_dst_all = Vec::new();
+
+        // Iterate through all slots and collect pending intra-pass data
+        for entry in self.slots.iter() {
+            let mut slot = entry.value().lock();
+            if let Some(pending) = slot.take_pending_intra_pass() {
+                g2_src_all.extend(pending.g2_block_ids);
+                g1_dst_all.extend(pending.g1_block_ids);
+            }
+        }
+
+        if g2_src_all.is_empty() {
+            None
+        } else {
+            Some(IntraPassLoad {
+                g2_src_block_ids: g2_src_all,
+                g1_dst_block_ids: g1_dst_all,
+            })
+        }
     }
 
     /// Create one event per worker for forward pass completion tracking.
-    fn create_worker_forward_pass_events(
+    fn create_worker_foward_pass_completion_events(
         &self,
     ) -> Result<HashMap<InstanceId, Arc<dynamo_nova::events::LocalEvent>>> {
         let worker_instances = self.get_worker_instance_ids()?;
@@ -380,27 +525,6 @@ impl ConnectorLeader {
         Ok(events)
     }
 
-    /// Create precondition event: single event if 1 worker, merge event if N>1.
-    fn create_offload_precondition(
-        &self,
-        worker_events: &HashMap<InstanceId, Arc<dynamo_nova::events::LocalEvent>>,
-    ) -> Result<Option<EventHandle>> {
-        if worker_events.is_empty() {
-            return Ok(None);
-        }
-
-        let handles: Vec<EventHandle> =
-            worker_events.values().map(|event| event.handle()).collect();
-
-        if handles.len() == 1 {
-            Ok(Some(handles[0]))
-        } else {
-            // N>1: Create merge event (spawns task immediately)
-            let merged = self.runtime.nova().events().merge_events(handles)?;
-            Ok(Some(merged))
-        }
-    }
-
     /// Get list of worker instance IDs from WorkerClients.
     fn get_worker_instance_ids(&self) -> Result<Vec<InstanceId>> {
         let workers = self
@@ -408,6 +532,80 @@ impl ConnectorLeader {
             .get()
             .ok_or_else(|| anyhow::anyhow!("Workers not initialized"))?;
         Ok(workers.worker_instance_ids.clone())
+    }
+
+    /// Spawn a unified cleanup task for forward pass completion.
+    ///
+    /// This task:
+    /// 1. Creates and awaits a merge event from all worker events (lazy - only created here if needed)
+    /// 2. Triggers the forward_pass_promise (unblocks any preconditions waiting on it)
+    /// 3. Drops G2 blocks (releases them back to the G2 cache)
+    ///
+    /// By deferring merge event creation to this async task, we avoid spawning
+    /// the merge task unless offload actions were actually scheduled.
+    fn spawn_forward_pass_cleanup_task(
+        &self,
+        worker_events: HashMap<InstanceId, Arc<dynamo_nova::events::LocalEvent>>,
+        forward_pass_promise: Arc<dynamo_nova::events::LocalEvent>,
+        g2_blocks: Vec<ImmutableBlock<G2>>,
+    ) {
+        let nova = self.runtime.nova().clone();
+        let block_count = g2_blocks.len();
+
+        tracing::debug!(
+            block_count,
+            worker_count = worker_events.len(),
+            "Spawning forward pass cleanup task"
+        );
+
+        self.runtime.tokio().spawn(async move {
+            // Step 1: Create and await merge event (lazy - only created now)
+            let handles: Vec<EventHandle> = worker_events.values().map(|e| e.handle()).collect();
+
+            let await_result: Option<Result<(), anyhow::Error>> = if handles.len() == 1 {
+                // Single worker - just await directly
+                match nova.events().awaiter(handles[0]) {
+                    Ok(awaiter) => Some(awaiter.await),
+                    Err(e) => {
+                        tracing::error!("Failed to create awaiter for single worker: {}", e);
+                        None
+                    }
+                }
+            } else if !handles.is_empty() {
+                // Multiple workers - create merge and await
+                match nova.events().merge_events(handles) {
+                    Ok(merge_handle) => match nova.events().awaiter(merge_handle) {
+                        Ok(awaiter) => Some(awaiter.await),
+                        Err(e) => {
+                            tracing::error!("Failed to create merge awaiter: {}", e);
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!("Failed to create merge event: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            if let Some(Err(e)) = await_result {
+                tracing::warn!("Forward pass completion failed: {}", e);
+            }
+
+            // Step 2: Trigger the promise (unblocks preconditions)
+            if let Err(e) = forward_pass_promise.trigger() {
+                tracing::warn!("Failed to trigger forward pass promise: {}", e);
+            }
+
+            // Step 3: Release G2 blocks (implicit via drop)
+            tracing::debug!(
+                block_count,
+                "Released G2 blocks after forward pass completion"
+            );
+            drop(g2_blocks);
+        });
     }
 
     /// Process offload for a single request with optional offset for cached requests.
@@ -427,10 +625,10 @@ impl ConnectorLeader {
         slot: &mut RequestSlot,
         num_scheduled_tokens: usize,
         precondition: Option<EventHandle>,
-    ) -> Result<()> {
+    ) -> Result<OffloadAction> {
         // Skip if slot is marked for deletion or finished evaluating
         if slot.is_marked_for_deletion() || slot.is_finished_evaluating() {
-            return Ok(());
+            return Ok(OffloadAction::NoAction);
         }
 
         // Capture state before evaluation for debug logging
@@ -465,6 +663,10 @@ impl ConnectorLeader {
             .map(|(block_id, seq_hash)| ExternalBlock::<G1>::new(*block_id, *seq_hash))
             .collect();
 
+        if source_blocks.is_empty() {
+            return Ok(OffloadAction::NoAction);
+        }
+
         // Enqueue with precondition
         let handle = self
             .offload_engine
@@ -475,8 +677,13 @@ impl ConnectorLeader {
         // Record offload in slot state
         slot.record_offload(block_mappings, handle)?;
 
-        Ok(())
+        Ok(OffloadAction::InterPassOffloadScheduled)
     }
+}
+
+enum OffloadAction {
+    NoAction,
+    InterPassOffloadScheduled,
 }
 
 impl IterationSession {
@@ -492,12 +699,13 @@ impl KvConnectorMetadata {
     pub fn new(iteration: usize) -> Self {
         Self {
             iteration,
-            forward_pass_events: None,
+            foward_pass_completion_events: None,
+            intra_pass_load: None,
         }
     }
 
     pub fn with_events(mut self, events: HashMap<InstanceId, EventHandle>) -> Self {
-        self.forward_pass_events = Some(events);
+        self.foward_pass_completion_events = Some(events);
         self
     }
 }

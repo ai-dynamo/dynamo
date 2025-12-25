@@ -84,6 +84,13 @@ class SchedulerConnectorWorker:
         self.kvbm_config = kvbm_config
         self.vllm_kv_cache_config = kv_cache_config
         self.kvbm_override_config = kwargs.get("kvbm_override_config", None)
+        self.device_id = None
+
+        # Events
+        # Map of layer name to onboarding event
+        # This is used for intra-pass onboarding
+        self.layer_onboarding_events = {}
+        self.layer_offloading_events = {}
 
         # Build KvbmRuntime with Nova
         self.runtime = KvbmRuntime.build_worker(self.kvbm_override_config)
@@ -127,6 +134,12 @@ class SchedulerConnectorWorker:
         ordered_kv_caches = sorted(
             kv_caches.items(), key=lambda item: extract_layer_index(item[0])
         )
+        self.ordered_kv_caches = ordered_kv_caches
+
+        # Create a mapping of layer name to layer index
+        self.layer_name_to_index = {
+            item[0]: i for i, item in enumerate(ordered_kv_caches)
+        }
 
         # Extract tensors in order
         tensors = [tensor for _, tensor in ordered_kv_caches]
@@ -170,6 +183,7 @@ class SchedulerConnectorWorker:
         # Store device block count and last layer name for later use
         self._num_device_blocks = num_device_blocks
         self._num_layers = len(tensors)
+
         # Get the last layer name from the ordered list
         self._last_layer_name = ordered_kv_caches[-1][0] if ordered_kv_caches else None
         print(
@@ -184,11 +198,14 @@ class SchedulerConnectorWorker:
         print(f"  - Shape: {shape}")
         print("[KVBM] Waiting for leader to trigger initialization...")
 
-    def bind_connector_metadata(self, data: bytes) -> None:
+    def bind_connector_metadata(self, data: bytes) -> bool:
         """
         Bind connector metadata from the leader.
+
+        Returns:
+            True if metadata should be bound, False otherwise.
         """
-        self.worker.bind_connector_metadata(data)
+        return self.worker.bind_connector_metadata(data)
 
     def clear_connector_metadata(self) -> None:
         """
@@ -198,11 +215,11 @@ class SchedulerConnectorWorker:
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """
-        Start loading KV cache - no-op.
+        Start loading KV cache
 
-        No KV loading needed for scheduler connector.
+        If the bound metadata dictates that we should
         """
-        pass
+        self.worker.start_load_kv()
 
     def save_kv_layer(
         self,
@@ -212,31 +229,39 @@ class SchedulerConnectorWorker:
         **kwargs,
     ) -> None:
         """
-        Save KV layer - triggers forward pass completion on last layer.
+        Save KV layer - always callable, returns early if no action needed.
 
         On the last layer, if there's a pending forward pass event,
         we record a CUDA event on the current stream and spawn an async
         task to wait for it before triggering the Nova forward pass event.
         """
-        # Check if this is the last layer (fast string comparison)
-        if layer_name != self._last_layer_name:
-            return
-
-        # Check if Rust needs the stream for event synchronization
-        if not self.worker.needs_cuda_stream():
-            return
+        layer_index = self.layer_name_to_index[layer_name]
 
         # Get the current CUDA stream handle
-        device = kv_layer.device
-        stream = torch.cuda.current_stream(device)
+        stream = torch.cuda.current_stream()
         stream_handle = stream.cuda_stream
 
-        # Call Rust to record event and spawn completion task
-        self.worker.save_kv_layer(stream_handle)
+        # Call Rust - returns early if no action needed for this layer
+        self.worker.save_kv_layer(layer_index, stream_handle)
 
-    def wait_for_layer_load(self, layer_name: str) -> None:
-        """No-op - no async loading."""
-        pass
+    def wait_for_layer_load(
+        self,
+        layer_name: str,
+    ) -> None:
+        """
+        Wait for a specific layer's KV cache load to complete.
+
+        If intra-pass onboarding was triggered, this inserts a cudaStreamWaitEvent
+        on the current torch stream to synchronize with the layer's onboard completion.
+        """
+        layer_index = self.layer_name_to_index[layer_name]
+
+        # Get the current CUDA stream handle
+        stream = torch.cuda.current_stream()
+        stream_handle = stream.cuda_stream
+
+        # Call Rust - returns early if no intra-pass onboarding is active
+        self.worker.wait_for_layer_load(layer_index, stream_handle)
 
     def wait_for_save(self) -> None:
         """No-op - no async saving."""

@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use cudarc::driver::CudaEvent;
 use derive_builder::Builder;
 use futures::future::BoxFuture;
 
@@ -218,6 +219,100 @@ impl DirectWorker {
     /// Import serialized layout metadata into the transfer manager.
     pub fn import_metadata(&self, metadata: SerializedLayout) -> Result<Vec<LayoutHandle>> {
         self.manager.import_metadata(metadata)
+    }
+
+    /// Execute layer-wise local transfer from G2 to G1.
+    ///
+    /// This method transfers blocks from the host cache (G2) to the GPU cache (G1)
+    /// one layer at a time, recording an event after each layer's transfer completes.
+    /// All transfers execute on the same CUDA stream to ensure proper ordering.
+    ///
+    /// The caller provides pre-allocated events that are reused across iterations.
+    /// After calling this method, the caller can use `cudaStreamWaitEvent` on the
+    /// torch stream to synchronize each layer's load before attention computation.
+    ///
+    /// # Arguments
+    /// * `src_block_ids` - Source block IDs in G2 (host cache)
+    /// * `dst_block_ids` - Destination block IDs in G1 (GPU cache)
+    /// * `layer_events` - Pre-allocated CUDA events, one per layer. Must have length == num_layers.
+    ///
+    /// # Returns
+    /// `Ok(())` on success. The caller owns synchronization via the recorded events.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - src_block_ids and dst_block_ids have different lengths
+    /// - layer_events length doesn't match num_layers
+    /// - G1 or G2 handles are not registered
+    /// - Any layer transfer fails
+    pub fn execute_local_layerwise_onboard(
+        &self,
+        src_block_ids: &[BlockId],
+        dst_block_ids: &[BlockId],
+        layer_events: &[Arc<CudaEvent>],
+    ) -> Result<()> {
+        // Validate block ID lengths match
+        if src_block_ids.len() != dst_block_ids.len() {
+            return Err(anyhow::anyhow!(
+                "Block ID length mismatch: src={}, dst={}",
+                src_block_ids.len(),
+                dst_block_ids.len()
+            ));
+        }
+
+        // Get layout handles
+        let g2_handle = self
+            .g2_handle()
+            .ok_or_else(|| anyhow::anyhow!("G2 layout not registered"))?;
+        let g1_handle = self
+            .g1_handle()
+            .ok_or_else(|| anyhow::anyhow!("G1 layout not registered"))?;
+
+        // Get num_layers from layout config
+        let g2_config = self.manager.get_layout_config(g2_handle)?;
+        let num_layers = g2_config.num_layers;
+
+        // Validate layer_events length
+        if layer_events.len() != num_layers {
+            return Err(anyhow::anyhow!(
+                "layer_events length ({}) doesn't match num_layers ({})",
+                layer_events.len(),
+                num_layers
+            ));
+        }
+
+        // Acquire a dedicated stream for all layer transfers
+        let stream = self.manager.context().acquire_h2d_stream();
+
+        tracing::debug!(
+            num_layers,
+            num_blocks = src_block_ids.len(),
+            "Starting layer-wise onboard from G2 to G1"
+        );
+
+        // Execute transfer for each layer and record event
+        for layer in 0..num_layers {
+            // Execute single-layer transfer on our dedicated stream
+            let options = TransferOptions::builder()
+                .layer_range(layer..layer + 1)
+                .cuda_stream(stream.clone())
+                .build()?;
+
+            self.manager.execute_transfer(
+                g2_handle,
+                src_block_ids,
+                g1_handle,
+                dst_block_ids,
+                options,
+            )?;
+
+            // Record event on the stream for this layer
+            layer_events[layer].record(stream.as_ref())?;
+        }
+
+        tracing::debug!(num_layers, "Layer-wise onboard complete - events recorded");
+
+        Ok(())
     }
 }
 

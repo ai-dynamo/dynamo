@@ -13,9 +13,10 @@ impl ConnectorLeader {
         num_computed_tokens: usize,
     ) -> Result<MatchCheckOutcome> {
         let block_size = slot.block_size();
+        let total_tokens = slot.sequence.total_tokens();
 
         // Early exit if we cannot match a full block
-        if (slot.sequence.total_tokens() - num_computed_tokens) < block_size {
+        if (total_tokens - num_computed_tokens) < block_size {
             return Ok(MatchCheckOutcome::NoMatch);
         }
 
@@ -34,7 +35,15 @@ impl ConnectorLeader {
             assert!(num_computed_tokens.is_multiple_of(block_size));
             let num_device_blocks = num_computed_tokens / block_size;
 
-            let search_sequence_hashes = &sequence_hashes[num_device_blocks..];
+            // If the total number of tokens is an even multiple of the block size,
+            // then we do not include the last full block in the search.
+            let last_block_index = if total_tokens.is_multiple_of(block_size) {
+                (total_tokens / block_size) - 1
+            } else {
+                total_tokens / block_size
+            };
+
+            let search_sequence_hashes = &sequence_hashes[num_device_blocks..last_block_index];
 
             let options = FindMatchesOptions {
                 search_remote: true,
@@ -48,7 +57,7 @@ impl ConnectorLeader {
 
             match instance_leader.find_matches_with_options(search_sequence_hashes, options) {
                 Ok(result) => {
-                    if let Err(e) = slot.txn_prepare_to_onboard(result) {
+                    if let Err(e) = slot.txn_prepare_to_onboard(num_computed_tokens, result) {
                         tracing::error!("Failed to set find session: {}", e);
                         bail!("Failed to set find session: {}", e);
                     }

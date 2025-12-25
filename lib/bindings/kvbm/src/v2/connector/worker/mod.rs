@@ -116,11 +116,19 @@ impl PyConnectorWorker {
     ///
     /// Args:
     ///     data: The connector metadata bytes
-    pub fn bind_connector_metadata(&self, data: Vec<u8>) -> PyResult<()> {
+    pub fn bind_connector_metadata(&self, data: Vec<u8>) -> PyResult<bool> {
         let metadata: KvConnectorMetadata = serde_json::from_slice(&data).map_err(to_pyerr)?;
-        self.inner
-            .bind_connector_metadata(metadata)
-            .map_err(to_pyerr)
+
+        // todo: add a method on KvConnectorMetadata to check if it should be bound
+        // todo: change the return type to bool
+        // todo: binding if should_bind is true and return true; otherwise return false
+        if metadata.should_bind() {
+            self.inner
+                .bind_connector_metadata(metadata)
+                .map_err(to_pyerr)?;
+            return Ok(true);
+        }
+        return Ok(false);
     }
 
     /// Clear connector metadata.
@@ -131,27 +139,44 @@ impl PyConnectorWorker {
         self.inner.clear_connector_metadata().map_err(to_pyerr)
     }
 
-    /// Check if we need a CUDA stream for event synchronization.
+    /// Save KV layer and trigger forward pass completion on last layer.
     ///
-    /// Returns True if there's a pending forward pass event that needs
-    /// to be synchronized via CUDA event before triggering.
-    /// Python should call this and only call save_kv_layer if True.
-    pub fn needs_cuda_stream(&self) -> bool {
-        self.inner.needs_cuda_stream()
-    }
-
-    /// Save KV layer and trigger forward pass completion.
-    ///
-    /// This should be called on the last layer's save_kv_layer when
-    /// needs_cuda_stream() returns True. It records a CUDA event on
-    /// the provided stream and spawns an async task that waits for
-    /// the event before triggering the Nova forward pass event.
+    /// Always callable - returns immediately if no action is needed for this layer.
+    /// On the last layer with a pending forward pass event, records a CUDA event
+    /// on the provided stream and spawns an async task that waits for the event
+    /// before triggering the Nova forward pass event.
     ///
     /// Args:
+    ///     layer_index: The layer index being saved
     ///     stream_handle: Raw CUDA stream handle (u64) from Python's current stream
     ///                   Obtained via: torch.cuda.current_stream().cuda_stream
-    pub fn save_kv_layer(&self, stream_handle: u64) -> PyResult<()> {
-        self.inner.save_kv_layer(stream_handle).map_err(to_pyerr)
+    pub fn save_kv_layer(&self, layer_index: usize, stream_handle: u64) -> PyResult<()> {
+        self.inner
+            .save_kv_layer(layer_index, stream_handle)
+            .map_err(to_pyerr)
+    }
+
+    /// Start loading KV cache.
+    ///
+    /// If the bound metadata dictates that we should start loading KV cache,
+    /// this function will trigger the loading of the KV cache.
+    pub fn start_load_kv(&self) -> PyResult<()> {
+        self.inner.start_load_kv().map_err(to_pyerr)
+    }
+
+    /// Wait for a specific layer's KV cache load to complete.
+    ///
+    /// If intra-pass onboarding was triggered in start_load_kv, this method
+    /// inserts a cudaStreamWaitEvent on the provided torch stream to synchronize
+    /// with the layer's onboard completion.
+    ///
+    /// Args:
+    ///     layer_index: The layer index to wait for
+    ///     stream_handle: Raw CUDA stream handle (u64) from Python's current torch stream
+    pub fn wait_for_layer_load(&self, layer_index: usize, stream_handle: u64) -> PyResult<()> {
+        self.inner
+            .wait_for_layer_load(layer_index, stream_handle)
+            .map_err(to_pyerr)
     }
 
     /// Get completed transfer request IDs (drains the sets).

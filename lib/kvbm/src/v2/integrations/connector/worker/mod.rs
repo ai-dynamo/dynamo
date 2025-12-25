@@ -1,39 +1,61 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-mod client;
-mod pending;
+//! There are four action that the [`ConnectorWorker`] is allowed to perform:
+//!
+//! 1. Intra-Pass Onboarding
+//!    - This action is triggered by the presence of an onboarding message from the leader and is detected
+//!      while binding the [`KvConnectorMetadata`].
+//!    - The presence of this action evaluated during the call to start_load_kv
+//!    - The metadata will contain the G2 source block_ids and G1 destination block_ids.
+//!    - Using a TransferManager CudaStream, each layer will be triggered with pre-defined set of events
+//!      being recorded between each layer.
+//!    - On wait_for_layer_load, the worker will inject a cuda stream wait event on the torch.cuda.current_stream()
+//!      corresponding to the specific event recorded for the specific layer's onboard in start_load_kv.
+//!    - CUDA will ensure that the the next attention layer will not start until the the onboarding for that layer
+//!      is complete.
+//! 2. Inter-Pass Onboarding
+//!    - The NovaWorkerService performs this action via the wrapped DirectWorker.
+//!    - This is performed out-of-band from the forward pass execution and is driven by the leader.
+//!    - The completion of this action is another active message from the leader that updates the
+//!      finished_state of the worker which which be observed via calls to get_finished.
+//! 3. Issue Forward Pass Completion Notificaiton back to the leader
+//!    - As part of the [`KvConnectorMetadata`], an optional ForwardPassCompletionEvent will be provided
+//!      from the leader.
+//!    - On binding the metadata, the action will be armed and triggered on the last call to save_kv_layer.
+//!      - The arming of the action is the creation of CudaEvent on bindings
+//!      - The triggering is to record the CudaEvent on the Torch CUDA stream on the last call to save_kv_layer;
+//!        the event immediately pass to an async task which await on the completion, then triggers the Nova
+//!        active message to trigger the EventHandle specific to the worker's rank back to the leader.
+//!    - The ForwardPassCompletionEvent is used as a precondition for leader initiated action that require the
+//!      forward pass completion event to be triggered.
+//! 4. Perform direct layer-wise offloads
+//!    - Future optimization for P/D offloading from prefill to decode.
 
-use bytes::Bytes;
-pub use client::ConnectorWorkerClient;
-pub use pending::PendingWorkerState;
+mod init;
+mod nova;
+mod state;
+
+pub use nova::client::ConnectorWorkerClient;
+
+use init::PendingWorkerState;
+use state::{WorkerDetails, WorkerState};
 
 use anyhow::{Result, bail};
 use cudarc::driver::sys::{
-    CUevent, CUevent_flags, CUresult, CUstream, cuEventCreate, cuEventQuery, cuEventRecord,
-    cudaError_enum,
+    CUevent, CUresult, CUstream, cuEventQuery, cuEventRecord, cuStreamWaitEvent, cudaError_enum,
 };
 use dynamo_memory::TensorDescriptor;
-use dynamo_nova::Nova;
-use dynamo_nova::am::NovaHandler;
-use serde::{Deserialize, Serialize};
+use parking_lot::Mutex;
 use std::collections::HashSet;
-use std::ptr;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use crate::KvbmRuntime;
-use crate::v2::BlockId;
-use crate::v2::distributed::worker::{
-    DirectWorker, LeaderLayoutConfig, NovaWorkerService, WorkerLayoutResponse,
-};
+use crate::v2::distributed::worker::DirectWorker;
 use crate::v2::integrations::connector::leader::scheduler::KvConnectorMetadata;
 use crate::v2::integrations::vllm::layout::determine_kv_layout;
-
-pub const ONBOARD_COMPLETE_HANDLER: &str = "kvbm.connector.worker.onboard_complete";
-pub const OFFLOAD_COMPLETE_HANDLER: &str = "kvbm.connector.worker.offload_complete";
-pub const FAILED_ONBOARD_HANDLER: &str = "kvbm.connector.worker.failed_onboard";
-pub const GET_LAYOUT_CONFIG_HANDLER: &str = "kvbm.connector.worker.get_layout_config";
-pub const INITIALIZE_HANDLER: &str = "kvbm.connector.worker.initialize";
 
 pub trait ConnectorWorkerInterface: Send + Sync {
     /// Register KV cache tensors (deferred mode - caches state for later).
@@ -51,22 +73,34 @@ pub trait ConnectorWorkerInterface: Send + Sync {
     /// Clear connector metadata.
     fn clear_connector_metadata(&self) -> Result<()>;
 
-    /// Check if we need a CUDA stream for event synchronization.
+    /// Start loading KV cache.
     ///
-    /// Returns `true` if there's a pending forward pass event that needs
-    /// to be synchronized via CUDA event before triggering.
-    fn needs_cuda_stream(&self) -> bool;
+    /// If the bound metadata dictates that we should start loading KV cache,
+    /// this function will trigger the loading of the KV cache.
+    fn start_load_kv(&self) -> Result<()>;
 
     /// Save KV layer and trigger forward pass completion on last layer.
     ///
-    /// This should be called on the last layer's save_kv_layer.
-    /// It records the pre-created CUDA event on the provided stream,
-    /// then spawns an async task that waits for the event and triggers
-    /// the Nova forward pass event.
+    /// Always callable - returns immediately if no action is needed for this layer.
+    /// On the last layer, records a CUDA event and spawns a task to trigger
+    /// the Nova forward pass completion event.
     ///
     /// # Arguments
+    /// * `layer_index` - The layer index being saved
     /// * `stream_handle` - Raw CUDA stream handle (u64) from Python's current stream
-    fn save_kv_layer(&self, stream_handle: u64) -> Result<()>;
+    fn save_kv_layer(&self, layer_index: usize, stream_handle: u64) -> Result<()>;
+
+    /// Wait for a specific layer's KV cache load to complete.
+    ///
+    /// If intra-pass onboarding was triggered in `start_load_kv`, this method
+    /// inserts a `cudaStreamWaitEvent` on the provided torch stream to synchronize
+    /// with the layer's onboard completion. This ensures the attention computation
+    /// for this layer doesn't start until its KV cache data is available.
+    ///
+    /// # Arguments
+    /// * `layer_index` - The layer index to wait for
+    /// * `stream_handle` - Raw CUDA stream handle (u64) from Python's current torch stream
+    fn wait_for_layer_load(&self, layer_index: usize, stream_handle: u64) -> Result<()>;
 
     /// Check if initialization has been completed.
     fn is_initialized(&self) -> bool;
@@ -78,65 +112,6 @@ pub trait ConnectorWorkerInterface: Send + Sync {
 
     /// Get and drain all failed onboarding block IDs.
     fn get_failed_onboarding(&self) -> HashSet<usize>;
-}
-
-/// Tracks completed operations for worker-side reporting.
-///
-/// The leader populates this via `mark_onboarding_complete()` and
-/// `mark_offloading_complete()` after detecting that transfers have finished.
-/// The worker executor drains via `take_finished()` to report completed requests.
-#[derive(Default, Debug)]
-pub struct FinishedState {
-    finished_onboarding: Mutex<HashSet<String>>,
-    finished_offloading: Mutex<HashSet<String>>,
-    failed_onboarding: Mutex<HashSet<usize>>,
-}
-
-impl FinishedState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn mark_onboarding_complete(&self, request_id: String) {
-        self.finished_onboarding.lock().unwrap().insert(request_id);
-    }
-
-    pub fn mark_offloading_complete(&self, request_id: String) {
-        self.finished_offloading.lock().unwrap().insert(request_id);
-    }
-
-    pub fn take_finished(&self) -> (HashSet<String>, HashSet<String>) {
-        let offloading = std::mem::take(&mut *self.finished_offloading.lock().unwrap());
-        let onboarding = std::mem::take(&mut *self.finished_onboarding.lock().unwrap());
-        (offloading, onboarding)
-    }
-
-    pub fn mark_failed_onboarding(&self, block_ids: Vec<BlockId>) {
-        self.failed_onboarding.lock().unwrap().extend(block_ids);
-    }
-
-    pub fn take_failed_onboarding(&self) -> HashSet<usize> {
-        std::mem::take(&mut *self.failed_onboarding.lock().unwrap())
-    }
-}
-
-/// Message sent by leader to workers when onboarding completes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OnboardCompleteMessage {
-    pub request_id: String,
-}
-
-/// Message sent by leader to workers when offloading completes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OffloadCompleteMessage {
-    pub request_id: String,
-}
-
-/// Message sent by leader to workers when onboarding fails for specific blocks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FailedOnboardMessage {
-    pub request_id: String,
-    pub block_ids: Vec<BlockId>,
 }
 
 /// GPU information for the worker, used for logging and debugging.
@@ -155,29 +130,6 @@ impl GpuInfo {
     }
 }
 
-/// Paired forward pass events: Nova event handle + CUDA event for synchronization.
-///
-/// These are created together in `bind_connector_metadata` when a forward pass
-/// event is present. The CUDA event is recorded on the stream in `save_kv_layer`,
-/// then an async task waits for the CUDA event before triggering the Nova event.
-struct ForwardPassEvents {
-    nova_event: dynamo_nova::events::EventHandle,
-    /// Raw CUDA event handle stored as u64 for Send/Sync safety
-    cuda_event: u64,
-}
-
-/// Shared state for the connector worker, wrapped in Arc for handler sharing.
-struct SharedWorkerState {
-    runtime: Arc<KvbmRuntime>,
-    pending_state: Mutex<Option<PendingWorkerState>>,
-    service: OnceLock<NovaWorkerService>,
-    gpu_info: OnceLock<GpuInfo>,
-    finished_state: FinishedState,
-    /// Current iteration's forward pass events (Nova + CUDA pair).
-    /// Created in `bind_connector_metadata`, consumed in `save_kv_layer`.
-    forward_pass_events: Mutex<Option<ForwardPassEvents>>,
-}
-
 /// Connector worker implementation that uses Nova for communication and
 /// NIXL for RDMA transfers.
 ///
@@ -185,7 +137,22 @@ struct SharedWorkerState {
 /// - `register_kv_caches` only caches tensor state
 /// - Leader calls `configure_layouts` RPC to complete initialization
 pub struct ConnectorWorker {
-    state: Arc<SharedWorkerState>,
+    runtime: Arc<KvbmRuntime>,
+    state: Arc<WorkerState>,
+    metadata: Mutex<Option<KvConnectorMetadata>>,
+    /// Flag indicating whether intra-pass onboarding is active for this iteration.
+    /// Set to true in start_load_kv when metadata has intra_pass_load,
+    /// used by wait_for_layer_load to decide whether to insert cudaStreamWaitEvent.
+    intra_pass_onboard_active: Arc<AtomicBool>,
+    /// Flag indicating whether forward pass completion notification is active.
+    /// Set to true in bind_connector_metadata when a Nova event is present,
+    /// used by save_kv_layer to decide whether to record events.
+    forward_pass_completion_active: Arc<AtomicBool>,
+    /// Flag for direct offloading (stub for future use, always false for now).
+    is_direct_offloading_active: Arc<AtomicBool>,
+
+    /// Start Forward Pass
+    forward_pass_start: Mutex<Option<Instant>>,
 }
 
 impl ConnectorWorker {
@@ -194,23 +161,21 @@ impl ConnectorWorker {
     /// Registers the `kvbm.connector.configure_layouts` handler immediately
     /// so the leader can trigger initialization via RPC.
     pub fn new(runtime: Arc<KvbmRuntime>) -> Self {
-        let state = Arc::new(SharedWorkerState {
-            runtime,
-            pending_state: Mutex::new(None),
-            service: OnceLock::new(),
-            gpu_info: OnceLock::new(),
-            finished_state: FinishedState::new(),
-            forward_pass_events: Mutex::new(None),
-        });
-
-        let nova = state.runtime.nova.clone();
+        let nova = runtime.nova.clone();
+        let state = Arc::new(WorkerState::new(Arc::clone(&runtime)));
 
         // Register handlers
-        Self::register_initialize_handler(&nova, Arc::clone(&state));
-        Self::register_completion_handlers(&nova, Arc::clone(&state));
-        Self::register_get_layout_config_handler(&nova, Arc::clone(&state));
+        nova::service::init(&nova, Arc::clone(&state));
 
-        Self { state }
+        Self {
+            runtime,
+            state,
+            metadata: Mutex::new(None),
+            intra_pass_onboard_active: Arc::new(AtomicBool::new(false)),
+            forward_pass_completion_active: Arc::new(AtomicBool::new(false)),
+            is_direct_offloading_active: Arc::new(AtomicBool::new(false)),
+            forward_pass_start: Mutex::new(None),
+        }
     }
 
     /// Get the DirectWorker if initialized.
@@ -221,275 +186,114 @@ impl ConnectorWorker {
     /// Get serialized handshake metadata for sending to leader.
     /// Returns the layout_config JSON bytes.
     pub fn handshake_metadata(&self) -> Result<Vec<u8>> {
-        let guard = self.state.pending_state.lock().unwrap();
-        match guard.as_ref() {
-            Some(pending) => Ok(serde_json::to_vec(&pending.layout_config)?),
-            None => bail!("No pending state - call register_kv_caches first"),
-        }
+        self.state.pending_layout_config()
     }
 
     #[cfg(test)]
     #[expect(dead_code)]
     pub(crate) fn runtime(&self) -> &Arc<KvbmRuntime> {
-        &self.state.runtime
+        self.state.runtime()
     }
 
-    /// Register the configure_layouts handler for leader-driven initialization.
+    fn num_layers(&self) -> usize {
+        self.state
+            .details
+            .get()
+            .expect("details not set")
+            .num_layers
+    }
+
+    /// Check if we need to perform any offload action for this layer.
     ///
-    /// This handler is called by the leader after collecting handshake metadata.
-    /// It completes NIXL registration and creates G1/G2/G3 layouts.
-    fn register_initialize_handler(nova: &Arc<Nova>, state: Arc<SharedWorkerState>) {
-        let handler = NovaHandler::typed_unary_async(INITIALIZE_HANDLER, move |ctx| {
-            let state = Arc::clone(&state);
+    /// Returns true if:
+    /// - Direct offloading is active (future - currently stubbed as false), OR
+    /// - Forward pass completion is active AND this is the last layer
+    fn needs_offload_action(&self, layer_index: usize) -> bool {
+        // Stub for future direct offloading support
+        let is_direct_offloading = self.is_direct_offloading_active.load(Ordering::Relaxed);
 
-            async move {
-                let config: LeaderLayoutConfig = ctx.input;
-                state.initialize(config)
-            }
-        })
-        .build();
+        // Forward pass completion triggers on last layer only
+        let is_last_layer = layer_index == self.num_layers() - 1;
+        let forward_pass_on_last =
+            self.forward_pass_completion_active.load(Ordering::Relaxed) && is_last_layer;
 
-        if let Err(e) = nova.register_handler(handler) {
-            tracing::error!("Failed to register configure_layouts handler: {}", e);
-        }
+        is_direct_offloading || forward_pass_on_last
     }
 
-    /// Register completion handlers for leader notifications.
-    fn register_completion_handlers(nova: &Arc<Nova>, state: Arc<SharedWorkerState>) {
-        // Handler: "kvbm.connector.worker.onboard_complete"
-        let onboard_state = Arc::clone(&state);
-        let onboard_handler =
-            NovaHandler::typed_unary_async(ONBOARD_COMPLETE_HANDLER, move |ctx| {
-                let state = Arc::clone(&onboard_state);
-                async move {
-                    let msg: OnboardCompleteMessage = ctx.input;
-                    tracing::debug!(request_id = %msg.request_id, "Worker received onboard complete");
-                    state
-                        .finished_state
-                        .mark_onboarding_complete(msg.request_id);
-                    Ok(())
-                }
-            })
-            .build();
+    /// Perform offload actions for the given layer.
+    ///
+    /// This is called from `save_kv_layer` when `needs_offload_action` returns true.
+    /// Actions performed:
+    /// - Record CUDA event on the stream for this layer
+    /// - On last layer with forward pass completion: spawn task to trigger Nova event
+    fn perform_offload_action(&self, layer_index: usize, stream_handle: u64) -> Result<()> {
+        let is_last_layer = layer_index == self.num_layers() - 1;
+        let forward_pass_active = self.forward_pass_completion_active.load(Ordering::Relaxed);
 
-        if let Err(e) = nova.register_handler(onboard_handler) {
-            tracing::error!("Failed to register onboard_complete handler: {}", e);
+        // Get pre-allocated save layer events
+        let layer_events = self.state.save_layer_events()?;
+
+        // Validate layer_index
+        if layer_index >= layer_events.len() {
+            return Err(anyhow::anyhow!(
+                "layer_index {} out of range (num_layers={})",
+                layer_index,
+                layer_events.len()
+            ));
         }
 
-        // Handler: "kvbm.connector.worker.offload_complete"
-        let offload_state = Arc::clone(&state);
-        let offload_handler =
-            NovaHandler::typed_unary_async(OFFLOAD_COMPLETE_HANDLER, move |ctx| {
-                let state = Arc::clone(&offload_state);
-                async move {
-                    let msg: OffloadCompleteMessage = ctx.input;
-                    tracing::debug!(request_id = %msg.request_id, "Worker received offload complete");
-                    state
-                        .finished_state
-                        .mark_offloading_complete(msg.request_id);
-                    Ok(())
-                }
-            })
-            .build();
+        let event = &layer_events[layer_index];
 
-        if let Err(e) = nova.register_handler(offload_handler) {
-            tracing::error!("Failed to register offload_complete handler: {}", e);
-        }
-
-        // Handler: "kvbm.connector.worker.failed_onboard"
-        let failed_state = state;
-        let failed_handler = NovaHandler::typed_unary_async(FAILED_ONBOARD_HANDLER, move |ctx| {
-            let state = Arc::clone(&failed_state);
-            async move {
-                let msg: FailedOnboardMessage = ctx.input;
-                tracing::debug!(
-                    request_id = %msg.request_id,
-                    block_ids = ?msg.block_ids,
-                    "Worker received failed onboard notification"
-                );
-                state.finished_state.mark_failed_onboarding(msg.block_ids);
-                Ok(())
-            }
-        })
-        .build();
-
-        if let Err(e) = nova.register_handler(failed_handler) {
-            tracing::error!("Failed to register failed_onboard handler: {}", e);
-        }
-    }
-
-    fn register_get_layout_config_handler(nova: &Arc<Nova>, state: Arc<SharedWorkerState>) {
-        let handler = NovaHandler::unary_handler_async(GET_LAYOUT_CONFIG_HANDLER, move |_ctx| {
-            let state = Arc::clone(&state);
-            async move {
-                let guard = state.pending_state.lock().unwrap();
-                match guard.as_ref() {
-                    Some(pending) => {
-                        let config = pending.layout_config.clone();
-                        Ok(Some(Bytes::from(serde_json::to_vec(&config)?)))
-                    }
-                    None => bail!("No pending state - call register_kv_caches first"),
-                }
-            }
-        })
-        .build();
-
-        if let Err(e) = nova.register_handler(handler) {
-            tracing::error!("Failed to register get_layout_config handler: {}", e);
-        }
-    }
-}
-
-impl ConnectorWorkerInterface for ConnectorWorker {
-    #[tracing::instrument(level = "debug", skip_all, fields(instance_id = ?self.state.runtime.nova.instance_id()))]
-    fn register_kv_caches(
-        &self,
-        tensors: Vec<Arc<dyn TensorDescriptor>>,
-        num_device_blocks: usize,
-        page_size: usize,
-        dtype_width_bytes: usize,
-    ) -> Result<()> {
-        // Prevent double registration
-        if self.state.service.get().is_some() {
-            bail!("KV caches already registered");
-        }
-        if self.state.pending_state.lock().unwrap().is_some() {
-            bail!("KV caches already pending registration");
-        }
-
-        // Determine layout from tensor shapes
-        let (layout_config, block_dim) =
-            determine_kv_layout(num_device_blocks, page_size, dtype_width_bytes, &tensors)?;
-
-        tracing::debug!(
-            ?layout_config,
-            ?block_dim,
-            "Determined KV layout configuration"
-        );
-
-        // Create pending state (validates tensors internally)
-        let pending = PendingWorkerState::new(
-            tensors,
-            num_device_blocks,
-            page_size,
-            dtype_width_bytes,
-            layout_config,
-            block_dim,
-        )?;
-
-        // Store GPU info for logging
-        let _ = self.state.gpu_info.set(pending.gpu_info.clone());
-
-        tracing::info!(
-            cuda_device = pending.cuda_device_id,
-            gpu_uuid = ?pending.gpu_info.uuid,
-            num_tensors = pending.tensors.len(),
-            num_device_blocks,
-            page_size,
-            dtype_width_bytes,
-            "KV caches registered (deferred mode - waiting for leader RPC)"
-        );
-
-        *self.state.pending_state.lock().unwrap() = Some(pending);
-
-        Ok(())
-    }
-
-    fn bind_connector_metadata(&self, metadata: KvConnectorMetadata) -> Result<()> {
-        tracing::debug!(iteration = metadata.iteration, "Binding connector metadata");
-
-        // Load forward pass event if present and create paired CUDA event
-        if let Some(event_map) = metadata.forward_pass_events {
-            let my_instance_id = self.state.runtime.nova().instance_id();
-
-            if let Some(&nova_event) = event_map.get(&my_instance_id) {
-                // Create a CUDA event for synchronization (disabled timing for performance)
-                let cuda_event: u64 = unsafe {
-                    let mut event: CUevent = ptr::null_mut();
-                    let status =
-                        cuEventCreate(&mut event, CUevent_flags::CU_EVENT_DISABLE_TIMING as u32);
-                    if status != cudaError_enum::CUDA_SUCCESS {
-                        bail!("cuEventCreate failed with status: {:?}", status);
-                    }
-                    event as u64
-                };
-
-                tracing::debug!(
-                    ?nova_event,
-                    cuda_event,
-                    "Created paired forward pass events"
-                );
-
-                *self.state.forward_pass_events.lock().unwrap() = Some(ForwardPassEvents {
-                    nova_event,
-                    cuda_event,
-                });
-            }
-        }
-
-        Ok(())
-    }
-
-    fn clear_connector_metadata(&self) -> Result<()> {
-        tracing::debug!("Clearing connector metadata");
-
-        // Verify that forward pass events have been consumed by save_kv_layer
-        let events = self.state.forward_pass_events.lock().unwrap().take();
-        if events.is_some() {
-            // todo: if wthere are no worker actions, remove the event from the leaders metadata message
-            tracing::trace!(
-                "Forward pass events not consumed - save_kv_layer may not have been called on last layer"
-            );
-            // Don't bail here - this could happen if there was an error during forward pass
-            // The events will be cleaned up on next bind_connector_metadata
-        }
-
-        Ok(())
-    }
-
-    fn needs_cuda_stream(&self) -> bool {
-        self.state.forward_pass_events.lock().unwrap().is_some()
-    }
-
-    fn save_kv_layer(&self, stream_handle: u64) -> Result<()> {
-        // Take the paired events
-        let events = self
-            .state
-            .forward_pass_events
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No forward pass events - needs_cuda_stream() should have returned false"
-                )
-            })?;
-
-        tracing::debug!(
-            ?events.nova_event,
-            cuda_event = events.cuda_event,
-            stream_handle,
-            "Recording CUDA event on stream and spawning completion task"
-        );
-
-        // Record the CUDA event on the provided stream
+        // Record CUDA event on the provided stream
         unsafe {
-            let status = cuEventRecord(events.cuda_event as CUevent, stream_handle as CUstream);
+            let status = cuEventRecord(event.cu_event(), stream_handle as CUstream);
             if status != cudaError_enum::CUDA_SUCCESS {
                 bail!("cuEventRecord failed with status: {:?}", status);
             }
         }
 
-        // Spawn async task to wait for CUDA event then trigger Nova event
-        let nova = self.state.runtime.nova().clone();
-        let nova_event = events.nova_event;
-        let cuda_event = events.cuda_event;
+        tracing::trace!(layer_index, "Recorded save layer CUDA event");
 
-        self.state.runtime.nova().tracker().spawn_on(
+        // If direct offloading is active, perform enqueue into a kvbm stream the event and the offload action
+        // to take once the event is complete.
+        // todo: add method to DirectWorker for this operation. - this will be a local operation from g1 -> g2
+        // note: the operation might be a permute kernel if we are gathering or scattering kv to remote workers
+        // with different tensor parallel world sizes.
+
+        // On last layer with forward pass completion: spawn task to trigger Nova
+        if is_last_layer && forward_pass_active {
+            self.trigger_forward_pass_completion(event.clone())?;
+        }
+
+        Ok(())
+    }
+
+    /// Spawn async task to wait for CUDA event then trigger Nova forward pass event.
+    fn trigger_forward_pass_completion(
+        &self,
+        cuda_event: Arc<cudarc::driver::CudaEvent>,
+    ) -> Result<()> {
+        // Take the Nova event handle
+        let nova_event = self.state.take_forward_pass_nova_event().ok_or_else(|| {
+            anyhow::anyhow!(
+                "No Nova event handle - forward_pass_completion_active was true but no event set"
+            )
+        })?;
+
+        let nova = self.runtime.nova().clone();
+        let cuda_event_handle = cuda_event.cu_event() as u64;
+
+        tracing::debug!(
+            ?nova_event,
+            cuda_event = cuda_event_handle,
+            "Spawning forward pass completion task"
+        );
+
+        self.runtime.nova().tracker().spawn_on(
             async move {
                 // Poll the CUDA event until complete
                 loop {
-                    let status = unsafe { cuEventQuery(cuda_event as CUevent) };
+                    let status = unsafe { cuEventQuery(cuda_event_handle as CUevent) };
                     match status {
                         CUresult::CUDA_SUCCESS => break,
                         CUresult::CUDA_ERROR_NOT_READY => {
@@ -508,16 +312,215 @@ impl ConnectorWorkerInterface for ConnectorWorker {
                 if let Err(e) = nova.events().trigger(nova_event).await {
                     tracing::error!("Failed to trigger forward pass event: {}", e);
                 }
-
-                // Note: We don't call cuEventDestroy here because it will be handled
-                // when the task completes. The event was created in bind_connector_metadata
-                // and ownership was transferred to this task.
-                // TODO: Consider explicit cleanup with cuEventDestroy
             },
-            &self.state.runtime.tokio(),
+            &self.runtime.tokio(),
         );
 
         Ok(())
+    }
+}
+
+impl ConnectorWorkerInterface for ConnectorWorker {
+    #[tracing::instrument(level = "debug", skip_all, fields(instance_id = ?self.runtime.nova.instance_id()))]
+    fn register_kv_caches(
+        &self,
+        tensors: Vec<Arc<dyn TensorDescriptor>>,
+        num_device_blocks: usize,
+        page_size: usize,
+        dtype_width_bytes: usize,
+    ) -> Result<()> {
+        // Prevent double registration
+        if self.state.service.get().is_some() {
+            bail!("KV caches already registered");
+        }
+        if self.state.has_pending_state() {
+            bail!("KV caches already pending registration");
+        }
+        if self.state.details.get().is_some() {
+            bail!("Worker details already set");
+        }
+
+        // Determine layout from tensor shapes
+        let (layout_config, block_dim) =
+            determine_kv_layout(num_device_blocks, page_size, dtype_width_bytes, &tensors)?;
+
+        tracing::debug!(
+            ?layout_config,
+            ?block_dim,
+            "Determined KV layout configuration"
+        );
+
+        // Create pending state (validates tensors internally)
+        let pending = PendingWorkerState::builder()
+            .tensors(tensors)
+            .num_device_blocks(num_device_blocks)
+            .page_size(page_size)
+            .dtype_width_bytes(dtype_width_bytes)
+            .layout_config(layout_config)
+            .block_dim(block_dim)
+            .build()?;
+
+        let details = WorkerDetails {
+            num_layers: pending.tensors.len(),
+        };
+
+        tracing::info!(
+            cuda_device = pending.cuda_device_id,
+            num_tensors = pending.tensors.len(),
+            num_device_blocks,
+            page_size,
+            dtype_width_bytes,
+            "KV caches registered (deferred mode - waiting for leader RPC)"
+        );
+
+        self.state.set_pending_state(pending)?;
+
+        self.state
+            .details
+            .set(details)
+            .map_err(|_| anyhow::anyhow!("details already set"))?;
+
+        Ok(())
+    }
+
+    fn bind_connector_metadata(&self, metadata: KvConnectorMetadata) -> Result<()> {
+        tracing::debug!(iteration = metadata.iteration, "Binding connector metadata");
+
+        // Store Nova event handle if present (we use pre-allocated CUDA events now)
+        if let Some(event_map) = &metadata.foward_pass_completion_events {
+            let my_instance_id = self.state.runtime().nova().instance_id();
+
+            if let Some(&nova_event) = event_map.get(&my_instance_id) {
+                tracing::debug!(?nova_event, "Storing forward pass Nova event");
+                self.state.set_forward_pass_nova_event(nova_event);
+                self.forward_pass_completion_active
+                    .store(true, Ordering::Relaxed);
+            }
+        }
+
+        tracing::info!("Forward pass start: {:?}", metadata);
+
+        // Store the metadata for use by start_load_kv
+        *self.metadata.lock() = Some(metadata);
+
+        Ok(())
+    }
+
+    fn clear_connector_metadata(&self) -> Result<()> {
+        tracing::debug!("Clearing connector metadata");
+
+        // Verify that Nova event has been consumed by save_kv_layer (on last layer)
+        if self.state.take_forward_pass_nova_event().is_some() {
+            // This could happen if there was an error during forward pass
+            // or if no layers were processed. Log but don't fail.
+            tracing::trace!(
+                "Forward pass Nova event not consumed - save_kv_layer may not have been called on last layer"
+            );
+        }
+
+        // Clear metadata and reset atomic flags
+        *self.metadata.lock() = None;
+        self.intra_pass_onboard_active
+            .store(false, Ordering::Relaxed);
+        self.forward_pass_completion_active
+            .store(false, Ordering::Relaxed);
+        self.is_direct_offloading_active
+            .store(false, Ordering::Relaxed);
+
+        Ok(())
+    }
+
+    fn start_load_kv(&self) -> Result<()> {
+        // Check if metadata has intra-pass load request
+        let intra_pass_load = {
+            let mut metadata_guard = self.metadata.lock();
+            metadata_guard
+                .as_mut()
+                .and_then(|m| m.intra_pass_load.take())
+        };
+
+        *self.forward_pass_start.lock() = Some(Instant::now());
+
+        if let Some(load) = intra_pass_load {
+            tracing::debug!(
+                g2_blocks = load.g2_src_block_ids.len(),
+                g1_blocks = load.g1_dst_block_ids.len(),
+                "Starting intra-pass layer-wise onboard from G2 to G1"
+            );
+
+            // Get the DirectWorker
+            let worker = self
+                .worker()
+                .ok_or_else(|| anyhow::anyhow!("Worker not initialized"))?;
+
+            // Get pre-allocated layer events
+            let layer_events = self.state.onboard_layer_events()?;
+
+            // Execute layer-wise onboard
+            worker.execute_local_layerwise_onboard(
+                &load.g2_src_block_ids,
+                &load.g1_dst_block_ids,
+                layer_events,
+            )?;
+
+            // Set flag so wait_for_layer_load knows to sync
+            self.intra_pass_onboard_active
+                .store(true, Ordering::Relaxed);
+
+            tracing::debug!("Intra-pass onboard initiated - events recorded on transfer stream");
+        }
+
+        Ok(())
+    }
+
+    fn wait_for_layer_load(&self, layer_index: usize, stream_handle: u64) -> Result<()> {
+        // Only insert wait if intra-pass onboarding is active
+        if !self.intra_pass_onboard_active.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        // Get the pre-allocated layer events
+        let layer_events = self.state.onboard_layer_events()?;
+
+        // Validate layer_index
+        if layer_index >= layer_events.len() {
+            return Err(anyhow::anyhow!(
+                "layer_index {} out of range (num_layers={})",
+                layer_index,
+                layer_events.len()
+            ));
+        }
+
+        let event = &layer_events[layer_index];
+
+        // Insert cudaStreamWaitEvent to make torch stream wait for this layer's onboard
+        unsafe {
+            let status = cuStreamWaitEvent(
+                stream_handle as CUstream,
+                event.cu_event(),
+                0, // flags = 0
+            );
+            if status != cudaError_enum::CUDA_SUCCESS {
+                bail!("cuStreamWaitEvent failed with status: {:?}", status);
+            }
+        }
+
+        tracing::trace!(
+            layer_index,
+            "Inserted cudaStreamWaitEvent for layer onboard sync"
+        );
+
+        Ok(())
+    }
+
+    fn save_kv_layer(&self, layer_index: usize, stream_handle: u64) -> Result<()> {
+        // Early return if no action needed for this layer
+        if !self.needs_offload_action(layer_index) {
+            return Ok(());
+        }
+
+        // Perform the offload action(s)
+        self.perform_offload_action(layer_index, stream_handle)
     }
 
     fn is_initialized(&self) -> bool {
@@ -537,115 +540,5 @@ impl ConnectorWorkerInterface for ConnectorWorker {
     #[tracing::instrument(level = "debug", skip(self), ret)]
     fn get_failed_onboarding(&self) -> HashSet<usize> {
         self.state.finished_state.take_failed_onboarding()
-    }
-}
-
-impl SharedWorkerState {
-    fn initialize(&self, config: LeaderLayoutConfig) -> Result<WorkerLayoutResponse> {
-        // Check if already initialized
-        if self.service.get().is_some() {
-            bail!("Worker already initialized");
-        }
-
-        // Take pending state
-        let pending =
-            self.pending_state.lock().unwrap().take().ok_or_else(|| {
-                anyhow::anyhow!("No pending state - call register_kv_caches first")
-            })?;
-
-        tracing::info!(
-            cuda_device = pending.cuda_device_id,
-            host_block_count = config.host_block_count,
-            disk_block_count = ?config.disk_block_count,
-            "Completing deferred NIXL initialization"
-        );
-
-        // Complete initialization
-        let (worker, response) = pending.complete_initialization(&self.runtime, config)?;
-
-        // Build NovaWorkerService
-        let service = NovaWorkerService::new(self.runtime.nova.clone(), worker)?;
-
-        self.service
-            .set(service)
-            .map_err(|_| anyhow::anyhow!("service already initialized (race condition)"))?;
-
-        tracing::info!(
-            created_layouts = ?response.created_layouts,
-            "Deferred initialization complete - NIXL registered"
-        );
-
-        Ok(response)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mark_failed_onboarding_adds_block_ids() {
-        let state = FinishedState::new();
-
-        state.mark_failed_onboarding(vec![1, 2, 3]);
-
-        let failed = state.take_failed_onboarding();
-        assert_eq!(failed.len(), 3);
-        assert!(failed.contains(&1));
-        assert!(failed.contains(&2));
-        assert!(failed.contains(&3));
-    }
-
-    #[test]
-    fn test_take_failed_onboarding_drains_set() {
-        let state = FinishedState::new();
-
-        state.mark_failed_onboarding(vec![10, 20]);
-
-        // First take should return the block IDs
-        let first_take = state.take_failed_onboarding();
-        assert_eq!(first_take.len(), 2);
-        assert!(first_take.contains(&10));
-        assert!(first_take.contains(&20));
-
-        // Second take should return empty set
-        let second_take = state.take_failed_onboarding();
-        assert!(second_take.is_empty());
-    }
-
-    #[test]
-    fn test_failed_onboarding_before_complete() {
-        // Verifies that failed blocks can be marked before marking completion
-        // This matches the ordering guarantee in the implementation
-        let state = FinishedState::new();
-
-        // First mark some blocks as failed
-        state.mark_failed_onboarding(vec![5, 6, 7]);
-
-        // Then mark onboarding as complete for a request
-        state.mark_onboarding_complete("req-123".to_string());
-
-        // Both should be retrievable
-        let failed = state.take_failed_onboarding();
-        assert_eq!(failed.len(), 3);
-
-        let (offloading, onboarding) = state.take_finished();
-        assert!(offloading.is_empty());
-        assert!(onboarding.contains("req-123"));
-    }
-
-    #[test]
-    fn test_mark_failed_onboarding_accumulates() {
-        let state = FinishedState::new();
-
-        // Mark multiple batches of failed blocks
-        state.mark_failed_onboarding(vec![1, 2]);
-        state.mark_failed_onboarding(vec![3, 4, 5]);
-
-        let failed = state.take_failed_onboarding();
-        assert_eq!(failed.len(), 5);
-        for id in 1..=5 {
-            assert!(failed.contains(&id));
-        }
     }
 }

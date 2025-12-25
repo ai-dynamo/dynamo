@@ -64,6 +64,7 @@ impl From<SerializableTransferOptions> for TransferOptions {
             nixl_write_notification: opts.nixl_write_notification,
             // bounce_buffer requires TransportManager to resolve handle to layout
             bounce_buffer: None,
+            cuda_stream: None,
         }
     }
 }

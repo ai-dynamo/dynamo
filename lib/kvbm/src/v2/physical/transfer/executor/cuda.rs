@@ -8,10 +8,11 @@ use super::{PhysicalLayout, TransferStrategy};
 use crate::BlockId;
 use crate::v2::physical::transfer::context::TransferCompleteNotification;
 use anyhow::{Result, anyhow};
-use cudarc::driver::result as cuda_result;
+use cudarc::driver::{CudaStream, result as cuda_result};
 use dynamo_kvbm_kernels::{OperationalCopyBackend, OperationalCopyDirection, TensorDataType};
 use dynamo_memory::CudaMemPool;
 use std::ops::Range;
+use std::sync::Arc;
 
 // #[cfg(test)]
 // mod cuda_kernel_tests;
@@ -28,6 +29,8 @@ use std::ops::Range;
 /// * `dst_block_ids` - Destination block IDs to transfer
 /// * `layer_range` - Optional range of layers to transfer (None = all layers)
 /// * `strategy` - CUDA transfer strategy (H2D, D2H, D2D, async or blocking)
+/// * `cuda_stream` - Optional caller-provided stream. If provided, use this stream
+///   and skip event recording (caller manages sync). Returns completed() immediately.
 /// * `ctx` - Transfer context with CUDA stream
 pub fn execute_cuda_transfer(
     src: &PhysicalLayout,
@@ -36,6 +39,7 @@ pub fn execute_cuda_transfer(
     dst_block_ids: &[BlockId],
     layer_range: Option<Range<usize>>,
     strategy: TransferStrategy,
+    cuda_stream: Option<Arc<CudaStream>>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     // Validate layouts
@@ -61,12 +65,19 @@ pub fn execute_cuda_transfer(
     // Determine layer range
     let layers = layer_range.unwrap_or(0..src_layout.num_layers());
 
-    // Get appropriate CUDA stream based on transfer direction
-    let stream = match strategy {
-        TransferStrategy::CudaAsyncD2H | TransferStrategy::CudaBlockingD2H => {
-            ctx.next_d2h_streams()
+    // Track whether caller provided stream (affects event recording)
+    let caller_manages_sync = cuda_stream.is_some();
+
+    // Get appropriate CUDA stream - use caller-provided or acquire from pool
+    let stream = if let Some(s) = cuda_stream {
+        s
+    } else {
+        match strategy {
+            TransferStrategy::CudaAsyncD2H | TransferStrategy::CudaBlockingD2H => {
+                ctx.next_d2h_streams()
+            }
+            _ => ctx.next_h2d_streams(), // H2D and D2D use h2d_stream
         }
-        _ => ctx.next_h2d_streams(), // H2D and D2D use h2d_stream
     };
 
     // Perform CUDA transfers based on strategy
@@ -228,6 +239,11 @@ pub fn execute_cuda_transfer(
         _ => {
             return Err(anyhow!("Invalid CUDA transfer strategy: {:?}", strategy));
         }
+    }
+
+    // If caller provided the stream, they manage synchronization - return completed immediately
+    if caller_manages_sync {
+        return Ok(TransferCompleteNotification::completed());
     }
 
     // For async transfers, record an event and register it for completion tracking

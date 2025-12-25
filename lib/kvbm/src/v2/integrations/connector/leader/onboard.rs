@@ -10,6 +10,75 @@ use std::time::Instant;
 use super::*;
 
 impl ConnectorLeader {
+    /// Prepare intra-pass onboarding by storing G2/G1 block pairs.
+    ///
+    /// Unlike `start_onboarding` which spawns an async task, this method:
+    /// 1. Extracts G2 blocks from the find session and moves them to the leader's
+    ///    `pending_intra_pass_g2_blocks` collection (preserving ownership)
+    /// 2. Stores the G2/G1 block IDs in the slot's `pending_intra_pass` state
+    ///
+    /// The G2 blocks are held on the leader until the forward pass completes.
+    /// A cleanup task (spawned in `process_scheduler_output`) releases them.
+    pub(crate) fn prepare_intra_pass_onboarding(
+        self: &Arc<Self>,
+        request_id: &str,
+        block_ids: Vec<BlockId>,
+        num_external_tokens: usize,
+    ) -> Result<()> {
+        let shared_slot = self.get_slot(request_id)?;
+        let mut slot = shared_slot.lock();
+        let num_computed_tokens = slot
+            .onboarding_state()
+            .expect("session should exist")
+            .num_computed_tokens;
+
+        let num_computed_blocks = num_computed_tokens / self.block_size();
+        let num_external_blocks = num_external_tokens / self.block_size();
+        let g1_block_ids =
+            block_ids[num_computed_blocks..num_computed_blocks + num_external_blocks].to_vec();
+
+        // Record the block_ids - this assigns them to the token_block sequence hashes
+        slot.apply_new_blocks(block_ids);
+
+        // Extract G2 blocks from the find session (takes ownership)
+        let g2_blocks = slot
+            .onboarding_state_mut()
+            .ok_or_else(|| anyhow!("Expected active onboarding state for {}", request_id))?
+            .find_session
+            .take_g2_blocks()
+            .ok_or_else(|| anyhow!("No G2 blocks found for intra-pass onboarding"))?;
+
+        let g2_block_ids: Vec<BlockId> = g2_blocks.iter().map(|b| b.block_id()).collect();
+
+        // Validate block counts match
+        if g2_block_ids.len() != g1_block_ids.len() {
+            bail!(
+                "G2/G1 block count mismatch: {} G2 blocks, {} G1 blocks",
+                g2_block_ids.len(),
+                g1_block_ids.len()
+            );
+        }
+
+        tracing::debug!(
+            request_id,
+            g2_count = g2_block_ids.len(),
+            g1_count = g1_block_ids.len(),
+            "Prepared intra-pass onboarding data"
+        );
+
+        // Move G2 blocks to leader's collection (preserves ownership until forward pass completes)
+        self.pending_intra_pass_g2_blocks.lock().extend(g2_blocks);
+
+        // Store the block IDs in slot's pending state for aggregation
+        slot.extend_pending_intra_pass(g2_block_ids, g1_block_ids);
+
+        // Transition to inactive since we're not doing async onboarding
+        slot.txn_to_error(); // Clear the PreparingToOnboard state
+        let _ = slot.txn_take_error(); // Discard and transition to Inactive
+
+        Ok(())
+    }
+
     pub(crate) fn start_onboarding(
         self: &Arc<Self>,
         request_id: &str,

@@ -11,7 +11,9 @@ use crate::distributed::worker::{LeaderLayoutConfig, NovaWorkerClient, Worker};
 use crate::integrations::connector::worker::ConnectorWorkerClient;
 use crate::logical::blocks::{BlockDuplicationPolicy, BlockRegistry};
 use crate::logical::manager::{BlockManager, FrequencyTrackingCapacity};
-use crate::v2::distributed::object::{ObjectLockManager, create_lock_manager, create_object_client};
+use crate::v2::distributed::object::{
+    ObjectLockManager, create_lock_manager, create_object_client,
+};
 use crate::v2::distributed::offload::{
     ObjectPipelineBuilder, ObjectPresenceFilter, OffloadEngine, PendingTracker, PipelineBuilder,
     S3PresenceChecker, create_policy_from_config,
