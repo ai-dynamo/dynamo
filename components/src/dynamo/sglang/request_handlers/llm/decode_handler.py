@@ -14,9 +14,6 @@ from dynamo.sglang.protocol import DisaggPreprocessedRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
-# Timeout for decode engine to receive first response when waiting for KV cache transfer
-DECODE_KV_TRANSFER_TIMEOUT_SECONDS = 60.0
-
 
 class DecodeWorkerHandler(BaseWorkerHandler):
     """Handler for decode workers in both aggregated and disaggregated serving modes."""
@@ -177,28 +174,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 rid=trace_id,
             )
 
-            # Wait for first token with timeout
-            decode_iter = decode.__aiter__()
-            try:
-                first_res = await asyncio.wait_for(
-                    decode_iter.__anext__(), timeout=DECODE_KV_TRANSFER_TIMEOUT_SECONDS
-                )
-            except asyncio.TimeoutError:
-                raise RuntimeError(
-                    f"Decode timed out after {DECODE_KV_TRANSFER_TIMEOUT_SECONDS}s waiting for first token. "
-                )
-
-            # Create stream starting with first result
-            async def decode_stream() -> AsyncGenerator[Dict[str, Any], None]:
-                yield first_res
-                async for res in decode_iter:
-                    yield res
-
             if self.skip_tokenizer_init:
-                async for out in self._process_token_stream(decode_stream(), context):
+                async for out in self._process_token_stream(decode, context):
                     yield out
             else:
-                async for out in self._process_text_stream(decode_stream(), context):
+                async for out in self._process_text_stream(decode, context):
                     yield out
         else:
             if self.enable_trace:
