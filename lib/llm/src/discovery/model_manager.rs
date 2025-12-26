@@ -40,13 +40,13 @@ enum PrefillActivationState {
     PrefillReady(oneshot::Receiver<Endpoint>),
 }
 
-/// Notification sent when a decode tier is discovered
+/// Notification sent when decode tiers change
 #[derive(Clone, Debug)]
-pub struct DecodeTierNotification {
-    /// Sequence length capacity of the tier
-    pub seqlen: u32,
-    /// Endpoint for the tier
-    pub endpoint: Endpoint,
+pub enum DecodeTierNotification {
+    /// A new tier was added (first worker for this seqlen)
+    Added { seqlen: u32, endpoint: Endpoint },
+    /// A tier was removed (last worker for this seqlen went away)
+    Removed { seqlen: u32 },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -82,9 +82,9 @@ pub struct ModelManager {
     /// Key: model_name, Value: broadcast sender
     decode_tier_broadcasters: Mutex<HashMap<String, broadcast::Sender<DecodeTierNotification>>>,
 
-    /// Storage for activated decode tier endpoints (for late subscribers)
-    /// Key: model_name, Value: list of (seqlen, endpoint) pairs
-    decode_tier_endpoints: Mutex<HashMap<String, Vec<(u32, Endpoint)>>>,
+    /// Decode tiers with reference counting: model_name -> (seqlen -> (endpoint, worker_count))
+    /// Endpoint is from first worker; count tracks how many workers serve this tier
+    decode_tiers: Mutex<HashMap<String, HashMap<u32, (Endpoint, usize)>>>,
 
     /// Per-model worker monitors for dynamic KV cache load rejection.
     /// Key: model name, Value: cloneable monitor (all fields are Arc).
@@ -110,7 +110,7 @@ impl ModelManager {
             kv_choosers: Mutex::new(HashMap::new()),
             prefill_router_activators: Mutex::new(HashMap::new()),
             decode_tier_broadcasters: Mutex::new(HashMap::new()),
-            decode_tier_endpoints: Mutex::new(HashMap::new()),
+            decode_tiers: Mutex::new(HashMap::new()),
             worker_monitors: RwLock::new(HashMap::new()),
         }
     }
@@ -518,53 +518,96 @@ impl ModelManager {
         }
     }
 
-    /// Activate a decode tier by sending the endpoint through the oneshot channel
-    /// and broadcasting to any subscribers.
+    /// Activate a decode tier (increment worker count).
+    /// Broadcasts `Added` notification only when first worker for this seqlen joins.
     ///
     /// Called by watcher when a worker with `this_seqlen` is discovered.
-    pub fn activate_decode_tier(
-        &self,
-        model_name: &str,
-        seqlen: u32,
-        endpoint: Endpoint,
-    ) -> anyhow::Result<()> {
-        // Store endpoint for late subscribers (dynamic discovery)
-        {
-            let mut endpoints = self.decode_tier_endpoints.lock();
-            let model_tiers = endpoints.entry(model_name.to_string()).or_default();
-            // Only add if not already present
-            if !model_tiers.iter().any(|(s, _)| *s == seqlen) {
-                model_tiers.push((seqlen, endpoint.clone()));
+    pub fn activate_decode_tier(&self, model_name: &str, seqlen: u32, endpoint: Endpoint) {
+        let is_new_tier = {
+            let mut tiers = self.decode_tiers.lock();
+            let model_tiers = tiers.entry(model_name.to_string()).or_default();
+
+            if let Some((_, count)) = model_tiers.get_mut(&seqlen) {
+                *count += 1;
+                tracing::debug!(
+                    model_name = %model_name,
+                    seqlen = seqlen,
+                    worker_count = *count,
+                    "Added worker to existing decode tier"
+                );
+                false
+            } else {
+                model_tiers.insert(seqlen, (endpoint.clone(), 1));
                 tracing::info!(
                     model_name = %model_name,
                     seqlen = seqlen,
-                    total_tiers = model_tiers.len(),
-                    "Stored decode tier endpoint for model"
+                    "New decode tier activated"
                 );
+                true
             }
-        }
+        };
 
-        // Broadcast to any current subscribers (dynamic discovery)
-        {
+        // Only broadcast when a new tier is added
+        if is_new_tier {
             let broadcasters = self.decode_tier_broadcasters.lock();
             if let Some(sender) = broadcasters.get(model_name) {
-                let notification = DecodeTierNotification {
-                    seqlen,
-                    endpoint: endpoint.clone(),
-                };
-                // Ignore send errors - just means no subscribers currently
-                let _ = sender.send(notification);
+                let _ = sender.send(DecodeTierNotification::Added { seqlen, endpoint });
             }
         }
+    }
 
-        Ok(())
+    /// Deactivate a decode tier (decrement worker count).
+    /// Broadcasts `Removed` notification only when last worker for this seqlen leaves.
+    ///
+    /// Called by watcher when a worker with `this_seqlen` goes offline.
+    pub fn deactivate_decode_tier(&self, model_name: &str, seqlen: u32) {
+        let is_tier_removed = {
+            let mut tiers = self.decode_tiers.lock();
+            let Some(model_tiers) = tiers.get_mut(model_name) else {
+                return;
+            };
+
+            if let Some((_, count)) = model_tiers.get_mut(&seqlen) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    model_tiers.remove(&seqlen);
+                    tracing::info!(
+                        model_name = %model_name,
+                        seqlen = seqlen,
+                        "Decode tier removed (last worker left)"
+                    );
+                    true
+                } else {
+                    tracing::debug!(
+                        model_name = %model_name,
+                        seqlen = seqlen,
+                        worker_count = *count,
+                        "Removed worker from decode tier"
+                    );
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        // Only broadcast when a tier is fully removed
+        if is_tier_removed {
+            let broadcasters = self.decode_tier_broadcasters.lock();
+            if let Some(sender) = broadcasters.get(model_name) {
+                let _ = sender.send(DecodeTierNotification::Removed { seqlen });
+            }
+        }
     }
 
     /// Get all existing decode tier endpoints for a model.
     /// Used by late subscribers (DecodeDisagger) to get tiers that were activated before subscription.
     pub fn get_existing_decode_tiers(&self, model_name: &str) -> Vec<(u32, Endpoint)> {
-        let endpoints = self.decode_tier_endpoints.lock();
-        endpoints.get(model_name).cloned().unwrap_or_default()
+        let tiers = self.decode_tiers.lock();
+        tiers
+            .get(model_name)
+            .map(|m| m.iter().map(|(s, (e, _))| (*s, e.clone())).collect())
+            .unwrap_or_default()
     }
 
     pub fn get_model_tool_call_parser(&self, model: &str) -> Option<String> {

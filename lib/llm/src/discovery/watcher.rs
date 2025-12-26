@@ -246,6 +246,12 @@ impl ModelWatcher {
             }
         };
         let model_name = card.name().to_string();
+
+        // Deactivate decode tier if this worker had one
+        if let Some(seqlen) = card.this_seqlen {
+            self.manager.deactivate_decode_tier(&model_name, seqlen);
+        }
+
         let active_instances = self
             .cards_for_model(&model_name, target_namespace, is_global_namespace)
             .await
@@ -357,14 +363,8 @@ impl ModelWatcher {
                     "Intermediate decode tier detected, activating tier (not publishing model)"
                 );
 
-                if let Err(e) = self.manager.activate_decode_tier(card.name(), seqlen, endpoint.clone()) {
-                    tracing::warn!(
-                        model_name = card.name(),
-                        seqlen = seqlen,
-                        error = %e,
-                        "Failed to activate decode tier - may already be activated"
-                    );
-                }
+                self.manager
+                    .activate_decode_tier(card.name(), seqlen, endpoint.clone());
                 true // This is an intermediate tier
             }
             Some(seqlen) => {
@@ -377,14 +377,8 @@ impl ModelWatcher {
                     "Main decode tier detected (seqlen == context_length), will publish model"
                 );
 
-                if let Err(e) = self.manager.activate_decode_tier(card.name(), seqlen, endpoint.clone()) {
-                    tracing::warn!(
-                        model_name = card.name(),
-                        seqlen = seqlen,
-                        error = %e,
-                        "Failed to activate decode tier - may already be activated"
-                    );
-                }
+                self.manager
+                    .activate_decode_tier(card.name(), seqlen, endpoint.clone());
                 false // This is the main tier, should publish model
             }
             None => false, // No decode disaggregation, publish model normally
@@ -497,21 +491,22 @@ impl ModelWatcher {
             };
 
             // Create DecodeDisagger if decode disaggregation is enabled and this is a tiered model
-            let decode_disagger = if self.router_config.enable_decode_disagg && card.this_seqlen.is_some() {
-                tracing::info!(
-                    model_name = card.name(),
-                    "Creating DecodeDisagger with dynamic tier discovery"
-                );
-                Some(DecodeDisagger::with_dynamic_tiers(
-                    card.name(),
-                    self.manager.clone(),
-                    self.router_config.router_mode,
-                    Some(self.router_config.kv_router_config),
-                    card.kv_cache_block_size,
-                ))
-            } else {
-                None
-            };
+            let decode_disagger =
+                if self.router_config.enable_decode_disagg && card.this_seqlen.is_some() {
+                    tracing::info!(
+                        model_name = card.name(),
+                        "Creating DecodeDisagger with dynamic tier discovery"
+                    );
+                    Some(DecodeDisagger::with_dynamic_tiers(
+                        card.name(),
+                        self.manager.clone(),
+                        self.router_config.router_mode,
+                        Some(self.router_config.kv_router_config),
+                        card.kv_cache_block_size,
+                    ))
+                } else {
+                    None
+                };
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {

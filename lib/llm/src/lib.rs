@@ -21,6 +21,7 @@ pub mod http;
 pub mod hub;
 // pub mod key_value_store;
 pub mod audit;
+pub mod decode_disagger;
 pub mod kv_router;
 pub mod local_model;
 pub mod lora;
@@ -38,7 +39,6 @@ pub mod tokenizers;
 pub mod tokens;
 pub mod types;
 pub mod utils;
-pub mod decode_disagger;
 
 #[cfg(feature = "block-manager")]
 pub mod block_manager;

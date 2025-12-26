@@ -14,7 +14,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/grpc/protos/kserve.proto");
     println!("cargo:rerun-if-changed=src/grpc/protos/model_config.proto");
-    println!("cargo:rerun-if-changed=src/block_manager/block/transfer/kernels/vectorized_copy.fatbin");
+    println!(
+        "cargo:rerun-if-changed=src/block_manager/block/transfer/kernels/vectorized_copy.fatbin"
+    );
     println!("cargo:rerun-if-env-changed=DYNAMO_FATBIN_PATH");
 
     // Declare our custom cfg flag to avoid unexpected_cfgs warnings
@@ -39,7 +41,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fatbin_path.display()
             );
         }
-
     } else {
         println!(
             "cargo:warning=CUDA FATBIN not found - run 'make fatbin' in cuda_kernels directory"

@@ -1126,6 +1126,7 @@ async def register_llm(
     custom_template_path: Optional[str] = None,
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
+    this_seqlen: Optional[int] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.

@@ -18,14 +18,14 @@ use tokio_util::sync::CancellationToken;
 use dynamo_runtime::{
     component::Endpoint,
     pipeline::{
-        async_trait, AsyncEngine, AsyncEngineContextProvider, Context, ManyOut, Operator,
-        PushRouter, ResponseStream, RouterMode, ServerStreamingEngine, SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, Context, ManyOut, Operator, PushRouter,
+        ResponseStream, RouterMode, ServerStreamingEngine, SingleIn, async_trait,
     },
     protocols::annotated::Annotated,
 };
 
 use crate::{
-    discovery::ModelManager,
+    discovery::{DecodeTierNotification, ModelManager},
     kv_router::{KvPushRouter, KvRouterConfig},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
 };
@@ -168,7 +168,9 @@ impl DecodeDisagger {
                     kv_router_config,
                     kv_cache_block_size,
                     Some(model_manager.clone()),
-                ).await {
+                )
+                .await
+                {
                     tracing::error!(
                         seqlen = seqlen,
                         error = %e,
@@ -177,33 +179,43 @@ impl DecodeDisagger {
                 }
             }
 
-            // Now listen for new tiers
+            // Now listen for tier add/remove notifications
             loop {
                 tokio::select! {
                     result = tier_rx.recv() => {
                         match result {
-                            Ok(notification) => {
+                            Ok(DecodeTierNotification::Added { seqlen, endpoint }) => {
                                 tracing::info!(
                                     model_name = %model_name,
-                                    seqlen = notification.seqlen,
-                                    "Received decode tier notification"
+                                    seqlen = seqlen,
+                                    "Decode tier added"
                                 );
 
                                 if let Err(e) = Self::activate_tier_inner(
                                     &tiers,
-                                    notification.seqlen,
-                                    notification.endpoint,
+                                    seqlen,
+                                    endpoint,
                                     router_mode,
                                     kv_router_config,
                                     kv_cache_block_size,
                                     Some(model_manager.clone()),
                                 ).await {
                                     tracing::error!(
-                                        seqlen = notification.seqlen,
+                                        seqlen = seqlen,
                                         error = %e,
-                                        "Failed to activate tier from notification"
+                                        "Failed to activate tier"
                                     );
                                 }
+                            }
+                            Ok(DecodeTierNotification::Removed { seqlen }) => {
+                                tracing::info!(
+                                    model_name = %model_name,
+                                    seqlen = seqlen,
+                                    "Decode tier removed"
+                                );
+
+                                let mut tiers_guard = tiers.write();
+                                tiers_guard.retain(|t| t.seqlen != seqlen);
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
                                 tracing::warn!(
@@ -350,10 +362,7 @@ impl DecodeDisagger {
     fn select_tier(&self, seqlen: usize) -> Option<Tier> {
         let tiers = self.tiers.read();
         // Find first tier that can handle this seqlen
-        tiers
-            .iter()
-            .find(|t| seqlen <= t.seqlen as usize)
-            .cloned()
+        tiers.iter().find(|t| seqlen <= t.seqlen as usize).cloned()
     }
 
     /// Check if this is the maximum tier
@@ -391,10 +400,7 @@ impl
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         let num_tiers = self.tiers.read().len();
-        tracing::info!(
-            num_tiers,
-            "DecodeDisagger::generate called"
-        );
+        tracing::info!(num_tiers, "DecodeDisagger::generate called");
 
         // If no tiers configured, just forward to next (passthrough mode)
         if !self.has_tiers() {
@@ -405,27 +411,23 @@ impl
         let (req, context) = request.into_parts();
         let isl = req.token_ids.len();
 
-        tracing::info!(
-            isl,
-            num_tiers,
-            "DecodeDisagger: Routing request with ISL"
-        );
+        tracing::info!(isl, num_tiers, "DecodeDisagger: Routing request with ISL");
 
         // Log available tiers
         {
             let tiers = self.tiers.read();
             for tier in tiers.iter() {
-                tracing::info!(
-                    tier_seqlen = tier.seqlen,
-                    "DecodeDisagger: Available tier"
-                );
+                tracing::info!(tier_seqlen = tier.seqlen, "DecodeDisagger: Available tier");
             }
         }
 
         // Select initial tier based on ISL
         let Some(current_tier) = self.select_tier(isl) else {
             // No tier can handle this, forward to next (let it fail there)
-            tracing::warn!(isl, "No tier available for sequence length, forwarding to next");
+            tracing::warn!(
+                isl,
+                "No tier available for sequence length, forwarding to next"
+            );
             return next.generate(context.map(|_| req)).await;
         };
 
@@ -439,7 +441,11 @@ impl
 
         // If this is the max tier, just forward (no migration possible)
         if self.is_max_tier(current_seqlen) {
-            tracing::info!(isl, tier_seqlen = current_seqlen, "DecodeDisagger: Using max tier, forwarding to next");
+            tracing::info!(
+                isl,
+                tier_seqlen = current_seqlen,
+                "DecodeDisagger: Using max tier, forwarding to next"
+            );
             return next.generate(context.map(|_| req)).await;
         }
 
