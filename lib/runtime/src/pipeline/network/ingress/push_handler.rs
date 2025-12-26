@@ -294,24 +294,33 @@ where
             }
         }
         if send_complete_final {
-            let resp_wrapper = NetworkStreamWrapper::<U> {
-                data: None,
-                complete_final: true,
-            };
-            let resp_bytes = serde_json::to_vec(&resp_wrapper)
-                .expect("fatal error: invalid response object - this should never happen");
-            if let Some(m) = self.metrics() {
-                m.response_bytes.inc_by(resp_bytes.len() as u64);
-            }
-            if (publisher.send(resp_bytes.into()).await).is_err() {
-                tracing::error!(
-                    "Failed to publish complete final for stream {}",
+            // If the context was stopped (e.g., cancelled by upstream during migration),
+            // don't try to send the final message - it's expected to fail
+            if context.is_stopped() {
+                tracing::debug!(
+                    "Stream {} was cancelled, skipping complete final",
                     context.id()
                 );
+            } else {
+                let resp_wrapper = NetworkStreamWrapper::<U> {
+                    data: None,
+                    complete_final: true,
+                };
+                let resp_bytes = serde_json::to_vec(&resp_wrapper)
+                    .expect("fatal error: invalid response object - this should never happen");
                 if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
-                        .inc();
+                    m.response_bytes.inc_by(resp_bytes.len() as u64);
+                }
+                if (publisher.send(resp_bytes.into()).await).is_err() {
+                    tracing::error!(
+                        "Failed to publish complete final for stream {}",
+                        context.id()
+                    );
+                    if let Some(m) = self.metrics() {
+                        m.error_counter
+                            .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
+                            .inc();
+                    }
                 }
             }
             // Notify the health check manager that the stream has finished.
