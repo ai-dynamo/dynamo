@@ -457,7 +457,7 @@ impl
         let request_id = stream_context.id().to_string();
 
         let tiers = self.tiers.clone();
-        let req_clone = req.clone();
+        let mut req_clone = req.clone();
 
         // Create a stream that monitors output and migrates if needed
         let migrating_stream = async_stream::stream! {
@@ -467,6 +467,7 @@ impl
                 // Count tokens in this chunk
                 if let Some(ref data) = chunk.data {
                     output_tokens += data.token_ids.len();
+                    req_clone.token_ids.extend(data.token_ids.iter());
                 }
 
                 // Check if we need to migrate

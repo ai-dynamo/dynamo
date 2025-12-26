@@ -149,6 +149,7 @@ def run_request(max_tokens: int):
     }
 
     try:
+        full_output = []
         with httpx.stream("POST", CHAT_URL, json=payload, timeout=60.0) as resp:
             for line in resp.iter_lines():
                 if line.startswith("data: "):
@@ -160,10 +161,15 @@ def run_request(max_tokens: int):
                         delta = chunk.get("choices", [{}])[0].get("delta", {})
                         content = delta.get("content", "")
                         if content:
+                            full_output.append(content)
                             print(content, end="", flush=True)
                     except json.JSONDecodeError:
                         pass
         print("\n" + "-" * 50)
+        final_text = "".join(full_output)
+        print(f"\n📋 Final output ({len(final_text)} chars):")
+        print(final_text)
+        print("-" * 50)
     except Exception as e:
         print(f"\n❌ Request failed: {e}")
 
