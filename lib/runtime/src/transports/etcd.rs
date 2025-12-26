@@ -348,7 +348,9 @@ impl Client {
         prefix: impl AsRef<str> + std::fmt::Display,
         include_existing: bool,
     ) -> Result<PrefixWatcher> {
-        let (tx, rx) = mpsc::channel(32);
+        // Use unbounded channel to avoid deadlock when sending initial keys.
+        // Memory growth is bounded by etcd key count, which should be finite.
+        let (tx, rx) = mpsc::unbounded_channel();
 
         // Get start revision and send existing KVs
         let mut start_revision = self
@@ -391,7 +393,7 @@ impl Client {
     async fn get_start_revision(
         &self,
         prefix: impl AsRef<str> + std::fmt::Display,
-        existing_kvs_tx: Option<&mpsc::Sender<WatchEvent>>,
+        existing_kvs_tx: Option<&mpsc::UnboundedSender<WatchEvent>>,
     ) -> Result<i64> {
         let mut kv_client = self.connector.get_client().kv_client();
         let mut get_response = kv_client
@@ -411,7 +413,7 @@ impl Client {
             let kvs = get_response.take_kvs();
             tracing::trace!("initial kv count: {:?}", kvs.len());
             for kv in kvs.into_iter() {
-                tx.send(WatchEvent::Put(kv)).await?;
+                tx.send(WatchEvent::Put(kv))?;
             }
         }
 
@@ -472,7 +474,7 @@ impl Client {
         mut watch_stream: WatchStream,
         prefix: &String,
         start_revision: &mut i64,
-        tx: &mpsc::Sender<WatchEvent>,
+        tx: &mpsc::UnboundedSender<WatchEvent>,
     ) -> bool {
         loop {
             tokio::select! {
@@ -500,7 +502,7 @@ impl Client {
                     };
 
                     // Process events
-                    if Self::process_watch_events(response.events(), tx).await.is_err() {
+                    if Self::process_watch_events(response.events(), tx).is_err() {
                         return false;
                     };
                 }
@@ -516,9 +518,9 @@ impl Client {
     ///
     /// Filters out events without key-values and transforms etcd events into
     /// appropriate WatchEvent types for channel transmission.
-    async fn process_watch_events(
+    fn process_watch_events(
         events: &[etcd_client::Event],
-        tx: &mpsc::Sender<WatchEvent>,
+        tx: &mpsc::UnboundedSender<WatchEvent>,
     ) -> Result<()> {
         for event in events {
             // Extract the KeyValue if it exists
@@ -529,13 +531,13 @@ impl Client {
             // Handle based on event type
             match event.event_type() {
                 etcd_client::EventType::Put => {
-                    if let Err(err) = tx.send(WatchEvent::Put(kv.clone())).await {
+                    if let Err(err) = tx.send(WatchEvent::Put(kv.clone())) {
                         tracing::error!("kv watcher error forwarding WatchEvent::Put: {err}");
                         return Err(err.into());
                     }
                 }
                 etcd_client::EventType::Delete => {
-                    if tx.send(WatchEvent::Delete(kv.clone())).await.is_err() {
+                    if tx.send(WatchEvent::Delete(kv.clone())).is_err() {
                         return Err(anyhow::anyhow!("failed to send WatchEvent::Delete"));
                     }
                 }
@@ -548,7 +550,7 @@ impl Client {
 #[derive(Dissolve)]
 pub struct PrefixWatcher {
     prefix: String,
-    rx: mpsc::Receiver<WatchEvent>,
+    rx: mpsc::UnboundedReceiver<WatchEvent>,
 }
 
 #[derive(Debug)]
