@@ -379,6 +379,8 @@ pub struct WorkerSelectionPipeline {
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >,
+    /// KV router for bookkeeping operations (only present when router_mode is KV)
+    kv_router: Option<Arc<dynamo_llm::kv_router::KvRouter>>,
 }
 
 /// Create a worker-selection pipeline ("generate" endpoint).
@@ -485,7 +487,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         .await
     };
 
-    let engine = match wk.runtime().secondary().block_on(make_engine()) {
+    let (engine, kv_router) = match wk.runtime().secondary().block_on(make_engine()) {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = ?e, "create_worker_selection_pipeline_chat failed");
@@ -493,7 +495,11 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         }
     };
 
-    let handle = Box::new(WorkerSelectionPipeline { wk, engine });
+    let handle = Box::new(WorkerSelectionPipeline {
+        wk,
+        engine,
+        kv_router,
+    });
     unsafe {
         *pipeline_out = Box::into_raw(handle);
     }
@@ -741,6 +747,248 @@ pub unsafe extern "C" fn dynamo_free_worker_selection_result(
         }
     }
     DynamoLlmResult::OK
+}
+
+/// Default timeout for GAIE bookkeeping operations (30 seconds)
+const GAIE_BOOKKEEPING_TIMEOUT_SECS: u64 = 30;
+
+/// Helper to validate pipeline pointer and extract request_id from C string.
+/// Returns `Err(DynamoLlmResult::ERR)` on validation failure, `Ok((pipeline_ref, request_id))` on success.
+unsafe fn validate_pipeline_and_request_id(
+    pipeline: *mut WorkerSelectionPipeline,
+    request_id_c_str: *const c_char,
+    operation: &str,
+) -> Result<(&'static WorkerSelectionPipeline, String), DynamoLlmResult> {
+    if pipeline.is_null() {
+        tracing::error!("[GAIE] {} failed: pipeline pointer is null", operation);
+        return Err(DynamoLlmResult::ERR);
+    }
+
+    let request_id = match unsafe { CStr::from_ptr(request_id_c_str) }.to_str() {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            tracing::error!(error = ?e, "[GAIE] {} failed: bad request_id", operation);
+            return Err(DynamoLlmResult::ERR);
+        }
+    };
+
+    // SAFETY: Caller guarantees pipeline is valid for the duration of the call
+    let pl: &'static WorkerSelectionPipeline = unsafe { &*pipeline };
+    Ok((pl, request_id))
+}
+
+/// Helper to run an async bookkeeping operation with timeout.
+/// Returns `OK` on success or timeout, `ERR` only on validation failures (handled by caller).
+fn run_bookkeeping_with_timeout<F, Fut>(
+    pl: &WorkerSelectionPipeline,
+    operation: &'static str,
+    request_id: &str,
+    f: F,
+) -> DynamoLlmResult
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    use std::time::Duration;
+
+    let timeout_duration = Duration::from_secs(GAIE_BOOKKEEPING_TIMEOUT_SECS);
+    let fut = f();
+
+    let result = pl
+        .wk
+        .runtime()
+        .secondary()
+        .block_on(async { tokio::time::timeout(timeout_duration, fut).await });
+
+    match result {
+        Ok(()) => DynamoLlmResult::OK,
+        Err(_elapsed) => {
+            tracing::warn!(
+                request_id = %request_id,
+                timeout_secs = GAIE_BOOKKEEPING_TIMEOUT_SECS,
+                "[GAIE] {} timed out",
+                operation
+            );
+            // Return OK to avoid blocking the caller - the operation may still complete
+            DynamoLlmResult::OK
+        }
+    }
+}
+
+/// Router bookkeeping functions for GAIE integration
+/// Add a request to the router's bookkeeping after worker selection.
+/// Call this from GAIE Stage 1 after `dynamo_query_worker_selection_and_annotate`.
+///
+/// This function computes the overlap_blocks internally by querying the indexer,
+/// so the caller doesn't need to provide it.
+///
+/// # Safety
+/// - `pipeline` must be a valid, non-null pointer from `dynamo_create_worker_selection_pipeline`
+/// - `request_id_c_str` must be a valid NUL-terminated UTF-8 C string
+/// - `token_ids` must point to at least `token_count` valid u32 values
+/// - Must not be called concurrently on the same pipeline without synchronization
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dynamo_router_add_request(
+    pipeline: *mut WorkerSelectionPipeline,
+    request_id_c_str: *const c_char,
+    token_ids: *const u32,
+    token_count: usize,
+    worker_id: u64,
+    dp_rank: u32,
+) -> DynamoLlmResult {
+    let (pl, request_id) = match unsafe {
+        validate_pipeline_and_request_id(pipeline, request_id_c_str, "add_request")
+    } {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let Some(ref kv_router) = pl.kv_router else {
+        tracing::debug!(
+            "[GAIE] KV router not available (router_mode is not KV), skipping add_request (no-op)"
+        );
+        return DynamoLlmResult::OK;
+    };
+
+    // Log after kv_router check to reduce noise
+    tracing::debug!(
+        request_id = %request_id,
+        worker_id = worker_id,
+        dp_rank = dp_rank,
+        token_count = token_count,
+        "[GAIE] dynamo_router_add_request processing"
+    );
+
+    let tokens: Vec<u32> = if token_count > 0 && !token_ids.is_null() {
+        unsafe { std::slice::from_raw_parts(token_ids, token_count) }.to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let kv_router = kv_router.clone();
+    let request_id_clone = request_id.clone();
+
+    run_bookkeeping_with_timeout(pl, "add_request", &request_id, || async move {
+        let worker = dynamo_llm::kv_router::protocols::WorkerWithDpRank::new(worker_id, dp_rank);
+
+        // Compute overlap_blocks using the public method
+        let overlap_blocks = match kv_router.get_overlap_blocks(&tokens, worker).await {
+            Ok(overlap) => overlap,
+            Err(e) => {
+                tracing::warn!(error = ?e, "Failed to compute overlap, using 0");
+                0
+            }
+        };
+
+        kv_router
+            .add_request(request_id_clone.clone(), &tokens, overlap_blocks, worker)
+            .await;
+
+        tracing::debug!(
+            request_id = %request_id_clone,
+            worker_id = worker_id,
+            dp_rank = dp_rank,
+            overlap_blocks = overlap_blocks,
+            token_count = tokens.len(),
+            "[GAIE] dynamo_router_add_request completed - request registered in router bookkeeping"
+        );
+    })
+}
+
+/// Mark prefill as completed for a request.
+/// Call this from GAIE hook when the first token is generated.
+///
+/// # Safety
+/// - `pipeline` must be a valid, non-null pointer from `dynamo_create_worker_selection_pipeline`
+/// - `request_id_c_str` must be a valid NUL-terminated UTF-8 C string
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dynamo_router_mark_prefill_complete(
+    pipeline: *mut WorkerSelectionPipeline,
+    request_id_c_str: *const c_char,
+) -> DynamoLlmResult {
+    let (pl, request_id) = match unsafe {
+        validate_pipeline_and_request_id(pipeline, request_id_c_str, "mark_prefill_complete")
+    } {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let Some(ref kv_router) = pl.kv_router else {
+        tracing::debug!(
+            "[GAIE] KV router not available (router_mode is not KV), skipping mark_prefill_complete (no-op)"
+        );
+        return DynamoLlmResult::OK;
+    };
+
+    // Log after kv_router check to reduce noise
+    tracing::debug!(
+        request_id = %request_id,
+        "[GAIE] dynamo_router_mark_prefill_complete processing"
+    );
+
+    let kv_router = kv_router.clone();
+    let request_id_clone = request_id.clone();
+
+    run_bookkeeping_with_timeout(pl, "mark_prefill_complete", &request_id, || async move {
+        if let Err(e) = kv_router.mark_prefill_completed(&request_id_clone).await {
+            tracing::warn!(
+                "Failed to mark prefill completed for {}: {}",
+                request_id_clone,
+                e
+            );
+        } else {
+            tracing::debug!(
+                request_id = %request_id_clone,
+                "[GAIE] dynamo_router_mark_prefill_complete completed - prefill tokens released"
+            );
+        }
+    })
+}
+
+/// Free a request from the router's bookkeeping.
+/// Call this from GAIE hook when the stream is closed (completed or cancelled).
+///
+/// # Safety
+/// - `pipeline` must be a valid, non-null pointer from `dynamo_create_worker_selection_pipeline`
+/// - `request_id_c_str` must be a valid NUL-terminated UTF-8 C string
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dynamo_router_free_request(
+    pipeline: *mut WorkerSelectionPipeline,
+    request_id_c_str: *const c_char,
+) -> DynamoLlmResult {
+    let (pl, request_id) = match unsafe {
+        validate_pipeline_and_request_id(pipeline, request_id_c_str, "free_request")
+    } {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let Some(ref kv_router) = pl.kv_router else {
+        tracing::debug!(
+            "[GAIE] KV router not available (router_mode is not KV), skipping free_request (no-op)"
+        );
+        return DynamoLlmResult::OK;
+    };
+
+    // Log after kv_router check to reduce noise
+    tracing::debug!(
+        request_id = %request_id,
+        "[GAIE] dynamo_router_free_request processing"
+    );
+
+    let kv_router = kv_router.clone();
+    let request_id_clone = request_id.clone();
+
+    run_bookkeeping_with_timeout(pl, "free_request", &request_id, || async move {
+        if let Err(e) = kv_router.free(&request_id_clone).await {
+            tracing::warn!("Failed to free request {}: {}", request_id_clone, e);
+        } else {
+            tracing::debug!(
+                request_id = %request_id_clone,
+                "[GAIE] dynamo_router_free_request completed - request removed from bookkeeping"
+            );
+        }
+    })
 }
 
 /// Result of worker selection extraction
@@ -1081,7 +1329,7 @@ fn spawn_prefill_watcher(
 /// - `enforce_disagg`: If true, fail requests when disaggregated serving is unavailable
 ///
 /// # Returns
-/// A configured worker selection pipeline ready to use
+/// A tuple of (engine, kv_router) where kv_router is Some when router_mode is KV
 pub async fn create_worker_selection_pipeline_chat(
     namespace: &str,
     component_name: &str,
@@ -1090,12 +1338,13 @@ pub async fn create_worker_selection_pipeline_chat(
     busy_threshold: Option<f64>,
     kv_router_config: Option<KvRouterConfig>,
     enforce_disagg: bool,
-) -> anyhow::Result<
+) -> anyhow::Result<(
     ServiceEngine<
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >,
-> {
+    Option<Arc<dynamo_llm::kv_router::KvRouter>>,
+)> {
     use dynamo_llm::kv_router::PrefillRouter;
 
     let runtime = Runtime::from_settings()?;
@@ -1217,6 +1466,9 @@ pub async fn create_worker_selection_pipeline_chat(
     // Note: C bindings don't register with ModelManager, so HTTP endpoint won't see this
     let worker_monitor = busy_threshold.map(|t| KvWorkerMonitor::new(client.clone(), t, 1000000));
 
+    // Clone chooser before passing to build_routed_pipeline (which takes ownership)
+    let kv_router = chooser.clone();
+
     let engine = build_routed_pipeline::<
         NvCreateChatCompletionRequest,
         NvCreateChatCompletionStreamResponse,
@@ -1233,5 +1485,5 @@ pub async fn create_worker_selection_pipeline_chat(
     )
     .await?;
 
-    Ok(engine)
+    Ok((engine, kv_router))
 }
