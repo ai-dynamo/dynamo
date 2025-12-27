@@ -139,17 +139,20 @@ class MultimodalRequestProcessor:
 
         for message in messages:
             for content in message.get("content", []):
-                if content.get("type") == "text":
-                    text_parts.append(content.get("text", ""))
-                elif content.get("type") == "image_url":
-                    url = content.get("image_url", {}).get("url", "")
-                    if not url:
-                        continue
-                    self.modality = "image"
-                    if url.endswith((".pt", ".pth", ".bin")):
-                        embedding_paths.append(url)
-                    else:
-                        image_urls.append(url)
+                if isinstance(content, str):
+                    text_parts.append(content)
+                else:
+                    if content.get("type") == "text":
+                        text_parts.append(content.get("text", ""))
+                    elif content.get("type") == "image_url":
+                        url = content.get("image_url", {}).get("url", "")
+                        if not url:
+                            continue
+                        self.modality = "image"
+                        if url.endswith((".pt", ".pth", ".bin")):
+                            embedding_paths.append(url)
+                        else:
+                            image_urls.append(url)
 
         return " ".join(text_parts), image_urls, embedding_paths
 
