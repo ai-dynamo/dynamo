@@ -482,6 +482,7 @@ impl
                     );
 
                     // Drop current stream (cancels the request)
+                    // TODO: call migration handler here and pass the bootstrap info to the next tier.
                     drop(stream);
 
                     // Get next tier (clone inside block to avoid holding lock across await)
@@ -505,6 +506,7 @@ impl
 
                     // Re-send full request to higher tier
                     // Note: This triggers full prefill on the new tier
+                    // TODO: call migration handler here and pass the bootstrap info to the next tier so we don't re-prefill
                     let migration_context = Context::with_id(req_clone.clone(), request_id.clone());
                     match higher_tier.router.generate(migration_context).await {
                         Ok(mut new_stream) => {

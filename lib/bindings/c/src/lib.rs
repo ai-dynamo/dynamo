@@ -1120,6 +1120,7 @@ pub async fn create_worker_selection_pipeline_chat(
         active_decode_blocks_threshold: busy_threshold,
         active_prefill_tokens_threshold: None,
         enforce_disagg,
+        enable_decode_disagg: false, // TODO: do we need C bindings?
     };
     // Create metrics for migration tracking (not exposed via /metrics in C bindings)
     let metrics = Arc::new(Metrics::new());

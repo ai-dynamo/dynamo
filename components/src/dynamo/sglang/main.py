@@ -25,6 +25,7 @@ from dynamo.sglang.register import register_llm_with_readiness_gate
 from dynamo.sglang.request_handlers import (
     DecodeWorkerHandler,
     EmbeddingWorkerHandler,
+    MigrationHandler,
     MultimodalEncodeWorkerHandler,
     MultimodalPrefillWorkerHandler,
     MultimodalProcessorHandler,
@@ -167,25 +168,42 @@ async def init(runtime: DistributedRuntime, config: Config):
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
+    # Setup migration endpoint for decode workers (disaggregated mode)
+    migration_handler = None
+    migrate_endpoint = None
+    endpoint_tasks = [
+        generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=metrics_labels,
+            health_check_payload=health_check_payload,
+        ),
+        register_llm_with_readiness_gate(
+            engine,
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
+            readiness_gate=ready_event,
+        ),
+    ]
+
+    if config.serving_mode == DisaggregationMode.DECODE:
+        migration_handler = MigrationHandler(component, engine, config, publisher)
+        migrate_endpoint = component.endpoint("migrate")
+        logging.info("Migration endpoint configured for decode worker")
+
+        endpoint_tasks.append(
+            migrate_endpoint.serve_endpoint(
+                migration_handler.migrate,
+                graceful_shutdown=True,
+            )
+        )
+
     try:
         # Start endpoint immediately and register model concurrently
         # Requests queue until ready_event is set (TODO: Part of new PR)
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=metrics_labels,
-                health_check_payload=health_check_payload,
-            ),
-            register_llm_with_readiness_gate(
-                engine,
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
-                readiness_gate=ready_event,
-            ),
-        )
+        await asyncio.gather(*endpoint_tasks)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise

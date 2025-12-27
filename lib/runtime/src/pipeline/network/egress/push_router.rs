@@ -28,6 +28,21 @@ use std::{
 };
 use tokio_stream::StreamExt;
 
+pub struct RoutedManyOut<T> {
+    inner: ManyOut<T>,
+    instance_id: u64,
+}
+
+impl<T> RoutedManyOut<T> {
+    pub fn take(self) -> (ManyOut<T>, u64) {
+        (self.inner, self.instance_id)
+    }
+
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+}
+
 /// Trait for monitoring worker load and determining busy state.
 /// Implementations can define custom load metrics and busy thresholds.
 #[async_trait]
@@ -139,7 +154,7 @@ where
     }
 
     /// Issue a request to the next available instance in a round-robin fashion
-    pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+    pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<RoutedManyOut<U>> {
         let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
 
         let instance_id = {
@@ -160,7 +175,7 @@ where
     }
 
     /// Issue a request to a random endpoint
-    pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+    pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<RoutedManyOut<U>> {
         let instance_id = {
             let instance_ids = self.client.instance_ids_avail();
             let count = instance_ids.len();
@@ -184,7 +199,7 @@ where
         &self,
         request: SingleIn<T>,
         instance_id: u64,
-    ) -> anyhow::Result<ManyOut<U>> {
+    ) -> anyhow::Result<RoutedManyOut<U>> {
         let found = self.client.instance_ids_avail().contains(&instance_id);
 
         if !found {
@@ -212,7 +227,7 @@ where
         &self,
         instance_id: u64,
         request: SingleIn<T>,
-    ) -> anyhow::Result<ManyOut<U>> {
+    ) -> anyhow::Result<RoutedManyOut<U>> {
         // Check if all workers are busy (only if busy threshold is set)
         if self.busy_threshold.is_some() {
             let free_instances = self.client.instance_ids_free();
@@ -288,7 +303,10 @@ where
                     }
                     res
                 });
-                Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
+                Ok(RoutedManyOut {
+                    inner: ResponseStream::new(Box::pin(stream), engine_ctx),
+                    instance_id,
+                })
             }
             Err(err) => {
                 if let Some(req_err) = err.downcast_ref::<NatsRequestError>()
@@ -303,6 +321,17 @@ where
             }
         }
     }
+
+    pub async fn routed_generate(&self, request: SingleIn<T>) -> anyhow::Result<RoutedManyOut<U>> {
+        match self.router_mode {
+            RouterMode::Random => self.random(request).await,
+            RouterMode::RoundRobin => self.round_robin(request).await,
+            RouterMode::Direct(instance_id) => self.direct(request, instance_id).await,
+            RouterMode::KV => {
+                anyhow::bail!("KV routing should not call generate on PushRouter");
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -313,13 +342,8 @@ where
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
         //InstanceSource::Static => self.r#static(request).await,
-        match self.router_mode {
-            RouterMode::Random => self.random(request).await,
-            RouterMode::RoundRobin => self.round_robin(request).await,
-            RouterMode::Direct(instance_id) => self.direct(request, instance_id).await,
-            RouterMode::KV => {
-                anyhow::bail!("KV routing should not call generate on PushRouter");
-            }
-        }
+        self.routed_generate(request)
+            .await
+            .map(|routed| routed.inner)
     }
 }

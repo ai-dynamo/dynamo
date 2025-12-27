@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Handler for KV cache migration from decode workers.
+
+This module provides functionality to migrate an in-flight request's KV cache
+from one decode worker to another, reusing the prefill->decode KV transfer protocol.
+"""
+
+import logging
+from typing import Any, Dict
+
+import sglang as sgl
+
+from dynamo._core import Component, Context
+from dynamo.sglang.args import Config
+from dynamo.sglang.publisher import DynamoSglangPublisher
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+
+
+class MigrationHandler(BaseWorkerHandler):
+    """Handler for KV cache migration on decode workers.
+
+    This handler exposes a migrate endpoint that allows migrating an in-flight
+    request's KV cache to another decode worker using the same protocol as
+    prefill->decode transfer.
+    """
+
+    def __init__(
+        self,
+        component: Component,
+        engine: sgl.Engine,
+        config: Config,
+        publisher: DynamoSglangPublisher,
+    ) -> None:
+        """Initialize migration handler.
+
+        Args:
+            component: The Dynamo runtime component.
+            engine: The SGLang engine instance.
+            config: SGLang and Dynamo configuration.
+            publisher: The SGLang publisher instance.
+        """
+        self.engine = engine
+        self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
+        super().__init__(component, engine, config, publisher)
+        logging.info(
+            f"Migration handler initialized - bootstrap host: {self.bootstrap_host}, "
+            f"bootstrap port: {self.bootstrap_port}"
+        )
+
+    async def generate(self, request: Dict[str, Any], context: Context):
+        """Not used for migration handler - use migrate() instead."""
+        raise NotImplementedError(
+            "MigrationHandler does not implement generate(). Use migrate() instead."
+        )
+
+    async def migrate(
+        self, request: Dict[str, Any], context: Context
+    ) -> Dict[str, Any]:
+        """Initiate migration of an in-flight request's KV cache.
+
+        This method:
+        1. Generates bootstrap info (host, port, room)
+        2. Returns the bootstrap info immediately
+        3. Triggers the KV transfer in the background
+
+        The caller should pass the returned bootstrap_info to the destination
+        decode worker, which will use it to receive the KV cache.
+
+        Args:
+            request: Request dict with 'rid' key containing the request ID to migrate.
+            context: Context object for request tracking.
+
+        Returns:
+            Dict with bootstrap_info containing:
+                - bootstrap_host: Host for KV transfer connection
+                - bootstrap_port: Port for KV transfer connection
+                - bootstrap_room: Unique room ID for this migration
+
+        Raises:
+            ValueError: If 'rid' is not provided in request.
+        """
+        rid = request.get("rid")
+        if not rid:
+            raise ValueError("'rid' is required in migration request")
+
+        logging.info(f"Processing migration request for rid: {rid}")
+
+        # Generate bootstrap info for this migration
+        bootstrap_room = self._generate_bootstrap_room()
+        bootstrap_info = {
+            "bootstrap_host": self.bootstrap_host,
+            "bootstrap_port": self.bootstrap_port,
+            "bootstrap_room": bootstrap_room,
+        }
+
+        logging.debug(
+            f"Migration bootstrap info for {rid}: "
+            f"host={self.bootstrap_host}, port={self.bootstrap_port}, room={bootstrap_room}"
+        )
+
+        # Trigger the migration in the SGLang engine
+        # This will:
+        # 1. Find and remove the request from running_batch
+        # 2. Setup KV sender with the bootstrap info
+        # 3. Transfer KV cache to the destination
+        self.engine.migrate_request(
+            rid=rid,
+            bootstrap_host=self.bootstrap_host,
+            bootstrap_port=self.bootstrap_port,
+            bootstrap_room=bootstrap_room,
+        )
+
+        logging.info(f"Migration initiated for rid: {rid}, room: {bootstrap_room}")
+
+        return {
+            "rid": rid,
+            "bootstrap_info": bootstrap_info,
+        }

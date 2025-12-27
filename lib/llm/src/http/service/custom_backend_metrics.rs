@@ -213,7 +213,7 @@ async fn poll_backend_once(
 ) -> anyhow::Result<usize> {
     use dynamo_runtime::pipeline::Context;
 
-    let response_stream = router.random(Context::new("".to_string())).await?;
+    let (response_stream, _instance_id) = router.random(Context::new("".to_string())).await?.take();
 
     // Collect responses from the stream
     let mut responses = Vec::new();

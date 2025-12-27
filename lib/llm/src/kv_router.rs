@@ -834,7 +834,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         backend_input.routing_mut().dp_rank = Some(dp_rank);
         let updated_request = context.map(|_| backend_input);
 
-        let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
+        let (mut response_stream, _instance_id) = self.inner.direct(updated_request, instance_id).await?.take();
         let stream_context = response_stream.context();
         let chooser = self.chooser.clone();
         let context_for_monitoring = stream_context.clone();
