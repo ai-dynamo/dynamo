@@ -561,6 +561,18 @@ impl KvRouter {
         self.block_size
     }
 
+    /// Compute the overlap blocks for a given token sequence and worker.
+    /// This queries the indexer to find how many blocks are already cached.
+    pub async fn get_overlap_blocks(
+        &self,
+        tokens: &[u32],
+        worker: WorkerWithDpRank,
+    ) -> Result<u32, KvRouterError> {
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
+        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
+        Ok(overlap_scores.scores.get(&worker).copied().unwrap_or(0))
+    }
+
     /// Get the disaggregated endpoint for a worker, if available.
     /// Used to look up bootstrap host/port for prefill workers.
     pub async fn get_disaggregated_endpoint(
@@ -691,12 +703,104 @@ pub struct KvPushRouter {
     pub chooser: Arc<KvRouter>,
 }
 
+/// Result of worker selection containing instance ID, dp_rank, and overlap amount.
+struct WorkerSelection {
+    instance_id: u64,
+    dp_rank: u32,
+    overlap_amount: u32,
+}
+
 impl KvPushRouter {
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
         KvPushRouter { inner, chooser }
+    }
+
+    /// Select a worker for the request, either using a preselected worker or finding the best match.
+    ///
+    /// When `is_query_only` is false and `handle_local_updates` is true, this also registers
+    /// the request with the scheduler via `add_request`.
+    async fn select_worker(
+        &self,
+        context_id: &str,
+        request: &PreprocessedRequest,
+        phase: RequestPhase,
+        is_query_only: bool,
+        handle_local_updates: bool,
+    ) -> Result<WorkerSelection, Error> {
+        let routing = request.routing.as_ref();
+
+        // Get pre-selected worker based on phase, with backend_instance_id as fallback
+        let Some(id) = (match phase {
+            RequestPhase::Prefill => {
+                routing.and_then(|r| r.prefill_worker_id.or(r.backend_instance_id))
+            }
+            RequestPhase::Decode => {
+                routing.and_then(|r| r.decode_worker_id.or(r.backend_instance_id))
+            }
+            RequestPhase::Aggregated => routing.and_then(|r| r.backend_instance_id),
+        }) else {
+            // No preselected worker - find the best match
+            // Don't update states if this is a query-only request
+            let (best_worker, overlap_amount) = self
+                .chooser
+                .find_best_match(
+                    Some(context_id),
+                    &request.token_ids,
+                    request.router_config_override.as_ref(),
+                    !is_query_only,
+                )
+                .await?;
+
+            return Ok(WorkerSelection {
+                instance_id: best_worker.worker_id,
+                dp_rank: best_worker.dp_rank,
+                overlap_amount,
+            });
+        };
+
+        // Route to pre-selected or explicitly specified worker
+        let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
+        tracing::debug!(
+            worker_id = id,
+            dp_rank = dp_rank,
+            ?phase,
+            "Routing to specified worker"
+        );
+
+        // Compute actual overlap blocks by querying the indexer
+        let worker = WorkerWithDpRank::new(id, dp_rank);
+        let overlap_blocks = self
+            .chooser
+            .get_overlap_blocks(&request.token_ids, worker)
+            .await?;
+
+        // Perform add_request if this router handles local updates
+        if !is_query_only && handle_local_updates {
+            self.chooser
+                .add_request(
+                    context_id.to_string(),
+                    &request.token_ids,
+                    overlap_blocks,
+                    worker,
+                )
+                .await;
+        } else {
+            tracing::debug!(
+                request_id = %context_id,
+                worker_id = id,
+                dp_rank = dp_rank,
+                "Skipping add_request - query or handled externally"
+            );
+        }
+
+        Ok(WorkerSelection {
+            instance_id: id,
+            dp_rank,
+            overlap_amount: overlap_blocks,
+        })
     }
 }
 
@@ -733,6 +837,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Simple query-only detection: presence of query_instance_id annotation means query-only mode
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
 
+        // Determine if this router should handle local state updates (add_request, free, etc.)
+        // When routing hints are present, the external caller handles state tracking
+        // via separate API calls, so we skip local updates here.
+        let routing = request.routing.as_ref();
+        let handle_local_updates = routing
+            .map(|r| {
+                // No routing hints = we handle updates locally
+                r.backend_instance_id.is_none()
+                    && (r.prefill_worker_id.is_none() || r.decode_worker_id.is_none())
+            })
+            .unwrap_or(true);
+
         // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
         let phase = request
             .tracker
@@ -740,61 +856,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .map(|t| t.phase())
             .unwrap_or(RequestPhase::Aggregated);
 
-        // Get pre-selected worker based on phase, with backend_instance_id as fallback
-        let routing = request.routing.as_ref();
-        let preselected = match phase {
-            RequestPhase::Prefill => {
-                routing.and_then(|r| r.prefill_worker_id.or(r.backend_instance_id))
-            }
-            RequestPhase::Decode => {
-                routing.and_then(|r| r.decode_worker_id.or(r.backend_instance_id))
-            }
-            RequestPhase::Aggregated => routing.and_then(|r| r.backend_instance_id),
-        };
-
         let block_size = self.chooser.block_size() as usize;
-        let (instance_id, dp_rank, overlap_amount) = if let Some(id) = preselected {
-            // Route to pre-selected or explicitly specified worker
-            let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
-            tracing::debug!(
-                worker_id = id,
-                dp_rank = dp_rank,
-                ?phase,
-                "Routing to specified worker"
-            );
-
-            // Compute actual overlap blocks by querying the indexer
-            let block_hashes =
-                compute_block_hash_for_seq(&request.token_ids, self.chooser.block_size(), None);
-            let overlap_scores = self.chooser.indexer.find_matches(block_hashes).await?;
-            let worker = WorkerWithDpRank::new(id, dp_rank);
-            let overlap_blocks = overlap_scores.scores.get(&worker).copied().unwrap_or(0);
-
-            if !is_query_only {
-                self.chooser
-                    .add_request(
-                        context_id.clone(),
-                        &request.token_ids,
-                        overlap_blocks,
-                        worker,
-                    )
-                    .await;
-            }
-            (id, dp_rank, overlap_blocks)
-        } else {
-            // Find the best worker match
-            // Don't update states if this is a query-only request
-            let (best_worker, overlap_amount) = self
-                .chooser
-                .find_best_match(
-                    Some(&context_id),
-                    &request.token_ids,
-                    request.router_config_override.as_ref(),
-                    !is_query_only,
-                )
-                .await?;
-            (best_worker.worker_id, best_worker.dp_rank, overlap_amount)
-        };
+        let selection = self
+            .select_worker(
+                &context_id,
+                &request,
+                phase,
+                is_query_only,
+                handle_local_updates,
+            )
+            .await?;
+        let WorkerSelection {
+            instance_id,
+            dp_rank,
+            overlap_amount,
+        } = selection;
 
         // Record metrics in tracker: KV hit rate and worker ID based on phase
         if let Some(ref tracker) = request.tracker {
@@ -834,11 +910,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         backend_input.routing_mut().dp_rank = Some(dp_rank);
         let updated_request = context.map(|_| backend_input);
 
+        let chooser = self.chooser.clone();
         let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
         let stream_context = response_stream.context();
-        let chooser = self.chooser.clone();
         let context_for_monitoring = stream_context.clone();
 
+        // TODO: When handle_local_updates=false, consider moving mark_prefill_completed
+        // to an external caller (e.g., sidecar) if they support a first-token hook.
+        // Currently mark_prefill_completed is called here for all flows.
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut prefill_marked = false;
 
@@ -868,6 +947,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }
             }
 
+            // Always call free() - it's idempotent and safe even if already freed or never added
             if let Err(e) = chooser.free(&context_id).await {
                 tracing::warn!("Failed to free request {context_id}: {e}");
             }
