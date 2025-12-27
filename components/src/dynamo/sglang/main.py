@@ -197,6 +197,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             migrate_endpoint.serve_endpoint(
                 migration_handler.migrate,
                 graceful_shutdown=True,
+                metrics_labels=metrics_labels,
             )
         )
 

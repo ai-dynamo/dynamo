@@ -1,6 +1,7 @@
 """Test script for decode disaggregation with interactive UI."""
 
 import json
+import os
 import random
 import select
 import subprocess
@@ -11,7 +12,7 @@ from pathlib import Path
 
 import httpx
 
-NUM_WORKERS = 2
+NUM_WORKERS = 3  # 1 prefill + 2 decode
 HEALTH_URL = "http://localhost:8080/health"
 CHAT_URL = "http://localhost:8080/v1/chat/completions"
 MODEL_PATH = Path.home() / "proj/models/qwen0.6b"
@@ -24,6 +25,7 @@ processes: dict[str, subprocess.Popen] = {}
 
 # ANSI colors for log prefixes
 COLORS = {
+    "prefill": "\033[32m",  # green
     "decode1": "\033[36m",  # cyan
     "decode2": "\033[35m",  # magenta
     "frontend": "\033[33m",  # yellow
@@ -43,14 +45,20 @@ def stream_output(proc: subprocess.Popen, name: str, stream: str):
             print(f"{prefix}{line}", end="", flush=True)
 
 
-def start_worker(name: str, args: list[str]) -> subprocess.Popen:
+def start_worker(
+    name: str, args: list[str], env: dict[str, str] | None = None
+) -> subprocess.Popen:
     """Start a worker process and stream its logs."""
+    proc_env = os.environ.copy()
+    if env:
+        proc_env.update(env)
     proc = subprocess.Popen(
         args,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
+        env=proc_env,
     )
 
     # Register process for monitoring
@@ -235,7 +243,32 @@ def cleanup():
 
 def main():
     try:
-        # Start decode worker 1
+        # Start prefill worker
+        start_worker(
+            "prefill",
+            [
+                sys.executable,
+                "-m",
+                "dynamo.sglang",
+                "--model-path",
+                str(MODEL_PATH),
+                "--disaggregation-mode",
+                "prefill",
+                "--disaggregation-bootstrap-port",
+                "12345",
+                "--disaggregation-transfer-backend",
+                "nixl",
+                "--context-length",
+                "1024",
+                "--mem-fraction-static",
+                "0.30",
+                "--page-size",
+                "16",
+            ],
+            env={"DYN_SYSTEM_PORT": "8081"},
+        )
+
+        # Start decode worker 1 (handles seqlen <= 128)
         start_worker(
             "decode1",
             [
@@ -244,20 +277,25 @@ def main():
                 "dynamo.sglang",
                 "--model-path",
                 str(MODEL_PATH),
-                "--endpoint",
-                "dyn://dynamo.backend.generate",
+                "--disaggregation-mode",
+                "decode",
+                "--disaggregation-bootstrap-port",
+                "12346",
+                "--disaggregation-transfer-backend",
+                "nixl",
                 "--this-seqlen",
                 "128",
                 "--context-length",
                 "1024",
                 "--mem-fraction-static",
-                "0.3",
+                "0.40",
                 "--page-size",
                 "16",
             ],
+            env={"DYN_SYSTEM_PORT": "8082"},
         )
 
-        # Start decode worker 2
+        # Start decode worker 2 (handles seqlen <= 1024)
         start_worker(
             "decode2",
             [
@@ -266,15 +304,22 @@ def main():
                 "dynamo.sglang",
                 "--model-path",
                 str(MODEL_PATH),
+                "--disaggregation-mode",
+                "decode",
+                "--disaggregation-bootstrap-port",
+                "12347",
+                "--disaggregation-transfer-backend",
+                "nixl",
                 "--this-seqlen",
                 "1024",
                 "--context-length",
                 "1024",
                 "--mem-fraction-static",
-                "0.3",
+                "0.30",
                 "--page-size",
                 "16",
             ],
+            env={"DYN_SYSTEM_PORT": "8083"},
         )
 
         # Start frontend
