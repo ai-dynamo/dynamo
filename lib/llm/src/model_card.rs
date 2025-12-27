@@ -172,15 +172,14 @@ pub struct ModelDeploymentCard {
     /// Human readable model name, e.g. "Meta Llama 3.1 8B Instruct"
     pub display_name: String,
 
-    /// Original model source path used for downloading (e.g., HuggingFace repo ID).
-    /// This is preserved separately from display_name which may be customized via
-    /// --served-model-name. Used by download_config() to fetch model files.
-    /// See: https://github.com/ai-dynamo/dynamo/issues/4748
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_model: Option<String>,
-
     // Cache the Slugified display_name so we can share references to it
     slug: Slug,
+
+    /// Original HuggingFace model repository path.
+    /// This preserves the source model path when display_name is customized via --served-model-name.
+    /// Used by download_config() to fetch files from the correct HF repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_model: Option<String>,
 
     /// Model information
     pub model_info: Option<ModelInfoType>,
@@ -409,11 +408,9 @@ impl ModelDeploymentCard {
         }
 
         let ignore_weights = true;
-        // Use source_model for downloading if available, otherwise fall back to display_name.
-        // source_model preserves the original HF repo ID even when display_name is customized
-        // via --served-model-name. See: https://github.com/ai-dynamo/dynamo/issues/4748
-        let model_for_download = self.source_model.as_deref().unwrap_or(&self.display_name);
-        let local_path = crate::hub::from_hf(model_for_download, ignore_weights).await?;
+        // Use source_model if available (preserves original HF repo path when display_name is customized)
+        let model_name = self.source_model.as_ref().unwrap_or(&self.display_name);
+        let local_path = crate::hub::from_hf(model_name, ignore_weights).await?;
 
         self.update_dir(&local_path);
         Ok(())
@@ -555,14 +552,10 @@ impl ModelDeploymentCard {
         };
 
         let display_name = local_path.display().to_string();
-        // Preserve the original model path for downloading purposes.
-        // This is crucial when display_name is later overwritten with --served-model-name.
-        // See: https://github.com/ai-dynamo/dynamo/issues/4748
-        let source_model = Some(display_name.clone());
         Ok(Self {
             slug: Slug::from_string(&display_name),
             display_name,
-            source_model,
+            source_model: None,
             model_info,
             tokenizer,
             gen_config,
