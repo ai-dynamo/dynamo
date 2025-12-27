@@ -44,9 +44,35 @@ enum PrefillActivationState {
 #[derive(Clone, Debug)]
 pub enum DecodeTierNotification {
     /// A new tier was added (first worker for this seqlen)
-    Added { seqlen: u32, endpoint: Endpoint },
+    Added {
+        seqlen: u32,
+        decode_endpoint: Endpoint,
+        migrate_endpoint: Endpoint,
+    },
     /// A tier was removed (last worker for this seqlen went away)
     Removed { seqlen: u32 },
+}
+
+#[derive(Clone, Debug)]
+pub struct DecodeTier {
+    seqlen: u32,
+    decode_endpoint: Endpoint,
+    migrate_endpoint: Endpoint,
+    worker_count: usize,
+}
+
+impl DecodeTier {
+    pub fn seqlen(&self) -> u32 {
+        self.seqlen
+    }
+
+    pub fn decode_endpoint(&self) -> &Endpoint {
+        &self.decode_endpoint
+    }
+
+    pub fn migrate_endpoint(&self) -> &Endpoint {
+        &self.migrate_endpoint
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -84,7 +110,7 @@ pub struct ModelManager {
 
     /// Decode tiers with reference counting: model_name -> (seqlen -> (endpoint, worker_count))
     /// Endpoint is from first worker; count tracks how many workers serve this tier
-    decode_tiers: Mutex<HashMap<String, HashMap<u32, (Endpoint, usize)>>>,
+    decode_tiers: Mutex<HashMap<String, HashMap<u32, DecodeTier>>>,
 
     /// Per-model worker monitors for dynamic KV cache load rejection.
     /// Key: model name, Value: cloneable monitor (all fields are Arc).
@@ -522,22 +548,36 @@ impl ModelManager {
     /// Broadcasts `Added` notification only when first worker for this seqlen joins.
     ///
     /// Called by watcher when a worker with `this_seqlen` is discovered.
-    pub fn activate_decode_tier(&self, model_name: &str, seqlen: u32, endpoint: Endpoint) {
+    pub fn activate_decode_tier(
+        &self,
+        model_name: &str,
+        seqlen: u32,
+        decode_endpoint: Endpoint,
+        migrate_endpoint: Endpoint,
+    ) {
         let is_new_tier = {
             let mut tiers = self.decode_tiers.lock();
             let model_tiers = tiers.entry(model_name.to_string()).or_default();
 
-            if let Some((_, count)) = model_tiers.get_mut(&seqlen) {
-                *count += 1;
+            if let Some(DecodeTier { worker_count, .. }) = model_tiers.get_mut(&seqlen) {
+                *worker_count += 1;
                 tracing::debug!(
                     model_name = %model_name,
                     seqlen = seqlen,
-                    worker_count = *count,
+                    worker_count = *worker_count,
                     "Added worker to existing decode tier"
                 );
                 false
             } else {
-                model_tiers.insert(seqlen, (endpoint.clone(), 1));
+                model_tiers.insert(
+                    seqlen,
+                    DecodeTier {
+                        seqlen,
+                        decode_endpoint: decode_endpoint.clone(),
+                        migrate_endpoint: migrate_endpoint.clone(),
+                        worker_count: 1,
+                    },
+                );
                 tracing::info!(
                     model_name = %model_name,
                     seqlen = seqlen,
@@ -551,7 +591,11 @@ impl ModelManager {
         if is_new_tier {
             let broadcasters = self.decode_tier_broadcasters.lock();
             if let Some(sender) = broadcasters.get(model_name) {
-                let _ = sender.send(DecodeTierNotification::Added { seqlen, endpoint });
+                let _ = sender.send(DecodeTierNotification::Added {
+                    seqlen,
+                    decode_endpoint,
+                    migrate_endpoint,
+                });
             }
         }
     }
@@ -567,9 +611,9 @@ impl ModelManager {
                 return;
             };
 
-            if let Some((_, count)) = model_tiers.get_mut(&seqlen) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
+            if let Some(DecodeTier { worker_count, .. }) = model_tiers.get_mut(&seqlen) {
+                *worker_count = worker_count.saturating_sub(1);
+                if *worker_count == 0 {
                     model_tiers.remove(&seqlen);
                     tracing::info!(
                         model_name = %model_name,
@@ -581,7 +625,7 @@ impl ModelManager {
                     tracing::debug!(
                         model_name = %model_name,
                         seqlen = seqlen,
-                        worker_count = *count,
+                        worker_count = *worker_count,
                         "Removed worker from decode tier"
                     );
                     false
@@ -602,11 +646,11 @@ impl ModelManager {
 
     /// Get all existing decode tier endpoints for a model.
     /// Used by late subscribers (DecodeDisagger) to get tiers that were activated before subscription.
-    pub fn get_existing_decode_tiers(&self, model_name: &str) -> Vec<(u32, Endpoint)> {
+    pub fn get_existing_decode_tiers(&self, model_name: &str) -> Vec<DecodeTier> {
         let tiers = self.decode_tiers.lock();
         tiers
             .get(model_name)
-            .map(|m| m.iter().map(|(s, (e, _))| (*s, e.clone())).collect())
+            .map(|m| m.iter().map(|(_, d)| d.clone()).collect())
             .unwrap_or_default()
     }
 

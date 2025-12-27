@@ -313,7 +313,11 @@ impl HealthCheckManager {
         tokio::spawn(async move {
             let result = tokio::time::timeout(timeout, async {
                 // Call direct() on the PushRouter to target specific instance
-                match router.direct(request, instance_id).await.map(|routed| routed.take()) {
+                match router
+                    .direct(request, instance_id)
+                    .await
+                    .map(|routed| routed.take())
+                {
                     Ok((mut response_stream, _instance_id)) => {
                         // Get the first response to verify endpoint is alive
                         let is_healthy = if let Some(response) = response_stream.next().await {

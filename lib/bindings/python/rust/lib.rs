@@ -923,9 +923,10 @@ impl Client {
                         .round_robin(request_ctx)
                         .instrument(span)
                         .await
+                        .map(|routed| routed.into_stream())
                         .map_err(to_pyerr)?
                 }
-                _ => client.round_robin(request_ctx).await.map_err(to_pyerr)?,
+                _ => client.round_robin(request_ctx).await.map(|routed| routed.into_stream()).map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream {
@@ -960,9 +961,10 @@ impl Client {
                         .random(request_ctx)
                         .instrument(span)
                         .await
+                        .map(|routed| routed.into_stream())
                         .map_err(to_pyerr)?
                 }
-                _ => client.random(request_ctx).await.map_err(to_pyerr)?,
+                _ => client.random(request_ctx).await.map(|routed| routed.into_stream()).map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream {
@@ -999,11 +1001,13 @@ impl Client {
                         .direct(request_ctx, instance_id)
                         .instrument(span)
                         .await
+                        .map(|routed| routed.into_stream())
                         .map_err(to_pyerr)?
                 }
                 _ => client
                     .direct(request_ctx, instance_id)
                     .await
+                    .map(|routed| routed.into_stream())
                     .map_err(to_pyerr)?,
             };
 

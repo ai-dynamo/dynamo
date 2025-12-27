@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use derive_builder::Builder;
+use dynamo_runtime::protocols::maybe_error::MaybeError;
 use serde::{Deserialize, Serialize};
 
 use super::timing::RequestTracker;
@@ -197,5 +198,38 @@ impl PreprocessedEmbeddingRequest {
 impl PreprocessedEmbeddingRequest {
     pub fn builder() -> PreprocessedEmbeddingRequestBuilder {
         PreprocessedEmbeddingRequestBuilder::default()
+    }
+}
+
+/// Request to initiate KV cache migration from a source decode worker.
+/// The source worker will return bootstrap info for the destination to connect.
+#[derive(Serialize, Deserialize, Debug, Clone, Builder)]
+pub struct MigrationRequest {
+    /// Request ID to migrate (identifies the in-flight request on the source worker)
+    pub rid: String,
+}
+
+/// Response from the migrate endpoint with connection details
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct MigrationResponse {
+    /// Request ID that was migrated
+    pub rid: String,
+    /// Bootstrap info for the destination worker to receive KV cache
+    pub bootstrap_info: BootstrapInfo,
+    /// Error message if migration failed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl MaybeError for MigrationResponse {
+    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        MigrationResponse {
+            error: Some(format!("{:?}", err)),
+            ..Default::default()
+        }
+    }
+
+    fn err(&self) -> Option<anyhow::Error> {
+        self.error.as_ref().map(|e| anyhow::Error::msg(e.clone()))
     }
 }

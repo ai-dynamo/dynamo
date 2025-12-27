@@ -34,8 +34,16 @@ pub struct RoutedManyOut<T> {
 }
 
 impl<T> RoutedManyOut<T> {
+    pub fn new(inner: ManyOut<T>, instance_id: u64) -> Self {
+        Self { inner, instance_id }
+    }
+
     pub fn take(self) -> (ManyOut<T>, u64) {
         (self.inner, self.instance_id)
+    }
+
+    pub fn into_stream(self) -> ManyOut<T> {
+        self.inner
     }
 
     pub fn instance_id(&self) -> u64 {
@@ -303,10 +311,10 @@ where
                     }
                     res
                 });
-                Ok(RoutedManyOut {
-                    inner: ResponseStream::new(Box::pin(stream), engine_ctx),
+                Ok(RoutedManyOut::new(
+                    ResponseStream::new(Box::pin(stream), engine_ctx),
                     instance_id,
-                })
+                ))
             }
             Err(err) => {
                 if let Some(req_err) = err.downcast_ref::<NatsRequestError>()
@@ -322,7 +330,7 @@ where
         }
     }
 
-    pub async fn routed_generate(&self, request: SingleIn<T>) -> anyhow::Result<RoutedManyOut<U>> {
+    pub async fn generate_routed(&self, request: SingleIn<T>) -> anyhow::Result<RoutedManyOut<U>> {
         match self.router_mode {
             RouterMode::Random => self.random(request).await,
             RouterMode::RoundRobin => self.round_robin(request).await,
@@ -342,7 +350,7 @@ where
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
         //InstanceSource::Static => self.r#static(request).await,
-        self.routed_generate(request)
+        self.generate_routed(request)
             .await
             .map(|routed| routed.inner)
     }

@@ -12,14 +12,15 @@ use std::sync::Arc;
 use anyhow::Result;
 use futures::StreamExt;
 use parking_lot::RwLock;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
     component::Endpoint,
     pipeline::{
-        AsyncEngine, AsyncEngineContextProvider, Context, ManyOut, Operator, PushRouter,
-        ResponseStream, RouterMode, ServerStreamingEngine, SingleIn, async_trait,
+        AsyncEngineContextProvider, Context, ManyOut, Operator, PushRouter, ResponseStream,
+        RouterMode, ServerStreamingEngine, SingleIn, async_trait,
+        network::egress::push_router::RoutedManyOut,
     },
     protocols::annotated::Annotated,
 };
@@ -27,7 +28,10 @@ use dynamo_runtime::{
 use crate::{
     discovery::{DecodeTierNotification, ModelManager},
     kv_router::{KvPushRouter, KvRouterConfig},
-    protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
+    protocols::common::{
+        llm_backend::{LLMEngineOutput, PreprocessedRequest},
+        preprocessor::{MigrationRequest, MigrationResponse},
+    },
 };
 
 /// Shared tiers storage wrapped in Arc for cloning across async tasks
@@ -40,6 +44,8 @@ struct Tier {
     seqlen: u32,
     /// Router to workers in this tier (KV-aware or simple)
     router: TierRouter,
+    /// Router for migration requests (to call migrate endpoint on source worker)
+    migrate_router: Arc<PushRouter<MigrationRequest, MigrationResponse>>,
 }
 
 /// The router type for a tier
@@ -52,13 +58,13 @@ enum TierRouter {
 }
 
 impl TierRouter {
-    async fn generate(
+    async fn generate_routed(
         &self,
         request: SingleIn<PreprocessedRequest>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+    ) -> Result<RoutedManyOut<Annotated<LLMEngineOutput>>> {
         match self {
-            TierRouter::Kv(router) => router.generate(request).await,
-            TierRouter::Simple(router) => router.generate(request).await,
+            TierRouter::Kv(router) => router.generate_routed(request).await,
+            TierRouter::Simple(router) => router.generate_routed(request).await,
         }
     }
 }
@@ -153,7 +159,8 @@ impl DecodeDisagger {
 
         tokio::spawn(async move {
             // First, activate any existing tiers
-            for (seqlen, endpoint) in existing_tiers {
+            for decode_tier in existing_tiers {
+                let seqlen = decode_tier.seqlen();
                 tracing::info!(
                     model_name = %model_name,
                     seqlen = seqlen,
@@ -163,7 +170,8 @@ impl DecodeDisagger {
                 if let Err(e) = Self::activate_tier_inner(
                     &tiers,
                     seqlen,
-                    endpoint,
+                    decode_tier.decode_endpoint().clone(),
+                    decode_tier.migrate_endpoint().clone(),
                     router_mode,
                     kv_router_config,
                     kv_cache_block_size,
@@ -184,7 +192,7 @@ impl DecodeDisagger {
                 tokio::select! {
                     result = tier_rx.recv() => {
                         match result {
-                            Ok(DecodeTierNotification::Added { seqlen, endpoint }) => {
+                            Ok(DecodeTierNotification::Added { seqlen, decode_endpoint, migrate_endpoint }) => {
                                 tracing::info!(
                                     model_name = %model_name,
                                     seqlen = seqlen,
@@ -194,7 +202,8 @@ impl DecodeDisagger {
                                 if let Err(e) = Self::activate_tier_inner(
                                     &tiers,
                                     seqlen,
-                                    endpoint,
+                                    decode_endpoint,
+                                    migrate_endpoint,
                                     router_mode,
                                     kv_router_config,
                                     kv_cache_block_size,
@@ -247,52 +256,12 @@ impl DecodeDisagger {
         disagger
     }
 
-    /// Register a tier for activation. Returns a sender to provide the endpoint when discovered.
-    pub fn register_tier(&self, seqlen: u32) -> oneshot::Sender<Endpoint> {
-        let (tx, rx) = oneshot::channel();
-
-        // Spawn background task to wait for activation
-        let tiers = self.tiers.clone();
-        let router_mode = self.router_mode;
-        let kv_router_config = self.kv_router_config;
-        let kv_cache_block_size = self.kv_cache_block_size;
-        let model_manager = self.model_manager.clone();
-        let cancel_token = self.cancel_token.clone();
-
-        tokio::spawn(async move {
-            tokio::select! {
-                result = rx => {
-                    let Ok(endpoint) = result else {
-                        tracing::debug!(seqlen, "Tier activation channel closed without endpoint");
-                        return;
-                    };
-
-                    if let Err(e) = Self::activate_tier_inner(
-                        &tiers,
-                        seqlen,
-                        endpoint,
-                        router_mode,
-                        kv_router_config,
-                        kv_cache_block_size,
-                        model_manager,
-                    ).await {
-                        tracing::error!(seqlen, error = %e, "Failed to activate tier");
-                    }
-                }
-                _ = cancel_token.cancelled() => {
-                    tracing::debug!(seqlen, "Tier activation cancelled");
-                }
-            }
-        });
-
-        tx
-    }
-
-    /// Activate a tier with the provided endpoint
+    /// Activate a tier with the provided endpoints
     async fn activate_tier_inner(
         tiers: &SharedTiers,
         seqlen: u32,
-        endpoint: Endpoint,
+        decode_endpoint: Endpoint,
+        migrate_endpoint: Endpoint,
         router_mode: RouterMode,
         kv_router_config: Option<KvRouterConfig>,
         kv_cache_block_size: u32,
@@ -306,7 +275,7 @@ impl DecodeDisagger {
             };
 
             let kv_chooser = manager
-                .kv_chooser_for(&endpoint, kv_cache_block_size, kv_router_config)
+                .kv_chooser_for(&decode_endpoint, kv_cache_block_size, kv_router_config)
                 .await?;
 
             let client = kv_chooser.client().clone();
@@ -321,7 +290,7 @@ impl DecodeDisagger {
 
             TierRouter::Kv(Arc::new(KvPushRouter::new(push_router, kv_chooser)))
         } else {
-            let client = endpoint.client().await?;
+            let client = decode_endpoint.client().await?;
             let push_router =
                 PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
                     client,
@@ -334,7 +303,23 @@ impl DecodeDisagger {
             TierRouter::Simple(Arc::new(push_router))
         };
 
-        let tier = Tier { seqlen, router };
+        // Create migrate router from migrate endpoint
+        // We use RoundRobin for router creation, but will use direct() to target specific instances
+        let migrate_client = migrate_endpoint.client().await?;
+        let migrate_push_router =
+            PushRouter::<MigrationRequest, MigrationResponse>::from_client_with_threshold(
+                migrate_client,
+                RouterMode::RoundRobin, // Will use direct() for specific instance targeting
+                None,
+                None,
+            )
+            .await?;
+
+        let tier = Tier {
+            seqlen,
+            router,
+            migrate_router: Arc::new(migrate_push_router),
+        };
 
         // Insert tier in sorted order
         let mut tiers_guard = tiers.write();
@@ -369,6 +354,12 @@ impl DecodeDisagger {
     fn is_max_tier(&self, seqlen: u32) -> bool {
         let tiers = self.tiers.read();
         tiers.last().map(|t| t.seqlen == seqlen).unwrap_or(true)
+    }
+
+    /// Find a tier by seqlen
+    fn find_tier(&self, seqlen: u32) -> Option<Tier> {
+        let tiers = self.tiers.read();
+        tiers.iter().find(|t| t.seqlen == seqlen).cloned()
     }
 }
 
@@ -451,12 +442,17 @@ impl
 
         // Route to current tier and monitor for migration
         let request_for_tier = context.map(|_| req.clone());
-        let mut stream = current_tier.router.generate(request_for_tier).await?;
+        let (mut stream, instance_id) = current_tier
+            .router
+            .generate_routed(request_for_tier)
+            .await?
+            .take();
         let stream_context = stream.context();
         let stream_context_for_return = stream_context.clone();
         let request_id = stream_context.id().to_string();
 
         let tiers = self.tiers.clone();
+        let current_tier_clone = current_tier.clone();
         let mut req_clone = req.clone();
 
         // Create a stream that monitors output and migrates if needed
@@ -481,10 +477,6 @@ impl
                         "Sequence length exceeded tier capacity, migrating"
                     );
 
-                    // Drop current stream (cancels the request)
-                    // TODO: call migration handler here and pass the bootstrap info to the next tier.
-                    drop(stream);
-
                     // Get next tier (clone inside block to avoid holding lock across await)
                     let higher_tier = {
                         let tiers_guard = tiers.read();
@@ -501,15 +493,61 @@ impl
 
                     tracing::info!(
                         new_tier = higher_tier.seqlen,
-                        "Migrating to higher tier"
+                        source_instance = instance_id,
+                        "Initiating KV cache migration to higher tier"
                     );
 
-                    // Re-send full request to higher tier
-                    // Note: This triggers full prefill on the new tier
-                    // TODO: call migration handler here and pass the bootstrap info to the next tier so we don't re-prefill
+                    // Step 1: Call migrate endpoint on the source worker to initiate KV transfer
+                    let migrate_req = MigrationRequest {
+                        rid: request_id.clone(),
+                    };
+                    let migrate_context = Context::with_id(migrate_req, format!("migrate-{}", request_id));
+
+                    // Use direct routing to the specific instance that has the request
+                    let migration_result = current_tier_clone.migrate_router
+                        .direct(migrate_context, instance_id)
+                        .await;
+
+                    let bootstrap_info = match migration_result {
+                        Ok(routed_migrate) => {
+                            // Get the inner stream from RoutedManyOut
+                            let (mut migrate_stream, _migrate_instance_id) = routed_migrate.take();
+                            // Get the migration response (should be a single response, not a stream)
+                            match migrate_stream.next().await {
+                                Some(response) => {
+                                    tracing::info!(
+                                        rid = %response.rid,
+                                        bootstrap_host = %response.bootstrap_info.bootstrap_host,
+                                        bootstrap_port = response.bootstrap_info.bootstrap_port,
+                                        bootstrap_room = response.bootstrap_info.bootstrap_room,
+                                        "Received migration bootstrap info from source worker"
+                                    );
+                                    Some(response.bootstrap_info)
+                                }
+                                None => {
+                                    tracing::warn!("Migration endpoint returned empty response, falling back to full prefill");
+                                    None
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to call migrate endpoint, falling back to full prefill");
+                            None
+                        }
+                    };
+
+                    // Drop current stream (cancels the request on source worker)
+                    drop(stream);
+
+                    // Step 2: Add bootstrap info to request and send to higher tier
+                    if let Some(info) = bootstrap_info {
+                        req_clone.bootstrap_info = Some(info);
+                    }
+
                     let migration_context = Context::with_id(req_clone.clone(), request_id.clone());
-                    match higher_tier.router.generate(migration_context).await {
-                        Ok(mut new_stream) => {
+                    match higher_tier.router.generate_routed(migration_context).await {
+                        Ok(routed_out) => {
+                            let (mut new_stream, _new_instance_id) = routed_out.take();
                             // Continue streaming from new tier
                             while let Some(new_chunk) = new_stream.next().await {
                                 yield new_chunk;

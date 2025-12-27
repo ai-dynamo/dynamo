@@ -10,6 +10,7 @@ use derive_builder::Builder;
 use dynamo_runtime::{
     component::{Client, Endpoint},
     discovery::{DiscoveryQuery, watch_and_extract_field},
+    pipeline::network::egress::push_router::RoutedManyOut,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
@@ -700,10 +701,7 @@ impl KvPushRouter {
     }
 }
 
-#[async_trait]
-impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for KvPushRouter
-{
+impl KvPushRouter {
     /// Generate method that handles KV-aware routing with three distinct behaviors:
     ///
     /// 1. **If `query_instance_id` annotation is set**:
@@ -723,10 +721,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ///
     /// The router state updates include tracking active sequences and managing
     /// prefill/completion lifecycle for proper KV cache management.
-    async fn generate(
+    pub async fn generate_routed(
         &self,
         request: SingleIn<PreprocessedRequest>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+    ) -> Result<RoutedManyOut<Annotated<LLMEngineOutput>>, Error> {
         // Extract context ID for request tracking
         let context_id = request.context().id().to_string();
 
@@ -826,7 +824,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             };
             let response = Annotated::from_data(output);
             let stream = stream::iter(vec![response]);
-            return Ok(ResponseStream::new(Box::pin(stream), stream_context));
+            return Ok(RoutedManyOut::new(
+                ResponseStream::new(Box::pin(stream), stream_context),
+                instance_id,
+            ));
         }
 
         // Route to worker
@@ -834,7 +835,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         backend_input.routing_mut().dp_rank = Some(dp_rank);
         let updated_request = context.map(|_| backend_input);
 
-        let (mut response_stream, _instance_id) = self.inner.direct(updated_request, instance_id).await?.take();
+        let (mut response_stream, _instance_id) = self
+            .inner
+            .direct(updated_request, instance_id)
+            .await?
+            .take();
         let stream_context = response_stream.context();
         let chooser = self.chooser.clone();
         let context_for_monitoring = stream_context.clone();
@@ -872,7 +877,24 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 tracing::warn!("Failed to free request {context_id}: {e}");
             }
         });
-        Ok(ResponseStream::new(wrapped_stream, stream_context))
+        Ok(RoutedManyOut::new(
+            ResponseStream::new(wrapped_stream, stream_context),
+            instance_id,
+        ))
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for KvPushRouter
+{
+    async fn generate(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        self.generate_routed(request)
+            .await
+            .map(|routed| routed.take().0)
     }
 }
 

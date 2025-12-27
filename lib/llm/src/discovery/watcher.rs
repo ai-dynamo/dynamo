@@ -363,8 +363,15 @@ impl ModelWatcher {
                     "Intermediate decode tier detected, activating tier (not publishing model)"
                 );
 
-                self.manager
-                    .activate_decode_tier(card.name(), seqlen, endpoint.clone());
+                // Create migrate endpoint for this component (same component, different endpoint name)
+                let migrate_endpoint = component.endpoint("migrate");
+
+                self.manager.activate_decode_tier(
+                    card.name(),
+                    seqlen,
+                    endpoint.clone(),
+                    migrate_endpoint,
+                );
                 true // This is an intermediate tier
             }
             Some(seqlen) => {
@@ -377,8 +384,15 @@ impl ModelWatcher {
                     "Main decode tier detected (seqlen == context_length), will publish model"
                 );
 
-                self.manager
-                    .activate_decode_tier(card.name(), seqlen, endpoint.clone());
+                // Create migrate endpoint for this component (same component, different endpoint name)
+                let migrate_endpoint = component.endpoint("migrate");
+
+                self.manager.activate_decode_tier(
+                    card.name(),
+                    seqlen,
+                    endpoint.clone(),
+                    migrate_endpoint,
+                );
                 false // This is the main tier, should publish model
             }
             None => false, // No decode disaggregation, publish model normally
