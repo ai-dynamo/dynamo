@@ -167,6 +167,31 @@ pub struct KvConnectorMetadata {
     pub intra_pass_load: Option<IntraPassLoad>,
 }
 
+// impl std::fmt::Debug for IterationSession {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         f.debug_struct("IterationSession")
+//             .field("iteration", &self.iteration)
+//             .field("elapsed", &self.created.elapsed())
+//             .finish()
+//     }
+// }
+
+impl KvConnectorMetadata {
+    pub fn summary(&self) -> String {
+        let intra_pass_load_num_blocks = self
+            .intra_pass_load
+            .as_ref()
+            .map(|l| l.g1_dst_block_ids.len())
+            .unwrap_or(0);
+        let will_signal_completion = self.foward_pass_completion_events.is_some();
+
+        format!(
+            "Iteration: {}, Intra pass load: {}, Forward pass completion events: {:?}",
+            self.iteration, intra_pass_load_num_blocks, will_signal_completion
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntraPassLoad {
     pub g2_src_block_ids: Vec<BlockId>,
@@ -213,12 +238,25 @@ impl ConnectorLeader {
         scheduler_output: SchedulerOutput,
     ) -> Result<KvConnectorMetadata> {
         if let Some(forward_pass_sample) = self.forward_pass_samples.lock().take() {
-            tracing::info!(
-                iteration = forward_pass_sample.iteration,
-                "Previous forward pass took {:?}; {:?}",
-                forward_pass_sample.forward_pass_start.elapsed(),
-                forward_pass_sample
-            );
+            let decode_tokens = forward_pass_sample.new_reqs + forward_pass_sample.cached_reqs;
+            let prefill_tokens = forward_pass_sample
+                .total_scheduled_tokens
+                .saturating_sub(decode_tokens);
+
+            // Only log decode-only iterations every 20th iteration to reduce noise
+            let should_log = prefill_tokens > 0 || forward_pass_sample.iteration % 20 == 0;
+
+            if should_log {
+                tracing::info!(
+                    iteration = forward_pass_sample.iteration,
+                    prefill_tokens,
+                    decode_tokens,
+                    "Forward pass completed in {:?}; active requests: {:?}; active slots: {:?}",
+                    forward_pass_sample.forward_pass_start.elapsed(),
+                    forward_pass_sample.new_reqs + forward_pass_sample.cached_reqs,
+                    forward_pass_sample.active_slots
+                );
+            }
         }
 
         if scheduler_output.total_num_scheduled_tokens == 0 {
@@ -238,8 +276,6 @@ impl ConnectorLeader {
             .cached_reqs(scheduler_output.scheduled_cached_reqs.len())
             .active_slots(self.slots.len())
             .build()?;
-
-        tracing::info!("Forward pass sample: {:?}", forward_pass_sample);
 
         *self.forward_pass_samples.lock() = Some(forward_pass_sample);
 

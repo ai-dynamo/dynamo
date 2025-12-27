@@ -85,6 +85,9 @@ mod policy;
 mod queue;
 mod source;
 
+#[cfg(test)]
+mod cancel_tests;
+
 // Re-export public API
 pub use cancel::{CancelConfirmation, CancelState, CancellationToken};
 pub use engine::{OffloadEngine, OffloadEngineBuilder};
@@ -104,4 +107,4 @@ pub use queue::CancellableQueue;
 pub use source::{ExternalBlock, SourceBlock, SourceBlocks};
 
 // Re-export batch config for advanced users
-pub use batch::BatchConfig;
+pub use batch::{BatchConfig, TimingTrace};

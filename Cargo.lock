@@ -3230,6 +3230,7 @@ dependencies = [
  "futures",
  "indicatif 0.18.3",
  "lru 0.16.2",
+ "nvtx",
  "oneshot",
  "parking_lot",
  "proptest",
@@ -3260,6 +3261,7 @@ dependencies = [
  "dynamo-nova-discovery",
  "figment",
  "nix 0.30.1",
+ "nvtx",
  "rayon",
  "serde",
  "serde_json",
@@ -7934,6 +7936,15 @@ name = "number_prefix"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
+
+[[package]]
+name = "nvtx"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad2e855e8019f99e4b94ac33670eb4e4f570a2e044f3749a0b2c7f83b841e52c"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "objc"

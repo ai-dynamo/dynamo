@@ -14,6 +14,7 @@ description = "KVBM Configuration Library for Tokio, Rayon, and Nova runtimes"
 [features]
 default = []
 rayon = ["dep:rayon"]
+nvtx = ["dep:nvtx"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -27,6 +28,7 @@ validator = { workspace = true }
 
 # Optional dependencies
 rayon = { version = "1.10", optional = true }
+nvtx = { version = "1.3", optional = true }
 
 # Nova dependencies
 dynamo-nova = { path = "../nova" }

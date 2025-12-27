@@ -398,7 +398,7 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             }
         }
 
-        tracing::info!("Forward pass start: {:?}", metadata);
+        tracing::info!("Forward pass start: {:?}", metadata.summary());
 
         // Store the metadata for use by start_load_kv
         *self.metadata.lock() = Some(metadata);

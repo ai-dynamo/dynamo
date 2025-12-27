@@ -3,8 +3,13 @@
 
 //! Tokio runtime configuration.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use serde::{Deserialize, Serialize};
 use validator::Validate;
+
+/// Atomic counter for assigning unique thread ranks.
+static THREAD_RANK: AtomicUsize = AtomicUsize::new(0);
 
 /// Tokio runtime configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -33,7 +38,16 @@ impl TokioConfig {
             builder.max_blocking_threads(blocking);
         }
 
-        builder.enable_all().build()
+        builder
+            .on_thread_start(|| {
+                let rank = THREAD_RANK.fetch_add(1, Ordering::Relaxed);
+                #[cfg(feature = "nvtx")]
+                nvtx::name_thread!("kvbm-tokio:{}", rank);
+                #[cfg(not(feature = "nvtx"))]
+                let _ = rank;
+            })
+            .enable_all()
+            .build()
     }
 }
 

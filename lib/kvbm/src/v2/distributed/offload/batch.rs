@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dynamo_nova::events::EventHandle;
 use tokio::sync::{mpsc, watch};
@@ -20,6 +20,110 @@ use super::handle::TransferId;
 use super::pending::PendingGuard;
 use super::queue::CancellableQueue;
 use super::source::SourceBlock;
+
+/// Helper macro to create an NVTX range when the nvtx feature is enabled.
+macro_rules! nvtx_range {
+    ($name:expr) => {{
+        #[cfg(feature = "nvtx")]
+        let _range = nvtx::range!($name);
+        #[cfg(not(feature = "nvtx"))]
+        let _range = ();
+        _range
+    }};
+}
+
+/// Timing trace for tracking block progression through pipeline stages.
+///
+/// Each block carries a timing trace that records when it passed through
+/// each stage. This enables per-container and batch-level timing analysis.
+#[derive(Debug, Clone)]
+pub struct TimingTrace {
+    /// When the block was initially enqueued into the pipeline
+    pub enqueued_at: Instant,
+    /// When policy evaluation completed for this block
+    pub policy_complete_at: Option<Instant>,
+    /// When the precondition (e.g., forward pass) completed
+    pub precondition_complete_at: Option<Instant>,
+    /// When the block was added to a transfer batch
+    pub batched_at: Option<Instant>,
+    /// When the transfer operation started
+    pub transfer_start_at: Option<Instant>,
+    /// When the transfer operation completed
+    pub transfer_complete_at: Option<Instant>,
+}
+
+impl TimingTrace {
+    /// Create a new timing trace, recording the current time as enqueue time.
+    pub fn new() -> Self {
+        Self {
+            enqueued_at: Instant::now(),
+            policy_complete_at: None,
+            precondition_complete_at: None,
+            batched_at: None,
+            transfer_start_at: None,
+            transfer_complete_at: None,
+        }
+    }
+
+    /// Mark policy evaluation complete.
+    pub fn mark_policy_complete(&mut self) {
+        self.policy_complete_at = Some(Instant::now());
+    }
+
+    /// Mark precondition complete.
+    pub fn mark_precondition_complete(&mut self) {
+        self.precondition_complete_at = Some(Instant::now());
+    }
+
+    /// Mark block as batched.
+    pub fn mark_batched(&mut self) {
+        self.batched_at = Some(Instant::now());
+    }
+
+    /// Mark transfer start.
+    pub fn mark_transfer_start(&mut self) {
+        self.transfer_start_at = Some(Instant::now());
+    }
+
+    /// Mark transfer complete.
+    pub fn mark_transfer_complete(&mut self) {
+        self.transfer_complete_at = Some(Instant::now());
+    }
+
+    /// Get total time from enqueue to transfer complete (if available).
+    pub fn total_duration(&self) -> Option<Duration> {
+        self.transfer_complete_at
+            .map(|end| end.duration_since(self.enqueued_at))
+    }
+
+    /// Get policy evaluation duration (if available).
+    pub fn policy_duration(&self) -> Option<Duration> {
+        self.policy_complete_at
+            .map(|end| end.duration_since(self.enqueued_at))
+    }
+
+    /// Get precondition wait duration (if available).
+    pub fn precondition_duration(&self) -> Option<Duration> {
+        match (self.policy_complete_at, self.precondition_complete_at) {
+            (Some(start), Some(end)) => Some(end.duration_since(start)),
+            _ => None,
+        }
+    }
+
+    /// Get transfer duration (if available).
+    pub fn transfer_duration(&self) -> Option<Duration> {
+        match (self.transfer_start_at, self.transfer_complete_at) {
+            (Some(start), Some(end)) => Some(end.duration_since(start)),
+            _ => None,
+        }
+    }
+}
+
+impl Default for TimingTrace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Configuration for batch collection.
 #[derive(Debug, Clone)]
@@ -99,6 +203,8 @@ pub struct TransferBatch<T: BlockMetadata> {
     /// Optional precondition event that must be satisfied before processing.
     /// If Some, the pipeline will await this event before executing the transfer.
     pub precondition: Option<EventHandle>,
+    /// Timing trace for performance monitoring (batch-level, not per-block).
+    pub timing: TimingTrace,
 }
 
 impl<T: BlockMetadata> TransferBatch<T> {
@@ -107,6 +213,7 @@ impl<T: BlockMetadata> TransferBatch<T> {
         Self {
             blocks: Vec::new(),
             precondition: None,
+            timing: TimingTrace::new(),
         }
     }
 
@@ -115,6 +222,7 @@ impl<T: BlockMetadata> TransferBatch<T> {
         Self {
             blocks: Vec::with_capacity(capacity),
             precondition: None,
+            timing: TimingTrace::new(),
         }
     }
 
@@ -356,6 +464,7 @@ impl<T: BlockMetadata> BatchCollector<T> {
 
     /// Flush the current batch to the output channel.
     async fn flush(&mut self) {
+        let _nvtx = nvtx_range!("offload::batch");
         if self.current_batch.is_empty() {
             return;
         }
@@ -364,6 +473,9 @@ impl<T: BlockMetadata> BatchCollector<T> {
             &mut self.current_batch,
             TransferBatch::with_capacity(self.config.max_batch_size),
         );
+
+        // Mark batch as ready (single O(1) call, not per-block)
+        batch.timing.mark_batched();
 
         // Extract precondition from blocks' transfer states
         // If all blocks share the same precondition, set it on the batch
@@ -489,6 +601,7 @@ impl<T: BlockMetadata> BatchCollectorQueue<T> {
 
     /// Flush the current batch to the output channel.
     async fn flush(&mut self) {
+        let _nvtx = nvtx_range!("offload::batch");
         if self.current_batch.is_empty() {
             return;
         }
@@ -497,6 +610,9 @@ impl<T: BlockMetadata> BatchCollectorQueue<T> {
             &mut self.current_batch,
             TransferBatch::with_capacity(self.config.max_batch_size),
         );
+
+        // Mark batch as ready (single O(1) call, not per-block)
+        batch.timing.mark_batched();
 
         // Extract precondition from blocks' transfer states
         // If all blocks share the same precondition, set it on the batch
@@ -590,5 +706,49 @@ mod tests {
         // Should receive nothing (empty input)
         let result = tokio::time::timeout(Duration::from_millis(50), output_rx.recv()).await;
         assert!(result.is_err() || result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_transfer_batch_with_capacity() {
+        let batch: TransferBatch<()> = TransferBatch::with_capacity(128);
+        assert!(batch.is_empty());
+        assert_eq!(batch.len(), 0);
+    }
+
+    #[test]
+    fn test_batch_config_with_methods() {
+        let config = BatchConfig::default()
+            .with_max_size(256)
+            .with_min_size(32)
+            .with_flush_interval(Duration::from_millis(100));
+
+        assert_eq!(config.max_batch_size, 256);
+        assert_eq!(config.min_batch_size, 32);
+        assert_eq!(config.flush_interval, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_transfer_batch_methods() {
+        let mut batch: TransferBatch<()> = TransferBatch::new();
+
+        // Note: We can't easily create QueuedBlock without the full pipeline setup,
+        // so this test just verifies the batch structure methods work on empty batches
+        assert!(batch.block_ids().is_empty());
+        assert!(batch.sequence_hashes().is_empty());
+        assert!(batch.transfer_ids().is_empty());
+
+        // Verify take() works
+        let taken = batch.take();
+        assert!(taken.is_empty());
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn test_batch_precondition() {
+        let batch: TransferBatch<()> = TransferBatch::new();
+        assert!(batch.precondition.is_none());
+
+        // Note: with_precondition requires an EventHandle which is complex to create
+        // in a unit test, so we just verify the field exists and is None by default
     }
 }

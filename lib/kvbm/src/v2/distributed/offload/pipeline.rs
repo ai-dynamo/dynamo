@@ -32,7 +32,7 @@
 use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::future::Either;
 use tokio::sync::{Semaphore, mpsc, watch};
@@ -47,7 +47,7 @@ use crate::v2::physical::transfer::TransferOptions;
 use crate::v2::{BlockId, SequenceHash};
 
 use super::batch::{
-    BatchCollector, BatchConfig, BatchOutputRx, EvalResult, QueuedBlock, TransferBatch,
+    BatchCollector, BatchConfig, BatchOutputRx, EvalResult, QueuedBlock, TimingTrace, TransferBatch,
 };
 use super::handle::{TransferId, TransferState, TransferStatus};
 use super::pending::PendingTracker;
@@ -55,6 +55,18 @@ use super::policy::{EvalContext, OffloadPolicy};
 use super::queue::CancellableQueue;
 use super::source::{SourceBlock, SourceBlocks};
 use crate::v2::distributed::object::ObjectLockManager;
+
+/// Helper macro to create an NVTX range when the nvtx feature is enabled.
+/// The range automatically ends when the returned guard is dropped.
+macro_rules! nvtx_range {
+    ($name:expr) => {{
+        #[cfg(feature = "nvtx")]
+        let _range = nvtx::range!($name);
+        #[cfg(not(feature = "nvtx"))]
+        let _range = ();
+        _range
+    }};
+}
 
 /// Configuration for a pipeline.
 #[derive(Clone)]
@@ -867,6 +879,7 @@ impl<T: BlockMetadata> PolicyEvaluator<T> {
     }
 
     async fn evaluate(&self, input: PipelineInput<T>) {
+        let _nvtx = nvtx_range!("offload::policy");
         let transfer_id = input.transfer_id;
 
         // Set total_expected_blocks for per-transfer sentinel flush
@@ -1108,6 +1121,8 @@ pub struct ResolvedBatch<T: BlockMetadata> {
     /// Sequence hashes of blocks that were evicted during upgrade
     #[allow(dead_code)]
     pub evicted: Vec<SequenceHash>,
+    /// Timing trace from the original batch (batch-level, not per-block)
+    pub timing: TimingTrace,
 }
 
 impl<T: BlockMetadata> ResolvedBatch<T> {
@@ -1140,6 +1155,10 @@ impl<T: BlockMetadata> ResolvedBatch<T> {
 pub fn upgrade_batch<T: BlockMetadata>(batch: TransferBatch<T>) -> ResolvedBatch<T> {
     let mut resolved: Vec<ResolvedBlock<T>> = Vec::with_capacity(batch.len());
     let mut evicted: Vec<SequenceHash> = Vec::new();
+
+    // Copy timing from batch and mark transfer start (O(1), not per-block)
+    let mut timing = batch.timing;
+    timing.mark_transfer_start();
 
     for queued in batch.blocks {
         // Note: pending_guard is automatically dropped when QueuedBlock is processed,
@@ -1188,6 +1207,7 @@ pub fn upgrade_batch<T: BlockMetadata>(batch: TransferBatch<T>) -> ResolvedBatch
     ResolvedBatch {
         blocks: resolved,
         evicted,
+        timing,
     }
 }
 
@@ -1211,12 +1231,13 @@ impl<T: BlockMetadata> PreconditionAwaiter<T> {
     async fn run(mut self) {
         // NO SEMAPHORE - spawn unbounded tasks
         // Event awaiting is cheap, we must never skip awaiting a precondition
-        while let Some(batch) = self.input_rx.recv().await {
+        while let Some(mut batch) = self.input_rx.recv().await {
             let output_tx = self.output_tx.clone();
             let nova = self.leader.nova().clone();
 
             // Spawn task for each batch - unbounded
             tokio::spawn(async move {
+                let _nvtx = nvtx_range!("offload::precondition");
                 if let Some(event_handle) = batch.precondition {
                     tracing::debug!(?event_handle, "Awaiting precondition for batch");
 
@@ -1271,6 +1292,9 @@ impl<T: BlockMetadata> PreconditionAwaiter<T> {
                         }
                     }
                 }
+
+                // Mark precondition complete (batch-level, O(1))
+                batch.timing.mark_precondition_complete();
 
                 // Forward batch to transfer executor
                 if let Err(e) = output_tx.send(batch).await {
@@ -1367,10 +1391,9 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
 
             // Spawn transfer task
             let shared_clone = shared.clone();
-            let resolved_blocks = upgraded.blocks;
             tokio::spawn(async move {
                 let _permit = transfer_permit; // Hold permit until task completes
-                if let Err(e) = Self::execute_transfer(&shared_clone, resolved_blocks).await {
+                if let Err(e) = Self::execute_transfer(&shared_clone, upgraded).await {
                     tracing::error!("BlockTransferExecutor: transfer failed: {}", e);
                 }
             });
@@ -1387,11 +1410,14 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
     /// This is async I/O work that runs concurrently with other transfers.
     async fn execute_transfer(
         shared: &SharedBlockExecutorState<Dst>,
-        resolved: Vec<ResolvedBlock<Src>>,
+        mut batch: ResolvedBatch<Src>,
     ) -> anyhow::Result<()> {
-        if resolved.is_empty() {
+        let _nvtx = nvtx_range!("offload::transfer");
+        if batch.is_empty() {
             return Ok(());
         }
+
+        let resolved = &batch.blocks;
 
         // Collect block_ids and sequence_hashes from resolved blocks
         let src_block_ids: Vec<BlockId> = resolved.iter().map(|b| b.block_id).collect();
@@ -1402,7 +1428,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
             TransferId,
             (Arc<std::sync::Mutex<TransferState>>, Vec<BlockId>),
         > = std::collections::HashMap::new();
-        for block in &resolved {
+        for block in resolved {
             transfer_states
                 .entry(block.transfer_id)
                 .or_insert_with(|| (block.state.clone(), Vec::new()))
@@ -1423,6 +1449,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
             let dst_block_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
 
             // Execute transfer via leader
+            let start_xfer = Instant::now();
             let notification = shared.leader.execute_local_transfer(
                 shared.src_layout,
                 shared.dst_layout,
@@ -1433,6 +1460,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
 
             // Wait for transfer completion
             notification.await?;
+            let end_xfer = Instant::now();
 
             // Register each transferred block in the destination tier
             let registered_blocks: Vec<ImmutableBlock<Dst>> = dst_blocks
@@ -1445,9 +1473,40 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
                 })
                 .collect();
 
-            tracing::debug!(
-                num_registered = registered_blocks.len(),
-                "Registered transferred blocks in destination tier"
+            let registration_timepoint = Instant::now();
+
+            // Compute timing statistics from batch timing (O(1), not per-block)
+            let unique_transfer_ids: std::collections::HashSet<_> =
+                resolved.iter().map(|b| b.transfer_id).collect();
+
+            let policy_ms = batch
+                .timing
+                .policy_duration()
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let precondition_ms = batch
+                .timing
+                .precondition_duration()
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let total_ms = batch
+                .timing
+                .total_duration()
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+
+            tracing::info!(
+                blocks = resolved.len(),
+                containers = unique_transfer_ids.len(),
+                policy_ms,
+                precondition_ms,
+                xfer_ms = end_xfer.duration_since(start_xfer).as_millis() as u64,
+                registration_ms =
+                    registration_timepoint.duration_since(end_xfer).as_millis() as u64,
+                total_ms,
+                src = std::any::type_name::<Src>(),
+                dst = std::any::type_name::<Dst>(),
+                "Batch transfer complete"
             );
 
             // Send registered blocks to downstream pipeline if chaining is enabled
@@ -1491,6 +1550,9 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
                 }
             }
         }
+
+        // Mark transfer complete (batch-level, O(1))
+        batch.timing.mark_transfer_complete();
 
         // Mark blocks as completed in each transfer state
         for (transfer_id, (state, block_ids)) in transfer_states {
@@ -1830,10 +1892,9 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
 
             // Spawn transfer task
             let shared_clone = shared.clone();
-            let resolved_blocks = upgraded.blocks;
             tokio::spawn(async move {
                 let _permit = transfer_permit; // Hold permit until task completes
-                if let Err(e) = Self::execute_transfer(&shared_clone, resolved_blocks).await {
+                if let Err(e) = Self::execute_transfer(&shared_clone, upgraded).await {
                     tracing::error!("ObjectTransferExecutor: transfer failed: {}", e);
                 }
             });
@@ -1848,11 +1909,14 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
     /// Execute the actual transfer for resolved blocks to object storage.
     async fn execute_transfer(
         shared: &SharedObjectExecutorState,
-        resolved: Vec<ResolvedBlock<Src>>,
+        mut batch: ResolvedBatch<Src>,
     ) -> anyhow::Result<()> {
-        if resolved.is_empty() {
+        let _nvtx = nvtx_range!("offload::transfer");
+        if batch.is_empty() {
             return Ok(());
         }
+
+        let resolved = &batch.blocks;
 
         // Collect keys (sequence hashes) and block_ids from resolved blocks
         let keys: Vec<SequenceHash> = resolved.iter().map(|b| b.sequence_hash).collect();
@@ -1863,7 +1927,7 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
             TransferId,
             (Arc<std::sync::Mutex<TransferState>>, Vec<BlockId>),
         > = std::collections::HashMap::new();
-        for block in &resolved {
+        for block in resolved {
             transfer_states
                 .entry(block.transfer_id)
                 .or_insert_with(|| (block.state.clone(), Vec::new()))
@@ -1947,6 +2011,46 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
                 }
             }
         }
+
+        // Mark transfer complete (batch-level, O(1))
+        batch.timing.mark_transfer_complete();
+
+        // Compute timing statistics from batch timing
+        let unique_transfer_ids: std::collections::HashSet<_> =
+            resolved.iter().map(|b| b.transfer_id).collect();
+
+        let policy_ms = batch
+            .timing
+            .policy_duration()
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let precondition_ms = batch
+            .timing
+            .precondition_duration()
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let transfer_ms = batch
+            .timing
+            .transfer_duration()
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let total_ms = batch
+            .timing
+            .total_duration()
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        tracing::info!(
+            blocks = resolved.len(),
+            containers = unique_transfer_ids.len(),
+            policy_ms,
+            precondition_ms,
+            transfer_ms,
+            total_ms,
+            src = std::any::type_name::<Src>(),
+            dst = "G4-object",
+            "Object batch transfer complete"
+        );
 
         // Mark blocks as completed in each transfer state
         for (transfer_id, (state, block_ids)) in transfer_states {

@@ -305,4 +305,104 @@ mod tests {
         assert!(!queue.is_cancelled(id));
         assert_eq!(queue.cancelled_count(), 0);
     }
+
+    /// Test multiple transfer IDs with interleaved cancellation.
+    #[test]
+    fn test_multiple_transfers_interleaved() {
+        let queue: CancellableQueue<i32> = CancellableQueue::new();
+        let id1 = TransferId::new();
+        let id2 = TransferId::new();
+        let id3 = TransferId::new();
+
+        // Push items from different transfers
+        queue.push(id1, 1);
+        queue.push(id2, 2);
+        queue.push(id1, 3);
+        queue.push(id3, 4);
+        queue.push(id2, 5);
+        queue.push(id3, 6);
+
+        assert_eq!(queue.len_approx(), 6);
+
+        // Cancel id2
+        queue.mark_cancelled(id2);
+        let removed = queue.sweep();
+        assert_eq!(removed, 2); // items 2 and 5
+        assert_eq!(queue.len_approx(), 4);
+
+        // Cancel id1
+        queue.mark_cancelled(id1);
+        let removed = queue.sweep();
+        assert_eq!(removed, 2); // items 1 and 3
+        assert_eq!(queue.len_approx(), 2);
+
+        // Remaining should be from id3
+        let item1 = queue.pop().unwrap();
+        let item2 = queue.pop().unwrap();
+        assert_eq!(item1.transfer_id, id3);
+        assert_eq!(item2.transfer_id, id3);
+    }
+
+    /// Test sweep with empty queue.
+    #[test]
+    fn test_sweep_empty_queue() {
+        let queue: CancellableQueue<i32> = CancellableQueue::new();
+        let id = TransferId::new();
+
+        queue.mark_cancelled(id);
+        let removed = queue.sweep();
+        assert_eq!(removed, 0);
+        assert!(queue.is_empty_approx());
+    }
+
+    /// Test pop_valid exhausts queue of only cancelled items.
+    #[test]
+    fn test_pop_valid_exhausts_cancelled() {
+        let queue: CancellableQueue<i32> = CancellableQueue::new();
+        let id = TransferId::new();
+
+        queue.push(id, 1);
+        queue.push(id, 2);
+        queue.push(id, 3);
+
+        queue.mark_cancelled(id);
+
+        // pop_valid should return None after exhausting cancelled items
+        assert!(queue.pop_valid().is_none());
+        // Queue should be empty now (items were dropped during pop_valid)
+        assert_eq!(queue.len_approx(), 0);
+    }
+
+    /// Test that cancelled items are dropped (not leaked) during sweep.
+    #[test]
+    fn test_sweep_drops_items() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct DropCounter {
+            counter: Arc<AtomicUsize>,
+        }
+
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let queue: CancellableQueue<DropCounter> = CancellableQueue::new();
+        let id = TransferId::new();
+
+        queue.push(id, DropCounter { counter: drop_count.clone() });
+        queue.push(id, DropCounter { counter: drop_count.clone() });
+        queue.push(id, DropCounter { counter: drop_count.clone() });
+
+        assert_eq!(drop_count.load(Ordering::SeqCst), 0);
+
+        queue.mark_cancelled(id);
+        let removed = queue.sweep();
+
+        assert_eq!(removed, 3);
+        assert_eq!(drop_count.load(Ordering::SeqCst), 3);
+    }
 }
