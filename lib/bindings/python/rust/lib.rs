@@ -257,13 +257,12 @@ fn register_llm<'p>(
     base_model_path: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
-    if model_type.inner == llm_rs::model_type::ModelType::Prefill {
-        if migration_limit != 0 {
+    if model_type.inner == llm_rs::model_type::ModelType::Prefill
+        && migration_limit != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "ModelType::Prefill requires migration_limit to be 0",
             ));
         }
-    }
 
     let model_input = match model_input {
         ModelInput::Text => llm_rs::model_type::ModelInput::Text,
