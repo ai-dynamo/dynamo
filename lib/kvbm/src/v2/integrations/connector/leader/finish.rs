@@ -205,9 +205,10 @@ impl ConnectorLeader {
 /// Async cleanup task for offloading handles.
 ///
 /// This function:
-/// 1. Requests cancellation on all handles (only affects queued transfers, not inflight)
-/// 2. Awaits ALL handles to reach a terminal state (Complete, Cancelled, or Failed)
-/// 3. Panics on hard failures (for now - unrecoverable error)
+/// 1. Requests cancellation on all incomplete handles and collects confirmations
+/// 2. Awaits all cancellation confirmations (draining complete)
+/// 3. Awaits ALL handles to reach a terminal state (Complete, Cancelled, or Failed)
+/// 4. Panics on hard failures (for now - unrecoverable error)
 async fn cleanup_offloading_handles(mut handles: Vec<TransferHandle>, request_id: &str) {
     tracing::debug!(
         "starting cleanup of {} transfer handles for request_id: {}",
@@ -215,7 +216,8 @@ async fn cleanup_offloading_handles(mut handles: Vec<TransferHandle>, request_id
         request_id
     );
 
-    // 1. Request cancellation on all handles (only affects queued, not inflight)
+    // 1. Request cancellation on all incomplete handles and collect confirmations
+    let mut confirmations = Vec::new();
     for handle in &handles {
         if !handle.is_complete() {
             tracing::debug!(
@@ -223,13 +225,22 @@ async fn cleanup_offloading_handles(mut handles: Vec<TransferHandle>, request_id
                 handle.id(),
                 handle.status()
             );
-            // Cancel returns a future for confirmation, but we don't await individual cancellations
-            // We'll await all handles below
-            // let _ = handle.cancel();
+            confirmations.push(handle.cancel());
         }
     }
 
-    // 2. Await ALL handles to terminal state (Complete, Cancelled, or Failed)
+    // 2. Await all cancellation confirmations (draining complete)
+    // This ensures all queued items are swept and in-flight transfers finish
+    for confirmation in confirmations {
+        confirmation.wait().await;
+    }
+
+    tracing::debug!(
+        "all cancellation confirmations received for request_id: {}",
+        request_id
+    );
+
+    // 3. Await ALL handles to terminal state (Complete, Cancelled, or Failed)
     for handle in &mut handles {
         if handle.is_complete() {
             continue;

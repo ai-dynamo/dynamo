@@ -328,4 +328,68 @@ mod tests {
 
         assert!(token.is_confirmed());
     }
+
+    /// Test that confirmation does NOT resolve while in-flight > 0.
+    /// This is a critical invariant: cancellation only completes after draining.
+    #[tokio::test]
+    async fn test_confirmation_blocked_during_draining() {
+        let (token, updater) = CancellationToken::new();
+
+        token.request();
+        updater.set_draining(2);
+
+        // Confirmation should NOT resolve while draining
+        let confirmation = token.wait_confirmed();
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(30),
+            confirmation.wait(),
+        )
+        .await;
+        assert!(result.is_err(), "Should timeout while in_flight > 0");
+
+        // Still draining
+        assert_eq!(token.state(), CancelState::Draining { in_flight: 2 });
+    }
+
+    /// Test that update_draining(0) transitions directly to Confirmed.
+    #[test]
+    fn test_draining_zero_confirms() {
+        let (token, updater) = CancellationToken::new();
+
+        token.request();
+        updater.set_draining(1);
+        assert_eq!(token.state(), CancelState::Draining { in_flight: 1 });
+
+        // Drain to 0 should confirm
+        updater.update_draining(0);
+        assert_eq!(token.state(), CancelState::Confirmed);
+    }
+
+    /// Test the full draining sequence: Requested → Draining(n) → ... → Confirmed.
+    #[test]
+    fn test_full_draining_sequence() {
+        let (token, updater) = CancellationToken::new();
+
+        // Start active
+        assert_eq!(token.state(), CancelState::Active);
+
+        // Request
+        token.request();
+        assert!(token.is_requested());
+
+        // Set draining
+        updater.set_draining(3);
+        assert_eq!(token.state(), CancelState::Draining { in_flight: 3 });
+
+        // Drain one by one
+        updater.update_draining(2);
+        assert_eq!(token.state(), CancelState::Draining { in_flight: 2 });
+
+        updater.update_draining(1);
+        assert_eq!(token.state(), CancelState::Draining { in_flight: 1 });
+
+        // Final drain confirms
+        updater.update_draining(0);
+        assert!(token.is_confirmed());
+    }
 }
