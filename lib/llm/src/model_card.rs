@@ -170,6 +170,12 @@ pub struct ModelDeploymentCard {
     // Cache the Slugified display_name so we can share references to it
     slug: Slug,
 
+    /// Original HuggingFace model repository path.
+    /// This preserves the source model path when display_name is customized via --served-model-name.
+    /// Used by download_config() to fetch files from the correct HF repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_model: Option<String>,
+
     /// Model information
     pub model_info: Option<ModelInfoType>,
 
@@ -395,7 +401,9 @@ impl ModelDeploymentCard {
         }
 
         let ignore_weights = true;
-        let local_path = crate::hub::from_hf(&self.display_name, ignore_weights).await?;
+        // Use source_model if available (preserves original HF repo path when display_name is customized)
+        let model_name = self.source_model.as_ref().unwrap_or(&self.display_name);
+        let local_path = crate::hub::from_hf(model_name, ignore_weights).await?;
 
         self.update_dir(&local_path);
         Ok(())
@@ -525,6 +533,7 @@ impl ModelDeploymentCard {
         Ok(Self {
             slug: Slug::from_string(&display_name),
             display_name,
+            source_model: None,
             model_info: Some(ModelInfoType::from_disk(local_path)?),
             tokenizer: Some(TokenizerKind::from_disk(local_path)?),
             gen_config: GenerationConfig::from_disk(local_path).ok(), // optional
