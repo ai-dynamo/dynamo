@@ -38,7 +38,7 @@ COMMON_ARGS = [
     "--context-length",
     "512",
     "--mem-fraction-static",
-    "0.33",
+    "0.15",
     "--page-size",
     "16",
     "--disable-cuda-graph",
