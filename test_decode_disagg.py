@@ -166,6 +166,7 @@ def run_request(max_tokens: int):
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "stream": True,
+        "ignore_eos": True,  # Always generate exactly max_tokens for debugging
     }
 
     try:
