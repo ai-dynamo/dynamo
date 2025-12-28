@@ -1,4 +1,4 @@
-# concurrencies: 6, 11, 22, 47, 93
+# concurrencies: 1, 2, 4, 10, 19
 prefill:
   num: 1
   config:
