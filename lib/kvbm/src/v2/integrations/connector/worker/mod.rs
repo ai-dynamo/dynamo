@@ -396,9 +396,9 @@ impl ConnectorWorkerInterface for ConnectorWorker {
                 self.forward_pass_completion_active
                     .store(true, Ordering::Relaxed);
             }
-        }
 
-        tracing::info!("Forward pass start: {:?}", metadata.summary());
+            tracing::info!("Binding connector metadata: {:?}", metadata.summary());
+        }
 
         // Store the metadata for use by start_load_kv
         *self.metadata.lock() = Some(metadata);

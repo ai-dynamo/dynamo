@@ -216,29 +216,31 @@ async fn cleanup_offloading_handles(mut handles: Vec<TransferHandle>, request_id
         request_id
     );
 
-    // 1. Request cancellation on all incomplete handles and collect confirmations
-    let mut confirmations = Vec::new();
-    for handle in &handles {
-        if !handle.is_complete() {
-            tracing::debug!(
-                "requesting cancellation for handle {} (status: {:?})",
-                handle.id(),
-                handle.status()
-            );
-            confirmations.push(handle.cancel());
-        }
-    }
+    // todo: add a configuration option to enable cancellation of incomplete handles on request finished
 
-    // 2. Await all cancellation confirmations (draining complete)
-    // This ensures all queued items are swept and in-flight transfers finish
-    for confirmation in confirmations {
-        confirmation.wait().await;
-    }
+    // // 1. Request cancellation on all incomplete handles and collect confirmations
+    // let mut confirmations = Vec::new();
+    // for handle in &handles {
+    //     if !handle.is_complete() {
+    //         tracing::debug!(
+    //             "requesting cancellation for handle {} (status: {:?})",
+    //             handle.id(),
+    //             handle.status()
+    //         );
+    //         confirmations.push(handle.cancel());
+    //     }
+    // }
 
-    tracing::debug!(
-        "all cancellation confirmations received for request_id: {}",
-        request_id
-    );
+    // // 2. Await all cancellation confirmations (draining complete)
+    // // This ensures all queued items are swept and in-flight transfers finish
+    // for confirmation in confirmations {
+    //     confirmation.wait().await;
+    // }
+
+    // tracing::debug!(
+    //     "all cancellation confirmations received for request_id: {}",
+    //     request_id
+    // );
 
     // 3. Await ALL handles to terminal state (Complete, Cancelled, or Failed)
     for handle in &mut handles {

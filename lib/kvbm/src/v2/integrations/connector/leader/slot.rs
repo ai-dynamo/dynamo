@@ -7,6 +7,7 @@ use std::ops::Range;
 use dynamo_tokens::TokenBlockSequence;
 
 use super::Request;
+use super::scheduler::CachedRequestData;
 use crate::distributed::leader::FindMatchesResult;
 use crate::distributed::offload::TransferHandle;
 use crate::v2::{BlockId, KvbmSequenceHashProvider, SequenceHash};
@@ -36,6 +37,7 @@ pub enum StateTransitionError {
 /// This struct holds all the state needed for finding and loading external KV cache blocks.
 /// The `session_id` is `None` while preparing (searching/staging) and becomes `Some` when
 /// actively onboarding.
+#[derive(Debug)]
 pub struct OnboardingState {
     /// The number of tokens that match tokens already in the G1 storage
     pub num_computed_tokens: usize,
@@ -65,6 +67,7 @@ pub struct OffloadingState {
 ///
 /// When a transaction enters the `Error` state, the original state data is preserved
 /// in this enum so that cleanup/recovery operations can access it.
+#[derive(Debug)]
 pub enum ActiveStateData {
     Onboarding(OnboardingState),
     Offloading(OffloadingState),
@@ -92,6 +95,7 @@ pub struct IntraPassPending {
 ///
 /// This enum uses associated data to ensure that state-specific information is only
 /// accessible when in the appropriate state, preventing invalid access patterns.
+#[derive(Debug)]
 pub enum TransactionState {
     /// No active onboarding or offloading.
     Inactive,
@@ -164,6 +168,7 @@ pub enum SlotState {
 ///
 /// This struct enforces valid state transitions through its API and prevents
 /// direct field access from outside this module.
+#[derive(Debug)]
 struct SlotStateMachine {
     slot_state: SlotState,
     txn_state: TransactionState,
@@ -477,6 +482,7 @@ pub enum MatchCheckOutcome {
 /// A slot representing an active request with its associated state.
 ///
 /// The state machine is private and can only be manipulated through validated methods.
+#[derive(Debug)]
 pub struct RequestSlot {
     request: Request,
 
@@ -507,7 +513,7 @@ pub struct RequestSlot {
     pending_intra_pass: Option<IntraPassPending>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct BlockAssignments {
     /// The blocks that have been aligned to the sequence.
     pub assigned_blocks: Vec<(SequenceHash, BlockId)>,
@@ -738,6 +744,29 @@ impl RequestSlot {
         self.finished_evaluating
     }
 
+    pub fn update_from_resumed_request(
+        &mut self,
+        req: &CachedRequestData,
+    ) -> Result<(), anyhow::Error> {
+        // Sync tokens from the resumed request if all_token_ids is provided
+        if let Some(ref all_token_ids) = req.all_token_ids {
+            let req_token_count = all_token_ids.len();
+            let slot_token_count = self.sequence.total_tokens();
+
+            if req_token_count > slot_token_count {
+                let tokens_to_add: dynamo_tokens::Tokens = all_token_ids[slot_token_count..].into();
+                let added_tokens = self.sequence.extend(tokens_to_add)?;
+                tracing::info!(
+                    "extended slot with {} tokens; range: {:?}",
+                    (req_token_count - slot_token_count),
+                    added_tokens,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Mark that we've stopped evaluating new blocks for offload.
     ///
     /// Called when:
@@ -942,10 +971,13 @@ impl RequestSlot {
     /// - Resets evaluation tracking
     /// - Transitions any active transaction to Inactive
     /// - Clears the reset flag
-    /// - Clears any pending intra-pass onboarding
     ///
     /// Note: The token sequence is intentionally NOT reset - the tokens themselves
     /// are still valid, only the G1 block mappings are invalidated.
+    ///
+    /// Note: `pending_intra_pass` is NOT cleared because by the time this is called,
+    /// `update_state_after_alloc` may have already set FRESH intra-pass data for the
+    /// resumed request's new block allocations.
     pub fn reset_for_preemption(&mut self) {
         // Clear block assignments (BlockIds are now invalid - freed by vLLM)
         self.block_matches.assigned_blocks.clear();
@@ -962,8 +994,9 @@ impl RequestSlot {
         // Clear the reset flag
         self.match_requires_reset = false;
 
-        // Clear pending intra-pass onboarding
-        self.pending_intra_pass = None;
+        // NOTE: Do NOT clear pending_intra_pass here. By the time reset_for_preemption
+        // is called (in process_scheduler_output), update_state_after_alloc has already
+        // been called and may have set fresh intra-pass data for this resumed request.
     }
 
     // ------------------------------------------------------------------------

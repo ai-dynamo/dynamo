@@ -81,6 +81,7 @@ pub struct FindMatchesOptions {
 /// This enum has two variants:
 /// - `Ready`: Immediate result when no async work is needed (local search with Hold mode)
 /// - `AsyncSession`: When staging or remote search is required
+#[derive(Debug)]
 pub enum FindMatchesResult {
     /// Immediate result - blocks are held in place without staging.
     ///
@@ -100,6 +101,7 @@ pub enum FindMatchesResult {
 ///
 /// No session is created - blocks are owned directly by this struct (RAII).
 /// Dropping this struct will release the block references.
+#[derive(Debug)]
 pub struct ReadyResult {
     /// G2 blocks held directly via RAII
     blocks: Vec<ImmutableBlock<G2>>,
@@ -130,6 +132,7 @@ impl ReadyResult {
 }
 
 /// Async session result for staging and/or remote search operations.
+#[derive(Debug)]
 pub struct AsyncSessionResult {
     session_id: SessionId,
     status_rx: watch::Receiver<OnboardingStatus>,
@@ -370,6 +373,7 @@ pub(crate) enum SessionControl {
 /// Handle to a live onboarding session for deferred operations.
 ///
 /// Only available for StagingMode::Hold and StagingMode::Prepare.
+#[derive(Debug)]
 pub struct SessionHandle {
     session_id: SessionId,
     mode: StagingMode,

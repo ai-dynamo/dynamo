@@ -200,7 +200,7 @@ impl ConnectorLeader {
     /// The second boolean in the return tuple indicates whether async loading is in progress:
     /// - `true` for inter-pass mode (async out-of-band via Nova messages)
     /// - `false` for intra-pass mode (sync layer-wise during forward pass)
-    #[tracing::instrument(level = "debug", skip(self), fields(?request_id), ret)]
+    #[tracing::instrument(level = "info", skip(self), ret)]
     pub fn get_num_new_matched_tokens(
         &self,
         request_id: &str,

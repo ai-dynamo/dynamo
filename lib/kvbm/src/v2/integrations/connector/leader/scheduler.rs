@@ -200,7 +200,8 @@ pub struct IntraPassLoad {
 
 impl KvConnectorMetadata {
     pub fn should_bind(&self) -> bool {
-        self.foward_pass_completion_events.is_some() || self.intra_pass_load.is_some()
+        // self.foward_pass_completion_events.is_some() || self.intra_pass_load.is_some()
+        true
     }
 }
 
@@ -297,58 +298,24 @@ impl ConnectorLeader {
                 Ok(shared_slot) => {
                     let mut slot = shared_slot.lock();
 
-                    // We are given all the block_ids for the request, but we need to filter out all those that may
-                    // have been applied to the slot already.
-                    let filtered_block_ids = slot.filter_block_ids(req.block_ids);
-                    slot.apply_new_blocks(filtered_block_ids);
-
-                    // Get scheduled tokens and compute total for offload evaluation.
-                    // We evaluate ALL tokens (computed + scheduled) so presence filters
-                    // handle any blocks already in G2 from external matches.
                     let num_scheduled_tokens = scheduler_output
                         .num_scheduled_tokens
                         .get(&req.req_id)
                         .copied()
                         .unwrap_or(0);
-                    let total_tokens = req.num_computed_tokens + num_scheduled_tokens;
 
-                    tracing::debug!(
-                        req_id = %req.req_id,
-                        num_computed_tokens = req.num_computed_tokens,
+                    let params = FullBlockApplicationParams {
+                        req_id: &req.req_id,
+                        block_ids: req.block_ids,
+                        num_computed_tokens: req.num_computed_tokens,
                         num_scheduled_tokens,
-                        total_tokens,
-                        assigned_blocks = slot.assigned_block_count(),
-                        evaluated_tokens = slot.evaluated_tokens(),
-                        evaluated_blocks = slot.evaluated_blocks(),
-                        "new_request: evaluating blocks for offload"
-                    );
+                        log_label: "new_request",
+                    };
 
-                    match self.process_request_offload(
-                        &req.req_id,
-                        &mut slot,
-                        total_tokens,
-                        forward_pass_handle,
-                    ) {
-                        Ok(OffloadAction::NoAction) => {
-                            tracing::trace!(
-                                "no offload action for new request for req_id: {}",
-                                req.req_id
-                            );
-                        }
-                        Ok(OffloadAction::InterPassOffloadScheduled) => {
-                            scheduled_actions = true;
-                            tracing::trace!(
-                                "inter-pass offload scheduled for new request for req_id: {}",
-                                req.req_id
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "failed to process offload for new req_id {}: {}",
-                                req.req_id,
-                                e
-                            );
-                        }
+                    if let Ok(true) =
+                        self.process_full_block_application(params, &mut slot, forward_pass_handle)
+                    {
+                        scheduled_actions = true;
                     }
                 }
                 Err(_) => {
@@ -363,6 +330,7 @@ impl ConnectorLeader {
         for req in scheduler_output.scheduled_cached_reqs {
             tracing::debug!(
                 req_id = %req.req_id,
+                resumed = req.resumed,
                 new_token_ids_count = req.new_token_ids.len(),
                 new_block_ids_count = req.new_block_ids.len(),
                 num_computed_tokens = req.num_computed_tokens,
@@ -373,7 +341,7 @@ impl ConnectorLeader {
                 Ok(shared_slot) => {
                     let mut slot = shared_slot.lock();
 
-                    // Skip if slot is marked for deletion or finished evaluating
+                    // Skip if slot is marked for deletion
                     if slot.is_marked_for_deletion() {
                         tracing::debug!(
                             "slot is marked for deletion, skipping cached request for req_id: {}",
@@ -382,22 +350,60 @@ impl ConnectorLeader {
                         continue;
                     }
 
+                    // Handle resumed requests like new requests: reset state and reapply all blocks
+                    if req.resumed {
+                        tracing::info!(
+                            req_id = %req.req_id,
+                            "request resumed from preemption, resetting slot state"
+                        );
+
+                        // Reset the slot state - clears block assignments and evaluation tracking
+                        slot.reset_for_preemption();
+
+                        // Sync tokens from the resumed request
+                        if let Err(e) = slot.update_from_resumed_request(&req) {
+                            tracing::error!(
+                                "failed to update slot from resumed request for req_id: {}: {}",
+                                req.req_id,
+                                e
+                            );
+                            slot.mark_finished_evaluating();
+                            continue;
+                        }
+
+                        // Process like a new request: apply all blocks and evaluate for offload
+                        let num_scheduled_tokens = scheduler_output
+                            .num_scheduled_tokens
+                            .get(&req.req_id)
+                            .copied()
+                            .unwrap_or(0);
+
+                        let params = FullBlockApplicationParams {
+                            req_id: &req.req_id,
+                            block_ids: req.new_block_ids,
+                            num_computed_tokens: req.num_computed_tokens,
+                            num_scheduled_tokens,
+                            log_label: "resumed_request",
+                        };
+
+                        if let Ok(true) = self.process_full_block_application(
+                            params,
+                            &mut slot,
+                            forward_pass_handle,
+                        ) {
+                            scheduled_actions = true;
+                        }
+                        continue;
+                    }
+
+                    // Normal cached request path (incremental updates)
+
+                    // Skip if slot is finished evaluating (doesn't apply to resumed requests)
                     if slot.is_finished_evaluating() {
                         tracing::debug!(
                             "slot is finished evaluating, skipping cached request for req_id: {}",
                             req.req_id
                         );
-                        continue;
-                    }
-
-                    // If resumed from preemption, we can't handle this yet
-                    if req.resumed {
-                        tracing::warn!(
-                            "request resumed from preemption, marking finished_evaluating for req_id: {}",
-                            req.req_id
-                        );
-                        slot.mark_finished_evaluating();
-                        // TODO: determine how to handle resumed requests
                         continue;
                     }
 
@@ -416,8 +422,8 @@ impl ConnectorLeader {
                     // If vLLM ever starts populating new_token_ids during decode, we should
                     // verify Python's total_tokens matches Rust's before deciding to apply.
 
-                    // Apply new block IDs if any (handles unassigned blocks correctly)
-                    let new_block_ids_count = req.new_block_ids.len();
+                    // Apply new block IDs directly - these are already just the incremental
+                    // new blocks allocated in this step, not the full list
                     if !req.new_block_ids.is_empty() {
                         slot.apply_new_blocks(req.new_block_ids);
                     }
@@ -428,19 +434,8 @@ impl ConnectorLeader {
                         .copied()
                         .unwrap_or(0);
 
-                    tracing::debug!(
-                        req_id = %req.req_id,
-                        num_scheduled_tokens,
-                        new_block_ids = new_block_ids_count,
-                        assigned_blocks = slot.assigned_block_count(),
-                        evaluated_tokens = slot.evaluated_tokens(),
-                        evaluated_blocks = slot.evaluated_blocks(),
-                        "cached_request: evaluating blocks for offload"
-                    );
-
                     // Always process offload - may have completed blocks from previous allocations
                     // even if no new block IDs were allocated this step
-
                     match self.process_request_offload(
                         &req.req_id,
                         &mut slot,
@@ -644,6 +639,74 @@ impl ConnectorLeader {
         });
     }
 
+    /// Process full block application for a request (new or resumed).
+    ///
+    /// This method encapsulates the common logic for:
+    /// 1. Filtering and applying all block IDs
+    /// 2. Calculating total tokens for offload evaluation
+    /// 3. Logging the evaluation
+    /// 4. Calling process_request_offload
+    ///
+    /// Used by both new request processing and resumed request processing.
+    ///
+    /// # Returns
+    /// - `Ok(true)` if an offload action was scheduled
+    /// - `Ok(false)` if no action was taken
+    /// - `Err` if an error occurred
+    fn process_full_block_application(
+        &self,
+        params: FullBlockApplicationParams<'_>,
+        slot: &mut RequestSlot,
+        forward_pass_handle: Option<EventHandle>,
+    ) -> Result<bool> {
+        // Filter and apply all block IDs
+        let filtered_block_ids = slot.filter_block_ids(params.block_ids);
+        slot.apply_new_blocks(filtered_block_ids);
+
+        // Calculate total tokens for offload evaluation
+        let total_tokens = params.num_computed_tokens + params.num_scheduled_tokens;
+
+        tracing::debug!(
+            req_id = %params.req_id,
+            num_computed_tokens = params.num_computed_tokens,
+            num_scheduled_tokens = params.num_scheduled_tokens,
+            total_tokens,
+            assigned_blocks = slot.assigned_block_count(),
+            evaluated_tokens = slot.evaluated_tokens(),
+            evaluated_blocks = slot.evaluated_blocks(),
+            "{}: evaluating blocks for offload",
+            params.log_label
+        );
+
+        match self.process_request_offload(params.req_id, slot, total_tokens, forward_pass_handle) {
+            Ok(OffloadAction::NoAction) => {
+                tracing::trace!(
+                    "no offload action for {} for req_id: {}",
+                    params.log_label,
+                    params.req_id
+                );
+                Ok(false)
+            }
+            Ok(OffloadAction::InterPassOffloadScheduled) => {
+                tracing::trace!(
+                    "inter-pass offload scheduled for {} for req_id: {}",
+                    params.log_label,
+                    params.req_id
+                );
+                Ok(true)
+            }
+            Err(e) => {
+                tracing::error!(
+                    "failed to process offload for {} req_id {}: {}",
+                    params.log_label,
+                    params.req_id,
+                    e
+                );
+                Err(e)
+            }
+        }
+    }
+
     /// Process offload for a single request with optional offset for cached requests.
     ///
     /// This method encapsulates the common logic for enqueuing offload operations
@@ -720,6 +783,20 @@ impl ConnectorLeader {
 enum OffloadAction {
     NoAction,
     InterPassOffloadScheduled,
+}
+
+/// Parameters for full block application (new requests and resumed requests).
+///
+/// This struct captures the common data needed to apply all blocks for a request
+/// and evaluate them for offload. Used by both new request processing and
+/// resumed request processing (which resets state and reapplies all blocks).
+struct FullBlockApplicationParams<'a> {
+    req_id: &'a str,
+    block_ids: Vec<BlockId>,
+    num_computed_tokens: usize,
+    num_scheduled_tokens: usize,
+    /// Label for logging purposes ("new_request" or "resumed_request")
+    log_label: &'static str,
 }
 
 impl IterationSession {
