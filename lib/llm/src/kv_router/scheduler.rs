@@ -237,36 +237,36 @@ impl KvScheduler {
                             tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
                         }
 
+                        // Add request to tracking BEFORE responding to avoid race condition.
+                        // If we respond first, the caller may send to the worker and receive
+                        // a response before add_request completes, causing mark_prefill_completed
+                        // to fail with "request not found".
+                        if request.update_states {
+                            if let Some(ref request_id) = request.maybe_request_id {
+                                if let Err(e) = slots_clone
+                                    .add_request(
+                                        request_id.clone(),
+                                        request.token_seq.clone(),
+                                        request.isl_tokens,
+                                        selection.overlap_blocks,
+                                        selection.worker,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!("Failed to add request {request_id}: {e}");
+                                }
+                            } else {
+                                tracing::error!(
+                                    "No request_id provided to add_request to the slot tracker"
+                                );
+                            }
+                        }
+
                         let response = SchedulingResponse {
                             best_worker: selection.worker,
                             overlap_blocks: selection.overlap_blocks,
                         };
                         request.respond(response);
-
-                        // Skip state update if not requested
-                        if !request.update_states {
-                            continue;
-                        }
-
-                        let Some(request_id) = request.maybe_request_id else {
-                            tracing::error!(
-                                "No request_id provided to add_request to the slot tracker"
-                            );
-                            continue;
-                        };
-
-                        if let Err(e) = slots_clone
-                            .add_request(
-                                request_id.clone(),
-                                request.token_seq,
-                                request.isl_tokens,
-                                selection.overlap_blocks,
-                                selection.worker,
-                            )
-                            .await
-                        {
-                            tracing::warn!("Failed to add request {request_id}: {e}");
-                        }
                     }
                     Err(KvSchedulerError::NoEndpoints) => {
                         tracing::trace!("no endpoints available; waiting for endpoints update");
