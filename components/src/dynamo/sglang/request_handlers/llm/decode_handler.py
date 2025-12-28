@@ -102,13 +102,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             RuntimeError: If no bootstrap info received from prefill worker.
         """
         logging.debug(f"New Request ID: {context.id()}")
+        # Use context.id() as the rid for SGLang - this must match the ID used by
+        # decode_disagger.rs when calling the migrate endpoint
+        request_id = context.id()
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
         if self.serving_mode == DisaggregationMode.DECODE:
-            # Check if bootstrap_info is in the request
+            # Check if bootstrap_info is in the request (direct field or via prefill_result)
             bootstrap_info = request.get("bootstrap_info")
+
+            # Fallback: check prefill_result.disaggregated_params for bootstrap info
+            if not bootstrap_info:
+                prefill_result = request.get("prefill_result")
+                if prefill_result:
+                    bootstrap_info = prefill_result.get("disaggregated_params")
 
             if not bootstrap_info:
                 raise RuntimeError(
@@ -122,6 +131,30 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"room={bootstrap_info['bootstrap_room']}"
             )
 
+            # #region agent log
+            import json as _json
+
+            open("/home/warnold/proj/dynamo/.cursor/debug.log", "a").write(
+                _json.dumps(
+                    {
+                        "location": "decode_handler.py:generate",
+                        "message": "Decode received request with bootstrap_info",
+                        "data": {
+                            "request_id": request_id,
+                            "trace_id": trace_id,
+                            "bootstrap_host": bootstrap_info["bootstrap_host"],
+                            "bootstrap_port": bootstrap_info["bootstrap_port"],
+                            "bootstrap_room": bootstrap_info["bootstrap_room"],
+                        },
+                        "timestamp": __import__("time").time() * 1000,
+                        "sessionId": "debug-session",
+                        "hypothesisId": "D",
+                    }
+                )
+                + "\n"
+            )
+            # #endregion
+
             if self.enable_trace:
                 self._propagate_trace_context_to_sglang(
                     context, bootstrap_info["bootstrap_room"]
@@ -134,7 +167,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
-                rid=trace_id,
+                rid=request_id,
             )
 
             # Wait for first token with timeout
@@ -168,7 +201,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
-                rid=trace_id,
+                rid=request_id,
             )
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):

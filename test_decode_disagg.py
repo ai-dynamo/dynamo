@@ -15,7 +15,7 @@ import httpx
 NUM_WORKERS = 3  # 1 prefill + 2 decode
 HEALTH_URL = "http://localhost:8080/health"
 CHAT_URL = "http://localhost:8080/v1/chat/completions"
-MODEL_PATH = Path.home() / "proj/models/qwen0.6b"
+MODEL_PATH = Path.home() / "proj/models/smol2-135m"
 
 # Event to signal all processes should stop
 stop_event = threading.Event()
@@ -31,6 +31,18 @@ COLORS = {
     "frontend": "\033[33m",  # yellow
     "reset": "\033[0m",
 }
+
+COMMON_ARGS = [
+    "--model-path",
+    str(MODEL_PATH),
+    "--context-length",
+    "512",
+    "--mem-fraction-static",
+    "0.33",
+    "--page-size",
+    "16",
+    "--disable-cuda-graph",
+]
 
 
 def stream_output(proc: subprocess.Popen, name: str, stream: str):
@@ -158,7 +170,8 @@ def run_request(max_tokens: int):
 
     try:
         full_output = []
-        with httpx.stream("POST", CHAT_URL, json=payload, timeout=60.0) as resp:
+        print("⏳ Generating... (output will be shown at the end)")
+        with httpx.stream("POST", CHAT_URL, json=payload, timeout=120.0) as resp:
             for line in resp.iter_lines():
                 if line.startswith("data: "):
                     data = line[6:]
@@ -170,10 +183,9 @@ def run_request(max_tokens: int):
                         content = delta.get("content", "")
                         if content:
                             full_output.append(content)
-                            print(content, end="", flush=True)
                     except json.JSONDecodeError:
                         pass
-        print("\n" + "-" * 50)
+        print("-" * 50)
         final_text = "".join(full_output)
         print(f"\n📋 Final output ({len(final_text)} chars):")
         print(final_text)
@@ -250,20 +262,15 @@ def main():
                 sys.executable,
                 "-m",
                 "dynamo.sglang",
-                "--model-path",
-                str(MODEL_PATH),
+                *COMMON_ARGS,
                 "--disaggregation-mode",
                 "prefill",
                 "--disaggregation-bootstrap-port",
                 "12345",
                 "--disaggregation-transfer-backend",
                 "nixl",
-                "--context-length",
-                "1024",
-                "--mem-fraction-static",
-                "0.30",
-                "--page-size",
-                "16",
+                "--host",
+                "0.0.0.0",
             ],
             env={"DYN_SYSTEM_PORT": "8081"},
         )
@@ -275,22 +282,17 @@ def main():
                 sys.executable,
                 "-m",
                 "dynamo.sglang",
-                "--model-path",
-                str(MODEL_PATH),
+                *COMMON_ARGS,
                 "--disaggregation-mode",
                 "decode",
                 "--disaggregation-bootstrap-port",
                 "12346",
                 "--disaggregation-transfer-backend",
                 "nixl",
+                "--host",
+                "0.0.0.0",
                 "--this-seqlen",
                 "128",
-                "--context-length",
-                "1024",
-                "--mem-fraction-static",
-                "0.40",
-                "--page-size",
-                "16",
             ],
             env={"DYN_SYSTEM_PORT": "8082"},
         )
@@ -302,22 +304,17 @@ def main():
                 sys.executable,
                 "-m",
                 "dynamo.sglang",
-                "--model-path",
-                str(MODEL_PATH),
+                *COMMON_ARGS,
                 "--disaggregation-mode",
                 "decode",
                 "--disaggregation-bootstrap-port",
                 "12347",
                 "--disaggregation-transfer-backend",
                 "nixl",
+                "--host",
+                "0.0.0.0",
                 "--this-seqlen",
-                "1024",
-                "--context-length",
-                "1024",
-                "--mem-fraction-static",
-                "0.30",
-                "--page-size",
-                "16",
+                "512",
             ],
             env={"DYN_SYSTEM_PORT": "8083"},
         )
@@ -334,6 +331,7 @@ def main():
                 "--namespace",
                 "dynamo",
                 "--enable-decode-disagg",
+                "--enforce-disagg",
             ],
         )
 

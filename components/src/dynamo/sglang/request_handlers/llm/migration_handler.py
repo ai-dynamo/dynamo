@@ -8,7 +8,7 @@ from one decode worker to another, reusing the prefill->decode KV transfer proto
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any, AsyncGenerator, Dict
 
 import sglang as sgl
 
@@ -57,12 +57,12 @@ class MigrationHandler(BaseWorkerHandler):
 
     async def migrate(
         self, request: Dict[str, Any], context: Context
-    ) -> Dict[str, Any]:
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """Initiate migration of an in-flight request's KV cache.
 
         This method:
         1. Generates bootstrap info (host, port, room)
-        2. Returns the bootstrap info immediately
+        2. Yields the bootstrap info immediately
         3. Triggers the KV transfer in the background
 
         The caller should pass the returned bootstrap_info to the destination
@@ -72,7 +72,7 @@ class MigrationHandler(BaseWorkerHandler):
             request: Request dict with 'rid' key containing the request ID to migrate.
             context: Context object for request tracking.
 
-        Returns:
+        Yields:
             Dict with bootstrap_info containing:
                 - bootstrap_host: Host for KV transfer connection
                 - bootstrap_port: Port for KV transfer connection
@@ -114,7 +114,30 @@ class MigrationHandler(BaseWorkerHandler):
 
         logging.info(f"Migration initiated for rid: {rid}, room: {bootstrap_room}")
 
-        return {
+        # #region agent log
+        import json as _json
+
+        open("/home/warnold/proj/dynamo/.cursor/debug.log", "a").write(
+            _json.dumps(
+                {
+                    "location": "migration_handler.py:migrate",
+                    "message": "Migration returning bootstrap_info",
+                    "data": {
+                        "rid": rid,
+                        "bootstrap_host": self.bootstrap_host,
+                        "bootstrap_port": self.bootstrap_port,
+                        "bootstrap_room": bootstrap_room,
+                    },
+                    "timestamp": __import__("time").time() * 1000,
+                    "sessionId": "debug-session",
+                    "hypothesisId": "B,D",
+                }
+            )
+            + "\n"
+        )
+        # #endregion
+
+        yield {
             "rid": rid,
             "bootstrap_info": bootstrap_info,
         }

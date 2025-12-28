@@ -63,7 +63,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         Yields:
             Bootstrap info dict with host, port, and room for decode worker connection.
         """
-        logging.debug(f"New Request ID: {context.id()}")
+        logging.info(f"New Prefill Request ID: {context.id()}")
         trace_id = context.trace_id
 
         if "request" in request:

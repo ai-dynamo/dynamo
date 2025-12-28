@@ -46,7 +46,8 @@ struct Tier {
     /// Router to workers in this tier (KV-aware or simple)
     router: TierRouter,
     /// Router for migration requests (to call migrate endpoint on source worker)
-    migrate_router: Arc<PushRouter<MigrationRequest, MigrationResponse>>,
+    /// Uses Annotated wrapper to match streaming protocol format
+    migrate_router: Arc<PushRouter<MigrationRequest, Annotated<MigrationResponse>>>,
 }
 
 /// The router type for a tier
@@ -285,9 +286,10 @@ impl DecodeDisagger {
         };
 
         // Create migrate router for calling migrate endpoint on source workers
+        // Uses Annotated wrapper to match streaming protocol format
         let migrate_client = migrate_endpoint.client().await?;
         let migrate_push_router =
-            PushRouter::<MigrationRequest, MigrationResponse>::from_client_with_threshold(
+            PushRouter::<MigrationRequest, Annotated<MigrationResponse>>::from_client_with_threshold(
                 migrate_client,
                 RouterMode::RoundRobin, // Will use direct() for specific instance targeting
                 None,
@@ -371,6 +373,9 @@ impl
 
         let (req, context) = request.into_parts();
         let isl = req.token_ids.len();
+        let has_bootstrap_info = req.bootstrap_info.is_some();
+
+        tracing::info!(isl, has_bootstrap_info, "DecodeDisagger received request");
 
         // Select initial tier based on ISL
         let Some(current_tier) = self.select_tier(isl) else {
@@ -453,7 +458,10 @@ impl
                         Ok(routed_migrate) => {
                             let (mut migrate_stream, _) = routed_migrate.take();
                             match migrate_stream.next().await {
-                                Some(response) => Some(response.bootstrap_info),
+                                Some(annotated_response) => {
+                                    // Extract MigrationResponse from Annotated wrapper
+                                    annotated_response.data.map(|r| r.bootstrap_info)
+                                }
                                 None => {
                                     tracing::warn!("Migration endpoint returned empty response");
                                     None
@@ -465,9 +473,6 @@ impl
                             None
                         }
                     };
-
-                    // TODO: will this drop the stream?
-                    drop(stream);
 
                     // Step 2: Add bootstrap info to request and send to higher tier
                     if let Some(info) = bootstrap_info {
@@ -488,6 +493,8 @@ impl
                                     );
                                 }
                                 yield new_chunk;
+                                // TODO: We want to close the stream here, but we want the decode worker to keep the request alive for transport
+                                //drop(stream);
                             }
                         }
                         Err(e) => {

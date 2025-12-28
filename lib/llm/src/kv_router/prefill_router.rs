@@ -59,10 +59,15 @@ impl InnerPrefillRouter {
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
-        match self {
-            InnerPrefillRouter::KvRouter(router) => router.generate(request).await,
-            InnerPrefillRouter::SimpleRouter(router) => router.generate(request).await,
-        }
+        let (stream, instance) = match self {
+            InnerPrefillRouter::KvRouter(router) => router.generate_routed(request).await?.take(),
+            InnerPrefillRouter::SimpleRouter(router) => router.generate_routed(request).await?.take(),
+        };
+        tracing::info!(
+            instance_id = instance,
+            "PrefillRouter: generated prefill response"
+        );
+        Ok(stream)
     }
 }
 
@@ -441,6 +446,15 @@ impl
         // Extract request data while preserving context
         let (req, context) = request.into_parts();
         let request_id = context.id().to_string();
+
+        let is_activated = self.prefill_router.get().is_some();
+        tracing::info!(
+            request_id = %request_id,
+            is_activated,
+            enforce_disagg = self.enforce_disagg,
+            has_bootstrap_info = req.bootstrap_info.is_some(),
+            "PrefillRouter.generate() called"
+        );
         let engine_ctx = context.context();
 
         // GAIE Stage 1: the presence of the empty query_instance_id signals query-only mode
@@ -465,11 +479,26 @@ impl
             .routing
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
+
+        tracing::info!(
+            request_id = %request_id,
+            is_gaie_stage1,
+            preselected_worker = ?preselected_worker,
+            "PrefillRouter: checking prefill path"
+        );
+
         let prefill_result = if !is_gaie_stage1 {
             if let Some((worker_id, dp_rank, bootstrap_info)) = self
                 .build_bootstrap_info(&prefill_req, preselected_worker)
                 .await
             {
+                tracing::info!(
+                    request_id = %request_id,
+                    worker_id,
+                    dp_rank,
+                    bootstrap_room = bootstrap_info.bootstrap_room,
+                    "PrefillRouter: using optimized bootstrap path"
+                );
                 let bootstrap_room = bootstrap_info.bootstrap_room;
 
                 // Prepare request with bootstrap_room and force routing to specific worker
@@ -500,7 +529,10 @@ impl
                 Ok((None, Some(worker_id), Some(bootstrap_info)))
             } else {
                 // Fallback to original: Wait for prefill to complete
-                tracing::debug!("Using original prefill path");
+                tracing::info!(
+                    request_id = %request_id,
+                    "PrefillRouter: build_bootstrap_info returned None, using original prefill path"
+                );
 
                 // Set phase to Prefill and record prefill start time if tracking is enabled
                 if let Some(ref tracker) = req.tracker {
@@ -519,10 +551,16 @@ impl
             // GAIE Stage 1: Use original path (no bootstrap optimization)
             // But first check if prefill router is activated - if not, skip to avoid setting phase
             if self.prefill_router.get().is_none() {
-                tracing::debug!("GAIE Stage 1: Prefill router not activated, skipping to decode");
+                tracing::info!(
+                    request_id = %request_id,
+                    "PrefillRouter: GAIE Stage 1, not activated, skipping to decode"
+                );
                 Err(PrefillError::NotActivated)
             } else {
-                tracing::debug!("Using original prefill path (GAIE Stage 1)");
+                tracing::info!(
+                    request_id = %request_id,
+                    "PrefillRouter: GAIE Stage 1, using original prefill path"
+                );
 
                 // Set phase to Prefill and record prefill start time if tracking is enabled
                 if let Some(ref tracker) = req.tracker {
@@ -551,7 +589,12 @@ impl
         // Handle prefill result
         match prefill_result {
             Ok((maybe_prefill_result, _prefill_worker_id, bootstrap_info)) => {
-                tracing::debug!("Prefill completed, proceeding to decode");
+                tracing::info!(
+                    request_id = %request_id,
+                    has_prefill_result = maybe_prefill_result.is_some(),
+                    has_bootstrap_info = bootstrap_info.is_some(),
+                    "PrefillRouter: prefill OK, proceeding to decode"
+                );
 
                 // Set phase to Decode for the decode request
                 if let Some(ref tracker) = req.tracker {
@@ -575,6 +618,11 @@ impl
 
                 // Inject bootstrap_info for decode worker
                 if let Some(info) = bootstrap_info {
+                    tracing::info!(
+                        request_id = %request_id,
+                        bootstrap_room = info.bootstrap_room,
+                        "PrefillRouter: injecting bootstrap_info into decode request"
+                    );
                     decode_req.bootstrap_info = Some(info);
                 }
 
@@ -598,29 +646,39 @@ impl
 
                 // Map the modified request through with preserved context
                 let decode_request = context.map(|_| decode_req);
+                tracing::info!(
+                    request_id = %request_id,
+                    "PrefillRouter: calling next.generate() for decode"
+                );
                 next.generate(decode_request).await
             }
             Err(PrefillError::NotActivated) => {
                 if self.enforce_disagg {
                     tracing::error!(
-                        "Prefill router not activated, but disaggregated mode is enforced. Failing request."
+                        request_id = %request_id,
+                        "PrefillRouter: NOT ACTIVATED + enforce_disagg=true, FAILING REQUEST"
                     );
                     return Err(anyhow::anyhow!(PrefillError::NotActivated));
                 }
-                tracing::debug!("Prefill router not activated, falling back to decode-only");
+                tracing::info!(
+                    request_id = %request_id,
+                    "PrefillRouter: NOT ACTIVATED, falling back to decode-only (no bootstrap_info!)"
+                );
                 next.generate(context.map(|_| req)).await
             }
             Err(e) => {
                 if self.enforce_disagg {
                     tracing::error!(
+                        request_id = %request_id,
                         error = %e,
-                        "Remote prefill failed, but disaggregated mode is enforced. Failing request."
+                        "PrefillRouter: prefill FAILED + enforce_disagg=true, FAILING REQUEST"
                     );
                     return Err(anyhow::anyhow!(e));
                 }
                 tracing::warn!(
+                    request_id = %request_id,
                     error = %e,
-                    "Remote prefill failed, falling back to decode-only. This may impact performance in disaggregated deployments. Verify prefill workers are healthy and accessible."
+                    "PrefillRouter: prefill FAILED, falling back to decode-only (no bootstrap_info!)"
                 );
                 next.generate(context.map(|_| req)).await
             }
