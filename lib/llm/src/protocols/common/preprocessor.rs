@@ -207,6 +207,11 @@ impl PreprocessedEmbeddingRequest {
 pub struct MigrationRequest {
     /// Request ID to migrate (identifies the in-flight request on the source worker)
     pub rid: String,
+    /// Number of tokens the frontend has already seen/yielded to client.
+    /// The migrate response will return tokens starting from this index.
+    #[builder(default)]
+    #[serde(default)]
+    pub tokens_seen: u32,
 }
 
 /// Response from the migrate endpoint with connection details
@@ -216,6 +221,11 @@ pub struct MigrationResponse {
     pub rid: String,
     /// Bootstrap info for the destination worker to receive KV cache
     pub bootstrap_info: BootstrapInfo,
+    /// Output chunks that the frontend hasn't seen yet (based on `tokens_seen` in request).
+    /// These should be yielded to the client to maintain API behavior consistency.
+    /// After yielding these, frontend will have: tokens_seen + tokens from pending_outputs
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_outputs: Vec<super::llm_backend::LLMEngineOutput>,
     /// Error message if migration failed
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,

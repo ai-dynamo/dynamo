@@ -26,7 +26,6 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
-use crate::protocols::common::preprocessor::BootstrapInfo;
 use crate::{
     discovery::{DecodeTierNotification, ModelManager},
     kv_router::{KvPushRouter, KvRouterConfig},
@@ -335,6 +334,8 @@ struct MigrationContext {
     current_tier: Arc<Tier>,
     /// Tracks when a migration started and from which seqlen (cleared after first token)
     migration_started_at: Option<(Instant, u32)>,
+    /// Chunks drained during migration that should be yielded to the client
+    pending_chunks: Vec<Annotated<LLMEngineOutput>>,
 }
 
 impl MigrationContext {
@@ -353,17 +354,21 @@ impl MigrationContext {
             current_instance_id,
             current_tier,
             migration_started_at: None,
+            pending_chunks: Vec::new(),
         })
     }
 
     pub async fn send_migration(
         &mut self,
         request_id: &str,
+        tokens_seen: u32,
         parent_ctx: &Arc<dyn AsyncEngineContext>,
-    ) -> Option<BootstrapInfo> {
-        // Step 1: Call migrate endpoint on the source worker to initiate KV transfer
+    ) -> Option<MigrationResponse> {
+        // Call migrate endpoint on the source worker to initiate KV transfer
+        // The response includes bootstrap_info and all token_ids from the request
         let migrate_req = MigrationRequest {
             rid: request_id.to_string(),
+            tokens_seen,
         };
         let migrate_context = Context::with_id(migrate_req, format!("migrate-{}", request_id));
         parent_ctx.link_child(migrate_context.context());
@@ -379,7 +384,7 @@ impl MigrationContext {
             Ok(routed_migrate) => {
                 let (mut migrate_stream, _) = routed_migrate.take();
                 match migrate_stream.next().await {
-                    Some(annotated_response) => annotated_response.data.map(|r| r.bootstrap_info),
+                    Some(annotated_response) => annotated_response.data,
                     None => {
                         tracing::warn!("Migration endpoint returned empty response");
                         None
@@ -422,42 +427,84 @@ impl MigrationContext {
             let migration_start = Instant::now();
             let from_seqlen = self.current_tier.seqlen;
 
-            let bootstrap_info = self.send_migration(&request_id, parent_ctx).await;
-            let mut new_context = Context::with_id(running_request.clone(), request_id.to_string());
-            if let Some(info) = bootstrap_info {
-                tracing::info!(
-                    bootstrap_info = ?info.clone(),
-                    "Migration successful, received bootstrap info",
-                );
-                new_context.bootstrap_info = Some(info);
-            } else {
-                tracing::warn!("no bootstrap info received");
+            // Call migrate endpoint - this de-schedules the request on decode1 and returns
+            // the full token_ids (origin_input_ids + output_ids) so we know exactly what to send to decode2
+            let tokens_seen = running_request.token_ids.len() as u32;
+            let migration_response = self.send_migration(&request_id, tokens_seen, parent_ctx).await;
+            let Some(response) = migration_response else {
+                return Err(anyhow::anyhow!("Migration failed: no response from migrate endpoint"));
+            };
+
+            tracing::info!(
+                bootstrap_room = response.bootstrap_info.bootstrap_room,
+                tokens_seen = tokens_seen,
+                pending_outputs_count = response.pending_outputs.len(),
+                "Migration response received",
+            );
+
+            // Build the full token_ids for the migrated request by extending with pending outputs
+            let mut migrated_token_ids = running_request.token_ids.clone();
+            for output in &response.pending_outputs {
+                migrated_token_ids.extend(output.token_ids.iter().copied());
             }
+
+            // Use the pending_outputs from the response - these are the actual LLMEngineOutput
+            // chunks that the frontend hasn't seen yet, preserving API behavior
+            let pending_chunks: Vec<Annotated<LLMEngineOutput>> = response
+                .pending_outputs
+                .into_iter()
+                .map(Annotated::from_data)
+                .collect();
+
+            // Create the migrated request with the full token_ids
+            let mut migrated_request = running_request.clone();
+            migrated_request.token_ids = migrated_token_ids;
+
+            let mut new_context = Context::with_id(migrated_request, request_id.to_string());
+            new_context.bootstrap_info = Some(response.bootstrap_info);
+
             parent_ctx.link_child(new_context.context());
             let routed_out = new_tier.router.generate_routed(new_context).await?;
             let (new_stream, new_instance_id) = routed_out.take();
             tracing::info!(
                 new_instance_id = new_instance_id,
                 new_tier_seqlen = new_tier.seqlen,
+                pending_chunks = pending_chunks.len(),
                 "Created new stream for next tier",
             );
             return Ok(MigrationContext {
-                previous_stream: Some(self.current_stream),
+                previous_stream: None,
                 current_stream: new_stream,
                 current_instance_id: new_instance_id,
                 current_tier: new_tier,
                 migration_started_at: Some((migration_start, from_seqlen)),
+                pending_chunks,
             });
         }
         Ok(self)
     }
 
+    /// Returns the next chunk(s) from the stream.
+    /// If there are pending chunks from a migration drain, returns all of them.
+    /// Otherwise, returns the next chunk from the current stream.
+    /// Returns empty Vec when the stream is done.
     pub async fn tock(
         &mut self,
         running_request: &mut PreprocessedRequest,
-    ) -> Option<Annotated<LLMEngineOutput>> {
+    ) -> Vec<Annotated<LLMEngineOutput>> {
+        // First, return any pending chunks from the migration drain
+        if !self.pending_chunks.is_empty() {
+            let chunks = std::mem::take(&mut self.pending_chunks);
+            for chunk in &chunks {
+                if let Some(ref data) = chunk.data {
+                    running_request.token_ids.extend(data.token_ids.iter());
+                }
+            }
+            return chunks;
+        }
+
         let Some(chunk) = self.current_stream.next().await else {
-            return None;
+            return Vec::new();
         };
 
         // Log migration duration if we just migrated
@@ -475,7 +522,7 @@ impl MigrationContext {
             // Keep track of the request + tokens we've received so far
             running_request.token_ids.extend(data.token_ids.iter());
         }
-        Some(chunk)
+        vec![chunk]
     }
 }
 
@@ -544,10 +591,12 @@ impl
                         break;
                     }
                 };
-                if let Some(chunk) = migration_context.tock(&mut running_request).await {
-                    yield chunk;
-                } else {
+                let chunks = migration_context.tock(&mut running_request).await;
+                if chunks.is_empty() {
                     break;
+                }
+                for chunk in chunks {
+                    yield chunk;
                 }
             }
         };
