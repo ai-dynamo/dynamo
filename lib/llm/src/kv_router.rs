@@ -915,9 +915,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
 
-        // TODO: When handle_local_updates=false, consider moving mark_prefill_completed
-        // to an external caller (e.g., sidecar) if they support a first-token hook.
-        // Currently mark_prefill_completed is called here for all flows.
+        // Only call mark_prefill_completed and free when we handle local updates.
+        // When handle_local_updates=false (e.g., backend_instance_id is set), the request
+        // was not added via add_request, so we should not try to mark or free it.
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut prefill_marked = false;
 
@@ -935,7 +935,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             break;
                         };
 
-                        if !prefill_marked {
+                        if !prefill_marked && handle_local_updates {
                             if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
                                 tracing::warn!("Failed to mark prefill completed for request {context_id}: {e}");
                             }
@@ -947,9 +947,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }
             }
 
-            // Always call free() - it's idempotent and safe even if already freed or never added
-            if let Err(e) = chooser.free(&context_id).await {
-                tracing::warn!("Failed to free request {context_id}: {e}");
+            // Only call free() when we handle local updates
+            if handle_local_updates {
+                if let Err(e) = chooser.free(&context_id).await {
+                    tracing::warn!("Failed to free request {context_id}: {e}");
+                }
             }
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
