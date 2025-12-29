@@ -1,12 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import logging
-from typing import Any, Dict, Union
+from dataclasses import asdict
+from typing import Any, Dict, Optional, Union
 
 import torch
+from tensorrt_llm.inputs import default_multimodal_input_loader
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.trtllm.utils.disagg_utils import DisaggregatedParamsCodec
 
 
 class EncodeHelper:
@@ -185,55 +189,188 @@ class EncodeHelper:
             return encodings_tensor
 
     @staticmethod
-    async def process_embedding_request(
+    async def process_encode_request(
         request: Dict[str, Any],
         multimodal_processor,
-        connector: nixl_connect.Connector,
+        connector: Optional[nixl_connect.Connector],
+        tokenizer=None,
+        model_dir=None,
+        model_type=None,
+        engine=None,
     ):
         """
-        Process embedding request by loading embeddings and creating NIXL readable operation.
+        Process an ENCODE-mode request.
+
+        Supported flows:
+        - Embedding-path flow (NIXL transfer):
+          - Extract `embedding_paths` from OpenAI messages (URLs ending in .pt/.pth/.bin)
+          - Load embeddings tensor (or dict containing mm_embeddings + auxiliary tensors)
+          - Create a NIXL readable op and yield metadata to the prefill worker, then wait
+            for read completion.
+        - Full EPD flow (MultimodalEncoder):
+          - Extract `image_urls` + `text_prompt`
+          - Build encoder inputs via TRT-LLM's `default_multimodal_input_loader`
+          - Run `MultimodalEncoder.generate(...)` to obtain `disaggregated_params`
+          - Encode the params for network transfer and also return the processed prompt
+            + token ids for downstream prefill/decode consistency.
 
         Args:
-            request: Request containing messages with embedding paths
-            multimodal_processor: Multimodal processor for loading embeddings
-            connector: NIXL connector for creating readable operations
+            request: Request containing OpenAI-format multimodal messages
+            multimodal_processor: Multimodal processor used to extract prompt/media and load embeddings
+            connector: NIXL connector (required only for embedding_paths flow)
 
         Yields:
-            Response dictionary with NIXL metadata and embeddings info, or error response
+            Response dictionary:
+            - For NIXL transfer: nixl_readable_metadata + shape/dtype (+ auxiliary_data)
+            - For full EPD: ep_disaggregated_params (+ processed_prompt + prompt_token_ids)
         """
         # Load embeddings first to get the actual shape
         # Extract messages from extra_args (set by Rust preprocessor for multimodal) or fall back to direct field
+        if multimodal_processor is None:
+            yield {"error": "No multimodal_processor configured on encode worker"}
+            return
+
         messages = request.get("extra_args", {}).get(
             "messages", request.get("messages", [])
         )
-        _, _, embedding_paths = multimodal_processor.extract_prompt_and_media(messages)
+        (
+            text_prompt,
+            image_urls,
+            embedding_paths,
+        ) = multimodal_processor.extract_prompt_and_media(messages)
 
-        if not embedding_paths:
-            # Placeholder for TRTLLM Encoder to be called
-            # TRTLLM Encoder will return a memory handler on the encoder GPU with the encodings
-            logging.warning(
-                "No embedding paths found, NIXL transfer for image urls not supported by TRTLLM Encoder yet"
+        if embedding_paths:
+            if connector is None:
+                yield {"error": "NIXL connector is required for embedding_paths encode"}
+                return
+            # Load the embeddings data
+            loaded_data = multimodal_processor.load_tensor_from_path_or_url(
+                embedding_paths[0]
             )
-            yield {"error": "No embedding paths found"}
-            return
+            # Handle both tensor and dictionary formats
+            if isinstance(loaded_data, dict):
+                # Dictionary format (e.g., maverick_mm_embed_seashore_v3.pt)
+                encodings = loaded_data.get("mm_embeddings")
+                if encodings is None:
+                    yield {"error": "Dictionary embeddings missing 'mm_embeddings' key"}
+                    return
 
-        # Load the embeddings data
-        loaded_data = multimodal_processor.load_tensor_from_path_or_url(
-            embedding_paths[0]
-        )
+                # Store auxiliary data for later transmission
+                auxiliary_data = {
+                    k: v for k, v in loaded_data.items() if k != "mm_embeddings"
+                }
+            else:
+                # Tensor format (e.g., llava_next_mm_embed_seashore.pt)
+                encodings = loaded_data
+                auxiliary_data = {}
+            # Create readable operation with main embeddings tensor (works for both formats)
+            descriptor = nixl_connect.Descriptor(encodings)
+            with connector.create_readable(descriptor) as readable_op:
+                # Get the metadata for the readable operation
+                op_metadata = readable_op.metadata()
 
-        # Handle both tensor and dictionary formats
-        if isinstance(loaded_data, dict):
-            # Dictionary format (e.g., maverick_mm_embed_seashore_v3.pt)
-            encodings = loaded_data.get("mm_embeddings")
-            if encodings is None:
-                yield {"error": "Dictionary embeddings missing 'mm_embeddings' key"}
+                # Send back shape info, readable metadata, and serialized auxiliary data
+                response = {
+                    "nixl_readable_metadata": op_metadata.model_dump(),
+                    "embeddings_shape": list(encodings.shape),
+                    "embeddings_dtype": str(encodings.dtype),
+                    "auxiliary_data": EncodeHelper.serialize_tensor_dict(
+                        auxiliary_data
+                    ),
+                }
+                yield response
+
+                # Wait for the prefill worker to complete the read operation
+                logging.debug(
+                    "EncodeHelper waiting for PrefillHandler to read embeddings..."
+                )
+                await readable_op.wait_for_completion()
+                logging.debug("EncodeHelper completed readable operation.")
+        elif image_urls and text_prompt:
+            # Use trtllm MultimodalEncoder to generate embeddings
+            # NOTE: `default_multimodal_input_loader` needs `model_dir` / `model_type` to
+            # construct the correct multimodal input format and apply model-specific
+            # preprocessing. These are derived from Dynamo's multimodal processor config.
+            if model_dir is None or model_type is None:
+                yield {
+                    "error": "model_dir and model_type are required for full EPD encode"
+                }
+                return
+            inputs = default_multimodal_input_loader(
+                tokenizer=tokenizer,
+                model_dir=model_dir,
+                model_type=model_type,
+                modality="image",
+                prompts=[text_prompt],
+                media=image_urls[0],
+            )
+            # engine.llm is the MultimodalEncoder instance
+            # MultimodalEncoder.generate() returns a list of GenerationResult objects
+            if engine is None:
+                yield {"error": "No engine configured on encode worker for full EPD"}
                 return
 
-            # Store auxiliary data for later transmission
-            auxiliary_data = {
-                k: v for k, v in loaded_data.items() if k != "mm_embeddings"
+            # NOTE: MultimodalEncoder.generate() is synchronous. Run it off-thread to avoid
+            # blocking the encode worker's event loop under concurrency.
+            encoder_outputs = await asyncio.to_thread(
+                lambda: list(engine.llm.generate(inputs))
+            )
+            if not encoder_outputs:
+                logging.error("ENCODE WORKER: encoder_outputs is empty")
+                yield {"ep_disaggregated_params": None}
+                return
+            ep_disaggregated_params = encoder_outputs[0].disaggregated_params
+            if ep_disaggregated_params is None:
+                logging.error(
+                    "ENCODE WORKER: encoder_outputs[0].disaggregated_params is None"
+                )
+                yield {"ep_disaggregated_params": None}
+                return
+            # NOTE: `hasattr` is used for TRT-LLM version compatibility: TBD
+            # may not have multimodal_embedding_handles/multimodal_hashes on DisaggregatedParams.
+            if (
+                hasattr(ep_disaggregated_params, "multimodal_embedding_handles")
+                and ep_disaggregated_params.multimodal_embedding_handles
+            ):
+                logging.debug(
+                    f"ENCODE WORKER: Generated {len(ep_disaggregated_params.multimodal_embedding_handles)} embedding handle(s)"
+                )
+            else:
+                logging.warning(
+                    "ENCODE WORKER: ep_disaggregated_params has no multimodal_embedding_handles"
+                )
+            # Prepare for Network Transfer
+            encoded_params = DisaggregatedParamsCodec.encode(ep_disaggregated_params)
+            params_dict = asdict(encoded_params)
+            # Also send the processed prompt (which includes <image> tokens)
+            # default_multimodal_input_loader returns a list, get the first element
+            processed_prompt = None
+            prompt_token_ids = None
+            if isinstance(inputs, list) and len(inputs) > 0:
+                first_input = inputs[0]
+                if isinstance(first_input, dict):
+                    processed_prompt = first_input.get("prompt")
+                else:
+                    processed_prompt = getattr(first_input, "prompt", None)
+                # Tokenize the processed prompt for prefill worker
+                if processed_prompt and tokenizer is not None:
+                    # NOTE: processed_prompt already contains template/placeholder tokens
+                    # (e.g. <image>, [INST], etc.). Adding special tokens here can change
+                    # token alignment across EPD stages (prefill/decode), so we explicitly
+                    # avoid adding them.
+                    prompt_token_ids = tokenizer.encode(
+                        processed_prompt, add_special_tokens=False
+                    )
+            logging.debug(
+                "ENCODE WORKER: Extracted processed_prompt (len=%s)",
+                len(processed_prompt) if processed_prompt is not None else None,
+            )
+            yield {
+                "ep_disaggregated_params": params_dict,
+                "processed_prompt": processed_prompt,  # Prompt with <image> tokens
+                "prompt_token_ids": prompt_token_ids,  # Token IDs for consistency
             }
+            return
         else:
             # Tensor format (e.g., llava_next_mm_embed_seashore.pt)
             encodings = loaded_data
@@ -252,11 +389,4 @@ class EncodeHelper:
                 "embeddings_dtype": str(encodings.dtype),
                 "auxiliary_data": EncodeHelper.serialize_tensor_dict(auxiliary_data),
             }
-            yield response
-
-            # Wait for the prefill worker to complete the read operation
-            logging.debug(
-                "EncodeHelper waiting for PrefillHandler to read embeddings..."
-            )
-            await readable_op.wait_for_completion()
-            logging.debug("EncodeHelper completed readable operation.")
+            return
