@@ -165,13 +165,16 @@ impl KvScheduler {
 
                 // Build the new workers_with_configs map
                 let mut new_workers_with_configs = HashMap::new();
+                let current_workers = workers_monitor.read().await;
                 for worker_id in &new_instance_ids {
                     let config = new_configs.get(worker_id).cloned();
-                    if config.is_some() {
-                        tracing::info!("Runtime config found for worker_id: {}", worker_id);
+                    let prev_config = current_workers.get(worker_id);
+                    if config.is_some() && prev_config != Some(&config) {
+                        tracing::info!("Runtime config found for worker_id: {worker_id}");
                     }
                     new_workers_with_configs.insert(*worker_id, config);
                 }
+                drop(current_workers);
 
                 // Update workers when instances change
                 slots_monitor.update_workers(new_workers_with_configs.clone());
