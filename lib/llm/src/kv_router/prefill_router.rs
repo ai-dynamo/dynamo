@@ -470,21 +470,12 @@ impl
                 .build_bootstrap_info(&prefill_req, preselected_worker)
                 .await
             {
-                let bootstrap_room = bootstrap_info.bootstrap_room;
-
-                // Prepare request with bootstrap_room and force routing to specific worker
+                // Prepare request with bootstrap_info and force routing to specific worker
                 let routing = prefill_req.routing_mut();
                 routing.prefill_worker_id = Some(worker_id);
                 routing.dp_rank = Some(dp_rank);
-                let extra_args = prefill_req
-                    .extra_args
-                    .get_or_insert_with(|| serde_json::json!({}));
-                if let Some(obj) = extra_args.as_object_mut() {
-                    obj.insert(
-                        "bootstrap_room".to_string(),
-                        serde_json::json!(bootstrap_room),
-                    );
-                }
+                // Set bootstrap_info on prefill request - prefill worker uses bootstrap_room from it
+                prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 
                 // Set phase to Prefill and record prefill start time if tracking is enabled
                 if let Some(ref tracker) = req.tracker {

@@ -936,10 +936,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         };
 
                         if !prefill_marked {
-                            if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
-                                tracing::warn!("Failed to mark prefill completed for request {context_id}: {e}");
+                            // Only mark prefill completed when we receive actual tokens,
+                            // not empty bootstrap info (token_ids: []) from disaggregated prefill
+                            let has_tokens = item.data.as_ref()
+                                .map(|d| !d.token_ids.is_empty())
+                                .unwrap_or(false);
+                            if has_tokens {
+                                if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
+                                    tracing::warn!("Failed to mark prefill completed for request {context_id}: {e}");
+                                }
+                                prefill_marked = true;
                             }
-                            prefill_marked = true;
                         }
 
                         yield item;
