@@ -117,4 +117,8 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
-  "${TRACE_ARGS[@]}"
+  "${TRACE_ARGS[@]}" &
+DECODE_PID2=$!
+
+# Wait for any worker to exit (keeps script running)
+wait
