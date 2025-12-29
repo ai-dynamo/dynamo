@@ -46,6 +46,7 @@ if [ "$ENABLE_OTEL" = true ]; then
     TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
 
+export DYN_REQUEST_PLANE=nats
 # Start frontend with KV routing
 # The frontend will automatically detect prefill workers and activate an internal prefill router
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
@@ -54,17 +55,6 @@ python3 -m dynamo.frontend \
     --router-mode kv \
     --router-reset-states &
 DYNAMO_PID=$!
-
-# run prefill router
-# Use numeric DYN_SYSTEM_PORT{N} env vars so launchers/test harnesses can set
-# ports without encoding role names (prefill/decode) in the env var.
-OTEL_SERVICE_NAME=dynamo-router-prefill DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-python3 -m dynamo.router \
-  --endpoint dynamo.prefill.generate \
-  --block-size 64 \
-  --router-reset-states \
-  --no-track-active-blocks &
-PREFILL_ROUTER_PID=$!
 
 # run prefill worker
 OTEL_SERVICE_NAME=dynamo-worker-prefill-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
@@ -108,7 +98,6 @@ CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
   --trust-remote-code \
   --disaggregation-mode decode \
   --host 0.0.0.0 \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5560"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &
@@ -124,7 +113,6 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --trust-remote-code \
   --disaggregation-mode decode \
   --host 0.0.0.0 \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
   "${TRACE_ARGS[@]}"
