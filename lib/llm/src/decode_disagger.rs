@@ -7,8 +7,7 @@
 //! When a request's sequence length exceeds the current tier's capacity,
 //! it migrates to a higher-capacity tier.
 
-use std::sync::Arc;
-use std::time::Instant;
+use std::{pin::Pin, sync::Arc};
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -18,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
     component::Endpoint,
+    engine::{AsyncEngineContext, AsyncEngineStream},
     pipeline::{
         AsyncEngineContextProvider, Context, ManyOut, Operator, PushRouter, ResponseStream,
         RouterMode, ServerStreamingEngine, SingleIn, async_trait,
@@ -26,6 +26,7 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
+use crate::protocols::common::preprocessor::BootstrapInfo;
 use crate::{
     discovery::{DecodeTierNotification, ModelManager},
     kv_router::{KvPushRouter, KvRouterConfig},
@@ -36,7 +37,11 @@ use crate::{
 };
 
 /// Shared tiers storage wrapped in Arc for cloning across async tasks
-type SharedTiers = Arc<RwLock<Vec<Tier>>>;
+type SharedTiers = RwLock<Vec<Arc<Tier>>>;
+
+fn find_tier(tiers: &Arc<SharedTiers>, seqlen: u32) -> Option<Arc<Tier>> {
+    tiers.read().iter().find(|t| t.seqlen == seqlen).cloned()
+}
 
 /// A tier represents a set of workers with a specific sequence length capacity.
 #[derive(Clone)]
@@ -81,7 +86,7 @@ impl TierRouter {
 /// 2. During decode, if ISL + OSL exceeds current tier's seqlen, migrate to higher tier
 pub struct DecodeDisagger {
     /// Tiers sorted by seqlen ascending (wrapped in Arc for async cloning)
-    tiers: SharedTiers,
+    tiers: Arc<SharedTiers>,
     /// Cancellation token for background tasks
     cancel_token: CancellationToken,
 }
@@ -297,11 +302,11 @@ impl DecodeDisagger {
             )
             .await?;
 
-        let tier = Tier {
+        let tier = Arc::new(Tier {
             seqlen,
             router,
             migrate_router: Arc::new(migrate_push_router),
-        };
+        });
 
         // Insert tier in sorted order
         let mut tiers_guard = tiers.write();
@@ -319,23 +324,126 @@ impl DecodeDisagger {
 
         Ok(())
     }
+}
 
-    /// Check if any tiers are available
-    pub fn has_tiers(&self) -> bool {
-        !self.tiers.read().is_empty()
+// Holds all the mutable state for a migration
+struct MigrationContext {
+    // These are the objects which get updated as we migrate
+    previous_stream: Option<Pin<Box<dyn AsyncEngineStream<Annotated<LLMEngineOutput>>>>>,
+    current_stream: Pin<Box<dyn AsyncEngineStream<Annotated<LLMEngineOutput>>>>,
+    current_instance_id: u64,
+    current_tier: Arc<Tier>,
+}
+
+impl MigrationContext {
+    pub async fn new(
+        tiers: &Arc<SharedTiers>,
+        request: PreprocessedRequest,
+        parent_ctx: Arc<dyn AsyncEngineContext>,
+    ) -> Result<Option<Self>> {
+        let Some(current_tier) = find_tier(tiers, request.token_ids.len() as u32) else {
+            return Ok(None);
+        };
+        let inner_ctx = Context::with_id(request.clone(), parent_ctx.id().to_string());
+        parent_ctx.link_child(inner_ctx.context());
+        let routed_out = current_tier.router.generate_routed(inner_ctx).await?;
+        let (current_stream, current_instance_id) = routed_out.take();
+        Ok(Some(Self {
+            previous_stream: None,
+            current_stream,
+            current_instance_id,
+            current_tier,
+        }))
     }
 
-    /// Select the appropriate tier for a given sequence length
-    fn select_tier(&self, seqlen: usize) -> Option<Tier> {
-        let tiers = self.tiers.read();
-        // Find first tier that can handle this seqlen
-        tiers.iter().find(|t| seqlen <= t.seqlen as usize).cloned()
+    pub async fn send_migration(
+        &mut self,
+        request_id: &str,
+        parent_ctx: &Arc<dyn AsyncEngineContext>,
+    ) -> Option<BootstrapInfo> {
+        // Step 1: Call migrate endpoint on the source worker to initiate KV transfer
+        let migrate_req = MigrationRequest {
+            rid: request_id.to_string(),
+        };
+        let migrate_context = Context::with_id(migrate_req, format!("migrate-{}", request_id));
+        parent_ctx.link_child(migrate_context.context());
+
+        // Use direct routing to the specific instance that has the request
+        let migration_result = self
+            .current_tier
+            .migrate_router
+            .direct(migrate_context, self.current_instance_id)
+            .await;
+
+        match migration_result {
+            Ok(routed_migrate) => {
+                let (mut migrate_stream, _) = routed_migrate.take();
+                match migrate_stream.next().await {
+                    Some(annotated_response) => annotated_response.data.map(|r| r.bootstrap_info),
+                    None => {
+                        tracing::warn!("Migration endpoint returned empty response");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to call migrate endpoint");
+                None
+            }
+        }
     }
 
-    /// Check if this is the maximum tier
-    fn is_max_tier(&self, seqlen: u32) -> bool {
-        let tiers = self.tiers.read();
-        tiers.last().map(|t| t.seqlen == seqlen).unwrap_or(true)
+    pub async fn tick(
+        mut self,
+        tiers: &Arc<SharedTiers>,
+        request_id: &str,
+        running_request: &PreprocessedRequest,
+        parent_ctx: &Arc<dyn AsyncEngineContext>,
+    ) -> Result<MigrationContext> {
+        // If we just migrated and then got the next token, drop the previous stream
+        if let Some(previous_stream) = self.previous_stream.take() {
+            drop(previous_stream);
+        }
+
+        // If we've reached the end of the current tier, migrate to the next tier
+        if running_request.token_ids.len() >= self.current_tier.seqlen as usize {
+            // We've reached the end of the current tier, so migrate to the next tier
+            let Some(new_tier) = find_tier(tiers, (running_request.token_ids.len() + 1) as u32)
+            else {
+                return Err(anyhow::anyhow!("No next tier available for migration"));
+            };
+
+            let bootstrap_info = self.send_migration(&request_id, parent_ctx).await;
+            let mut new_context = Context::with_id(running_request.clone(), request_id.to_string());
+            if let Some(info) = bootstrap_info {
+                new_context.bootstrap_info = Some(info);
+            }
+            parent_ctx.link_child(new_context.context());
+            let routed_out = new_tier.router.generate_routed(new_context).await?;
+            let (new_stream, new_instance_id) = routed_out.take();
+            return Ok(MigrationContext {
+                previous_stream: Some(self.current_stream),
+                current_stream: new_stream,
+                current_instance_id: new_instance_id,
+                current_tier: new_tier,
+            });
+        }
+        Ok(self)
+    }
+
+    pub async fn tock(
+        &mut self,
+        running_request: &mut PreprocessedRequest,
+    ) -> Option<Annotated<LLMEngineOutput>> {
+        let Some(chunk) = self.current_stream.next().await else {
+            return None;
+        };
+
+        if let Some(ref data) = chunk.data {
+            // Keep track of the request + tokens we've received so far
+            running_request.token_ids.extend(data.token_ids.iter());
+        }
+        Some(chunk)
     }
 }
 
@@ -366,151 +474,51 @@ impl
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
-        // If no tiers configured, just forward to next (passthrough mode)
-        if !self.has_tiers() {
-            return next.generate(request).await;
-        }
-
-        let (req, context) = request.into_parts();
-        let isl = req.token_ids.len();
-        let has_bootstrap_info = req.bootstrap_info.is_some();
-
-        tracing::info!(isl, has_bootstrap_info, "DecodeDisagger received request");
-
-        // Select initial tier based on ISL
-        let Some(current_tier) = self.select_tier(isl) else {
-            // No tier can handle this, forward to next (let it fail there)
-            tracing::warn!(isl, "No tier available for sequence length");
-            return next.generate(context.map(|_| req)).await;
+        let (mut running_request, context) = request.transfer(());
+        let parent_engine_ctx = context.context();
+        let Some(mut migration_context) = MigrationContext::new(
+            &self.tiers,
+            running_request.clone(),
+            parent_engine_ctx.clone(),
+        )
+        .await?
+        else {
+            tracing::warn!(
+                tiers = self.tiers.read().len(),
+                "No tiers for migration, forwarding to next",
+            );
+            return next
+                .generate(Context::rejoin(running_request, context))
+                .await;
         };
-
-        let current_seqlen = current_tier.seqlen;
-
-        // If this is the max tier, just forward (no migration possible)
-        if self.is_max_tier(current_seqlen) {
-            return next.generate(context.map(|_| req)).await;
-        }
-
-        // Route to current tier and monitor for migration
-        let request_for_tier = context.map(|_| req.clone());
-        let (mut stream, instance_id) = current_tier
-            .router
-            .generate_routed(request_for_tier)
-            .await?
-            .take();
-        let stream_context = stream.context();
-        let stream_context_for_return = stream_context.clone();
-        let request_id = stream_context.id().to_string();
-
+        let request_id = context.id().to_string();
         let tiers = self.tiers.clone();
-        let current_tier_clone = current_tier.clone();
-        let mut req_clone = req.clone();
-
-        // Create a stream that monitors output and migrates if needed
         let migrating_stream = async_stream::stream! {
-            let mut output_tokens = 0usize;
-
-            while let Some(chunk) = stream.next().await {
-                // Count tokens in this chunk
-                if let Some(ref data) = chunk.data {
-                    output_tokens += data.token_ids.len();
-                    req_clone.token_ids.extend(data.token_ids.iter());
+            let parent_engine_ctx = context.context();
+            loop {
+                if parent_engine_ctx.is_stopped() || parent_engine_ctx.is_killed() {
+                    break;
                 }
-
-                // Check if we need to migrate
-                let total_seqlen = isl + output_tokens;
-                if total_seqlen > current_seqlen as usize {
-                    let start_migration = Instant::now();
-
-                    // Get next tier (clone inside block to avoid holding lock across await)
-                    let higher_tier = {
-                        let tiers_guard = tiers.read();
-                        tiers_guard
-                            .iter()
-                            .find(|t| t.seqlen > current_seqlen)
-                            .cloned()
-                    };
-
-                    let Some(higher_tier) = higher_tier else {
-                        tracing::error!("No higher tier available for migration");
-                        return;
-                    };
-
-                    tracing::info!(
-                        current_tier = current_seqlen,
-                        new_tier = higher_tier.seqlen,
-                        total_seqlen,
-                        "Migrating to higher tier"
-                    );
-
-                    // Step 1: Call migrate endpoint on the source worker to initiate KV transfer
-                    let migrate_req = MigrationRequest {
-                        rid: request_id.clone(),
-                    };
-                    let migrate_context = Context::with_id(migrate_req, format!("migrate-{}", request_id));
-
-                    // Use direct routing to the specific instance that has the request
-                    let migration_result = current_tier_clone.migrate_router
-                        .direct(migrate_context, instance_id)
-                        .await;
-
-                    let bootstrap_info = match migration_result {
-                        Ok(routed_migrate) => {
-                            let (mut migrate_stream, _) = routed_migrate.take();
-                            match migrate_stream.next().await {
-                                Some(annotated_response) => {
-                                    // Extract MigrationResponse from Annotated wrapper
-                                    annotated_response.data.map(|r| r.bootstrap_info)
-                                }
-                                None => {
-                                    tracing::warn!("Migration endpoint returned empty response");
-                                    None
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Failed to call migrate endpoint");
-                            None
-                        }
-                    };
-
-                    // Step 2: Add bootstrap info to request and send to higher tier
-                    if let Some(info) = bootstrap_info {
-                        req_clone.bootstrap_info = Some(info);
+                match migration_context.tick(&tiers, &request_id, &running_request, &parent_engine_ctx).await {
+                    Ok(ctx) => {
+                        migration_context = ctx;
+                    },
+                    Err(e)=> {
+                        yield Annotated::from_error(e.to_string());
+                        break;
                     }
-
-                    let migration_context = Context::with_id(req_clone.clone(), request_id.clone());
-                    match higher_tier.router.generate_routed(migration_context).await {
-                        Ok(routed_out) => {
-                            let (mut new_stream, _) = routed_out.take();
-                            let mut first_chunk = true;
-                            while let Some(new_chunk) = new_stream.next().await {
-                                if first_chunk {
-                                    first_chunk = false;
-                                    tracing::info!(
-                                        migration_latency_ms = start_migration.elapsed().as_millis(),
-                                        "Migration completed, first token from new tier"
-                                    );
-                                }
-                                yield new_chunk;
-                                // TODO: We want to close the stream here, but we want the decode worker to keep the request alive for transport
-                                //drop(stream);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "Failed to migrate to higher tier");
-                        }
-                    }
-                    return;
+                };
+                if let Some(chunk) = migration_context.tock(&mut running_request).await {
+                    yield chunk;
+                } else {
+                    break;
                 }
-
-                yield chunk;
             }
         };
 
         Ok(ResponseStream::new(
             Box::pin(migrating_stream),
-            stream_context_for_return,
+            parent_engine_ctx.clone(),
         ))
     }
 }
