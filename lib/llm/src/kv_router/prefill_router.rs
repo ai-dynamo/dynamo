@@ -23,7 +23,7 @@ use crate::{
     kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
-    protocols::common::timing::RequestPhase,
+    protocols::common::timing::{RequestPhase, RequestTracker},
     protocols::openai::nvext::WorkerIdInfo,
 };
 
@@ -440,7 +440,7 @@ impl
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         // Extract request data while preserving context
-        let (req, context) = request.into_parts();
+        let (mut req, context) = request.into_parts();
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
 
@@ -453,13 +453,6 @@ impl
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
-        // Prepare prefill request with max_tokens = 1
-        let mut prefill_req = req.clone();
-        prefill_req.stop_conditions.max_tokens = Some(1);
-
-        // Prepare prefill request for GAIE flows (Stage 1 or Stage 2)
-        Self::prepare_prefill_for_gaie(&mut prefill_req, is_gaie_stage1);
-
         // GAIE Stage 1: Check if prefill router is activated - if not, skip to decode
         if is_gaie_stage1 && self.prefill_router.get().is_none() {
             tracing::debug!("GAIE Stage 1: Prefill router not activated, skipping to decode");
@@ -470,11 +463,21 @@ impl
             return next.generate(context.map(|_| req)).await;
         }
 
-        // Set phase to Prefill and record prefill start time if tracking is enabled
-        if let Some(ref tracker) = req.tracker {
-            tracker.set_phase(RequestPhase::Prefill);
-            tracker.record_prefill_start();
+        // Ensure tracker exists for routing decisions in disaggregated mode.
+        // Create one if not provided by the upstream DeltaGenerator.
+        if req.tracker.is_none() {
+            req.tracker = Some(Arc::new(RequestTracker::new()));
         }
+        let tracker = req.tracker.as_ref().unwrap();
+        tracker.set_phase(RequestPhase::Prefill);
+        tracker.record_prefill_start();
+
+        // Prepare prefill request with max_tokens = 1 (clone after tracker is set)
+        let mut prefill_req = req.clone();
+        prefill_req.stop_conditions.max_tokens = Some(1);
+
+        // Prepare prefill request for GAIE flows (Stage 1 or Stage 2)
+        Self::prepare_prefill_for_gaie(&mut prefill_req, is_gaie_stage1);
 
         // Try build_bootstrap_info optimization (skip for GAIE Stage 1 which needs query-only flow)
         // For GAIE Stage 2, use prefill_worker_id if provided
