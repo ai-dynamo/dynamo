@@ -942,10 +942,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 .map(|d| !d.token_ids.is_empty())
                                 .unwrap_or(false);
                             if has_tokens {
-                            if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
-                                tracing::warn!("Failed to mark prefill completed for request {context_id}: {e}");
-                            }
-                            prefill_marked = true;
+                                if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
+                                    tracing::warn!("Failed to mark prefill completed for request {context_id}: {e}");
+                                }
+                                prefill_marked = true;
                             }
                         }
 
