@@ -474,7 +474,7 @@ impl
 
                 // Prepare request with bootstrap_room and force routing to specific worker
                 let routing = prefill_req.routing_mut();
-                routing.backend_instance_id = Some(worker_id);
+                routing.prefill_worker_id = Some(worker_id);
                 routing.dp_rank = Some(dp_rank);
                 let extra_args = prefill_req
                     .extra_args

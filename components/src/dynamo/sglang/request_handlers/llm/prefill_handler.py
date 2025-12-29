@@ -34,19 +34,12 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self.engine = engine
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
         super().__init__(component, engine, config, publisher)
-        self._consume_tasks = set()
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
         )
 
     def cleanup(self) -> None:
         """Shutdown the prefill engine and cleanup resources."""
-        # Cancel all pending consume tasks
-        for task in self._consume_tasks:
-            if not task.done():
-                task.cancel()
-        self._consume_tasks.clear()
-
         self.engine.shutdown()
         logging.info("Prefill engine shutdown")
         super().cleanup()
@@ -126,20 +119,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             rid=trace_id,
         )
 
-        task = asyncio.create_task(self._consume_results(results, context))
-        self._consume_tasks.add(task)
-        task.add_done_callback(self._consume_tasks.discard)
-
-    async def _consume_results(
-        self, results: AsyncGenerator[Any, None], context: Context
-    ) -> None:
-        """Consume async generator results without processing.
-
-        Args:
-            results: Async generator from engine.async_generate.
-            context: Context object for cancellation handling.
-        """
-        # Use Future pattern for request ID - will be set when first response arrives
+        # Consume results in-line (with cancellation handling) to keep the stream
+        # open until prefill completes. This allows the router to properly track
+        # when the prefill worker is done.
         request_id_future = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
             async for res in results:
@@ -149,8 +131,4 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     sglang_request_id = meta_info.get("id")
                     if sglang_request_id:
                         request_id_future.set_result(sglang_request_id)
-                        logging.debug(f"New Prefill Request ID: {sglang_request_id}")
-
-                # Note: No explicit cancellation checks needed here.
-                # When abort_request is called by the cancellation monitor,
-                # SGLang will terminate this async generator automatically.
+                        logging.debug(f"Prefill Request ID: {sglang_request_id}")
