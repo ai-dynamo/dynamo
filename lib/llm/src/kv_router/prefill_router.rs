@@ -229,6 +229,7 @@ impl PrefillRouter {
             );
             (id, dp_rank)
         } else {
+            // TODO: do not call this if no bootstrap info is needed
             match kv_router
                 .chooser
                 .find_best_match(None, &req.token_ids, None, false)
@@ -459,75 +460,59 @@ impl
         // Prepare prefill request for GAIE flows (Stage 1 or Stage 2)
         Self::prepare_prefill_for_gaie(&mut prefill_req, is_gaie_stage1);
 
+        // GAIE Stage 1: Check if prefill router is activated - if not, skip to decode
+        if is_gaie_stage1 && self.prefill_router.get().is_none() {
+            tracing::debug!("GAIE Stage 1: Prefill router not activated, skipping to decode");
+            if self.enforce_disagg {
+                return Err(anyhow::anyhow!(PrefillError::NotActivated));
+            }
+            // Fall back to decode-only
+            return next.generate(context.map(|_| req)).await;
+        }
+
+        // Set phase to Prefill and record prefill start time if tracking is enabled
+        if let Some(ref tracker) = req.tracker {
+            tracker.set_phase(RequestPhase::Prefill);
+            tracker.record_prefill_start();
+        }
+
         // Try build_bootstrap_info optimization (skip for GAIE Stage 1 which needs query-only flow)
         // For GAIE Stage 2, use prefill_worker_id if provided
         let preselected_worker = prefill_req
             .routing
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
-        let prefill_result = if !is_gaie_stage1 {
-            if let Some((worker_id, dp_rank, bootstrap_info)) = self
+
+        let prefill_result = if !is_gaie_stage1
+            && let Some((worker_id, dp_rank, bootstrap_info)) = self
                 .build_bootstrap_info(&prefill_req, preselected_worker)
                 .await
-            {
-                // Prepare request with bootstrap_info and force routing to specific worker
-                let routing = prefill_req.routing_mut();
-                routing.prefill_worker_id = Some(worker_id);
-                routing.dp_rank = Some(dp_rank);
-                // Set bootstrap_info on prefill request - prefill worker uses bootstrap_room from it
-                prefill_req.bootstrap_info = Some(bootstrap_info.clone());
+        {
+            // Bootstrap optimization path: spawn prefill in background
+            let routing = prefill_req.routing_mut();
+            routing.prefill_worker_id = Some(worker_id);
+            routing.dp_rank = Some(dp_rank);
+            prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 
-                // Set phase to Prefill and record prefill start time if tracking is enabled
-                if let Some(ref tracker) = req.tracker {
-                    tracker.set_phase(RequestPhase::Prefill);
-                    tracker.record_prefill_start();
-                }
+            let prefill_context = Context::with_id(prefill_req, request_id.clone());
+            engine_ctx.link_child(prefill_context.context());
 
-                let prefill_context = Context::with_id(prefill_req, request_id.clone());
-                engine_ctx.link_child(prefill_context.context());
+            self.spawn_prefill_task(prefill_context);
 
-                self.spawn_prefill_task(prefill_context);
-
-                Ok((None, Some(worker_id), Some(bootstrap_info)))
-            } else {
-                // Fallback to original: Wait for prefill to complete
-                tracing::debug!("Using original prefill path");
-
-                // Set phase to Prefill and record prefill start time if tracking is enabled
-                if let Some(ref tracker) = req.tracker {
-                    tracker.set_phase(RequestPhase::Prefill);
-                    tracker.record_prefill_start();
-                }
-
-                let prefill_context = Context::with_id(prefill_req, request_id.clone());
-                engine_ctx.link_child(prefill_context.context());
-
-                self.call_prefill(prefill_context)
-                    .await
-                    .map(|(result, worker_id)| (Some(result), worker_id, None))
-            }
+            Ok((None, Some(worker_id), Some(bootstrap_info)))
         } else {
-            // GAIE Stage 1: Use original path (no bootstrap optimization)
-            // But first check if prefill router is activated - if not, skip to avoid setting phase
-            if self.prefill_router.get().is_none() {
-                tracing::debug!("GAIE Stage 1: Prefill router not activated, skipping to decode");
-                Err(PrefillError::NotActivated)
-            } else {
-                tracing::debug!("Using original prefill path (GAIE Stage 1)");
+            // Original prefill path: wait for prefill to complete
+            tracing::debug!(
+                is_gaie_stage1 = is_gaie_stage1,
+                "Using original prefill path"
+            );
 
-                // Set phase to Prefill and record prefill start time if tracking is enabled
-                if let Some(ref tracker) = req.tracker {
-                    tracker.set_phase(RequestPhase::Prefill);
-                    tracker.record_prefill_start();
-                }
+            let prefill_context = Context::with_id(prefill_req, request_id.clone());
+            engine_ctx.link_child(prefill_context.context());
 
-                let prefill_context = Context::with_id(prefill_req, request_id.clone());
-                engine_ctx.link_child(prefill_context.context());
-
-                self.call_prefill(prefill_context)
-                    .await
-                    .map(|(result, worker_id)| (Some(result), worker_id, None))
-            }
+            self.call_prefill(prefill_context)
+                .await
+                .map(|(result, worker_id)| (Some(result), worker_id, None))
         };
 
         // Abort if cancelled during prefill
