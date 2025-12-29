@@ -114,29 +114,6 @@ class MigrationHandler(BaseWorkerHandler):
 
         logging.info(f"Migration initiated for rid: {rid}, room: {bootstrap_room}")
 
-        # #region agent log
-        import json as _json
-
-        open("/home/warnold/proj/dynamo/.cursor/debug.log", "a").write(
-            _json.dumps(
-                {
-                    "location": "migration_handler.py:migrate",
-                    "message": "Migration returning bootstrap_info",
-                    "data": {
-                        "rid": rid,
-                        "bootstrap_host": self.bootstrap_host,
-                        "bootstrap_port": self.bootstrap_port,
-                        "bootstrap_room": bootstrap_room,
-                    },
-                    "timestamp": __import__("time").time() * 1000,
-                    "sessionId": "debug-session",
-                    "hypothesisId": "B,D",
-                }
-            )
-            + "\n"
-        )
-        # #endregion
-
         yield {
             "rid": rid,
             "bootstrap_info": bootstrap_info,

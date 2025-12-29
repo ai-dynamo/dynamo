@@ -105,7 +105,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Use context.id() as the rid for SGLang - this must match the ID used by
         # decode_disagger.rs when calling the migrate endpoint
         request_id = context.id()
-        trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
@@ -130,30 +129,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"port={bootstrap_info['bootstrap_port']}, "
                 f"room={bootstrap_info['bootstrap_room']}"
             )
-
-            # #region agent log
-            import json as _json
-
-            open("/home/warnold/proj/dynamo/.cursor/debug.log", "a").write(
-                _json.dumps(
-                    {
-                        "location": "decode_handler.py:generate",
-                        "message": "Decode received request with bootstrap_info",
-                        "data": {
-                            "request_id": request_id,
-                            "trace_id": trace_id,
-                            "bootstrap_host": bootstrap_info["bootstrap_host"],
-                            "bootstrap_port": bootstrap_info["bootstrap_port"],
-                            "bootstrap_room": bootstrap_info["bootstrap_room"],
-                        },
-                        "timestamp": __import__("time").time() * 1000,
-                        "sessionId": "debug-session",
-                        "hypothesisId": "D",
-                    }
-                )
-                + "\n"
-            )
-            # #endregion
 
             if self.enable_trace:
                 self._propagate_trace_context_to_sglang(
