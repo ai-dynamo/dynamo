@@ -148,8 +148,8 @@ elif [[ "$CUDA_VERSION_MAJOR" == "13" ]]; then
             --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND} \
             https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER}/vllm-${VLLM_VER}+${TORCH_BACKEND}-cp38-abi3-manylinux_2_31_x86_64.whl[flashinfer,runai] \
             --torch-backend=${TORCH_BACKEND}
-        uv pip uninstall cupy-cuda12x # remove cupy-cuda12x installed by vllm - bug in vllm packaging
-        uv pip install cupy-cuda13x
+        # uv pip uninstall cupy-cuda12x # remove cupy-cuda12x installed by vllm - bug in vllm packaging
+        # uv pip install cupy-cuda13x
         uv pip install flashinfer-cubin==$FLASHINF_REF
         uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
     else
@@ -159,11 +159,11 @@ elif [[ "$CUDA_VERSION_MAJOR" == "13" ]]; then
         uv pip install --index-strategy=unsafe-best-match --index https://download.pytorch.org/whl/ \
             -r requirements/cuda.txt \
             -r requirements/build.txt
-        uv pip uninstall cupy-cuda12x # remove cupy-cuda12x installed by vllm dependencies
-        uv pip install cupy-cuda13x
+        # uv pip uninstall cupy-cuda12x # remove cupy-cuda12x installed by vllm dependencies
+        # uv pip install cupy-cuda13x
         MAX_JOBS=${MAX_JOBS} uv pip install -v --no-build-isolation .
-        uv pip uninstall cupy-cuda12x # remove cupy-cuda12x installed by vllm
-        uv pip install cupy-cuda13x # force use of cpuy-cuda13x
+        # uv pip uninstall cupy-cuda12x # remove cupy-cuda12x installed by vllm
+        # uv pip install cupy-cuda13x # force use of cpuy-cuda13x
     fi
 else
     echo "❌ Unsupported CUDA version for vLLM installation: ${CUDA_VERSION}"
