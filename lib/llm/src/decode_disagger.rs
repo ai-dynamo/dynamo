@@ -7,7 +7,7 @@
 //! When a request's sequence length exceeds the current tier's capacity,
 //! it migrates to a higher-capacity tier.
 
-use std::{pin::Pin, sync::Arc};
+use std::{pin::Pin, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -40,7 +40,7 @@ use crate::{
 type SharedTiers = RwLock<Vec<Arc<Tier>>>;
 
 fn find_tier(tiers: &Arc<SharedTiers>, seqlen: u32) -> Option<Arc<Tier>> {
-    tiers.read().iter().find(|t| t.seqlen == seqlen).cloned()
+    tiers.read().iter().find(|t| t.seqlen > seqlen).cloned()
 }
 
 /// A tier represents a set of workers with a specific sequence length capacity.
@@ -333,27 +333,27 @@ struct MigrationContext {
     current_stream: Pin<Box<dyn AsyncEngineStream<Annotated<LLMEngineOutput>>>>,
     current_instance_id: u64,
     current_tier: Arc<Tier>,
+    /// Tracks when a migration started and from which seqlen (cleared after first token)
+    migration_started_at: Option<(Instant, u32)>,
 }
 
 impl MigrationContext {
     pub async fn new(
-        tiers: &Arc<SharedTiers>,
+        current_tier: Arc<Tier>,
         request: PreprocessedRequest,
         parent_ctx: Arc<dyn AsyncEngineContext>,
-    ) -> Result<Option<Self>> {
-        let Some(current_tier) = find_tier(tiers, request.token_ids.len() as u32) else {
-            return Ok(None);
-        };
+    ) -> Result<Self> {
         let inner_ctx = Context::with_id(request.clone(), parent_ctx.id().to_string());
         parent_ctx.link_child(inner_ctx.context());
         let routed_out = current_tier.router.generate_routed(inner_ctx).await?;
         let (current_stream, current_instance_id) = routed_out.take();
-        Ok(Some(Self {
+        Ok(Self {
             previous_stream: None,
             current_stream,
             current_instance_id,
             current_tier,
-        }))
+            migration_started_at: None,
+        })
     }
 
     pub async fn send_migration(
@@ -408,24 +408,45 @@ impl MigrationContext {
         // If we've reached the end of the current tier, migrate to the next tier
         if running_request.token_ids.len() >= self.current_tier.seqlen as usize {
             // We've reached the end of the current tier, so migrate to the next tier
+            tracing::info!(
+                request_token_count = running_request.token_ids.len(),
+                current_tier_seqlen = self.current_tier.seqlen,
+                "Reached the end of the current tier, migrating to the next tier",
+            );
             let Some(new_tier) = find_tier(tiers, (running_request.token_ids.len() + 1) as u32)
             else {
                 return Err(anyhow::anyhow!("No next tier available for migration"));
             };
 
+            // Start timing the migration
+            let migration_start = Instant::now();
+            let from_seqlen = self.current_tier.seqlen;
+
             let bootstrap_info = self.send_migration(&request_id, parent_ctx).await;
             let mut new_context = Context::with_id(running_request.clone(), request_id.to_string());
             if let Some(info) = bootstrap_info {
+                tracing::info!(
+                    bootstrap_info = ?info.clone(),
+                    "Migration successful, received bootstrap info",
+                );
                 new_context.bootstrap_info = Some(info);
+            } else {
+                tracing::warn!("no bootstrap info received");
             }
             parent_ctx.link_child(new_context.context());
             let routed_out = new_tier.router.generate_routed(new_context).await?;
             let (new_stream, new_instance_id) = routed_out.take();
+            tracing::info!(
+                new_instance_id = new_instance_id,
+                new_tier_seqlen = new_tier.seqlen,
+                "Created new stream for next tier",
+            );
             return Ok(MigrationContext {
                 previous_stream: Some(self.current_stream),
                 current_stream: new_stream,
                 current_instance_id: new_instance_id,
                 current_tier: new_tier,
+                migration_started_at: Some((migration_start, from_seqlen)),
             });
         }
         Ok(self)
@@ -438,6 +459,17 @@ impl MigrationContext {
         let Some(chunk) = self.current_stream.next().await else {
             return None;
         };
+
+        // Log migration duration if we just migrated
+        if let Some((migration_start, from_seqlen)) = self.migration_started_at.take() {
+            let duration = migration_start.elapsed();
+            tracing::info!(
+                duration_ms = duration.as_millis(),
+                from_seqlen = from_seqlen,
+                to_seqlen = self.current_tier.seqlen,
+                "Migration completed, received first token from new tier"
+            );
+        }
 
         if let Some(ref data) = chunk.data {
             // Keep track of the request + tokens we've received so far
@@ -474,23 +506,27 @@ impl
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        let Some(tier) = find_tier(&self.tiers, request.token_ids.len() as u32) else {
+            let tier_seqlens: Vec<u32> = self.tiers.read().iter().map(|t| t.seqlen).collect();
+            tracing::warn!(
+                request_token_count = request.token_ids.len(),
+                available_tiers = ?tier_seqlens,
+                "No tier found for request, routing to next tier"
+            );
+            return next.generate(request).await;
+        };
+
+        tracing::info!(
+            request_token_count = request.token_ids.len(),
+            tier_seqlen = tier.seqlen,
+            "Routing request to tier"
+        );
+
         let (mut running_request, context) = request.transfer(());
         let parent_engine_ctx = context.context();
-        let Some(mut migration_context) = MigrationContext::new(
-            &self.tiers,
-            running_request.clone(),
-            parent_engine_ctx.clone(),
-        )
-        .await?
-        else {
-            tracing::warn!(
-                tiers = self.tiers.read().len(),
-                "No tiers for migration, forwarding to next",
-            );
-            return next
-                .generate(Context::rejoin(running_request, context))
-                .await;
-        };
+        let mut migration_context =
+            MigrationContext::new(tier, running_request.clone(), parent_engine_ctx.clone()).await?;
+
         let request_id = context.id().to_string();
         let tiers = self.tiers.clone();
         let migrating_stream = async_stream::stream! {
@@ -502,7 +538,7 @@ impl
                 match migration_context.tick(&tiers, &request_id, &running_request, &parent_engine_ctx).await {
                     Ok(ctx) => {
                         migration_context = ctx;
-                    },
+                    }
                     Err(e)=> {
                         yield Annotated::from_error(e.to_string());
                         break;
