@@ -45,7 +45,11 @@ pub struct NvCreateChatCompletionRequest {
 
     /// Extra args to pass to the chat template rendering context
     /// Also accepts "chat_template_kwargs" as an alias for compatibility
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "chat_template_kwargs")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "chat_template_kwargs"
+    )]
     pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
 
     /// Runtime media decoding parameters.
