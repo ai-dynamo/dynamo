@@ -25,7 +25,9 @@ fn register_initialize_handler(nova: &Arc<Nova>, state: &Arc<WorkerState>) {
         let state = Arc::clone(&state);
         async move {
             let config: LeaderLayoutConfig = ctx.input;
-            state.initialize(config)
+            state
+                .initialize(config)
+                .inspect_err(|e| tracing::error!("Error initializing worker: {}", e))
         }
     })
     .build();

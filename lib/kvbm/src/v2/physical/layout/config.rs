@@ -92,7 +92,7 @@ pub fn validate_power_of_2(alignment: usize) -> Result<(), ValidationError> {
 }
 
 pub fn validate_dtype_width_bytes(dtype_width_bytes: usize) -> Result<(), ValidationError> {
-    if !dtype_width_bytes.is_power_of_two() || !(2..=8).contains(&dtype_width_bytes) {
+    if !dtype_width_bytes.is_power_of_two() || !(1..=8).contains(&dtype_width_bytes) {
         return Err(validator::ValidationError::new(
             "dtype_width_bytes_must_be_power_of_two_and_less_than_8_bytes",
         ));
