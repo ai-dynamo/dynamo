@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use dashmap::DashMap;
 use derive_builder::Builder;
 use dynamo_runtime::{
     component::{Client, Endpoint},
@@ -284,6 +285,7 @@ impl KvRouter {
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
+        workers_with_configs: Arc<DashMap<protocols::WorkerId, Option<ModelRuntimeConfig>>>,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
@@ -296,6 +298,7 @@ impl KvRouter {
         let instance_ids_rx = client.instance_avail_watcher();
 
         // Watch for runtime config updates via discovery interface
+        // (still needed for WorkerQueryClient and background tasks)
         let discovery = component.drt().discovery();
         let endpoint_id = endpoint.id();
         let discovery_key = DiscoveryQuery::EndpointModels {
@@ -341,7 +344,7 @@ impl KvRouter {
             component.clone(),
             block_size,
             instance_ids_rx,
-            runtime_configs_rx.clone(),
+            workers_with_configs,
             selector,
             kv_router_config.router_replica_sync,
             consumer_id.clone(),
@@ -571,15 +574,6 @@ impl KvRouter {
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
         Ok(overlap_scores.scores.get(&worker).copied().unwrap_or(0))
-    }
-
-    /// Get the disaggregated endpoint for a worker, if available.
-    /// Used to look up bootstrap host/port for prefill workers.
-    pub async fn get_disaggregated_endpoint(
-        &self,
-        worker_id: u64,
-    ) -> Option<crate::local_model::runtime_config::DisaggregatedEndpoint> {
-        self.scheduler.get_disaggregated_endpoint(worker_id).await
     }
 
     /// Get potential prefill and decode loads for all workers

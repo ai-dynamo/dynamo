@@ -15,7 +15,7 @@ use dynamo_runtime::{
         AsyncEngine, AsyncEngineContextProvider, Context, ManyOut, Operator, PushRouter,
         RouterMode, ServerStreamingEngine, SingleIn, async_trait,
     },
-    protocols::{annotated::Annotated, maybe_error::MaybeError},
+    protocols::{EndpointId, annotated::Annotated, maybe_error::MaybeError},
 };
 
 use crate::{
@@ -54,14 +54,29 @@ enum InnerPrefillRouter {
 }
 
 impl InnerPrefillRouter {
-    /// Execute prefill generation through the underlying router
-    async fn generate(
+    /// Generate with optional direct routing to specific worker.
+    /// For KvRouter, target_worker is ignored since prefill_worker_id is already set on the request.
+    /// For SimpleRouter, target_worker triggers direct routing via router.direct().
+    async fn generate_to_worker(
         &self,
         request: SingleIn<PreprocessedRequest>,
+        target_worker: Option<u64>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        match (self, target_worker) {
+            // KvRouter: prefill_worker_id already set on request, KvPushRouter::select_worker uses it
+            (InnerPrefillRouter::KvRouter(router), _) => router.generate(request).await,
+            (InnerPrefillRouter::SimpleRouter(router), Some(worker_id)) => {
+                router.direct(request, worker_id).await
+            }
+            (InnerPrefillRouter::SimpleRouter(router), None) => router.generate(request).await,
+        }
+    }
+
+    /// Select next worker (for non-KV modes only)
+    fn select_next_worker(&self) -> Option<u64> {
         match self {
-            InnerPrefillRouter::KvRouter(router) => router.generate(request).await,
-            InnerPrefillRouter::SimpleRouter(router) => router.generate(request).await,
+            InnerPrefillRouter::SimpleRouter(router) => router.select_next_worker(),
+            InnerPrefillRouter::KvRouter(_) => None,
         }
     }
 }
@@ -76,6 +91,8 @@ impl InnerPrefillRouter {
 /// - Non-GAIE: like GAIE Stage 2 but the worker ids have to be determined.
 pub struct PrefillRouter {
     prefill_router: OnceLock<InnerPrefillRouter>,
+    model_manager: Arc<ModelManager>,
+    endpoint_id: OnceLock<EndpointId>,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     enforce_disagg: bool,
@@ -83,9 +100,15 @@ pub struct PrefillRouter {
 
 impl PrefillRouter {
     /// Create a disabled prefill router that will never activate (passthrough only)
-    pub fn disabled(router_mode: RouterMode, enforce_disagg: bool) -> Arc<Self> {
+    pub fn disabled(
+        model_manager: Arc<ModelManager>,
+        router_mode: RouterMode,
+        enforce_disagg: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: OnceLock::new(),
+            model_manager,
+            endpoint_id: OnceLock::new(),
             cancel_token: CancellationToken::new(),
             router_mode,
             enforce_disagg,
@@ -105,6 +128,8 @@ impl PrefillRouter {
 
         let router = Arc::new(Self {
             prefill_router,
+            model_manager: model_manager.clone(),
+            endpoint_id: OnceLock::new(),
             cancel_token: cancel_token.clone(),
             router_mode,
             enforce_disagg,
@@ -150,6 +175,9 @@ impl PrefillRouter {
             router_mode = ?self.router_mode,
             "Activating prefill router"
         );
+
+        // Store endpoint_id for later use in build_bootstrap_info
+        let _ = self.endpoint_id.set(endpoint.id());
 
         let inner_router = if self.router_mode.is_kv_routing() {
             // Create KV chooser using the endpoint
@@ -205,22 +233,18 @@ impl PrefillRouter {
 
     /// Build bootstrap_info for disaggregated serving
     /// If preselected_worker is provided (GAIE Stage 2), use it directly.
-    /// Otherwise, query for the best worker.
+    /// Otherwise, query for the best worker (KV mode) or select next worker (non-KV modes).
     async fn build_bootstrap_info(
         &self,
         req: &PreprocessedRequest,
         preselected_worker: Option<u64>,
     ) -> Option<(u64, u32, BootstrapInfo)> {
+        let endpoint_id = self.endpoint_id.get()?;
         let prefill_router = self.prefill_router.get()?;
 
-        // Only works with KvRouter
-        let kv_router = match prefill_router {
-            InnerPrefillRouter::KvRouter(r) => r,
-            InnerPrefillRouter::SimpleRouter(_) => return None,
-        };
-
-        // Use pre-selected worker (GAIE Stage 2) or query for best worker
+        // Worker selection
         let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
+            // GAIE Stage 2: use pre-selected worker
             let dp_rank = req.routing.as_ref().and_then(|r| r.dp_rank).unwrap_or(0);
             tracing::debug!(
                 worker_id = id,
@@ -228,8 +252,12 @@ impl PrefillRouter {
                 "Using pre-selected prefill worker for bootstrap"
             );
             (id, dp_rank)
-        } else {
-            // TODO: do not call this if no bootstrap info is needed
+        } else if self.router_mode.is_kv_routing() {
+            // KV mode: use find_best_match
+            let kv_router = match prefill_router {
+                InnerPrefillRouter::KvRouter(r) => r,
+                _ => return None,
+            };
             match kv_router
                 .chooser
                 .find_best_match(None, &req.token_ids, None, false)
@@ -238,13 +266,16 @@ impl PrefillRouter {
                 Ok((worker, _overlap)) => (worker.worker_id, worker.dp_rank),
                 Err(_) => return None,
             }
+        } else {
+            // Non-KV mode: use PushRouter's stateful selection
+            let worker_id = prefill_router.select_next_worker()?;
+            (worker_id, 0)
         };
 
-        // Look up bootstrap endpoint from discovery
-        let endpoint = kv_router
-            .chooser
-            .get_disaggregated_endpoint(worker_id)
-            .await?;
+        // Get bootstrap info from ModelManager (works for ANY mode)
+        let endpoint = self
+            .model_manager
+            .get_disaggregated_endpoint(endpoint_id, worker_id)?;
         let host = endpoint.bootstrap_host?;
         let port = endpoint.bootstrap_port?;
 
@@ -256,6 +287,7 @@ impl PrefillRouter {
             bootstrap_host = %host,
             bootstrap_port = port,
             bootstrap_room = bootstrap_room,
+            router_mode = ?self.router_mode,
             "Built bootstrap_info upfront before prefill"
         );
 
@@ -271,13 +303,15 @@ impl PrefillRouter {
     }
 
     /// Execute prefill with the given router and extract structured result
+    /// Uses direct routing to target_worker when specified (for non-KV modes with bootstrap optimization)
     async fn execute_prefill(
         router: Option<InnerPrefillRouter>,
         request: SingleIn<PreprocessedRequest>,
+        target_worker: Option<u64>,
     ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
         let router = router.ok_or(PrefillError::NotActivated)?;
         let mut prefill_response = router
-            .generate(request)
+            .generate_to_worker(request, target_worker)
             .await
             .map_err(|e| PrefillError::PrefillError(e.to_string()))?;
 
@@ -340,11 +374,16 @@ impl PrefillRouter {
     }
 
     /// Spawn prefill as a background task
-    fn spawn_prefill_task(&self, prefill_request: SingleIn<PreprocessedRequest>) {
+    /// Uses direct routing to target_worker when specified (for non-KV modes with bootstrap optimization)
+    fn spawn_prefill_task(
+        &self,
+        prefill_request: SingleIn<PreprocessedRequest>,
+        target_worker: Option<u64>,
+    ) {
         let router = self.prefill_router.get().cloned();
 
         tokio::spawn(async move {
-            match Self::execute_prefill(router, prefill_request).await {
+            match Self::execute_prefill(router, prefill_request, target_worker).await {
                 Ok(_) => {
                     tracing::debug!("Prefill background task completed");
                 }
@@ -360,7 +399,8 @@ impl PrefillRouter {
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
-        Self::execute_prefill(self.prefill_router.get().cloned(), request).await
+        // For call_prefill path, routing is handled by the router itself (no direct routing needed)
+        Self::execute_prefill(self.prefill_router.get().cloned(), request, None).await
     }
 }
 
@@ -500,7 +540,7 @@ impl
             let prefill_context = Context::with_id(prefill_req, request_id.clone());
             engine_ctx.link_child(prefill_context.context());
 
-            self.spawn_prefill_task(prefill_context);
+            self.spawn_prefill_task(prefill_context, Some(worker_id));
 
             Ok((None, Some(worker_id), Some(bootstrap_info)))
         } else {

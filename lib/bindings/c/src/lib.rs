@@ -1475,6 +1475,7 @@ pub async fn create_worker_selection_pipeline_chat(
     >(
         &card_with_local_files,
         &client,
+        model_manager.clone(),
         router_mode,
         worker_monitor,
         chooser,

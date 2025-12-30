@@ -449,6 +449,7 @@ impl ModelWatcher {
                     >(
                         card,
                         &client,
+                        self.manager.clone(),
                         self.router_config.router_mode,
                         worker_monitor.clone(),
                         kv_chooser.clone(),
@@ -482,6 +483,7 @@ impl ModelWatcher {
                 >(
                     card,
                     &client,
+                    self.manager.clone(),
                     self.router_config.router_mode,
                     worker_monitor,
                     kv_chooser,
