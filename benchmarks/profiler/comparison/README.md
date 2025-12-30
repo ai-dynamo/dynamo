@@ -32,6 +32,7 @@ export NAMESPACE=hannahz
 ### AIC-Search ALL (~30 seconds)
 
 ```bash
+kubectl delete dgdr qwen3-32b-aic -n hannahz
 kubectl apply -n $NAMESPACE -f benchmarks/profiler/comparison/configs/aic_profiling_dgdr.yaml
 
 # Watch progress
@@ -41,6 +42,7 @@ kubectl logs -f job/profile-qwen3-32b-aic -n $NAMESPACE
 ### Profile-ALL Online (~30-60 min)
 
 ```bash
+kubectl delete dgdr qwen3-32b-online -n hannahz
 kubectl apply -n $NAMESPACE -f benchmarks/profiler/comparison/configs/online_profiling_dgdr.yaml
 
 # Watch progress
@@ -53,16 +55,16 @@ kubectl logs -f job/profile-qwen3-32b-online -n $NAMESPACE
 
 ```bash
 # List profiling ConfigMaps
-kubectl get configmaps -n $NAMESPACE | grep profiling
+kubectl get configmaps -n $NAMESPACE | grep dgdr-output
 
 # Save AIC results
 mkdir -p benchmarks/profiler/comparison/results/aic_all
-kubectl get configmap qwen3-32b-aic-profiling-results -n $NAMESPACE -o jsonpath='{.data}' \
+kubectl get configmap dgdr-output-qwen3-32b-aic -n $NAMESPACE -o jsonpath='{.data}' \
   > benchmarks/profiler/comparison/results/aic_all/configmap_data.json
 
 # Save Online results
 mkdir -p benchmarks/profiler/comparison/results/online_all
-kubectl get configmap qwen3-32b-online-profiling-results -n $NAMESPACE -o jsonpath='{.data}' \
+kubectl get configmap dgdr-output-qwen3-32b-online -n $NAMESPACE -o jsonpath='{.data}' \
   > benchmarks/profiler/comparison/results/online_all/configmap_data.json
 
 # Also save the logs
