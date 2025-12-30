@@ -519,7 +519,7 @@ class ManagedDeployment:
     # the service containing component_type: Frontend determines what is actually the frontend service
     frontend_service_name: str = "Frontend"
     skip_service_restart: bool = False
-    
+
     # Hardware fault injection support
     enable_hw_faults: bool = False
     hw_fault_config: Optional[Dict[str, Any]] = None
@@ -627,7 +627,7 @@ class ManagedDeployment:
     ):
         start_time = time.time()
 
-self._logger.info(f"Waiting for DGD {self._deployment_name} to be ready...")
+        self._logger.info(f"Waiting for DGD {self._deployment_name} to be ready...")
 
         attempt = 0
         expected_pods = self._get_expected_pod_count()
@@ -661,11 +661,13 @@ self._logger.info(f"Waiting for DGD {self._deployment_name} to be ready...")
 
                 observed_state_val = status_obj.get("state")  # type: ignore[attr-defined]
 
-# Also check if all pods are actually running (fallback for slow DGD updates)
+                # Also check if all pods are actually running (fallback for slow DGD updates)
                 ready_pods, total_pods = await self._count_ready_pods()
                 pods_ready = ready_pods >= expected_pods and ready_pods == total_pods
 
-                ready_condition = observed_ready_condition_val == str(desired_ready_condition_val)
+                ready_condition = observed_ready_condition_val == str(
+                    desired_ready_condition_val
+                )
                 state_successful = observed_state_val == desired_state_val
 
                 if ready_condition and state_successful:
@@ -682,7 +684,7 @@ self._logger.info(f"Waiting for DGD {self._deployment_name} to be ready...")
                     return True
                 else:
                     if attempt % log_interval == 0:
-self._logger.info(
+                        self._logger.info(
                             f"  [{time.time() - start_time:.0f}s] Pods: {ready_pods}/{expected_pods}, State: {current_state}"
                         )
 
@@ -1290,10 +1292,10 @@ self._logger.info(
     async def cleanup_cuda_spec_without_restart(self) -> bool:
         """
         Clean up CUDA fault injection from deployment spec WITHOUT restarting pods.
-        
+
         Used when relying on NVSentinel's node-drainer to evict pods.
         The spec is cleaned so new pods (after eviction) will be clean.
-        
+
         Returns:
             True if successful
         """
@@ -1351,7 +1353,7 @@ self._logger.info(
         start_time = time.time()
         last_log_time = 0  # Track when we last logged
         log_interval = 30  # Log every 30 seconds
-        
+
         while (time.time() - start_time) < timeout:
             try:
                 assert self._core_api is not None
@@ -1424,7 +1426,9 @@ self._logger.info(
                 all_pod_nodes = []
                 for pod in pods.items:
                     # Try both attribute styles
-                    node = getattr(pod.spec, 'node_name', None) or getattr(pod.spec, 'nodeName', None)
+                    node = getattr(pod.spec, "node_name", None) or getattr(
+                        pod.spec, "nodeName", None
+                    )
                     all_pod_nodes.append(f"{pod.metadata.name}={node}")
                     if node == exclude_node:
                         pods_on_excluded.append(pod.metadata.name)

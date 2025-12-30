@@ -236,9 +236,13 @@ class CUDAFaultInjector:
         if service_names is None:
             # Support vLLM, SGLang, and TensorRT-LLM service names
             service_names = [
-                "VllmDecodeWorker", "VllmPrefillWorker",  # vLLM
-                "decode", "prefill",  # SGLang
-                "TRTLLMDecodeWorker", "TRTLLMPrefillWorker", "TRTLLMWorker",  # TensorRT-LLM
+                "VllmDecodeWorker",
+                "VllmPrefillWorker",  # vLLM
+                "decode",
+                "prefill",  # SGLang
+                "TRTLLMDecodeWorker",
+                "TRTLLMPrefillWorker",
+                "TRTLLMWorker",  # TensorRT-LLM
             ]
         print("\n[→] Cleaning up CUDA fault injection...")
 
@@ -394,7 +398,11 @@ class CUDAFaultInjector:
             return False
 
     def enable_cuda_faults_via_toggle(
-        self, pods: List[client.V1Pod], namespace: str, enable: bool = True
+        self,
+        pods: List[client.V1Pod],
+        namespace: str,
+        enable: bool = True,
+        target_node: Optional[str] = None,
     ) -> bool:
         """
         Enable or disable CUDA faults on running pods via environment variable toggle.
@@ -405,10 +413,14 @@ class CUDAFaultInjector:
         Only worker pods (with componentType=worker label) are toggled - frontend pods
         don't have the CUDA library mounted.
 
+        With soft node affinity, only pods on the target_node have the hostPath
+        volume mounted. Pods on other nodes will be skipped.
+
         Args:
             pods: List of pods to toggle faults on
             namespace: Kubernetes namespace
             enable: True to enable faults, False to disable
+            target_node: If specified, only toggle pods on this node (required for soft affinity)
 
         Returns:
             True if toggle succeeded
@@ -417,12 +429,14 @@ class CUDAFaultInjector:
             return False
 
         # Filter to only worker pods that are Running (frontend doesn't have CUDA library)
+        # With soft affinity, also filter to only pods on target_node
         worker_pods = []
         skipped_pods = []
         for pod in pods:
             labels = pod.metadata.labels or {}
             component_type = labels.get("nvidia.com/dynamo-component-type", "")
             pod_phase = pod.status.phase if pod.status else "Unknown"
+            pod_node = pod.spec.node_name if pod.spec else None
 
             if component_type != "worker":
                 skipped_pods.append(
@@ -433,6 +447,13 @@ class CUDAFaultInjector:
             if pod_phase != "Running":
                 skipped_pods.append(
                     (pod.metadata.name, f"not running (phase={pod_phase})")
+                )
+                continue
+
+            # With soft affinity, only toggle pods on target node (they have hostPath mounted)
+            if target_node and pod_node != target_node:
+                skipped_pods.append(
+                    (pod.metadata.name, f"not on target node (node={pod_node})")
                 )
                 continue
 
@@ -450,8 +471,9 @@ class CUDAFaultInjector:
         toggle_value = "1" if enable else "0"
         action = "Enabling" if enable else "Disabling"
 
+        target_info = f" on node {target_node}" if target_node else ""
         print(
-            f"\n[→] {action} CUDA faults via toggle on {len(worker_pods)} running worker pods..."
+            f"\n[→] {action} CUDA faults via toggle on {len(worker_pods)} worker pods{target_info}..."
         )
 
         success_count = 0
@@ -469,12 +491,28 @@ class CUDAFaultInjector:
                     failed_pods.append((pod_name, "No container found"))
                     continue
 
+                # Verify pod has the node-fault-marker volume mount
+                volumes = pod.spec.volumes or []
+                volume_names = [v.name for v in volumes if hasattr(v, "name")]
+                has_fault_volume = "node-fault-marker" in volume_names
+
+                if not has_fault_volume:
+                    failed_pods.append(
+                        (
+                            pod_name,
+                            f"Missing node-fault-marker volume (has: {volume_names})",
+                        )
+                    )
+                    continue
+
                 # Write toggle file to hostPath (persists across pod restarts on same node)
                 # This simulates persistent hardware failure!
+                # Note: /host-fault is a volume mount - if it doesn't exist, the volume isn't mounted
                 exec_command = [
                     "sh",
                     "-c",
-                    f'mkdir -p /host-fault && echo "{toggle_value}" > /host-fault/cuda_fault_enabled && cat /host-fault/cuda_fault_enabled',
+                    f'if [ ! -d /host-fault ]; then echo "ERROR: /host-fault not mounted"; exit 1; fi; '
+                    f'echo "{toggle_value}" > /host-fault/cuda_fault_enabled && cat /host-fault/cuda_fault_enabled',
                 ]
 
                 result = subprocess.run(
@@ -509,9 +547,13 @@ class CUDAFaultInjector:
                             )
                         )
                 else:
-                    failed_pods.append(
-                        (pod_name, f"Exec failed: {result.stderr.strip()}")
+                    # Show both stdout and stderr for better debugging
+                    error_info = (
+                        result.stderr.strip()
+                        or result.stdout.strip()
+                        or f"exit code {result.returncode}"
                     )
+                    failed_pods.append((pod_name, f"Exec failed: {error_info}"))
 
             except Exception as e:
                 failed_pods.append((pod_name, str(e)))
@@ -648,9 +690,13 @@ class CUDAFaultInjector:
 
                 # Check worker services (supports vLLM, SGLang, TensorRT-LLM)
                 worker_services = [
-                    "VllmDecodeWorker", "VllmPrefillWorker",  # vLLM
-                    "decode", "prefill",  # SGLang
-                    "TRTLLMDecodeWorker", "TRTLLMPrefillWorker", "TRTLLMWorker",  # TensorRT-LLM
+                    "VllmDecodeWorker",
+                    "VllmPrefillWorker",  # vLLM
+                    "decode",
+                    "prefill",  # SGLang
+                    "TRTLLMDecodeWorker",
+                    "TRTLLMPrefillWorker",
+                    "TRTLLMWorker",  # TensorRT-LLM
                 ]
                 for service_name in worker_services:
                     if service_name in dgd["spec"]["services"]:

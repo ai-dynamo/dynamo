@@ -1,0 +1,715 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    cluster-autoscaler.kubernetes.io/safe-to-evict-local-volumes: datadog
+    pod-group-name: pg-hw-fault-test-0-vllmprefillworker-125f0b4f-cddc-4509-b76c-9e154a97cb19
+    received-resource-type: Regular
+  creationTimestamp: '2025-12-30T22:07:55Z'
+  generateName: hw-fault-test-0-vllmprefillworker-
+  labels:
+    app.kubernetes.io/component: pcs-podclique
+    app.kubernetes.io/managed-by: grove-operator
+    app.kubernetes.io/name: hw-fault-test-0-vllmprefillworker
+    app.kubernetes.io/part-of: hw-fault-test
+    grove.io/pod-template-hash: bb7b9cdf6dcf9bc9d69
+    grove.io/podclique: hw-fault-test-0-vllmprefillworker
+    grove.io/podcliqueset-replica-index: '0'
+    grove.io/podgang: hw-fault-test-0
+    kai.scheduler/queue: dynamo
+    nvidia.com/dynamo-component-type: worker
+    nvidia.com/dynamo-graph-deployment-name: hw-fault-test
+    nvidia.com/metrics-enabled: 'true'
+    nvidia.com/selector: hw-fault-test-vllmprefillworker
+  managedFields:
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:metadata:
+        f:generateName: {}
+        f:labels:
+          .: {}
+          f:app.kubernetes.io/component: {}
+          f:app.kubernetes.io/managed-by: {}
+          f:app.kubernetes.io/name: {}
+          f:app.kubernetes.io/part-of: {}
+          f:grove.io/pod-template-hash: {}
+          f:grove.io/podclique: {}
+          f:grove.io/podcliqueset-replica-index: {}
+          f:grove.io/podgang: {}
+          f:kai.scheduler/queue: {}
+          f:nvidia.com/dynamo-component-type: {}
+          f:nvidia.com/dynamo-graph-deployment-name: {}
+          f:nvidia.com/metrics-enabled: {}
+          f:nvidia.com/selector: {}
+        f:ownerReferences:
+          .: {}
+          k:{"uid":"125f0b4f-cddc-4509-b76c-9e154a97cb19"}: {}
+      f:spec:
+        f:affinity:
+          .: {}
+          f:nodeAffinity:
+            .: {}
+            f:preferredDuringSchedulingIgnoredDuringExecution: {}
+        f:containers:
+          k:{"name":"main"}:
+            .: {}
+            f:args: {}
+            f:command: {}
+            f:env:
+              .: {}
+              k:{"name":"CUDA_FAULT_INJECTION_ENABLED"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"CUDA_XID_TYPE"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_NAMESPACE"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_PARENT_DGD_K8S_NAME"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_PARENT_DGD_K8S_NAMESPACE"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_SYSTEM_ENABLED"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_SYSTEM_PORT"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"ETCD_ENDPOINTS"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"GROVE_HEADLESS_SERVICE"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"GROVE_PCLQ_NAME"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"GROVE_PCLQ_POD_INDEX"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"GROVE_PCS_INDEX"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"GROVE_PCS_NAME"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"LD_PRELOAD"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"NATS_SERVER"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+            f:envFrom: {}
+            f:image: {}
+            f:imagePullPolicy: {}
+            f:livenessProbe:
+              .: {}
+              f:failureThreshold: {}
+              f:httpGet:
+                .: {}
+                f:path: {}
+                f:port: {}
+                f:scheme: {}
+              f:periodSeconds: {}
+              f:successThreshold: {}
+              f:timeoutSeconds: {}
+            f:name: {}
+            f:ports:
+              .: {}
+              k:{"containerPort":9090,"protocol":"TCP"}:
+                .: {}
+                f:containerPort: {}
+                f:name: {}
+                f:protocol: {}
+            f:readinessProbe:
+              .: {}
+              f:failureThreshold: {}
+              f:httpGet:
+                .: {}
+                f:path: {}
+                f:port: {}
+                f:scheme: {}
+              f:periodSeconds: {}
+              f:successThreshold: {}
+              f:timeoutSeconds: {}
+            f:resources:
+              .: {}
+              f:limits:
+                .: {}
+                f:nvidia.com/gpu: {}
+              f:requests:
+                .: {}
+                f:nvidia.com/gpu: {}
+            f:startupProbe:
+              .: {}
+              f:failureThreshold: {}
+              f:httpGet:
+                .: {}
+                f:path: {}
+                f:port: {}
+                f:scheme: {}
+              f:periodSeconds: {}
+              f:successThreshold: {}
+              f:timeoutSeconds: {}
+            f:terminationMessagePath: {}
+            f:terminationMessagePolicy: {}
+            f:volumeMounts:
+              .: {}
+              k:{"mountPath":"/cuda-fault"}:
+                .: {}
+                f:mountPath: {}
+                f:name: {}
+                f:readOnly: {}
+              k:{"mountPath":"/dev/shm"}:
+                .: {}
+                f:mountPath: {}
+                f:name: {}
+              k:{"mountPath":"/host-fault"}:
+                .: {}
+                f:mountPath: {}
+                f:name: {}
+            f:workingDir: {}
+        f:dnsPolicy: {}
+        f:enableServiceLinks: {}
+        f:hostname: {}
+        f:imagePullSecrets:
+          .: {}
+          k:{"name":"acr-secret"}: {}
+        f:initContainers:
+          .: {}
+          k:{"name":"compile-cuda-fault-lib"}:
+            .: {}
+            f:args: {}
+            f:command: {}
+            f:env:
+              .: {}
+              k:{"name":"GROVE_HEADLESS_SERVICE"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"GROVE_PCLQ_NAME"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"GROVE_PCLQ_POD_INDEX"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"GROVE_PCS_INDEX"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"GROVE_PCS_NAME"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+            f:image: {}
+            f:imagePullPolicy: {}
+            f:name: {}
+            f:resources: {}
+            f:terminationMessagePath: {}
+            f:terminationMessagePolicy: {}
+            f:volumeMounts:
+              .: {}
+              k:{"mountPath":"/dest"}:
+                .: {}
+                f:mountPath: {}
+                f:name: {}
+              k:{"mountPath":"/host-fault"}:
+                .: {}
+                f:mountPath: {}
+                f:name: {}
+              k:{"mountPath":"/source"}:
+                .: {}
+                f:mountPath: {}
+                f:name: {}
+                f:readOnly: {}
+        f:restartPolicy: {}
+        f:schedulerName: {}
+        f:securityContext: {}
+        f:subdomain: {}
+        f:terminationGracePeriodSeconds: {}
+        f:volumes:
+          .: {}
+          k:{"name":"cuda-fault-lib"}:
+            .: {}
+            f:emptyDir: {}
+            f:name: {}
+          k:{"name":"cuda-fault-lib-source"}:
+            .: {}
+            f:configMap:
+              .: {}
+              f:defaultMode: {}
+              f:name: {}
+            f:name: {}
+          k:{"name":"node-fault-marker"}:
+            .: {}
+            f:hostPath:
+              .: {}
+              f:path: {}
+              f:type: {}
+            f:name: {}
+          k:{"name":"shared-memory"}:
+            .: {}
+            f:emptyDir:
+              .: {}
+              f:medium: {}
+              f:sizeLimit: {}
+            f:name: {}
+    manager: grove-operator
+    operation: Update
+    time: '2025-12-30T22:07:55Z'
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:metadata:
+        f:annotations:
+          f:pod-group-name: {}
+          f:received-resource-type: {}
+    manager: app
+    operation: Update
+    time: '2025-12-30T22:07:56Z'
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:status:
+        f:conditions:
+          k:{"type":"PodBound"}:
+            .: {}
+            f:lastProbeTime: {}
+            f:lastTransitionTime: {}
+            f:message: {}
+            f:reason: {}
+            f:status: {}
+            f:type: {}
+    manager: app
+    operation: Update
+    subresource: status
+    time: '2025-12-30T22:07:56Z'
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:status:
+        f:conditions:
+          k:{"type":"ContainersReady"}:
+            .: {}
+            f:lastProbeTime: {}
+            f:lastTransitionTime: {}
+            f:status: {}
+            f:type: {}
+          k:{"type":"Initialized"}:
+            .: {}
+            f:lastProbeTime: {}
+            f:lastTransitionTime: {}
+            f:status: {}
+            f:type: {}
+          k:{"type":"PodReadyToStartContainers"}:
+            .: {}
+            f:lastProbeTime: {}
+            f:lastTransitionTime: {}
+            f:status: {}
+            f:type: {}
+          k:{"type":"Ready"}:
+            .: {}
+            f:lastProbeTime: {}
+            f:lastTransitionTime: {}
+            f:status: {}
+            f:type: {}
+        f:containerStatuses: {}
+        f:hostIP: {}
+        f:hostIPs: {}
+        f:initContainerStatuses: {}
+        f:phase: {}
+        f:podIP: {}
+        f:podIPs:
+          .: {}
+          k:{"ip":"10.244.9.234"}:
+            .: {}
+            f:ip: {}
+        f:startTime: {}
+    manager: kubelet
+    operation: Update
+    subresource: status
+    time: '2025-12-30T22:12:13Z'
+  name: hw-fault-test-0-vllmprefillworker-vv6r4
+  namespace: dynamo-oviya
+  ownerReferences:
+  - apiVersion: grove.io/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: PodClique
+    name: hw-fault-test-0-vllmprefillworker
+    uid: 125f0b4f-cddc-4509-b76c-9e154a97cb19
+  resourceVersion: '632917087'
+  uid: b5e1a58a-55c0-4cd8-a6b5-677882030ad1
+spec:
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - preference:
+          matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: In
+            values:
+            - aks-a100a-36888584-vmss000002
+        weight: 100
+  containers:
+  - args:
+    - --model
+    - Qwen/Qwen3-0.6B
+    - --is-prefill-worker
+    command:
+    - python3
+    - -m
+    - dynamo.vllm
+    env:
+    - name: DD_INTERNAL_POD_UID
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.uid
+    - name: DD_EXTERNAL_ENV
+      value: it-false,cn-main,pu-$(DD_INTERNAL_POD_UID)
+    - name: DD_ENTITY_ID
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.uid
+    - name: DD_DOGSTATSD_URL
+      value: unix:///var/run/datadog/dsd.socket
+    - name: DD_TRACE_AGENT_URL
+      value: unix:///var/run/datadog/apm.socket
+    - name: CUDA_FAULT_INJECTION_ENABLED
+      value: '0'
+    - name: CUDA_XID_TYPE
+      value: '79'
+    - name: DYN_NAMESPACE
+      value: hw-fault-test
+    - name: DYN_PARENT_DGD_K8S_NAME
+      value: hw-fault-test
+    - name: DYN_PARENT_DGD_K8S_NAMESPACE
+      value: dynamo-oviya
+    - name: DYN_SYSTEM_ENABLED
+      value: 'true'
+    - name: DYN_SYSTEM_PORT
+      value: '9090'
+    - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+      value: '["generate"]'
+    - name: ETCD_ENDPOINTS
+      value: dynamo-platform-etcd.dynamo-oviya:2379
+    - name: LD_PRELOAD
+      value: /cuda-fault/cuda_intercept.so
+    - name: NATS_SERVER
+      value: nats://dynamo-platform-nats.dynamo-oviya:4222
+    - name: GROVE_PCS_NAME
+      value: hw-fault-test
+    - name: GROVE_PCS_INDEX
+      value: '0'
+    - name: GROVE_PCLQ_NAME
+      value: hw-fault-test-0-vllmprefillworker
+    - name: GROVE_HEADLESS_SERVICE
+      value: hw-fault-test-0.dynamo-oviya.svc.cluster.local
+    - name: GROVE_PCLQ_POD_INDEX
+      value: '0'
+    envFrom:
+    - secretRef:
+        name: hf-token-secret
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0
+    imagePullPolicy: IfNotPresent
+    livenessProbe:
+      failureThreshold: 1
+      httpGet:
+        path: /live
+        port: system
+        scheme: HTTP
+      periodSeconds: 5
+      successThreshold: 1
+      timeoutSeconds: 30
+    name: main
+    ports:
+    - containerPort: 9090
+      name: system
+      protocol: TCP
+    readinessProbe:
+      failureThreshold: 60
+      httpGet:
+        path: /health
+        port: system
+        scheme: HTTP
+      periodSeconds: 10
+      successThreshold: 1
+      timeoutSeconds: 30
+    resources:
+      limits:
+        nvidia.com/gpu: '1'
+      requests:
+        nvidia.com/gpu: '1'
+    startupProbe:
+      failureThreshold: 60
+      httpGet:
+        path: /live
+        port: system
+        scheme: HTTP
+      periodSeconds: 10
+      successThreshold: 1
+      timeoutSeconds: 5
+    terminationMessagePath: /dev/termination-log
+    terminationMessagePolicy: File
+    volumeMounts:
+    - mountPath: /cuda-fault
+      name: cuda-fault-lib
+      readOnly: true
+    - mountPath: /host-fault
+      name: node-fault-marker
+    - mountPath: /dev/shm
+      name: shared-memory
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-hh54n
+      readOnly: true
+    - mountPath: /var/run/datadog
+      name: datadog
+      readOnly: true
+    workingDir: /workspace/examples/backends/vllm
+  dnsPolicy: ClusterFirst
+  enableServiceLinks: true
+  hostname: hw-fault-test-0-vllmprefillworker-0
+  imagePullSecrets:
+  - name: acr-secret
+  initContainers:
+  - args:
+    - gcc -shared -fPIC -Wall -Wextra /source/cuda_intercept.c -o /dest/cuda_intercept.so
+      -ldl && chmod 755 /dest/cuda_intercept.so && echo 'Compiled CUDA fault library
+      for Linux' && ls -lh /dest/cuda_intercept.so && file /dest/cuda_intercept.so
+      && echo '0' > /host-fault/cuda_fault_enabled && chmod 666 /host-fault/cuda_fault_enabled
+      && echo 'Initialized fault toggle file (disabled)'
+    command:
+    - sh
+    - -c
+    env:
+    - name: DD_INTERNAL_POD_UID
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.uid
+    - name: DD_EXTERNAL_ENV
+      value: it-true,cn-compile-cuda-fault-lib,pu-$(DD_INTERNAL_POD_UID)
+    - name: DD_ENTITY_ID
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.uid
+    - name: DD_DOGSTATSD_URL
+      value: unix:///var/run/datadog/dsd.socket
+    - name: DD_TRACE_AGENT_URL
+      value: unix:///var/run/datadog/apm.socket
+    - name: GROVE_PCS_NAME
+      value: hw-fault-test
+    - name: GROVE_PCS_INDEX
+      value: '0'
+    - name: GROVE_PCLQ_NAME
+      value: hw-fault-test-0-vllmprefillworker
+    - name: GROVE_HEADLESS_SERVICE
+      value: hw-fault-test-0.dynamo-oviya.svc.cluster.local
+    - name: GROVE_PCLQ_POD_INDEX
+      value: '0'
+    image: gcc:latest
+    imagePullPolicy: Always
+    name: compile-cuda-fault-lib
+    resources: {}
+    terminationMessagePath: /dev/termination-log
+    terminationMessagePolicy: File
+    volumeMounts:
+    - mountPath: /dest
+      name: cuda-fault-lib
+    - mountPath: /source
+      name: cuda-fault-lib-source
+      readOnly: true
+    - mountPath: /host-fault
+      name: node-fault-marker
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-hh54n
+      readOnly: true
+    - mountPath: /var/run/datadog
+      name: datadog
+      readOnly: true
+  nodeName: aks-a100a-36888584-vmss000002
+  preemptionPolicy: PreemptLowerPriority
+  priority: 0
+  restartPolicy: Always
+  schedulerName: kai-scheduler
+  securityContext: {}
+  serviceAccount: default
+  serviceAccountName: default
+  subdomain: hw-fault-test-0
+  terminationGracePeriodSeconds: 60
+  tolerations:
+  - effect: NoExecute
+    key: node.kubernetes.io/not-ready
+    operator: Exists
+    tolerationSeconds: 300
+  - effect: NoExecute
+    key: node.kubernetes.io/unreachable
+    operator: Exists
+    tolerationSeconds: 300
+  - effect: NoSchedule
+    key: nvidia.com/gpu
+    operator: Exists
+  volumes:
+  - emptyDir: {}
+    name: cuda-fault-lib
+  - configMap:
+      defaultMode: 420
+      name: cuda-fault-injection-lib
+    name: cuda-fault-lib-source
+  - hostPath:
+      path: /var/lib/cuda-fault-test
+      type: DirectoryOrCreate
+    name: node-fault-marker
+  - emptyDir:
+      medium: Memory
+      sizeLimit: 8Gi
+    name: shared-memory
+  - name: kube-api-access-hh54n
+    projected:
+      defaultMode: 420
+      sources:
+      - serviceAccountToken:
+          expirationSeconds: 3607
+          path: token
+      - configMap:
+          items:
+          - key: ca.crt
+            path: ca.crt
+          name: kube-root-ca.crt
+      - downwardAPI:
+          items:
+          - fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+            path: namespace
+  - hostPath:
+      path: /var/run/datadog
+      type: DirectoryOrCreate
+    name: datadog
+status:
+  conditions:
+  - lastProbeTime: null
+    lastTransitionTime: '2025-12-30T22:07:56Z'
+    message: Pod bound successfully to node aks-a100a-36888584-vmss000002
+    reason: Bound
+    status: 'True'
+    type: PodBound
+  - lastProbeTime: null
+    lastTransitionTime: '2025-12-30T22:08:32Z'
+    status: 'True'
+    type: PodReadyToStartContainers
+  - lastProbeTime: null
+    lastTransitionTime: '2025-12-30T22:08:32Z'
+    status: 'True'
+    type: Initialized
+  - lastProbeTime: null
+    lastTransitionTime: '2025-12-30T22:12:13Z'
+    status: 'True'
+    type: Ready
+  - lastProbeTime: null
+    lastTransitionTime: '2025-12-30T22:12:13Z'
+    status: 'True'
+    type: ContainersReady
+  - lastProbeTime: null
+    lastTransitionTime: '2025-12-30T22:07:56Z'
+    status: 'True'
+    type: PodScheduled
+  containerStatuses:
+  - containerID: containerd://22f3c3ae20917db9c7d7840058bd5217704a75fe928a97c746154306616642b9
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0
+    imageID: nvcr.io/nvidia/ai-dynamo/vllm-runtime@sha256:0adad9459447830b2f9337c6577485821b254b3c72f7064a5bc1eb677dd7dd66
+    lastState: {}
+    name: main
+    ready: true
+    restartCount: 0
+    started: true
+    state:
+      running:
+        startedAt: '2025-12-30T22:08:33Z'
+    volumeMounts:
+    - mountPath: /cuda-fault
+      name: cuda-fault-lib
+      readOnly: true
+      recursiveReadOnly: Disabled
+    - mountPath: /host-fault
+      name: node-fault-marker
+    - mountPath: /dev/shm
+      name: shared-memory
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-hh54n
+      readOnly: true
+      recursiveReadOnly: Disabled
+    - mountPath: /var/run/datadog
+      name: datadog
+      readOnly: true
+      recursiveReadOnly: Disabled
+  hostIP: 10.224.0.18
+  hostIPs:
+  - ip: 10.224.0.18
+  initContainerStatuses:
+  - containerID: containerd://c5f6fc89b55c080d096f25a11929ec05f72a91ab7b2888d1bc61b5816236579c
+    image: docker.io/library/gcc:latest
+    imageID: docker.io/library/gcc@sha256:1c68ef4ba3730c7e70c343212cd322af0e806e7e8c5c713facf4d5f719e155a3
+    lastState: {}
+    name: compile-cuda-fault-lib
+    ready: true
+    restartCount: 0
+    started: false
+    state:
+      terminated:
+        containerID: containerd://c5f6fc89b55c080d096f25a11929ec05f72a91ab7b2888d1bc61b5816236579c
+        exitCode: 0
+        finishedAt: '2025-12-30T22:08:25Z'
+        reason: Completed
+        startedAt: '2025-12-30T22:08:25Z'
+    volumeMounts:
+    - mountPath: /dest
+      name: cuda-fault-lib
+    - mountPath: /source
+      name: cuda-fault-lib-source
+      readOnly: true
+      recursiveReadOnly: Disabled
+    - mountPath: /host-fault
+      name: node-fault-marker
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-hh54n
+      readOnly: true
+      recursiveReadOnly: Disabled
+    - mountPath: /var/run/datadog
+      name: datadog
+      readOnly: true
+      recursiveReadOnly: Disabled
+  phase: Running
+  podIP: 10.244.9.234
+  podIPs:
+  - ip: 10.244.9.234
+  qosClass: BestEffort
+  startTime: '2025-12-30T22:08:22Z'

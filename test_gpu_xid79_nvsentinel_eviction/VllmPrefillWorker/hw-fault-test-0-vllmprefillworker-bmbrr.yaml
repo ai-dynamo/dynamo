@@ -1,0 +1,494 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    cluster-autoscaler.kubernetes.io/safe-to-evict-local-volumes: datadog
+    pod-group-name: pg-hw-fault-test-0-vllmprefillworker-125f0b4f-cddc-4509-b76c-9e154a97cb19
+    received-resource-type: Regular
+  creationTimestamp: '2025-12-30T22:13:06Z'
+  generateName: hw-fault-test-0-vllmprefillworker-
+  labels:
+    app.kubernetes.io/component: pcs-podclique
+    app.kubernetes.io/managed-by: grove-operator
+    app.kubernetes.io/name: hw-fault-test-0-vllmprefillworker
+    app.kubernetes.io/part-of: hw-fault-test
+    grove.io/pod-template-hash: b9844b555487546fbc
+    grove.io/podclique: hw-fault-test-0-vllmprefillworker
+    grove.io/podcliqueset-replica-index: '0'
+    grove.io/podgang: hw-fault-test-0
+    kai.scheduler/queue: dynamo
+    nvidia.com/dynamo-component-type: worker
+    nvidia.com/dynamo-graph-deployment-name: hw-fault-test
+    nvidia.com/metrics-enabled: 'true'
+    nvidia.com/selector: hw-fault-test-vllmprefillworker
+  managedFields:
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:metadata:
+        f:generateName: {}
+        f:labels:
+          .: {}
+          f:app.kubernetes.io/component: {}
+          f:app.kubernetes.io/managed-by: {}
+          f:app.kubernetes.io/name: {}
+          f:app.kubernetes.io/part-of: {}
+          f:grove.io/pod-template-hash: {}
+          f:grove.io/podclique: {}
+          f:grove.io/podcliqueset-replica-index: {}
+          f:grove.io/podgang: {}
+          f:kai.scheduler/queue: {}
+          f:nvidia.com/dynamo-component-type: {}
+          f:nvidia.com/dynamo-graph-deployment-name: {}
+          f:nvidia.com/metrics-enabled: {}
+          f:nvidia.com/selector: {}
+        f:ownerReferences:
+          .: {}
+          k:{"uid":"125f0b4f-cddc-4509-b76c-9e154a97cb19"}: {}
+      f:spec:
+        f:containers:
+          k:{"name":"main"}:
+            .: {}
+            f:args: {}
+            f:command: {}
+            f:env:
+              .: {}
+              k:{"name":"DYN_NAMESPACE"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_PARENT_DGD_K8S_NAME"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_PARENT_DGD_K8S_NAMESPACE"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_SYSTEM_ENABLED"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_SYSTEM_PORT"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"ETCD_ENDPOINTS"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"GROVE_HEADLESS_SERVICE"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"GROVE_PCLQ_NAME"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"GROVE_PCLQ_POD_INDEX"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"GROVE_PCS_INDEX"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"GROVE_PCS_NAME"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+              k:{"name":"NATS_SERVER"}:
+                .: {}
+                f:name: {}
+                f:value: {}
+            f:envFrom: {}
+            f:image: {}
+            f:imagePullPolicy: {}
+            f:livenessProbe:
+              .: {}
+              f:failureThreshold: {}
+              f:httpGet:
+                .: {}
+                f:path: {}
+                f:port: {}
+                f:scheme: {}
+              f:periodSeconds: {}
+              f:successThreshold: {}
+              f:timeoutSeconds: {}
+            f:name: {}
+            f:ports:
+              .: {}
+              k:{"containerPort":9090,"protocol":"TCP"}:
+                .: {}
+                f:containerPort: {}
+                f:name: {}
+                f:protocol: {}
+            f:readinessProbe:
+              .: {}
+              f:failureThreshold: {}
+              f:httpGet:
+                .: {}
+                f:path: {}
+                f:port: {}
+                f:scheme: {}
+              f:periodSeconds: {}
+              f:successThreshold: {}
+              f:timeoutSeconds: {}
+            f:resources:
+              .: {}
+              f:limits:
+                .: {}
+                f:nvidia.com/gpu: {}
+              f:requests:
+                .: {}
+                f:nvidia.com/gpu: {}
+            f:startupProbe:
+              .: {}
+              f:failureThreshold: {}
+              f:httpGet:
+                .: {}
+                f:path: {}
+                f:port: {}
+                f:scheme: {}
+              f:periodSeconds: {}
+              f:successThreshold: {}
+              f:timeoutSeconds: {}
+            f:terminationMessagePath: {}
+            f:terminationMessagePolicy: {}
+            f:volumeMounts:
+              .: {}
+              k:{"mountPath":"/dev/shm"}:
+                .: {}
+                f:mountPath: {}
+                f:name: {}
+            f:workingDir: {}
+        f:dnsPolicy: {}
+        f:enableServiceLinks: {}
+        f:hostname: {}
+        f:imagePullSecrets:
+          .: {}
+          k:{"name":"acr-secret"}: {}
+        f:restartPolicy: {}
+        f:schedulerName: {}
+        f:securityContext: {}
+        f:subdomain: {}
+        f:terminationGracePeriodSeconds: {}
+        f:volumes:
+          .: {}
+          k:{"name":"shared-memory"}:
+            .: {}
+            f:emptyDir:
+              .: {}
+              f:medium: {}
+              f:sizeLimit: {}
+            f:name: {}
+    manager: grove-operator
+    operation: Update
+    time: '2025-12-30T22:13:06Z'
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:metadata:
+        f:annotations:
+          f:pod-group-name: {}
+          f:received-resource-type: {}
+    manager: app
+    operation: Update
+    time: '2025-12-30T22:13:08Z'
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:status:
+        f:conditions:
+          k:{"type":"PodBound"}:
+            .: {}
+            f:lastProbeTime: {}
+            f:lastTransitionTime: {}
+            f:message: {}
+            f:reason: {}
+            f:status: {}
+            f:type: {}
+    manager: app
+    operation: Update
+    subresource: status
+    time: '2025-12-30T22:13:08Z'
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:status:
+        f:conditions:
+          k:{"type":"ContainersReady"}:
+            .: {}
+            f:lastProbeTime: {}
+            f:lastTransitionTime: {}
+            f:status: {}
+            f:type: {}
+          k:{"type":"Initialized"}:
+            .: {}
+            f:lastProbeTime: {}
+            f:lastTransitionTime: {}
+            f:status: {}
+            f:type: {}
+          k:{"type":"PodReadyToStartContainers"}:
+            .: {}
+            f:lastProbeTime: {}
+            f:lastTransitionTime: {}
+            f:status: {}
+            f:type: {}
+          k:{"type":"Ready"}:
+            .: {}
+            f:lastProbeTime: {}
+            f:lastTransitionTime: {}
+            f:status: {}
+            f:type: {}
+        f:containerStatuses: {}
+        f:hostIP: {}
+        f:hostIPs: {}
+        f:phase: {}
+        f:podIP: {}
+        f:podIPs:
+          .: {}
+          k:{"ip":"10.244.5.160"}:
+            .: {}
+            f:ip: {}
+        f:startTime: {}
+    manager: kubelet
+    operation: Update
+    subresource: status
+    time: '2025-12-30T22:15:48Z'
+  name: hw-fault-test-0-vllmprefillworker-bmbrr
+  namespace: dynamo-oviya
+  ownerReferences:
+  - apiVersion: grove.io/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: PodClique
+    name: hw-fault-test-0-vllmprefillworker
+    uid: 125f0b4f-cddc-4509-b76c-9e154a97cb19
+  resourceVersion: '632958690'
+  uid: 7b2b93ab-8d59-4982-bb8a-3cc880ca391c
+spec:
+  containers:
+  - args:
+    - --model
+    - Qwen/Qwen3-0.6B
+    - --is-prefill-worker
+    command:
+    - python3
+    - -m
+    - dynamo.vllm
+    env:
+    - name: DD_INTERNAL_POD_UID
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.uid
+    - name: DD_EXTERNAL_ENV
+      value: it-false,cn-main,pu-$(DD_INTERNAL_POD_UID)
+    - name: DD_ENTITY_ID
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.uid
+    - name: DD_DOGSTATSD_URL
+      value: unix:///var/run/datadog/dsd.socket
+    - name: DD_TRACE_AGENT_URL
+      value: unix:///var/run/datadog/apm.socket
+    - name: DYN_NAMESPACE
+      value: hw-fault-test
+    - name: DYN_PARENT_DGD_K8S_NAME
+      value: hw-fault-test
+    - name: DYN_PARENT_DGD_K8S_NAMESPACE
+      value: dynamo-oviya
+    - name: DYN_SYSTEM_ENABLED
+      value: 'true'
+    - name: DYN_SYSTEM_PORT
+      value: '9090'
+    - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+      value: '["generate"]'
+    - name: ETCD_ENDPOINTS
+      value: dynamo-platform-etcd.dynamo-oviya:2379
+    - name: NATS_SERVER
+      value: nats://dynamo-platform-nats.dynamo-oviya:4222
+    - name: GROVE_PCS_NAME
+      value: hw-fault-test
+    - name: GROVE_PCS_INDEX
+      value: '0'
+    - name: GROVE_PCLQ_NAME
+      value: hw-fault-test-0-vllmprefillworker
+    - name: GROVE_HEADLESS_SERVICE
+      value: hw-fault-test-0.dynamo-oviya.svc.cluster.local
+    - name: GROVE_PCLQ_POD_INDEX
+      value: '1'
+    envFrom:
+    - secretRef:
+        name: hf-token-secret
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0
+    imagePullPolicy: IfNotPresent
+    livenessProbe:
+      failureThreshold: 1
+      httpGet:
+        path: /live
+        port: system
+        scheme: HTTP
+      periodSeconds: 5
+      successThreshold: 1
+      timeoutSeconds: 30
+    name: main
+    ports:
+    - containerPort: 9090
+      name: system
+      protocol: TCP
+    readinessProbe:
+      failureThreshold: 60
+      httpGet:
+        path: /health
+        port: system
+        scheme: HTTP
+      periodSeconds: 10
+      successThreshold: 1
+      timeoutSeconds: 30
+    resources:
+      limits:
+        nvidia.com/gpu: '1'
+      requests:
+        nvidia.com/gpu: '1'
+    startupProbe:
+      failureThreshold: 60
+      httpGet:
+        path: /live
+        port: system
+        scheme: HTTP
+      periodSeconds: 10
+      successThreshold: 1
+      timeoutSeconds: 5
+    terminationMessagePath: /dev/termination-log
+    terminationMessagePolicy: File
+    volumeMounts:
+    - mountPath: /dev/shm
+      name: shared-memory
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-8sqqt
+      readOnly: true
+    - mountPath: /var/run/datadog
+      name: datadog
+      readOnly: true
+    workingDir: /workspace/examples/backends/vllm
+  dnsPolicy: ClusterFirst
+  enableServiceLinks: true
+  hostname: hw-fault-test-0-vllmprefillworker-1
+  imagePullSecrets:
+  - name: acr-secret
+  nodeName: aks-a100b-22138447-vmss000002
+  preemptionPolicy: PreemptLowerPriority
+  priority: 0
+  restartPolicy: Always
+  schedulerName: kai-scheduler
+  securityContext: {}
+  serviceAccount: default
+  serviceAccountName: default
+  subdomain: hw-fault-test-0
+  terminationGracePeriodSeconds: 60
+  tolerations:
+  - effect: NoExecute
+    key: node.kubernetes.io/not-ready
+    operator: Exists
+    tolerationSeconds: 300
+  - effect: NoExecute
+    key: node.kubernetes.io/unreachable
+    operator: Exists
+    tolerationSeconds: 300
+  - effect: NoSchedule
+    key: nvidia.com/gpu
+    operator: Exists
+  volumes:
+  - emptyDir:
+      medium: Memory
+      sizeLimit: 8Gi
+    name: shared-memory
+  - name: kube-api-access-8sqqt
+    projected:
+      defaultMode: 420
+      sources:
+      - serviceAccountToken:
+          expirationSeconds: 3607
+          path: token
+      - configMap:
+          items:
+          - key: ca.crt
+            path: ca.crt
+          name: kube-root-ca.crt
+      - downwardAPI:
+          items:
+          - fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+            path: namespace
+  - hostPath:
+      path: /var/run/datadog
+      type: DirectoryOrCreate
+    name: datadog
+status:
+  conditions:
+  - lastProbeTime: null
+    lastTransitionTime: '2025-12-30T22:13:08Z'
+    message: Pod bound successfully to node aks-a100b-22138447-vmss000002
+    reason: Bound
+    status: 'True'
+    type: PodBound
+  - lastProbeTime: null
+    lastTransitionTime: '2025-12-30T22:13:12Z'
+    status: 'True'
+    type: PodReadyToStartContainers
+  - lastProbeTime: null
+    lastTransitionTime: '2025-12-30T22:13:08Z'
+    status: 'True'
+    type: Initialized
+  - lastProbeTime: null
+    lastTransitionTime: '2025-12-30T22:15:48Z'
+    status: 'True'
+    type: Ready
+  - lastProbeTime: null
+    lastTransitionTime: '2025-12-30T22:15:48Z'
+    status: 'True'
+    type: ContainersReady
+  - lastProbeTime: null
+    lastTransitionTime: '2025-12-30T22:13:08Z'
+    status: 'True'
+    type: PodScheduled
+  containerStatuses:
+  - containerID: containerd://c5ae305f34d8fed37ee69cf918fe885e37feb7e5dcf8b939c3cd57a6c7e3c4e8
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0
+    imageID: nvcr.io/nvidia/ai-dynamo/vllm-runtime@sha256:0adad9459447830b2f9337c6577485821b254b3c72f7064a5bc1eb677dd7dd66
+    lastState: {}
+    name: main
+    ready: true
+    restartCount: 0
+    started: true
+    state:
+      running:
+        startedAt: '2025-12-30T22:13:12Z'
+    volumeMounts:
+    - mountPath: /dev/shm
+      name: shared-memory
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-8sqqt
+      readOnly: true
+      recursiveReadOnly: Disabled
+    - mountPath: /var/run/datadog
+      name: datadog
+      readOnly: true
+      recursiveReadOnly: Disabled
+  hostIP: 10.224.0.13
+  hostIPs:
+  - ip: 10.224.0.13
+  phase: Running
+  podIP: 10.244.5.160
+  podIPs:
+  - ip: 10.244.5.160
+  qosClass: BestEffort
+  startTime: '2025-12-30T22:13:08Z'

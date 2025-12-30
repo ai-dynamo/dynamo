@@ -319,15 +319,19 @@ def _patch_service_for_injection(
         print("      ✓ Added ConfigMap volume mount")
         print("      ✓ Added hostPath volume for persistent fault marker")
 
-    # Add node affinity to pin pods to target node (simulates real XID 79 behavior)
+    # Add SOFT node affinity with spreading disabled - pack target node first, overflow to others
+    # This ensures maximum pods on the faulty node while allowing fallback to healthy nodes.
+    # We disable pod anti-affinity and topology spread to prevent Kubernetes from spreading pods.
     if target_node and enable:
         if "affinity" not in service["extraPodSpec"]:
             service["extraPodSpec"]["affinity"] = {}
 
+        # Strong preference for target node (weight=100 is max)
         service["extraPodSpec"]["affinity"]["nodeAffinity"] = {
-            "requiredDuringSchedulingIgnoredDuringExecution": {
-                "nodeSelectorTerms": [
-                    {
+            "preferredDuringSchedulingIgnoredDuringExecution": [
+                {
+                    "weight": 100,  # Max weight - very strong preference
+                    "preference": {
                         "matchExpressions": [
                             {
                                 "key": "kubernetes.io/hostname",
@@ -335,11 +339,24 @@ def _patch_service_for_injection(
                                 "values": [target_node],
                             }
                         ]
-                    }
-                ]
-            }
+                    },
+                }
+            ]
         }
-        print(f"      ✓ Added node affinity to pin pods to {target_node}")
+        
+        # Disable pod anti-affinity to allow packing pods on same node
+        # (Some operators add anti-affinity by default for HA)
+        service["extraPodSpec"]["affinity"]["podAntiAffinity"] = None
+        
+        # Disable topology spread constraints to allow packing
+        # (Kubernetes may spread pods across zones/nodes by default)
+        if "topologySpreadConstraints" not in service["extraPodSpec"]:
+            service["extraPodSpec"]["topologySpreadConstraints"] = []
+        else:
+            service["extraPodSpec"]["topologySpreadConstraints"] = []
+        
+        print(f"      ✓ Added soft node affinity (prefer {target_node}, weight=100)")
+        print(f"      ✓ Disabled pod spreading (anti-affinity + topology constraints)")
 
     elif not enable:
         # Remove ConfigMap volume and mount when disabling

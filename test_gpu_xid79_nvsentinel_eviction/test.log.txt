@@ -1,0 +1,187 @@
+[TEST] 2025-12-30T14:03:29 INFO test_gpu_xid79_nvsentinel_eviction: ================================================================================
+[TEST] 2025-12-30T14:03:29 INFO test_gpu_xid79_nvsentinel_eviction: TEST: XID 79 - NVSentinel-Driven Eviction [VLLM]
+[TEST] 2025-12-30T14:03:29 INFO test_gpu_xid79_nvsentinel_eviction: ================================================================================
+[TEST] 2025-12-30T14:03:29 INFO test_gpu_xid79_nvsentinel_eviction: This test relies on node-drainer to evict pods (2 min timeout)
+[TEST] 2025-12-30T14:03:29 INFO ManagedDeployment: Restarting dynamo-platform-etcd app.kubernetes.io/component=etcd
+[TEST] 2025-12-30T14:03:29 INFO ManagedDeployment: Restarting dynamo-platform-nats app.kubernetes.io/component=nats
+[TEST] 2025-12-30T14:03:59 INFO ManagedDeployment: Restarted dynamo-platform-etcd app.kubernetes.io/component=etcd
+[TEST] 2025-12-30T14:04:17 INFO ManagedDeployment: Restarted dynamo-platform-nats app.kubernetes.io/component=nats
+[TEST] 2025-12-30T14:04:17 INFO ManagedDeployment: Starting Deployment hw-fault-test with spec <tests.utils.managed_deployment.DeploymentSpec object at 0x111ce11d0>
+[TEST] 2025-12-30T14:04:18 INFO ManagedDeployment: {'apiVersion': 'nvidia.com/v1alpha1', 'kind': 'DynamoGraphDeployment', 'metadata': {'name': 'hw-fault-test', 'namespace': 'dynamo-oviya'}, 'spec': {'services': {'Frontend': {'dynamoNamespace': 'hw-fault-test', 'componentType': 'frontend', 'replicas': 1, 'extraPodSpec': {'mainContainer': {'image': 'nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0'}}, 'envs': [{'name': 'DYN_ROUTER_MODE', 'value': 'kv'}]}, 'VllmDecodeWorker': {'dynamoNamespace': 'hw-fault-test', 'envFromSecret': 'hf-token-secret', 'componentType': 'worker', 'replicas': 2, 'resources': {'limits': {'gpu': '1'}}, 'extraPodSpec': {'mainContainer': {'image': 'nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0', 'workingDir': '/workspace/examples/backends/vllm', 'command': ['python3', '-m', 'dynamo.vllm'], 'args': ['--model', 'Qwen/Qwen3-0.6B', '--is-decode-worker']}}}, 'VllmPrefillWorker': {'dynamoNamespace': 'hw-fault-test', 'envFromSecret': 'hf-token-secret', 'componentType': 'worker', 'replicas': 2, 'resources': {'limits': {'gpu': '1'}}, 'extraPodSpec': {'mainContainer': {'image': 'nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0', 'workingDir': '/workspace/examples/backends/vllm', 'command': ['python3', '-m', 'dynamo.vllm'], 'args': ['--model', 'Qwen/Qwen3-0.6B', '--is-prefill-worker']}}}}}}
+[TEST] 2025-12-30T14:04:18 INFO ManagedDeployment: Deployment Started hw-fault-test
+[TEST] 2025-12-30T14:04:18 INFO ManagedDeployment: Waiting for DGD hw-fault-test to be ready...
+[TEST] 2025-12-30T14:05:36 INFO ManagedDeployment:   [78s] Pods: 1/5, State: pending
+[TEST] 2025-12-30T14:06:54 INFO ManagedDeployment:   [156s] Pods: 1/5, State: pending
+[TEST] 2025-12-30T14:07:38 INFO ManagedDeployment: ✓ Pods ready (5/5) (201s)
+[TEST] 2025-12-30T14:07:38 INFO ManagedDeployment:   (DGD status pending update: state=pending, Ready=False)
+[TEST] 2025-12-30T14:07:38 INFO ManagedDeployment: [HW Faults] Initializing hardware fault manager...
+[TEST] 2025-12-30T14:07:39 INFO ManagedDeployment: [HW Faults] Setting up hardware fault injection...
+[TEST] 2025-12-30T14:07:39 INFO ManagedDeployment: [HW Faults] Starting port-forward: localhost:64157 → svc/fault-injection-api:8080
+[TEST] 2025-12-30T14:07:41 INFO ManagedDeployment: [HW Faults] Port-forward active: http://localhost:64157
+[TEST] 2025-12-30T14:07:41 INFO ManagedDeployment: [HW Faults] API available at http://localhost:64157
+[TEST] 2025-12-30T14:07:41 INFO ManagedDeployment: [HW Faults] Building CUDA fault injection library...
+[TEST] 2025-12-30T14:07:41 INFO ManagedDeployment: [HW Faults] Creating ConfigMap with library source...
+[TEST] 2025-12-30T14:07:41 INFO ManagedDeployment: [HW Faults] Setup complete - ready for fault injection
+[TEST] 2025-12-30T14:07:41 INFO ManagedDeployment: [HW Faults] ✓ Hardware fault manager ready
+[TEST] 2025-12-30T14:07:41 INFO test_gpu_xid79_nvsentinel_eviction: [PHASE 1] Deployment ready
+[TEST] 2025-12-30T14:07:50 INFO ManagedDeployment: [HW Faults] Scanning 3 services for target node: ['Frontend', 'VllmDecodeWorker', 'VllmPrefillWorker']
+[TEST] 2025-12-30T14:07:50 INFO ManagedDeployment: [HW Faults] Checking 2 pods in VllmDecodeWorker
+[TEST] 2025-12-30T14:07:50 INFO ManagedDeployment: [HW Faults] Auto-detected target node from VllmDecodeWorker/hw-fault-test-0-vllmdecodeworker-9gq4s: aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:07:50 INFO ManagedDeployment: [HW Faults] Target node set to: aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:07:50 INFO test_gpu_xid79_nvsentinel_eviction:   Target node: aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:07:51 INFO test_gpu_xid79_nvsentinel_eviction:   Initial pods: 5
+[TEST] 2025-12-30T14:07:53 INFO test_gpu_xid79_nvsentinel_eviction:   [Initial] Pod Status:
+[TEST] 2025-12-30T14:07:53 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-frontend-f2w7c: Running on aks-general-medium-storage-mpzvx
+[TEST] 2025-12-30T14:07:53 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmdecodeworker-9gq4s: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:07:53 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmdecodeworker-l9pq7: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:07:53 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmprefillworker-p2dqw: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:07:53 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmprefillworker-rxl8w: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:07:53 INFO test_gpu_xid79_nvsentinel_eviction: 
+[PHASE 2] Setting up CUDA passthrough...
+[TEST] 2025-12-30T14:07:53 INFO ManagedDeployment: [HW Faults] Setting up CUDA passthrough (XID 79) on deployment...
+[TEST] 2025-12-30T14:07:53 INFO ManagedDeployment: [HW Faults] Library will load with faults DISABLED - use toggle_cuda_faults() to enable
+[TEST] 2025-12-30T14:07:53 INFO ManagedDeployment: [HW Faults] Target node: aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:07:54 INFO ManagedDeployment: [HW Faults] CUDA passthrough configured - pods will restart with library (faults disabled)
+[TEST] 2025-12-30T14:07:54 INFO test_gpu_xid79_nvsentinel_eviction:   ✓ CUDA passthrough configured
+[TEST] 2025-12-30T14:08:25 INFO ManagedDeployment: [HW Faults] [31s/300s] Waiting for pods: 1/5 ready (expecting 5)
+[TEST] 2025-12-30T14:08:56 INFO ManagedDeployment: [HW Faults] [62s/300s] Waiting for pods: 1/5 ready (expecting 5)
+[TEST] 2025-12-30T14:09:27 INFO ManagedDeployment: [HW Faults] [93s/300s] Waiting for pods: 1/5 ready (expecting 5)
+[TEST] 2025-12-30T14:09:59 INFO ManagedDeployment: [HW Faults] [125s/300s] Waiting for pods: 1/5 ready (expecting 5)
+[TEST] 2025-12-30T14:10:30 INFO ManagedDeployment: [HW Faults] [156s/300s] Waiting for pods: 1/5 ready (expecting 5)
+[TEST] 2025-12-30T14:11:01 INFO ManagedDeployment: [HW Faults] [187s/300s] Waiting for pods: 1/5 ready (expecting 5)
+[TEST] 2025-12-30T14:11:32 INFO ManagedDeployment: [HW Faults] [218s/300s] Waiting for pods: 1/5 ready (expecting 5)
+[TEST] 2025-12-30T14:12:04 INFO ManagedDeployment: [HW Faults] [250s/300s] Waiting for pods: 1/5 ready (expecting 5)
+[TEST] 2025-12-30T14:12:14 INFO ManagedDeployment: [HW Faults] All 5 pods ready
+[TEST] 2025-12-30T14:12:14 INFO test_gpu_xid79_nvsentinel_eviction:   ✓ Pods ready with CUDA library (faults disabled)
+[TEST] 2025-12-30T14:12:16 INFO test_gpu_xid79_nvsentinel_eviction:   [After CUDA Setup] Pod Status:
+[TEST] 2025-12-30T14:12:16 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-frontend-f2w7c: Running on aks-general-medium-storage-mpzvx
+[TEST] 2025-12-30T14:12:16 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmdecodeworker-jbmq9: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:12:16 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmdecodeworker-z48g7: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:12:16 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmprefillworker-9jdz5: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:12:16 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmprefillworker-vv6r4: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:12:16 INFO test_gpu_xid79_nvsentinel_eviction: 
+[PHASE 3] Baseline inference...
+[TEST] 2025-12-30T14:12:18 INFO test_gpu_xid79_nvsentinel_eviction:   ✓ Endpoint: http://localhost:53291/v1/completions
+[TEST] 2025-12-30T14:12:21 INFO test_gpu_xid79_nvsentinel_eviction:     [1/5] ✓ - 2.55s
+[TEST] 2025-12-30T14:12:24 INFO test_gpu_xid79_nvsentinel_eviction:     [2/5] ✓ - 2.45s
+[TEST] 2025-12-30T14:12:26 INFO test_gpu_xid79_nvsentinel_eviction:     [3/5] ✓ - 0.87s
+[TEST] 2025-12-30T14:12:28 INFO test_gpu_xid79_nvsentinel_eviction:     [4/5] ✓ - 0.76s
+[TEST] 2025-12-30T14:12:31 INFO test_gpu_xid79_nvsentinel_eviction:     [5/5] ✓ - 2.34s
+[TEST] 2025-12-30T14:12:32 INFO test_gpu_xid79_nvsentinel_eviction:   Baseline: 5/5 successful
+[TEST] 2025-12-30T14:12:42 INFO test_gpu_xid79_nvsentinel_eviction: 
+[PHASE 4] Injecting XID 79 and enabling CUDA faults...
+[TEST] 2025-12-30T14:12:42 INFO ManagedDeployment: [HW Faults] Injecting XID 79 on node aks-a100a-36888584-vmss000002, GPU 0...
+[TEST] 2025-12-30T14:12:42 INFO ManagedDeployment: [HW Faults] XID 79 injected (fault_id: gpu_xid_79-8dde186b)
+[TEST] 2025-12-30T14:12:42 INFO test_gpu_xid79_nvsentinel_eviction:   ✓ XID 79 injected: gpu_xid_79-8dde186b
+[TEST] 2025-12-30T14:12:42 INFO ManagedDeployment: [HW Faults] Enabling CUDA faults via hostPath toggle (no restart)...
+[TEST] 2025-12-30T14:12:46 INFO ManagedDeployment: [HW Faults] CUDA faults ACTIVE
+[TEST] 2025-12-30T14:12:46 INFO test_gpu_xid79_nvsentinel_eviction:   ✓ CUDA faults ENABLED
+[TEST] 2025-12-30T14:12:46 INFO test_gpu_xid79_nvsentinel_eviction: 
+[PHASE 5] Inference during fault...
+[TEST] 2025-12-30T14:12:48 INFO test_gpu_xid79_nvsentinel_eviction:   [During Fault] Pod Status:
+[TEST] 2025-12-30T14:12:48 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-frontend-f2w7c: Running on aks-general-medium-storage-mpzvx
+[TEST] 2025-12-30T14:12:48 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmdecodeworker-jbmq9: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:12:48 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmdecodeworker-z48g7: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:12:48 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmprefillworker-9jdz5: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:12:48 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmprefillworker-vv6r4: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:12:48 INFO test_gpu_xid79_nvsentinel_eviction:     [1/5] ✗ - 0.25s
+[TEST] 2025-12-30T14:12:50 INFO test_gpu_xid79_nvsentinel_eviction:     [2/5] ✗ - 0.37s
+[TEST] 2025-12-30T14:12:53 INFO test_gpu_xid79_nvsentinel_eviction:     [3/5] ✗ - 0.42s
+[TEST] 2025-12-30T14:12:55 INFO test_gpu_xid79_nvsentinel_eviction:     [4/5] ✗ - 0.45s
+[TEST] 2025-12-30T14:12:57 INFO test_gpu_xid79_nvsentinel_eviction:     [5/5] ✗ - 0.39s
+[TEST] 2025-12-30T14:12:59 INFO test_gpu_xid79_nvsentinel_eviction:   During fault: 0/5 successful (failures expected)
+[TEST] 2025-12-30T14:12:59 INFO test_gpu_xid79_nvsentinel_eviction: 
+[PHASE 6] Verifying NVSentinel cordoned the node...
+[TEST] 2025-12-30T14:13:05 INFO test_gpu_xid79_nvsentinel_eviction:   [5s] Node cordoned: ✓
+[TEST] 2025-12-30T14:13:05 INFO test_gpu_xid79_nvsentinel_eviction: 
+[PHASE 7] Cleaning up DGD spec (keeping pods running)...
+[TEST] 2025-12-30T14:13:05 INFO test_gpu_xid79_nvsentinel_eviction:   New pods will come up WITHOUT CUDA library or node affinity
+[TEST] 2025-12-30T14:13:05 INFO test_gpu_xid79_nvsentinel_eviction:   Node-drainer will evict pods from cordoned node automatically
+[TEST] 2025-12-30T14:13:05 INFO ManagedDeployment: [HW Faults] Cleaning up DGD spec (keeping pods running)...
+[TEST] 2025-12-30T14:13:05 INFO ManagedDeployment: [HW Faults] Replacing DGD spec for services: ['VllmDecodeWorker', 'VllmPrefillWorker']
+[TEST] 2025-12-30T14:13:05 INFO ManagedDeployment: [HW Faults]   VllmDecodeWorker: initContainers=False, affinity=False, LD_PRELOAD=False
+[TEST] 2025-12-30T14:13:05 INFO ManagedDeployment: [HW Faults]   VllmPrefillWorker: initContainers=False, affinity=False, LD_PRELOAD=False
+[TEST] 2025-12-30T14:13:05 INFO ManagedDeployment: [HW Faults] DGD spec replaced successfully
+[TEST] 2025-12-30T14:13:05 INFO ManagedDeployment: [HW Faults]   ✓ Verified VllmDecodeWorker is clean
+[TEST] 2025-12-30T14:13:05 INFO ManagedDeployment: [HW Faults]   ✓ Verified VllmPrefillWorker is clean
+[TEST] 2025-12-30T14:13:06 INFO ManagedDeployment: [HW Faults] ConfigMap deleted
+[TEST] 2025-12-30T14:13:06 INFO ManagedDeployment: [HW Faults] DGD spec cleaned - pods still running
+[TEST] 2025-12-30T14:13:06 INFO ManagedDeployment: [HW Faults] When node-drainer evicts pods, new ones will be clean
+[TEST] 2025-12-30T14:13:06 INFO test_gpu_xid79_nvsentinel_eviction:   ✓ DGD spec cleaned
+[TEST] 2025-12-30T14:13:06 INFO test_gpu_xid79_nvsentinel_eviction:   Disabling CUDA faults via toggle...
+[TEST] 2025-12-30T14:13:06 INFO ManagedDeployment: [HW Faults] Disabling CUDA faults via hostPath toggle (no restart)...
+[TEST] 2025-12-30T14:13:09 INFO ManagedDeployment: [HW Faults] CUDA faults DISABLED
+[TEST] 2025-12-30T14:13:09 INFO test_gpu_xid79_nvsentinel_eviction:   ✓ CUDA faults disabled via toggle
+[TEST] 2025-12-30T14:13:09 INFO test_gpu_xid79_nvsentinel_eviction:   Waiting 30s for DGD spec to propagate to controller...
+[TEST] 2025-12-30T14:13:41 INFO test_gpu_xid79_nvsentinel_eviction:   [After Spec Cleanup (pods still running)] Pod Status:
+[TEST] 2025-12-30T14:13:41 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-frontend-f2w7c: Running on aks-general-medium-storage-mpzvx
+[TEST] 2025-12-30T14:13:41 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmdecodeworker-gg6ll: Running on aks-a100b-22138447-vmss000002
+[TEST] 2025-12-30T14:13:41 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmdecodeworker-jbmq9: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:13:41 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmdecodeworker-sr5zp: Running on aks-a100b-22138447-vmss000002
+[TEST] 2025-12-30T14:13:41 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmdecodeworker-z48g7: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:13:41 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmprefillworker-9jdz5: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:13:41 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmprefillworker-bmbrr: Running on aks-a100b-22138447-vmss000002
+[TEST] 2025-12-30T14:13:41 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmprefillworker-vl9pz: Running on aks-a100b-22138447-vmss000002
+[TEST] 2025-12-30T14:13:41 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmprefillworker-vv6r4: Running on aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:13:41 INFO test_gpu_xid79_nvsentinel_eviction: 
+[PHASE 8] Waiting for node-drainer to evict pods...
+[TEST] 2025-12-30T14:13:41 INFO test_gpu_xid79_nvsentinel_eviction:   Timeout: 120s (~2 min from XID detection)
+[TEST] 2025-12-30T14:13:41 INFO test_gpu_xid79_nvsentinel_eviction:   Pods will be force-deleted when DeleteAfterTimeout is reached
+[TEST] 2025-12-30T14:13:43 INFO test_gpu_xid79_nvsentinel_eviction:   Pods on cordoned node: 4
+[TEST] 2025-12-30T14:13:44 INFO test_gpu_xid79_nvsentinel_eviction:   [0s] Pods on cordoned node: 4
+[TEST] 2025-12-30T14:14:01 INFO test_gpu_xid79_nvsentinel_eviction:   [16s] Pods on cordoned node: 4
+[TEST] 2025-12-30T14:14:19 INFO test_gpu_xid79_nvsentinel_eviction:   [33s] Pods on cordoned node: 0
+[TEST] 2025-12-30T14:14:19 INFO test_gpu_xid79_nvsentinel_eviction:   ✓ All pods evicted from cordoned node after 33s
+[TEST] 2025-12-30T14:14:19 INFO test_gpu_xid79_nvsentinel_eviction: 
+[PHASE 9] Waiting for new clean pods on healthy nodes...
+[TEST] 2025-12-30T14:14:19 INFO test_gpu_xid79_nvsentinel_eviction:   (vLLM workers take ~5-7 min to start after cold eviction)
+[TEST] 2025-12-30T14:14:19 INFO ManagedDeployment: [HW Faults] All pods rescheduled off aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:14:51 INFO ManagedDeployment: [HW Faults] [31s/1000s] Waiting for pods: 1/5 ready (expecting 5)
+[TEST] 2025-12-30T14:15:22 INFO ManagedDeployment: [HW Faults] [62s/1000s] Waiting for pods: 1/5 ready (expecting 5)
+[TEST] 2025-12-30T14:15:54 INFO ManagedDeployment: [HW Faults] All 5 pods ready
+[TEST] 2025-12-30T14:15:55 INFO test_gpu_xid79_nvsentinel_eviction:   [After Eviction (new clean pods)] Pod Status:
+[TEST] 2025-12-30T14:15:55 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-frontend-f2w7c: Running on aks-general-medium-storage-mpzvx
+[TEST] 2025-12-30T14:15:55 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmdecodeworker-gg6ll: Running on aks-a100b-22138447-vmss000002
+[TEST] 2025-12-30T14:15:55 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmdecodeworker-sr5zp: Running on aks-a100b-22138447-vmss000002
+[TEST] 2025-12-30T14:15:55 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmprefillworker-bmbrr: Running on aks-a100b-22138447-vmss000002
+[TEST] 2025-12-30T14:15:55 INFO test_gpu_xid79_nvsentinel_eviction:     - hw-fault-test-0-vllmprefillworker-vl9pz: Running on aks-a100b-22138447-vmss000002
+[TEST] 2025-12-30T14:15:57 INFO test_gpu_xid79_nvsentinel_eviction:   ✓ New pods are clean (no CUDA library, not on cordoned node)
+[TEST] 2025-12-30T14:15:57 INFO test_gpu_xid79_nvsentinel_eviction: 
+[PHASE 10] Recovery inference...
+[TEST] 2025-12-30T14:15:59 INFO test_gpu_xid79_nvsentinel_eviction:   Running recovery requests...
+[TEST] 2025-12-30T14:16:02 INFO test_gpu_xid79_nvsentinel_eviction:     [1/5] ✓ - 2.54s
+[TEST] 2025-12-30T14:16:05 INFO test_gpu_xid79_nvsentinel_eviction:     [2/5] ✓ - 2.34s
+[TEST] 2025-12-30T14:16:07 INFO test_gpu_xid79_nvsentinel_eviction:     [3/5] ✓ - 0.69s
+[TEST] 2025-12-30T14:16:10 INFO test_gpu_xid79_nvsentinel_eviction:     [4/5] ✓ - 2.11s
+[TEST] 2025-12-30T14:16:11 INFO test_gpu_xid79_nvsentinel_eviction:     [5/5] ✓ - 0.62s
+[TEST] 2025-12-30T14:16:12 INFO test_gpu_xid79_nvsentinel_eviction:   Recovery: 5/5 successful
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction: 
+================================================================================
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction: TEST RESULTS - NVSENTINEL-DRIVEN EVICTION
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction: ================================================================================
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction: 
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction: Phase                Success Rate       Avg Latency    
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction: -------------------------------------------------------
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction: Baseline             5/5 (100%)         1.79s
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction: During Fault         0/5 (0%)           0.38s
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction: After Recovery       5/5 (100%)         1.66s
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction: 
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction: KEY RESULTS:
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction:   ✓ CUDA passthrough (toggle-based): PASS
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction:   ✓ NVSentinel cordoned node: PASS
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction:   ✓ node-drainer evicted pods (no force delete): PASS
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction:   ✓ New pods clean (no CUDA lib, healthy node): PASS
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction: 
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction: 🎉 SUCCESS: Full NVSentinel-driven fault recovery!
+[TEST] 2025-12-30T14:16:23 INFO test_gpu_xid79_nvsentinel_eviction: ================================================================================
+[TEST] 2025-12-30T14:16:32 INFO ManagedDeployment: [HW Faults] Cleaning up hardware fault artifacts...
+[TEST] 2025-12-30T14:16:32 INFO ManagedDeployment: [HW Faults] Cleaning up hardware fault injection...
+[TEST] 2025-12-30T14:16:32 INFO ManagedDeployment: [HW Faults] Cleanup target node: aks-a100a-36888584-vmss000002
+[TEST] 2025-12-30T14:16:32 INFO ManagedDeployment: [HW Faults] Uncordoning node aks-a100a-36888584-vmss000002...
+[TEST] 2025-12-30T14:16:33 INFO ManagedDeployment: [HW Faults] Node aks-a100a-36888584-vmss000002 uncordoned
+[TEST] 2025-12-30T14:16:33 INFO ManagedDeployment: [HW Faults] ✓ Node aks-a100a-36888584-vmss000002 uncordoned
+[TEST] 2025-12-30T14:16:38 INFO ManagedDeployment: [HW Faults] CUDA artifacts cleaned up
+[TEST] 2025-12-30T14:16:39 WARNING ManagedDeployment: [HW Faults] Failed to clean fault gpu_xid_79-8dde186b
+[TEST] 2025-12-30T14:16:39 INFO ManagedDeployment: [HW Faults] Cleanup complete
+[TEST] 2025-12-30T14:16:39 INFO ManagedDeployment: [HW Faults] ✓ Hardware fault cleanup complete
+[TEST] 2025-12-30T14:16:39 INFO ManagedDeployment: Cleaning up 17 active port forwards

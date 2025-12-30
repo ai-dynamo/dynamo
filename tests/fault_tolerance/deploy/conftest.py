@@ -35,7 +35,7 @@ def pytest_addoption(parser):
         help="Include tests that require custom builds (e.g., MoE models). "
         "By default, these tests are excluded.",
     )
-parser.addoption(
+    parser.addoption(
         "--skip-service-restart",
         action="store_true",
         default=False,
@@ -61,7 +61,7 @@ parser.addoption(
         "--hw-fault-target-node",
         type=str,
         default=None,
-        help="Target node for hardware fault injection (auto-detect if not specified)"
+        help="Target node for hardware fault injection (auto-detect if not specified)",
     )
     parser.addoption(
         "--hw-fault-backend",
@@ -156,13 +156,13 @@ def skip_service_restart(request):
 def hw_fault_config(request):
     """
     Get hardware fault configuration from command line options.
-    
+
     Returns None if --enable-hw-faults is not set, allowing tests to skip.
     Returns a config dict if enabled.
     """
     if not request.config.getoption("--enable-hw-faults"):
         return None
-    
+
     return {
         "enabled": True,
         "xid_type": request.config.getoption("--hw-fault-xid"),
