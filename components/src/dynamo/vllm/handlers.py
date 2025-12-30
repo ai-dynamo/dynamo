@@ -861,6 +861,40 @@ class BaseWorkerHandler(ABC):
         # TODO: properly propagate the trace-flags from current span.
         return {"traceparent": f"00-{trace_id}-{span_id}-01"}
 
+    @staticmethod
+    def _log_with_lora_context(
+        message: str,
+        request_id: str,
+        lora_request=None,
+        level: str = "debug",
+        **kwargs,
+    ) -> None:
+        """
+        Log a message with optional LoRA context.
+
+        Args:
+            message: Base message to log (can include {lora_info} placeholder)
+            request_id: Request ID for correlation
+            lora_request: Optional LoRA request object
+            level: Log level ("debug" or "info")
+            **kwargs: Additional format arguments for the message
+        """
+        if lora_request:
+            lora_info = f" with LoRA {lora_request.lora_name}"
+        else:
+            lora_info = ""
+
+        formatted_message = message.format(
+            request_id=request_id,
+            lora_info=lora_info,
+            **kwargs,
+        )
+
+        if level == "info":
+            logger.info(formatted_message)
+        else:
+            logger.debug(formatted_message)
+
     async def generate_tokens(
         self,
         prompt,
@@ -873,15 +907,11 @@ class BaseWorkerHandler(ABC):
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
-            if lora_request:
-                logger.debug(
-                    f"Starting token generation for request {request_id} with LoRA: "
-                    f"{lora_request.lora_name} (ID: {lora_request.lora_int_id})"
-                )
-            else:
-                logger.debug(
-                    f"Starting token generation for request {request_id} (no LoRA)"
-                )
+            self._log_with_lora_context(
+                "Starting token generation for request {request_id}{lora_info}",
+                request_id,
+                lora_request,
+            )
             gen = self.engine_client.generate(
                 prompt,
                 sampling_params,
@@ -897,11 +927,11 @@ class BaseWorkerHandler(ABC):
                     # res is vllm's RequestOutput
 
                     if not res.outputs:
-                        if lora_request:
-                            logger.debug(
-                                f"Request {request_id} with LoRA {lora_request.lora_name} "
-                                "returned no outputs"
-                            )
+                        self._log_with_lora_context(
+                            "Request {request_id}{lora_info} returned no outputs",
+                            request_id,
+                            lora_request,
+                        )
                         # Use string format "error: message" for consistency with vLLM's string-based finish_reason
                         # Rust will parse this into FinishReason::Error(message)
                         yield {
@@ -932,17 +962,14 @@ class BaseWorkerHandler(ABC):
                             embedding_sequence_length=embedding_sequence_length,
                         )
                         # Log completion with LoRA info (debug level to avoid log spam)
-                        if lora_request:
-                            logger.debug(
-                                f"Completed token generation for request {request_id} with LoRA "
-                                f"{lora_request.lora_name}: {next_total_toks} output tokens, "
-                                f"finish_reason={output.finish_reason}"
-                            )
-                        else:
-                            logger.debug(
-                                f"Completed token generation for request {request_id}: "
-                                f"{next_total_toks} output tokens, finish_reason={output.finish_reason}"
-                            )
+                        self._log_with_lora_context(
+                            "Completed token generation for request {request_id}{lora_info}: "
+                            "{output_tokens} output tokens, finish_reason={finish_reason}",
+                            request_id,
+                            lora_request,
+                            output_tokens=next_total_toks,
+                            finish_reason=output.finish_reason,
+                        )
                     if output.stop_reason:
                         out["stop_reason"] = output.stop_reason
                     yield out
@@ -1342,12 +1369,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     }
 
                     # Log prefill completion with LoRA info
-                    if lora_request:
-                        logger.info(
-                            f"Prefill completed for request {request_id} with LoRA {lora_request.lora_name}: "
-                            f"generated {len(token_ids)} token(s), "
-                            f"has_kv_params={res.kv_transfer_params is not None}"
-                        )
+                    self._log_with_lora_context(
+                        "Prefill completed for request {request_id}{lora_info}: "
+                        "generated {token_count} token(s), has_kv_params={has_kv_params}",
+                        request_id,
+                        lora_request,
+                        level="info" if lora_request else "debug",
+                        token_count=len(token_ids),
+                        has_kv_params=res.kv_transfer_params is not None,
+                    )
 
                     yield output
             except asyncio.CancelledError:
