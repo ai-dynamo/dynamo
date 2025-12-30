@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::oneshot;
 
@@ -626,22 +626,28 @@ impl ModelManager {
     ) -> anyhow::Result<Arc<DashMap<WorkerId, Option<ModelRuntimeConfig>>>> {
         let endpoint_id = endpoint.id();
 
-        // Return existing if present
+        // Fast path: return existing if present
         if let Some(existing) = self.runtime_configs.get(&endpoint_id) {
             return Ok(existing.clone());
         }
 
-        // Create new DashMap and spawn background watcher
+        // Atomic get-or-insert to avoid TOCTOU race
         let inner_map = Arc::new(DashMap::new());
-        self.runtime_configs
-            .insert(endpoint_id.clone(), inner_map.clone());
+        let (map, is_new) = match self.runtime_configs.entry(endpoint_id) {
+            Entry::Occupied(e) => (e.get().clone(), false),
+            Entry::Vacant(e) => {
+                e.insert(inner_map.clone());
+                (inner_map, true)
+            }
+        };
 
-        // Spawn background task to watch DiscoveryQuery::EndpointModels
-        // and update inner_map when configs change
-        self.spawn_runtime_config_watcher(endpoint, inner_map.clone())
-            .await?;
+        // Only spawn watcher if we were the one who inserted
+        if is_new {
+            self.spawn_runtime_config_watcher(endpoint, map.clone())
+                .await?;
+        }
 
-        Ok(inner_map)
+        Ok(map)
     }
 
     /// Get disaggregated endpoint for a specific worker.
