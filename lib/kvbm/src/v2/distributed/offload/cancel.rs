@@ -340,11 +340,8 @@ mod tests {
 
         // Confirmation should NOT resolve while draining
         let confirmation = token.wait_confirmed();
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_millis(30),
-            confirmation.wait(),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(tokio::time::Duration::from_millis(30), confirmation.wait()).await;
         assert!(result.is_err(), "Should timeout while in_flight > 0");
 
         // Still draining
