@@ -832,14 +832,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
 
         // Determine if this router should handle local state updates (add_request, free, etc.)
-        // When routing hints are present, the external caller handles state tracking
-        // via separate API calls, so we skip local updates here.
+        // Only skip local updates for GAIE Stage 2: when BOTH prefill and decode worker IDs
+        // are externally specified (indicates external orchestrator handles tracking).
+        // For internal routing (e.g., bootstrap optimization with only prefill_worker_id set),
+        // we still handle updates locally.
         let routing = request.routing.as_ref();
         let handle_local_updates = routing
             .map(|r| {
-                // No routing hints = we handle updates locally
-                r.backend_instance_id.is_none()
-                    && (r.prefill_worker_id.is_none() || r.decode_worker_id.is_none())
+                // GAIE Stage 2 sets both worker IDs - external caller handles tracking
+                // All other cases (including backend_instance_id for routing) - we handle locally
+                !(r.prefill_worker_id.is_some() && r.decode_worker_id.is_some())
             })
             .unwrap_or(true);
 
