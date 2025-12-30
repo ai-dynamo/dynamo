@@ -421,7 +421,13 @@ impl ValidateRequest for NvCreateCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_model(&self.inner.model)?;
-        validate::validate_prompt(&self.inner.prompt)?;
+
+        // Validate prompt and prompt_embeds together (checks presence, format, and content)
+        validate::validate_prompt_or_embeds(
+            Some(&self.inner.prompt),
+            self.inner.prompt_embeds.as_deref(),
+        )?;
+
         validate::validate_suffix(self.inner.suffix.as_deref())?;
         validate::validate_max_tokens(self.inner.max_tokens)?;
         validate::validate_temperature(self.inner.temperature)?;
@@ -458,7 +464,9 @@ impl ValidateRequest for NvCreateCompletionRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engines::ValidateRequest;
     use crate::protocols::common::OutputOptionsProvider;
+    use base64::Engine;
     use serde_json::json;
 
     #[test]
@@ -498,6 +506,146 @@ mod tests {
 
             assert_eq!(output_options.skip_special_tokens, Some(skip_value));
         }
+    }
+
+    #[test]
+    fn test_prompt_embeds_only() {
+        // Create valid embeddings: > 100 bytes (PyTorch format)
+        let valid_data = vec![0u8; 256];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&valid_data);
+
+        let json_str = json!({
+            "model": "test-model",
+            "prompt": "test",
+            "prompt_embeds": encoded
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        assert!(ValidateRequest::validate(&request).is_ok());
+        assert!(request.inner.prompt_embeds.is_some());
+    }
+
+    #[test]
+    fn test_both_prompt_and_embeds() {
+        // Both fields are allowed, prompt_embeds takes precedence at worker level
+        // Create valid embeddings: > 100 bytes (PyTorch format)
+        let valid_data = vec![0u8; 256];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&valid_data);
+
+        let json_str = json!({
+            "model": "test-model",
+            "prompt": "Hello",
+            "prompt_embeds": encoded
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        assert!(ValidateRequest::validate(&request).is_ok());
+    }
+
+    #[test]
+    fn test_invalid_base64() {
+        // Create invalid base64 that's long enough (>100 bytes) to pass size check
+        // Use characters that look like base64 but aren't valid
+        let invalid_base64 = "not-valid-base64!!!".repeat(10); // 190 bytes, looks like base64 but invalid
+
+        let json_str = json!({
+            "model": "test-model",
+            "prompt": "test",
+            "prompt_embeds": invalid_base64
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        let result = ValidateRequest::validate(&request);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("base64"));
+    }
+
+    #[test]
+    fn test_embeds_too_large() {
+        // Create embeddings with DECODED size larger than 10MB
+        // Base64 encoding adds ~33% overhead, so we need 11MB decoded = ~14.7MB encoded
+        let large_data = vec![0u8; 11 * 1024 * 1024]; // 11MB decoded
+        let large_embeds = base64::engine::general_purpose::STANDARD.encode(&large_data);
+
+        let json_str = json!({
+            "model": "test-model",
+            "prompt": "test",
+            "prompt_embeds": large_embeds
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        let result = ValidateRequest::validate(&request);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("10MB"));
+    }
+
+    #[test]
+    fn test_embeds_too_small() {
+        // Create embeddings with DECODED size smaller than 100 bytes
+        let small_data = vec![0u8; 20]; // Only 20 bytes when decoded
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&small_data);
+
+        let json_str = json!({
+            "model": "test-model",
+            "prompt": "test",
+            "prompt_embeds": encoded
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        let result = ValidateRequest::validate(&request);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("100 bytes")
+                || err_msg.contains("at least")
+                || err_msg.contains("decoded")
+        );
+    }
+
+    #[test]
+    fn test_embeddings_with_empty_prompt() {
+        // Test that empty prompt is ALLOWED when embeddings provided
+        let valid_data = vec![0u8; 256]; // Valid size and aligned
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&valid_data);
+
+        let json_str = json!({
+            "model": "test-model",
+            "prompt": "", // Empty prompt is OK with embeddings
+            "prompt_embeds": encoded
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        // Should succeed - embeddings take precedence, prompt can be empty
+        assert!(ValidateRequest::validate(&request).is_ok());
+    }
+
+    #[test]
+    fn test_empty_prompt_without_embeddings_fails() {
+        // Empty prompt WITHOUT embeddings should fail
+        let json_str = json!({
+            "model": "test-model",
+            "prompt": "",  // Empty prompt
+            // No prompt_embeds
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        let result = ValidateRequest::validate(&request);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
     }
 
     #[test]
