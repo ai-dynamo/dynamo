@@ -179,6 +179,12 @@ impl PrefillRouter {
         // Store endpoint_id for later use in build_bootstrap_info
         let _ = self.endpoint_id.set(endpoint.id());
 
+        // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
+        // This must be done before creating the router so bootstrap info is available
+        model_manager
+            .get_or_create_runtime_config_watcher(&endpoint)
+            .await?;
+
         let inner_router = if self.router_mode.is_kv_routing() {
             // Create KV chooser using the endpoint
             let kv_chooser = model_manager
