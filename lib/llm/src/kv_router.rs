@@ -841,7 +841,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .map(|r| {
                 // GAIE Stage 2 sets both worker IDs - external caller handles tracking
                 // All other cases (including backend_instance_id for routing) - we handle locally
-                !(r.prefill_worker_id.is_some() && r.decode_worker_id.is_some())
+                r.prefill_worker_id.is_none() || r.decode_worker_id.is_none()
             })
             .unwrap_or(true);
 
