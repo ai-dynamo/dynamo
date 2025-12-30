@@ -56,7 +56,7 @@ def planner():
     args.backend = "vllm"
     args.no_operation = True  # Don't actually scale
     args.no_correction = False  # Allow correction factors
-    args.metric_pulling_prometheus_endpoint = "http://localhost:9090" # dummy endpoint
+    args.metric_pulling_prometheus_endpoint = "http://localhost:9090"  # dummy endpoint
     args.metric_reporting_prometheus_port = 0  # 0 means disabled
     args.load_predictor = "constant"
     args.load_prediction_window_size = 10
