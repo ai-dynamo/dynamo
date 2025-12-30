@@ -212,7 +212,7 @@ When disabled, you can manually specify secrets as you would for a normal pod sp
         nvidia.com/disable-image-pull-secret-discovery: "true"
       extraPodSpec:
         imagePullSecrets:
-          - name: nvcr.io/nvidia/ai-dynamo-secret
+          - name: my-registry-secret
           - name: another-secret
         mainContainer:
           image: your-image

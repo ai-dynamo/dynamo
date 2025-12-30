@@ -72,7 +72,6 @@
    backends/vllm/gpt-oss.md
    backends/vllm/LMCache_Integration.md
    backends/vllm/multi-node.md
-   backends/vllm/multimodal.md
    backends/vllm/prometheus.md
    backends/vllm/speculative_decoding.md
 

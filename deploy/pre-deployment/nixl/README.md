@@ -286,7 +286,7 @@ Interactive script that provides flexible build and deployment workflow:
 
 ### nixlbench-deployment.yaml
 Base Kubernetes deployment template that gets customized by the script:
-- **Template image**: `nvcr.io/nvidia/ai-dynamo/nixlbench:version-arch`
+- **Template image**: `my-registry/nixlbench:version-arch`
 - **Resource allocation**: 10 CPU, 5Gi memory, 1 GPU per pod
 - **ETCD integration**: Pre-configured environment variables
 - **Benchmark command**: Runs with VRAM segment configuration

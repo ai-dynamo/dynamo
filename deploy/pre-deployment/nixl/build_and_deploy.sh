@@ -160,7 +160,7 @@ validate_architecture() {
 # Function to prompt for registry
 prompt_for_registry() {
     echo
-    printf "Enter your Docker registry (e.g., nvcr.io/nvidia/ai-dynamo, docker.io/username): "
+    printf "Enter your Docker registry (e.g., my-registry, docker.io/username): "
     read REGISTRY
     if [ -z "$REGISTRY" ]; then
         echo "Error: Registry cannot be empty"
@@ -205,7 +205,7 @@ update_deployment() {
     cp "${SCRIPT_DIR}/nixlbench-deployment.yaml" "$deployment_file"
 
     # Update the image field using sed
-    sed -i "s|nvcr.io/nvidia/ai-dynamo/nixlbench:version-arch|${registry}/nixlbench:${NIXL_VERSION}-${arch}|g" "$deployment_file"
+    sed -i "s|my-registry/nixlbench:version-arch|${registry}/nixlbench:${NIXL_VERSION}-${arch}|g" "$deployment_file"
 
     echo "Deployment file updated with image: ${registry}/nixlbench:${NIXL_VERSION}-${arch}"
 }

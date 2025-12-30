@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: nixl-benchmark
-        image: "nvcr.io/nvidia/ai-dynamo/nixlbench:version-arch"
+        image: "my-registry/nixlbench:version-arch"
         command: ["sh", "-c"]
         env:
           - name: ETCD_ENDPOINTS

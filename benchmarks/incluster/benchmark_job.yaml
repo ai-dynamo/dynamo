@@ -17,7 +17,7 @@ spec:
       containers:
       - name: benchmark-runner
         # TODO: update to latest public image in next release
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

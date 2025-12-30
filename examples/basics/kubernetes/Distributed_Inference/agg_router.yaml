@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
@@ -35,7 +35,7 @@ spec:
             path: /YOUR/LOCAL/CACHE/FOLDER
             type: DirectoryOrCreate
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           volumeMounts:
           - name: local-model-cache
             mountPath: /root/.cache

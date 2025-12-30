@@ -98,7 +98,7 @@ class DgdPlannerServiceConfig(BaseModel):
     replicas: int = 1
     extraPodSpec: PodSpec = PodSpec(
         mainContainer=Container(
-            image="nvcr.io/nvidia/ai-dynamo/dynamo-runtime:0.7.0",  # placeholder
+            image="my-registry/dynamo-runtime:my-tag",  # placeholder
             workingDir=f"{get_workspace_dir()}/components/src/dynamo/planner",
             command=["python3", "-m", "dynamo.planner.planner_sla"],
             args=[],

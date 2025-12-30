@@ -21,19 +21,6 @@ impl Registry {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(RegistryInner::default())),
-            is_static: false,
         }
-    }
-
-    pub fn new_with_static(is_static: bool) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(RegistryInner::default())),
-            is_static,
-        }
-    }
-
-    /// Check if this registry is for a static runtime
-    pub fn is_static(&self) -> bool {
-        self.is_static
     }
 }

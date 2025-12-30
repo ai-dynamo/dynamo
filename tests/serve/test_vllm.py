@@ -171,30 +171,6 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
-    "agg-request-plane-tcp": VLLMConfig(
-        name="agg-request-plane-tcp",
-        directory=vllm_dir,
-        script_name="agg_request_planes.sh",
-        marks=[pytest.mark.gpu_1],
-        model="Qwen/Qwen3-0.6B",
-        script_args=["--tcp"],
-        request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
-        ],
-    ),
-    "agg-request-plane-http": VLLMConfig(
-        name="agg-request-plane-http",
-        directory=vllm_dir,
-        script_name="agg_request_planes.sh",
-        marks=[pytest.mark.gpu_1],
-        model="Qwen/Qwen3-0.6B",
-        script_args=["--http"],
-        request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
-        ],
-    ),
     "agg-router": VLLMConfig(
         name="agg-router",
         directory=vllm_dir,
