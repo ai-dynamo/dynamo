@@ -5,8 +5,8 @@
 # Setup cleanup trap
 cleanup() {
     echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID $DECODE_PID 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID $DECODE_PID 2>/dev/null || true
+    kill $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
+    wait $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
     echo "Cleanup complete."
 }
 trap cleanup EXIT INT TERM
@@ -87,8 +87,4 @@ CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang \
   --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
-  "${TRACE_ARGS[@]}" &
-DECODE_PID=$!
-
-# Wait for any worker to exit (keeps script running)
-wait
+  "${TRACE_ARGS[@]}"
