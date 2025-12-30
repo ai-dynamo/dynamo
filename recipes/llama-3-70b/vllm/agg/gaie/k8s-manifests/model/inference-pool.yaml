@@ -21,7 +21,7 @@ metadata:
 spec:
   targetPortNumber: 8000
   selector:
-    nvidia.com/dynamo-component: Frontend
+    nvidia.com/dynamo-component-type: frontend
   extensionRef:
     failureMode: FailOpen
     group: ""

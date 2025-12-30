@@ -36,9 +36,8 @@ data:
         parameters: {}
       - name: dyn-kv
         type: kv-aware-scorer
-        parameters:
-          frontendURL: http://127.0.0.1:8000/v1/chat/completions
-          timeoutMS: 10000
+      - name: dyn-cleanup
+        type: dynamo-cleanup
     schedulingProfiles:
       - name: default
         plugins:

@@ -4,6 +4,7 @@
 use derive_builder::Builder;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use validator::Validate;
 
 use crate::engines::ValidateRequest;
@@ -23,7 +24,7 @@ mod delta;
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::CreateCompletionRequest,
@@ -43,7 +44,7 @@ pub struct NvCreateCompletionRequest {
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionResponse {
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::CreateCompletionResponse,
@@ -183,8 +184,8 @@ impl CommonExtProvider for NvCreateCompletionRequest {
     }
 
     /// Guided Decoding Options
-    fn get_guided_json(&self) -> Option<&serde_json::Value> {
-        self.common.guided_json.as_ref()
+    fn get_guided_json(&self) -> Option<serde_json::Value> {
+        self.common.guided_json.clone()
     }
 
     fn get_guided_regex(&self) -> Option<String> {
@@ -238,7 +239,11 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     }
 
     fn get_stop(&self) -> Option<Vec<String>> {
-        None
+        use dynamo_async_openai::types::Stop;
+        self.inner.stop.as_ref().map(|s| match s {
+            Stop::String(s) => vec![s.clone()],
+            Stop::StringArray(arr) => arr.clone(),
+        })
     }
 
     fn nvext(&self) -> Option<&NvExt> {
@@ -650,5 +655,37 @@ mod tests {
         let result = ValidateRequest::validate(&request);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_stop() {
+        let null_stop = json!({
+            "model": "test-model",
+            "prompt": "Hello, world!"
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(null_stop).expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), None);
+
+        let one_stop = json!({
+            "model": "test-model",
+            "prompt": "Hello, world!",
+            "stop": "foo"
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(one_stop).expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), Some(vec!["foo".to_string()]));
+
+        let many_stops = json!({
+            "model": "test-model",
+            "prompt": "Hello, world!",
+            "stop": ["foo", "bar"]
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(many_stops).expect("Failed to deserialize request");
+        assert_eq!(
+            request.get_stop(),
+            Some(vec!["foo".to_string(), "bar".to_string()])
+        );
     }
 }
