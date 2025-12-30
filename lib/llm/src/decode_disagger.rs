@@ -489,7 +489,7 @@ impl MigrationContext {
             if let Some(min_tokens) = migrated_request.stop_conditions.min_tokens {
                 let remaining_min = min_tokens.saturating_sub(tokens_generated as u32);
                 migrated_request.stop_conditions.min_tokens = Some(remaining_min);
-                tracing::debug!(
+                tracing::info!(
                     original_min_tokens = min_tokens,
                     remaining_min_tokens = remaining_min,
                     "Adjusted min_tokens for migrated request",
@@ -508,8 +508,11 @@ impl MigrationContext {
                 pending_chunks = pending_chunks.len(),
                 "Created new stream for next tier",
             );
+            // Keep the old stream alive until we receive the first token from the new tier.
+            // This prevents the old context from being cancelled before KV transfer completes.
+            // The old stream will be dropped on the next tick() call (after first token received).
             return Ok(MigrationContext {
-                previous_stream: None,
+                previous_stream: Some(self.current_stream),
                 current_stream: new_stream,
                 current_instance_id: new_instance_id,
                 current_tier: new_tier,
