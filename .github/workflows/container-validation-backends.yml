@@ -122,17 +122,17 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Linter
         shell: bash
+        working-directory: ./deploy/operator
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          cd deploy/cloud/operator
           docker buildx build --platform linux/${{ matrix.platform.arch }} --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
       - name: Tester
         shell: bash
+        working-directory: ./deploy/operator
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          cd deploy/cloud/operator
           docker buildx build --platform linux/${{ matrix.platform.arch }}  --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
@@ -140,19 +140,19 @@ jobs:
           go-version: '1.24'
       - name: Check for uncommitted changes
         shell: bash
+        working-directory: ./deploy/operator
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           sudo apt-get update && sudo apt-get install -y make
-          cd deploy/cloud/operator
           make check
       - name: Build Container
         id: build-image
         shell: bash
+        working-directory: ./deploy/operator
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          cd deploy/cloud/operator
           docker buildx build --push \
               --platform linux/${{ matrix.platform.arch }} \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
