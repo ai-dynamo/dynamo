@@ -58,7 +58,6 @@ use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
     protocols::common::timing::RequestPhase,
-    tokens::SequenceHash,
 };
 
 // [gluo TODO] shouldn't need to be public
@@ -245,16 +244,15 @@ impl Indexer {
         }
     }
 
-    async fn process_routing_decision(
+    async fn process_routing_decision_for_request(
         &self,
+        tokens: &[u32],
         worker: WorkerWithDpRank,
-        local_hashes: Vec<LocalBlockHash>,
-        sequence_hashes: Vec<SequenceHash>,
     ) -> Result<(), KvRouterError> {
         match self {
             Indexer::KvIndexer(indexer) => {
                 indexer
-                    .process_routing_decision(worker, local_hashes, sequence_hashes)
+                    .process_routing_decision_for_request(tokens, worker)
                     .await
             }
             Indexer::None => Ok(()),
@@ -479,41 +477,28 @@ impl KvRouter {
         let isl_tokens = tokens.len();
 
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
-        let seq_hashes = compute_seq_hash_for_block(&block_hashes);
-
         let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
 
-        // Determine who needs seq_hashes
-        let needs_process_routing = !self.kv_router_config.use_kv_events;
-        let scheduler_needs_it = self.kv_router_config.router_track_active_blocks;
-
-        // Optimize cloning: only clone if both need it, otherwise move
-        let (maybe_seq_hashes_1, maybe_seq_hashes_2) =
-            match (needs_process_routing, scheduler_needs_it) {
-                (true, true) => (Some(seq_hashes.clone()), Some(seq_hashes)),
-                (true, false) => (Some(seq_hashes), None),
-                (false, true) => (None, Some(seq_hashes)),
-                (false, false) => (None, None),
-            };
+        // Compute seq_hashes only if scheduler needs it for active blocks tracking
+        let maybe_seq_hashes = self
+            .kv_router_config
+            .router_track_active_blocks
+            .then(|| compute_seq_hash_for_block(&block_hashes));
 
         let best_worker = self
             .scheduler
             .schedule(
                 context_id.map(|s| s.to_string()),
                 isl_tokens,
-                maybe_seq_hashes_2,
+                maybe_seq_hashes,
                 overlap_scores.clone(),
                 router_config_override,
                 update_states,
             )
             .await?;
 
-        // Process routing decision when not using KV events (approximate mode with TTL/pruning)
-        if needs_process_routing {
-            self.indexer
-                .process_routing_decision(best_worker, block_hashes, maybe_seq_hashes_1.unwrap())
-                .await?;
-        }
+        // Note: Routing decision recording (for approximate mode) is now handled
+        // by KvPushRouter::generate after select_worker returns.
 
         let overlap_amount = overlap_scores
             .scores
@@ -580,12 +565,12 @@ impl KvRouter {
     pub async fn get_potential_loads(&self, tokens: &[u32]) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
-        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
+        let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
 
-        let maybe_seq_hashes = self.kv_router_config.router_track_active_blocks.then(|| {
-            let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
-            compute_seq_hash_for_block(&block_hashes)
-        });
+        let maybe_seq_hashes = self
+            .kv_router_config
+            .router_track_active_blocks
+            .then(|| compute_seq_hash_for_block(&block_hashes));
 
         Ok(self
             .scheduler
@@ -867,6 +852,27 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             dp_rank,
             overlap_amount,
         } = selection;
+
+        // In approximate mode (use_kv_events=false), record the routing decision
+        // so the indexer can track cache state based on routing decisions.
+        // This covers both pre-selected workers and find_best_match selections.
+        if !is_query_only && !self.chooser.kv_router_config.use_kv_events {
+            let worker = WorkerWithDpRank::new(instance_id, dp_rank);
+            if let Err(e) = self
+                .chooser
+                .indexer
+                .process_routing_decision_for_request(&request.token_ids, worker)
+                .await
+            {
+                tracing::warn!(
+                    request_id = %context_id,
+                    worker_id = instance_id,
+                    dp_rank = dp_rank,
+                    error = %e,
+                    "Failed to record routing decision in approximate mode"
+                );
+            }
+        }
 
         // Record metrics in tracker: KV hit rate and worker ID based on phase
         if let Some(ref tracker) = request.tracker {
