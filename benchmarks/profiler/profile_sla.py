@@ -33,10 +33,7 @@ from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
     get_candidate_parallel_mappings,
 )
 from benchmarks.profiler.utils.defaults import EngineType
-from benchmarks.profiler.utils.dgd_generation import (
-    dump_yaml_multi_doc,
-    generate_dgd_config_with_planner,
-)
+from benchmarks.profiler.utils.dgd_generation import generate_dgd_config_with_planner
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.plot import (
     plot_decode_performance,
@@ -740,12 +737,18 @@ async def run_profile(args):
 
         # save DGD config with planner; support multi-document output when a ConfigMap is included
         with open(f"{args.output_dir}/config_with_planner.yaml", "w") as f:
-            dump_yaml_multi_doc(config, f)
+            if isinstance(config, list):
+                yaml.safe_dump_all(config, f, sort_keys=False)
+            else:
+                yaml.safe_dump(config, f, sort_keys=False)
 
         # save mocker config with planner for testing purposes
         logger.debug(f"Mocker config with planner: {mocker_config}")
         with open(f"{args.output_dir}/mocker_config_with_planner.yaml", "w") as f:
-            dump_yaml_multi_doc(mocker_config, f)
+            if isinstance(mocker_config, list):
+                yaml.safe_dump_all(mocker_config, f, sort_keys=False)
+            else:
+                yaml.safe_dump(mocker_config, f, sort_keys=False)
 
     except Exception as e:
         logger.error(f"Profile job failed with error: {e}")

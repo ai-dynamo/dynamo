@@ -26,6 +26,7 @@ from benchmarks.profiler.utils.config import (
     DgdPlannerServiceConfig,
     set_argument_value,
 )
+from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
     ParallelizationMapping,
     apply_parallel_mapping_to_config,
@@ -38,16 +39,169 @@ from dynamo.planner.defaults import MockerComponentName, SubComponentType
 MOCKER_DISAGG_CONFIG_PATH = "examples/backends/mocker/deploy/disagg.yaml"
 
 
-def dump_yaml_multi_doc(obj, stream=None) -> str | None:
-    """
-    Dump a YAML object that may be either a single document (dict) or a list of documents.
+def _get_config_modifier_from_args(args):
+    """Return an instantiated config modifier for args.backend."""
+    config_modifier_cls = CONFIG_MODIFIERS[args.backend]
+    return config_modifier_cls()
 
-    - If `stream` is provided, writes to the stream and returns None.
-    - If `stream` is None, returns the YAML string.
-    """
-    if isinstance(obj, list):
-        return yaml.safe_dump_all(obj, stream, sort_keys=False)
-    return yaml.safe_dump(obj, stream, sort_keys=False)
+
+def _find_service_name_for_subcomponent(
+    config: Config, subcomponent: SubComponentType
+) -> str:
+    """Find the service name in a DGD config for a given subComponentType."""
+    for service_name, service_cfg in config.spec.services.items():
+        if getattr(service_cfg, "subComponentType", None) == subcomponent:
+            return service_name
+    raise KeyError(f"Could not find service with subComponentType={subcomponent!r}")
+
+
+def _load_and_apply_mappings(
+    *,
+    config_path: str,
+    args,
+    config_modifier,
+    best_prefill_mapping: ParallelizationMapping | None,
+    best_decode_mapping: ParallelizationMapping | None,
+    num_gpus_per_node: int,
+) -> Config:
+    """Load a DGD config file and apply optional prefill/decode parallel mappings (single source of truth)."""
+    with open(config_path, "r") as f:
+        raw = yaml.safe_load(f)
+
+    # Update container image if provided (overrides config file images)
+    if getattr(args, "dgd_image", None):
+        raw = config_modifier.update_image(raw, args.dgd_image)
+
+    if best_prefill_mapping is not None:
+        raw = apply_parallel_mapping_to_config(
+            raw,
+            best_prefill_mapping,
+            SubComponentType.PREFILL,
+            config_modifier,
+            num_gpus_per_node,
+            is_aggregated_config=False,
+        )
+    if best_decode_mapping is not None:
+        raw = apply_parallel_mapping_to_config(
+            raw,
+            best_decode_mapping,
+            SubComponentType.DECODE,
+            config_modifier,
+            num_gpus_per_node,
+            is_aggregated_config=False,
+        )
+
+    return Config.model_validate(raw)
+
+
+def build_prefill_service_config(
+    *,
+    config_path: str,
+    args,
+    best_prefill_mapping: ParallelizationMapping,
+    num_gpus_per_node: int = 8,
+) -> tuple[str, dict]:
+    """Return (service_name, service_dict) for the prefill worker after applying mapping."""
+    config_modifier = _get_config_modifier_from_args(args)
+    config = _load_and_apply_mappings(
+        config_path=config_path,
+        args=args,
+        config_modifier=config_modifier,
+        best_prefill_mapping=best_prefill_mapping,
+        best_decode_mapping=None,
+        num_gpus_per_node=num_gpus_per_node,
+    )
+    service_name = _find_service_name_for_subcomponent(config, SubComponentType.PREFILL)
+    config_dict = config.model_dump(exclude_unset=False)
+    return service_name, config_dict["spec"]["services"][service_name]
+
+
+def build_decode_service_config(
+    *,
+    config_path: str,
+    args,
+    best_decode_mapping: ParallelizationMapping,
+    num_gpus_per_node: int = 8,
+) -> tuple[str, dict]:
+    """Return (service_name, service_dict) for the decode worker after applying mapping."""
+    config_modifier = _get_config_modifier_from_args(args)
+    config = _load_and_apply_mappings(
+        config_path=config_path,
+        args=args,
+        config_modifier=config_modifier,
+        best_prefill_mapping=None,
+        best_decode_mapping=best_decode_mapping,
+        num_gpus_per_node=num_gpus_per_node,
+    )
+    service_name = _find_service_name_for_subcomponent(config, SubComponentType.DECODE)
+    config_dict = config.model_dump(exclude_unset=False)
+    return service_name, config_dict["spec"]["services"][service_name]
+
+
+def generate_prefill_service_config_preview(
+    *,
+    config_path: str,
+    args,
+    best_prefill_mapping: ParallelizationMapping,
+    num_gpus_per_node: int = 8,
+) -> dict:
+    """Generate a prefill-only service config object for WebUI 'Show Config'."""
+    service_name, service_dict = build_prefill_service_config(
+        config_path=config_path,
+        args=args,
+        best_prefill_mapping=best_prefill_mapping,
+        num_gpus_per_node=num_gpus_per_node,
+    )
+    return {service_name: service_dict}
+
+
+def generate_decode_service_config_preview(
+    *,
+    config_path: str,
+    args,
+    best_decode_mapping: ParallelizationMapping,
+    num_gpus_per_node: int = 8,
+) -> dict:
+    """Generate a decode-only service config object for WebUI 'Show Config'."""
+    service_name, service_dict = build_decode_service_config(
+        config_path=config_path,
+        args=args,
+        best_decode_mapping=best_decode_mapping,
+        num_gpus_per_node=num_gpus_per_node,
+    )
+    return {service_name: service_dict}
+
+
+def generate_prefill_decode_services_config_preview(
+    *,
+    config_path: str,
+    args,
+    best_prefill_mapping: ParallelizationMapping,
+    best_decode_mapping: ParallelizationMapping,
+    num_gpus_per_node: int = 8,
+) -> dict[str, dict]:
+    """Generate a (prefill+decode)-only services config object for WebUI 'Show Config'."""
+    config_modifier = _get_config_modifier_from_args(args)
+    config = _load_and_apply_mappings(
+        config_path=config_path,
+        args=args,
+        config_modifier=config_modifier,
+        best_prefill_mapping=best_prefill_mapping,
+        best_decode_mapping=best_decode_mapping,
+        num_gpus_per_node=num_gpus_per_node,
+    )
+    prefill_service_name = _find_service_name_for_subcomponent(
+        config, SubComponentType.PREFILL
+    )
+    decode_service_name = _find_service_name_for_subcomponent(
+        config, SubComponentType.DECODE
+    )
+    config_dict = config.model_dump(exclude_unset=False)
+    services = {
+        prefill_service_name: config_dict["spec"]["services"][prefill_service_name],
+        decode_service_name: config_dict["spec"]["services"][decode_service_name],
+    }
+    return services
 
 
 def generate_dgd_config_with_planner(
@@ -78,38 +232,14 @@ def generate_dgd_config_with_planner(
               If a ConfigMap is generated, returns [ConfigMap, DGD]; otherwise returns a single DGD dict.
     """
 
-    # Load config from file
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-
-    # Update container image if provided
-    # This overrides the default image in the config file for all DGD components
-    if args.dgd_image:
-        config = config_modifier.update_image(config, args.dgd_image)
-
-    # Apply parallelization mappings (optional).
-    # For final DGD generation this is a disaggregated config, so is_aggregated_config=False.
-    if best_prefill_mapping is not None:
-        config = apply_parallel_mapping_to_config(
-            config,
-            best_prefill_mapping,
-            SubComponentType.PREFILL,
-            config_modifier,
-            num_gpus_per_node,
-            is_aggregated_config=False,
-        )
-
-    if best_decode_mapping is not None:
-        config = apply_parallel_mapping_to_config(
-            config,
-            best_decode_mapping,
-            SubComponentType.DECODE,
-            config_modifier,
-            num_gpus_per_node,
-            is_aggregated_config=False,
-        )
-
-    config = Config.model_validate(config)
+    config = _load_and_apply_mappings(
+        config_path=config_path,
+        args=args,
+        config_modifier=config_modifier,
+        best_prefill_mapping=best_prefill_mapping,
+        best_decode_mapping=best_decode_mapping,
+        num_gpus_per_node=num_gpus_per_node,
+    )
 
     # add the planner service
     planner_config = DgdPlannerServiceConfig()
