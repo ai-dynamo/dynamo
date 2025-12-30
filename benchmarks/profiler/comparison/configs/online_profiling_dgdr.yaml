@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Profile-ALL (online AIPerf) profiling for Qwen3-32B
+# Duration: ~30-60 minutes (real deployments with AIPerf benchmarks)
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-32b-online
+spec:
+  model: "Qwen/Qwen3-32B"
+  backend: vllm
+
+  profilingConfig:
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0.post2"
+    config:
+      sla:
+        isl: 2048
+        osl: 256
+        ttft: 500.0
+        itl: 50.0
+
+      hardware:
+        min_num_gpus_per_engine: 1
+        max_num_gpus_per_engine: 8
+
+      sweep:
+        use_ai_configurator: false  # Use real deployments
+
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+
+  autoApply: false  # Profile only, don't deploy
+
