@@ -186,6 +186,7 @@ fn create_chat_request(include_usage: Option<bool>) -> NvCreateChatCompletionReq
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        chat_template_kwargs: None,
         media_io_kwargs: None,
         unsupported_fields: Default::default(),
     }
@@ -424,6 +425,7 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        chat_template_kwargs: None,
         media_io_kwargs: None,
         unsupported_fields: Default::default(),
     }

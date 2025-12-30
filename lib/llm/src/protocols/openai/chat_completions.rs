@@ -47,6 +47,10 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
 
+    /// Alias for chat_template_args for backwards compatibility with vLLM/Python conventions
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<std::collections::HashMap<String, serde_json::Value>>,
+
     /// Runtime media decoding parameters.
     /// When provided, these override the MDC defaults
     /// Example: `{"video": {"num_frames": 16}}`

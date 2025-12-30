@@ -251,7 +251,8 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn chat_template_args(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
-        self.chat_template_args.as_ref()
+        // Prefer chat_template_kwargs if both are provided for backwards compatibility
+        self.chat_template_kwargs.as_ref().or(self.chat_template_args.as_ref())
     }
 
     fn media_io_kwargs(&self) -> Option<&MediaDecoder> {

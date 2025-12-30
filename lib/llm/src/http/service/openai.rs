@@ -1773,6 +1773,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+        chat_template_kwargs: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
@@ -1805,6 +1806,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+        chat_template_kwargs: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
@@ -2021,6 +2023,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+        chat_template_kwargs: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
@@ -2051,6 +2054,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+        chat_template_kwargs: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
@@ -2080,6 +2084,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+        chat_template_kwargs: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
@@ -2109,6 +2114,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+        chat_template_kwargs: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
@@ -2140,6 +2146,7 @@ mod tests {
                 .unwrap(),
             nvext: None,
             chat_template_args: None,
+        chat_template_kwargs: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
@@ -2169,6 +2176,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+        chat_template_kwargs: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
