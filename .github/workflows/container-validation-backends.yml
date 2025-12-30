@@ -25,6 +25,11 @@ on:
 #     group: docker-build-test-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
 #     cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+env:
+  BUILDER_NAME: dynamo-builder # here for simplifying while developing
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+
 jobs:
   changed-files:
     runs-on: ubuntu-latest
