@@ -62,21 +62,23 @@ class MigrationHandler(BaseWorkerHandler):
 
         This method:
         1. Generates bootstrap info (host, port, room)
-        2. Yields the bootstrap info immediately
-        3. Triggers the KV transfer in the background
+        2. Triggers the KV transfer and waits for pending outputs
+        3. Yields the response with bootstrap_info and pending_outputs
 
         The caller should pass the returned bootstrap_info to the destination
         decode worker, which will use it to receive the KV cache.
 
         Args:
-            request: Request dict with 'rid' key containing the request ID to migrate.
+            request: Request dict with:
+                - 'rid': Request ID to migrate (required)
+                - 'tokens_seen': Number of tokens already yielded to client (optional, default 0)
             context: Context object for request tracking.
 
         Yields:
-            Dict with bootstrap_info containing:
-                - bootstrap_host: Host for KV transfer connection
-                - bootstrap_port: Port for KV transfer connection
-                - bootstrap_room: Unique room ID for this migration
+            Dict with:
+                - rid: Request ID
+                - bootstrap_info: Connection details for KV transfer
+                - pending_outputs: List of output chunks the frontend hasn't seen yet
 
         Raises:
             ValueError: If 'rid' is not provided in request.
@@ -85,7 +87,11 @@ class MigrationHandler(BaseWorkerHandler):
         if not rid:
             raise ValueError("'rid' is required in migration request")
 
-        logging.info(f"Processing migration request for rid: {rid}")
+        tokens_seen = request.get("tokens_seen", 0)
+
+        logging.info(
+            f"Processing migration request for rid: {rid}, tokens_seen: {tokens_seen}"
+        )
 
         # Generate bootstrap info for this migration
         bootstrap_room = self._generate_bootstrap_room()
@@ -100,21 +106,26 @@ class MigrationHandler(BaseWorkerHandler):
             f"host={self.bootstrap_host}, port={self.bootstrap_port}, room={bootstrap_room}"
         )
 
-        # Trigger the migration in the SGLang engine
+        # Trigger the migration in the SGLang engine and get pending outputs
         # This will:
         # 1. Find and remove the request from running_batch
         # 2. Setup KV sender with the bootstrap info
-        # 3. Transfer KV cache to the destination
-        self.engine.migrate_request(
+        # 3. Return any output tokens the frontend hasn't seen yet
+        pending_outputs = await self.engine.migrate_request(
             rid=rid,
             bootstrap_host=self.bootstrap_host,
             bootstrap_port=self.bootstrap_port,
             bootstrap_room=bootstrap_room,
+            tokens_seen=tokens_seen,
         )
 
-        logging.info(f"Migration initiated for rid: {rid}, room: {bootstrap_room}")
+        logging.info(
+            f"Migration initiated for rid: {rid}, room: {bootstrap_room}, "
+            f"pending_outputs: {len(pending_outputs)}"
+        )
 
         yield {
             "rid": rid,
             "bootstrap_info": bootstrap_info,
+            "pending_outputs": pending_outputs,
         }
