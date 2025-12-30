@@ -115,6 +115,21 @@ For a user-focused guide on deploying and managing models with DynamoModel, see:
 
 **📖 [Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
 
+## Webhooks
+
+The Dynamo Operator uses **Kubernetes admission webhooks** for real-time validation of custom resources before they are persisted to the cluster. Webhooks are **enabled by default** and ensure that invalid configurations are rejected immediately at the API server level.
+
+**Key Features:**
+- ✅ Shared certificate infrastructure across all webhook types
+- ✅ Automatic certificate generation (for testing/development)
+- ✅ cert-manager integration (for production)
+- ✅ Multi-operator support with lease-based coordination
+- ✅ Immutability enforcement for critical fields
+
+For complete documentation on webhooks, certificate management, and troubleshooting, see:
+
+**📖 [Webhooks Guide](./webhooks.md)**
+
 ## Installation
 
 ### Quick Install with Helm
@@ -140,13 +155,13 @@ export DOCKER_SERVER=your-registry.com/  # your container registry
 export IMAGE_TAG=latest
 
 # Build operator image
-cd deploy/cloud/operator
+cd deploy/operator
 docker build -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG .
 docker push $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG
 cd -
 
 # Install CRDs
-cd deploy/cloud/helm
+cd deploy/helm/charts
 helm install dynamo-crds ./crds/ --namespace default
 
 # Install platform with custom operator image

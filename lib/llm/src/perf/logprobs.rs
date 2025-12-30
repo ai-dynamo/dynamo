@@ -961,6 +961,7 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
                 logprobs: Some(ChatChoiceLogprobs {
                     content: Some(token_logprobs),
                     refusal: None,
@@ -972,6 +973,7 @@ mod tests {
             system_fingerprint: None,
             object: "chat.completion.chunk".to_string(),
             usage: None,
+            nvext: None,
         }
     }
 
@@ -993,6 +995,7 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
                 logprobs: Some(ChatChoiceLogprobs {
                     content: Some(token_logprobs),
                     refusal: None,
@@ -1009,6 +1012,7 @@ mod tests {
             system_fingerprint: None,
             object: "chat.completion.chunk".to_string(),
             usage: None,
+            nvext: None,
         }
     }
 
@@ -1341,6 +1345,7 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
                 logprobs: None, // No logprobs
             }],
             created: 1234567890,
@@ -1349,6 +1354,7 @@ mod tests {
             system_fingerprint: None,
             object: "chat.completion.chunk".to_string(),
             usage: None,
+            nvext: None,
         };
 
         let logprobs = response.extract_logprobs_by_choice();
@@ -1563,6 +1569,7 @@ mod tests {
             system_fingerprint: None,
             object: "chat.completion.chunk".to_string(),
             usage: None,
+            nvext: None,
         }
     }
 

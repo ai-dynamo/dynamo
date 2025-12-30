@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{- if and .Values.webhook.enabled .Values.webhook.certManager.enabled }}
+---
+# Self-signed issuer to bootstrap the CA
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-selfsigned-issuer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+# Root CA Certificate
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-root-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+spec:
+  isCA: true
+  commonName: {{ include "dynamo-operator.fullname" . }}-root-ca
+  secretName: {{ include "dynamo-operator.fullname" . }}-root-ca-secret
+  duration: {{ .Values.webhook.certManager.certificate.rootCA.duration }}
+  renewBefore: {{ .Values.webhook.certManager.certificate.rootCA.renewBefore }}
+  privateKey:
+    algorithm: RSA
+    size: 4096
+  issuerRef:
+    name: {{ include "dynamo-operator.fullname" . }}-selfsigned-issuer
+    kind: Issuer
+---
+# CA Issuer (uses the root CA to sign webhook certs)
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-ca-issuer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ include "dynamo-operator.fullname" . }}-root-ca-secret
+---
+# Webhook Server Certificate
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-serving-cert
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.webhook.certificateSecret.name }}
+  duration: {{ .Values.webhook.certManager.certificate.duration }}
+  renewBefore: {{ .Values.webhook.certManager.certificate.renewBefore }}
+  commonName: {{ include "dynamo-operator.fullname" . }}-webhook-service.{{ .Release.Namespace }}.svc
+  dnsNames:
+  - {{ include "dynamo-operator.fullname" . }}-webhook-service
+  - {{ include "dynamo-operator.fullname" . }}-webhook-service.{{ .Release.Namespace }}.svc
+  - {{ include "dynamo-operator.fullname" . }}-webhook-service.{{ .Release.Namespace }}.svc.{{ .Values.kubernetesClusterDomain }}
+  issuerRef:
+    name: {{ include "dynamo-operator.fullname" . }}-ca-issuer
+    kind: Issuer
+{{- end }}
+

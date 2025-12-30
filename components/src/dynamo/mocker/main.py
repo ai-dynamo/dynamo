@@ -7,6 +7,7 @@
 import asyncio
 import logging
 import os
+import signal
 
 import uvloop
 
@@ -16,10 +17,21 @@ from dynamo.llm import EngineType, EntrypointArgs, make_engine, run_input
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .args import create_temp_engine_args_file, parse_args
+from .args import create_temp_engine_args_file, parse_args, resolve_planner_profile_data
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+async def graceful_shutdown(runtimes: list):
+    """
+    Shutdown dynamo distributed runtime instances.
+    The endpoints will be immediately invalidated so no new requests will be accepted.
+    """
+    logger.info("Received shutdown signal, shutting down DistributedRuntime instances")
+    for runtime in runtimes:
+        runtime.shutdown()
+    logger.info("DistributedRuntime shutdown complete")
 
 
 async def worker():
@@ -29,6 +41,10 @@ async def worker():
     while still sharing the same event loop and tokio runtime.
     """
     args = parse_args()
+
+    # Resolve planner-profile-data: convert profile results dir to NPZ if needed
+    profile_data_result = resolve_planner_profile_data(args.planner_profile_data)
+    args.planner_profile_data = profile_data_result.npz_path
 
     # Handle extra_engine_args: either use provided file or create from CLI args
     if args.extra_engine_args:
@@ -54,6 +70,8 @@ async def worker():
             except Exception as e:
                 logger.warning(f"Failed to clean up temporary file: {e}")
 
+        del profile_data_result  # Triggers tmpdir cleanup via __del__
+
 
 async def launch_workers(args, extra_engine_args_path):
     """Launch mocker worker(s) with isolated DistributedRuntime instances.
@@ -72,7 +90,7 @@ async def launch_workers(args, extra_engine_args_path):
         logger.info(f"Creating mocker worker {worker_id + 1}/{args.num_workers}")
 
         # Create a separate DistributedRuntime for this worker (on same event loop)
-        runtime = DistributedRuntime(loop, args.store_kv, False)
+        runtime = DistributedRuntime(loop, args.store_kv, args.request_plane)
         runtimes.append(runtime)
 
         # Create EntrypointArgs for this worker
@@ -94,11 +112,20 @@ async def launch_workers(args, extra_engine_args_path):
 
     logger.info(f"All {args.num_workers} mocker worker(s) created and running")
 
+    # Set up signal handler for graceful shutdown
+    def signal_handler():
+        asyncio.create_task(graceful_shutdown(runtimes))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
+
+    logger.info("Signal handlers set up for graceful shutdown")
+
     try:
         # Wait for all futures to complete
         await asyncio.gather(*futures, return_exceptions=True)
     finally:
-        # Clean up runtimes
+        # Clean up runtimes (in case they weren't already shut down by signal handler)
         logger.info("Shutting down DistributedRuntime instances")
         for runtime in runtimes:
             runtime.shutdown()

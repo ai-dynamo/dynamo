@@ -32,6 +32,7 @@ pub struct NatsMultiplexedServer {
 
 struct EndpointTask {
     cancel_token: CancellationToken,
+    join_handle: tokio::task::JoinHandle<()>,
     _endpoint_name: String,
 }
 
@@ -99,14 +100,9 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         tracing::info!("Successfully retrieved service group");
 
         // Construct the full NATS subject with instance ID
-        // In static mode, use plain endpoint name (no instance ID)
-        // In dynamic mode, append instance ID for multi-instance support
-        // This matches Endpoint::name_with_id() behavior
-        let endpoint_with_id = if self.component_registry.is_static() {
-            endpoint_name.clone()
-        } else {
-            format!("{}-{:x}", endpoint_name, instance_id)
-        };
+        // Format: {endpoint_name}-{instance_id_hex}
+        // This matches Endpoint::name_with_id() and subject_to() format
+        let endpoint_with_id = format!("{}-{:x}", endpoint_name, instance_id);
 
         // Create NATS service endpoint with the full subject
         let service_endpoint = service_group
@@ -150,7 +146,7 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         // Spawn task to handle this endpoint using PushEndpoint
         // Note: PushEndpoint::start() is a blocking loop that runs until cancelled
         let endpoint_name_clone = endpoint_name.clone();
-        tokio::spawn(async move {
+        let join_handle = tokio::spawn(async move {
             if let Err(e) = push_endpoint
                 .start(
                     service_endpoint,
@@ -185,6 +181,7 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
             endpoint_name.clone(),
             EndpointTask {
                 cancel_token: endpoint_cancel,
+                join_handle,
                 _endpoint_name: endpoint_name,
             },
         );
@@ -198,7 +195,25 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
                 endpoint_name = %endpoint_name,
                 "Unregistering NATS endpoint"
             );
+            // Cancel the token to trigger graceful shutdown
             task.cancel_token.cancel();
+
+            // Wait for the endpoint task to complete (which includes waiting for inflight requests)
+            tracing::debug!(
+                endpoint_name = %endpoint_name,
+                "Waiting for NATS endpoint task to complete"
+            );
+            if let Err(e) = task.join_handle.await {
+                tracing::warn!(
+                    endpoint_name = %endpoint_name,
+                    error = %e,
+                    "NATS endpoint task panicked during shutdown"
+                );
+            }
+            tracing::info!(
+                endpoint_name = %endpoint_name,
+                "NATS endpoint unregistration complete"
+            );
         }
         Ok(())
     }

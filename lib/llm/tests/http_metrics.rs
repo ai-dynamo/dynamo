@@ -52,7 +52,7 @@ impl
 
             // Generate 5 response chunks
             for i in 0..5 {
-                let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None);
+                let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None, None);
                 yield Annotated::from_data(output);
             }
         };
@@ -299,7 +299,6 @@ mod integration_tests {
     };
     use dynamo_runtime::DistributedRuntime;
     use dynamo_runtime::discovery::DiscoveryQuery;
-    use dynamo_runtime::pipeline::RouterMode;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -322,10 +321,9 @@ mod integration_tests {
             .unwrap();
 
         // Create EngineConfig with EchoEngine
-        let engine_config = EngineConfig::StaticFull {
+        let engine_config = EngineConfig::InProcessText {
             engine: make_echo_engine(),
             model: Box::new(local_model.clone()),
-            is_static: false, // This enables MDC registration!
         };
 
         let service = HttpService::builder()
@@ -341,6 +339,8 @@ mod integration_tests {
             distributed_runtime.clone(),
             service.state().manager_clone(),
             dynamo_llm::entrypoint::RouterConfig::default(),
+            None,
+            service.state().metrics_clone(),
         );
         // Start watching for model registrations via discovery interface
         let discovery = distributed_runtime.discovery();
@@ -357,9 +357,8 @@ mod integration_tests {
             model_watcher.watch(discovery_stream, None).await;
         });
 
-        // Set up the engine following the StaticFull pattern from http.rs
-        let EngineConfig::StaticFull { engine, model, .. } = engine_config else {
-            panic!("Expected StaticFull config");
+        let EngineConfig::InProcessText { engine, model, .. } = engine_config else {
+            panic!("Expected InProcessText config");
         };
 
         let card = local_model.card().clone();
@@ -375,12 +374,13 @@ mod integration_tests {
         let test_component = namespace.component("test-mdc-component").unwrap();
         let test_endpoint = test_component.endpoint("test-mdc-endpoint");
 
-        // This will store the MDC in etcd for discovery
+        // This will store the MDC in key-value store for discovery
         local_model
             .attach(
                 &test_endpoint,
                 dynamo_llm::model_type::ModelType::Chat,
                 dynamo_llm::model_type::ModelInput::Text,
+                None,
             )
             .await
             .unwrap();
@@ -512,6 +512,8 @@ mod integration_tests {
                 distributed_runtime.clone(),
                 service.state().manager_clone(),
                 dynamo_llm::entrypoint::RouterConfig::default(),
+                None,
+                service.state().metrics_clone(),
             );
 
             // Get all model entries for our test model

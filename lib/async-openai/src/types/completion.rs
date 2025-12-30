@@ -13,6 +13,7 @@ use std::{collections::HashMap, pin::Pin};
 use derive_builder::Builder;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::error::OpenAIError;
 
@@ -89,7 +90,7 @@ where
     deserializer.deserialize_option(StrictBoolVisitor)
 }
 
-#[derive(Clone, Serialize, Deserialize, Default, Debug, Builder, PartialEq)]
+#[derive(ToSchema, Clone, Serialize, Deserialize, Default, Debug, Builder, PartialEq)]
 #[builder(name = "CreateCompletionRequestArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]
@@ -197,7 +198,7 @@ pub struct CreateCompletionRequest {
     pub seed: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
+#[derive(ToSchema, Debug, Deserialize, Clone, PartialEq, Serialize)]
 pub struct CreateCompletionResponse {
     /// A unique identifier for the completion.
     pub id: String,
@@ -216,6 +217,10 @@ pub struct CreateCompletionResponse {
     /// The object type, which is always "text_completion"
     pub object: String,
     pub usage: Option<CompletionUsage>,
+
+    /// NVIDIA extension field for response metadata (worker IDs, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
 }
 
 /// Parsed server side events stream until an \[DONE\] is received from server.

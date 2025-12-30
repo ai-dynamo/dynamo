@@ -11,6 +11,7 @@ use dynamo_async_openai::types::{
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 use validator::Validate;
 
@@ -18,8 +19,9 @@ use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatComplet
 use super::nvext::{NvExt, NvExtProvider};
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateResponse {
+    /// Flattened CreateResponse fields (model, input, temperature, etc.)
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::responses::CreateResponse,
 
@@ -27,10 +29,15 @@ pub struct NvCreateResponse {
     pub nvext: Option<NvExt>,
 }
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvResponse {
+    /// Flattened Response fields.
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::responses::Response,
+
+    /// NVIDIA extension field for response metadata (worker IDs, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
 }
 
 /// Implements `NvExtProvider` for `NvCreateResponse`,
@@ -189,6 +196,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             common: Default::default(),
             nvext: resp.nvext,
             chat_template_args: None,
+            media_io_kwargs: None,
             unsupported_fields: Default::default(),
         })
     }
@@ -203,6 +211,10 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
 
     fn try_from(nv_resp: NvCreateChatCompletionResponse) -> Result<Self, Self::Error> {
         let chat_resp = nv_resp;
+
+        // Preserve nvext field from chat completion response
+        let nvext = chat_resp.nvext.clone();
+
         let content_text = chat_resp
             .choices
             .into_iter()
@@ -253,7 +265,10 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
             user: None,
         };
 
-        Ok(NvResponse { inner: response })
+        Ok(NvResponse {
+            inner: response,
+            nvext,
+        })
     }
 }
 
@@ -357,6 +372,7 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
+                stop_reason: None,
                 logprobs: None,
             }],
             created: now,
@@ -365,6 +381,7 @@ mod tests {
             system_fingerprint: None,
             object: "chat.completion".to_string(),
             usage: None,
+            nvext: None,
         };
 
         let wrapped: NvResponse = chat_resp.try_into().unwrap();

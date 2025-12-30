@@ -7,7 +7,7 @@ use crate::{
     discovery::{ModelManager, ModelUpdate, ModelWatcher},
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
-    entrypoint::{self, EngineConfig, RouterConfig, input::common},
+    entrypoint::{EngineConfig, EngineFactoryCallback, RouterConfig, input::common},
     http::service::service_v2::{self, HttpService},
     namespace::is_global_namespace,
     types::openai::{
@@ -15,7 +15,7 @@ use crate::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_runtime::{DistributedRuntime, pipeline::RouterMode};
+use dynamo_runtime::DistributedRuntime;
 
 /// Build and run an HTTP service
 pub async fn run(
@@ -61,16 +61,19 @@ pub async fn run(
     );
 
     let http_service = match engine_config {
-        EngineConfig::Dynamic(_) => {
+        EngineConfig::Dynamic {
+            ref model,
+            ref engine_factory,
+        } => {
             // This allows the /health endpoint to query store for active instances
             http_service_builder = http_service_builder.store(distributed_runtime.store().clone());
             let http_service = http_service_builder.build()?;
 
-            let router_config = engine_config.local_model().router_config();
+            let router_config = model.router_config();
             // Listen for models registering themselves, add them to HTTP service
             // Check if we should filter by namespace (based on the local model's namespace)
             // Get namespace from the model, fallback to endpoint_id namespace if not set
-            let namespace = engine_config.local_model().namespace().unwrap_or("");
+            let namespace = model.namespace().unwrap_or("");
             let target_namespace = if is_global_namespace(namespace) {
                 None
             } else {
@@ -83,85 +86,12 @@ pub async fn run(
                 target_namespace,
                 Arc::new(http_service.clone()),
                 http_service.state().metrics_clone(),
+                engine_factory.clone(),
             )
             .await?;
             http_service
         }
-        EngineConfig::StaticRemote(local_model) => {
-            let card = local_model.card();
-            let checksum = card.mdcsum();
-            let router_mode = local_model.router_config().router_mode;
-            let http_service = http_service_builder.build()?;
-            let manager = http_service.model_manager();
-
-            let endpoint_id = local_model.endpoint_id();
-            let component = distributed_runtime
-                .namespace(&endpoint_id.namespace)?
-                .component(&endpoint_id.component)?;
-            let client = component.endpoint(&endpoint_id.name).client().await?;
-
-            let kv_chooser = if router_mode == RouterMode::KV {
-                Some(
-                    manager
-                        .kv_chooser_for(
-                            &component,
-                            card.kv_cache_block_size,
-                            Some(local_model.router_config().kv_router_config),
-                        )
-                        .await?,
-                )
-            } else {
-                None
-            };
-
-            let tokenizer_hf = card.tokenizer_hf()?;
-            let chat_engine = entrypoint::build_routed_pipeline::<
-                NvCreateChatCompletionRequest,
-                NvCreateChatCompletionStreamResponse,
-            >(
-                card,
-                &client,
-                router_mode,
-                None,
-                kv_chooser.clone(),
-                tokenizer_hf.clone(),
-                None,  // No prefill chooser in http static mode
-                false, // No enforce_disagg in http static mode
-            )
-            .await?;
-            manager.add_chat_completions_model(
-                local_model.display_name(),
-                checksum,
-                chat_engine,
-            )?;
-
-            let completions_engine = entrypoint::build_routed_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(
-                card,
-                &client,
-                router_mode,
-                None,
-                kv_chooser,
-                tokenizer_hf,
-                None,  // No prefill chooser in http static mode
-                false, // No enforce_disagg in http static mode
-            )
-            .await?;
-            manager.add_completions_model(
-                local_model.display_name(),
-                checksum,
-                completions_engine,
-            )?;
-
-            for endpoint_type in EndpointType::all() {
-                http_service.enable_model_endpoint(endpoint_type, true);
-            }
-
-            http_service
-        }
-        EngineConfig::StaticFull { engine, model, .. } => {
+        EngineConfig::InProcessText { engine, model, .. } => {
             let http_service = http_service_builder.build()?;
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = http_service.model_manager();
@@ -175,7 +105,7 @@ pub async fn run(
             }
             http_service
         }
-        EngineConfig::StaticCore {
+        EngineConfig::InProcessTokens {
             engine: inner_engine,
             model,
             ..
@@ -268,8 +198,15 @@ async fn run_watcher(
     target_namespace: Option<String>,
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
+    engine_factory: Option<EngineFactoryCallback>,
 ) -> anyhow::Result<()> {
-    let mut watch_obj = ModelWatcher::new(runtime.clone(), model_manager, router_config);
+    let mut watch_obj = ModelWatcher::new(
+        runtime.clone(),
+        model_manager,
+        router_config,
+        engine_factory,
+        metrics.clone(),
+    );
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery

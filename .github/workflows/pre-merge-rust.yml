@@ -39,6 +39,7 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
+      # removing kvbm from here - it will fail to test with nixl dep enabled
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run'] }
     permissions:
       contents: read

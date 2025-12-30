@@ -1,0 +1,84 @@
+# syntax=docker/dockerfile:1.10.0
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# PURPOSE: AWS EFA support layer
+#
+# This Dockerfile adds AWS EFA (Elastic Fabric Adapter) support on top of
+# the runtime or dev stages from framework Dockerfiles (vllm, sglang, trtllm).
+#
+# Usage (via build.sh with --make-efa flag):
+#   ./build.sh --framework vllm --target runtime --make-efa
+#   ./build.sh --framework vllm --target local-dev --make-efa
+
+ARG BASE_IMAGE
+ARG EFA_VERSION
+
+###########################################################
+########## Runtime with AWS EFA ##########################
+###########################################################
+#
+# This stage extends the runtime stage with AWS EFA installer
+# which includes: libfabric and aws-ofi-nccl plugin
+#
+# Use this stage when deploying on AWS infrastructure with EFA support
+
+FROM ${BASE_IMAGE} AS runtime-aws
+
+ARG EFA_VERSION
+
+USER root
+
+# Install AWS EFA installer with bundled libfabric and aws-ofi-nccl
+# Flags explanation:
+#   --skip-kmod: Skip kernel module installation (handled by host)
+#   --skip-limit-conf: Skip ulimit configuration (handled by container runtime)
+#   --no-verify: Skip GPG verification (optional, can be removed if verification is needed)
+RUN mkdir -p /tmp/efa && \
+    cd /tmp/efa && \
+    curl --retry 3 --retry-delay 2 -fsSL -o aws-efa-installer-${EFA_VERSION}.tar.gz \
+        https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_VERSION}.tar.gz && \
+    tar -xf aws-efa-installer-${EFA_VERSION}.tar.gz && \
+    cd aws-efa-installer && \
+    apt-get update && \
+    ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify && \
+    rm -rf /tmp/efa && \
+    ldconfig
+
+USER dynamo
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
+
+########################################################################
+########## Development with AWS EFA (run.sh, runs as root user) ########
+########################################################################
+#
+# PURPOSE: Development environment with AWS EFA support
+#
+# This stage extends dev stages with development tools for building and
+# debugging on EFA-enabled AWS instances.
+
+FROM ${BASE_IMAGE} AS dev-aws
+
+ARG EFA_VERSION
+
+# Dev stage runs as root, no USER switch needed
+# Install AWS EFA installer with bundled libfabric and aws-ofi-nccl
+# Flags explanation:
+#   --skip-kmod: Skip kernel module installation (handled by host)
+#   --skip-limit-conf: Skip ulimit configuration (handled by container runtime)
+#   --no-verify: Skip GPG verification (optional, can be removed if verification is needed)
+RUN mkdir -p /tmp/efa && \
+    cd /tmp/efa && \
+    curl --retry 3 --retry-delay 2 -fsSL -o aws-efa-installer-${EFA_VERSION}.tar.gz \
+        https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_VERSION}.tar.gz && \
+    tar -xf aws-efa-installer-${EFA_VERSION}.tar.gz && \
+    cd aws-efa-installer && \
+    apt-get update && \
+    ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify && \
+    rm -rf /tmp/efa && \
+    ldconfig
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []

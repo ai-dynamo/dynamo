@@ -128,7 +128,8 @@ spec:
                 --model-path "${MODEL_PATH}" \
                 --served-model-name "Qwen/Qwen3-235B-A22B-FP8" \
                 --extra-engine-args "${ENGINE_ARGS}" \
-                --disaggregation-mode prefill
+                --disaggregation-mode prefill \
+                --disaggregation-strategy prefill_first
           volumeMounts:
             - name: prefill-config
               mountPath: /engine_configs
@@ -179,7 +180,8 @@ spec:
                 --model-path "${MODEL_PATH}" \
                 --served-model-name "Qwen/Qwen3-235B-A22B-FP8" \
                 --extra-engine-args "${ENGINE_ARGS}" \
-                --disaggregation-mode decode
+                --disaggregation-mode decode \
+                --disaggregation-strategy prefill_first
           volumeMounts:
             - name: decode-config
               mountPath: /engine_configs

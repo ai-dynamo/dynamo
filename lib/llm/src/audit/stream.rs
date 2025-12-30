@@ -98,6 +98,7 @@ where
                     system_fingerprint: None,
                     choices: vec![],
                     service_tier: None,
+                    nvext: None,
                 }
             })
         }),
@@ -132,6 +133,7 @@ where
                     system_fingerprint: None,
                     choices: vec![],
                     service_tier: None,
+                    nvext: None,
                 };
                 let _ = tx.send(fallback.clone());
                 final_response_to_one_chunk_stream(fallback)
@@ -151,6 +153,7 @@ where
                 system_fingerprint: None,
                 choices: vec![],
                 service_tier: None,
+                nvext: None,
             }
         })
     });
@@ -212,6 +215,7 @@ pub fn final_response_to_one_chunk_stream(
             index: idx as u32,
             delta,
             finish_reason: ch.finish_reason,
+            stop_reason: ch.stop_reason.clone(),
             logprobs: ch.logprobs.clone(),
         };
         choices.push(choice);
@@ -226,6 +230,7 @@ pub fn final_response_to_one_chunk_stream(
         service_tier: resp.service_tier.clone(),
         choices,
         usage: resp.usage.clone(),
+        nvext: resp.nvext.clone(),
     };
 
     let annotated = Annotated {
@@ -263,6 +268,7 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
+            stop_reason: None,
             logprobs: None,
         };
 
@@ -275,6 +281,7 @@ mod tests {
             object: "chat.completion.chunk".to_string(),
             usage: None,
             service_tier: None,
+            nvext: None,
         };
 
         Annotated {
@@ -299,6 +306,7 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: Some(FinishReason::Stop),
+            stop_reason: None,
             logprobs: None,
         };
 
@@ -311,6 +319,7 @@ mod tests {
             object: "chat.completion.chunk".to_string(),
             usage: None,
             service_tier: None,
+            nvext: None,
         };
 
         Annotated {
@@ -421,6 +430,7 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: None,
+                        stop_reason: None,
                         logprobs: None,
                     }
                 }],
@@ -430,6 +440,7 @@ mod tests {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
                 service_tier: None,
+                nvext: None,
             }),
             id: Some("correlation-123".to_string()),
             event: Some("test-event".to_string()),

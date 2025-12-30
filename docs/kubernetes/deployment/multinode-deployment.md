@@ -51,7 +51,7 @@ These systems provide enhanced scheduling capabilities including topology-aware 
 ##### Prerequisites
 
 - [Grove](https://github.com/NVIDIA/grove/blob/main/docs/installation.md) installed on the cluster
-- (Optional) [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) installed on the cluster with default queue name `dynamo` created. You can use a different queue name by setting the `nvidia.com/kai-scheduler-queue` annotation on the DGD resource.
+- (Optional) [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) installed on the cluster with the default queue name `dynamo` created. If no queue annotation is specified on the DGD resource, the operator uses the `dynamo` queue by default. Custom queue names can be specified via the `nvidia.com/kai-scheduler-queue` annotation, but the queue must exist in the cluster before deployment.
 
 KAI-Scheduler is optional but recommended for advanced scheduling capabilities.
 
@@ -94,10 +94,12 @@ kind: DynamoGraphDeployment
 metadata:
   name: my-multinode-deployment
   annotations:
-    nvidia.com/kai-scheduler-queue: "gpu-intensive"  # Optional: defaults to "dynamo"
+    nvidia.com/kai-scheduler-queue: "dynamo"
 spec:
   # ... your deployment spec
 ```
+
+> **Note:** The `nvidia.com/kai-scheduler-queue` annotation defaults to `"dynamo"`. If you specify a custom queue name, ensure the queue exists in your cluster before deploying. You can verify available queues with `kubectl get queues`.
 
 **Force LWS usage:**
 ```yaml
@@ -188,17 +190,23 @@ For vLLM multinode deployments, the operator automatically selects and configure
 
 The operator automatically determines the deployment mode based on your parallelism configuration:
 
-**1. Ray-Based Mode (Tensor/Pipeline Parallelism across nodes)**
+**1. Tensor/Pipeline Parallelism Mode (Single model across nodes)**
 - **When used**: When `world_size > GPUs_per_node` where `world_size = tensor_parallel_size × pipeline_parallel_size`
 - **Use case**: Distributing a single model instance across multiple nodes using tensor or pipeline parallelism
 
+The operator uses Ray for multi-node tensor/pipeline parallel deployments. Ray provides automatic placement group management and worker spawning across nodes.
+
 **Leader Node:**
-- **Ray Head**: The operator prepends `ray start --head --port=6379` to your existing command
+- **Command**: `ray start --head --port=6379 && <original-vllm-command> --distributed-executor-backend ray`
+- **Behavior**: Starts Ray head node, then runs vLLM which creates a placement group spanning all Ray workers
 - **Probes**: All health probes remain active (liveness, readiness, startup)
 
 **Worker Nodes:**
-- **Ray Worker**: The command is replaced with `ray start --address=<leader-hostname>:6379 --block`
-- **Probes**: All probes (liveness, readiness, startup) are automatically removed since workers don't expose health endpoints
+- **Command**: `ray start --address=<leader-hostname>:6379 --block`
+- **Behavior**: Joins Ray cluster and blocks; vLLM on leader spawns Ray actors to these workers
+- **Probes**: All probes (liveness, readiness, startup) are automatically removed
+
+> **Note**: vLLM's Ray executor automatically creates a placement group and spawns workers across the cluster. The `--nnodes` flag is NOT used with Ray - it's only compatible with the `mp` backend.
 
 **2. Data Parallel Mode (Multiple model instances across nodes)**
 - **When used**: When `world_size × data_parallel_size > GPUs_per_node`
@@ -213,6 +221,18 @@ The operator automatically determines the deployment mode based on your parallel
 - **Probes**: Worker probes are removed; leader probes remain active
 
 **Note**: The operator intelligently injects these flags into your command regardless of command structure (direct Python commands or shell wrappers)
+
+#### Why Ray for Multi-Node TP/PP?
+
+vLLM supports two distributed executor backends: `ray` and `mp`. For multi-node deployments:
+
+- **Ray executor**: vLLM creates a placement group and spawns Ray actors across the cluster. Workers don't run vLLM directly - the leader's vLLM process manages everything.
+- **mp executor**: Each node must run its own vLLM process with `--nnodes`, `--node-rank`, `--master-addr`, `--master-port`. This approach is more complex to orchestrate.
+
+The Dynamo operator uses Ray because:
+1. It aligns with vLLM's official multi-node documentation (see `multi-node-serving.sh`)
+2. Simpler orchestration - only the leader runs vLLM, workers just need Ray agents
+3. vLLM automatically handles placement group creation and worker management
 
 #### Compilation Cache Support
 When a volume mount is configured with `useAsCompilationCache: true`, the operator automatically sets:

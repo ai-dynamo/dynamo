@@ -1,17 +1,67 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
+use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::kv_router::RouterConfigOverride;
+#[cfg(feature = "media-nixl")]
+use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
+
+/// Routing hints for directing requests to specific workers.
+/// These fields are extracted from nvext and used by the router to determine
+/// which worker(s) should handle the request.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, Builder)]
+#[builder(default)]
+pub struct RoutingHints {
+    /// General backend instance ID for direct routing (aggregated mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_instance_id: Option<u64>,
+
+    /// Targeted prefill worker ID for disaggregated serving (GAIE Stage 2)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_id: Option<u64>,
+
+    /// Targeted decode worker ID for disaggregated serving (GAIE Stage 2)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_worker_id: Option<u64>,
+
+    /// Data parallel rank for the request
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_rank: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct BootstrapInfo {
+    /// The host address for bootstrap connection
+    pub bootstrap_host: String,
+
+    /// The port for bootstrap connection
+    pub bootstrap_port: u16,
+
+    /// Unique room ID for this request's KV transfer session
+    pub bootstrap_room: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PrefillResult {
+    /// Disaggregated execution parameters
+    pub disaggregated_params: serde_json::Value,
+    /// Prompt token details produced during prefill
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<dynamo_async_openai::types::PromptTokensDetails>,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum MultimodalData {
     Url(url::Url),
-    // TODO: Decoded(DecodedMediaData),
+    #[cfg(feature = "media-nixl")]
+    Decoded(RdmaMediaDataDescriptor),
 }
 
 // multimodal map containing {mm_part_type: [data...]}
@@ -31,6 +81,7 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_data: Option<MultimodalDataMap>,
+
     /// StopConditions are conditions that the inference engine will use to stop generation.
     pub stop_conditions: StopConditions,
 
@@ -57,43 +108,58 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     pub annotations: Vec<String>,
 
-    /// Estimated number of prefix hit tokens (only used in kv aware routing)
+    /// Routing hints for worker targeting (backend_instance_id, prefill/decode worker IDs, dp_rank)
     #[builder(default)]
-    pub estimated_prefix_hit_num_blocks: Option<u32>,
-
-    /// Targeted backend instance ID for the request
-    #[builder(default)]
-    pub backend_instance_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingHints>,
 
     /// Router configuration overrides for this specific request
     #[builder(default)]
     pub router_config_override: Option<RouterConfigOverride>,
 
-    /// Disaggregated execution parameters (for prefill/decode separation)
+    /// Structured prefill result
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disaggregated_params: Option<serde_json::Value>,
+    pub prefill_result: Option<PrefillResult>,
 
-    /// Data parallel rank for the request (used with data parallelism)
+    /// Bootstrap info for disaggregated serving
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dp_rank: Option<u32>,
+    pub bootstrap_info: Option<BootstrapInfo>,
 
     /// Additional arguments for extensibility
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
+
+    /// Optional request tracker for per-request metrics (shared with DeltaGenerator)
+    #[builder(default)]
+    #[serde(skip)]
+    pub tracker: Option<Arc<RequestTracker>>,
 }
 
 impl PreprocessedRequest {
     pub fn has_annotation(&self, annotation: &str) -> bool {
         self.annotations.contains(&annotation.to_string())
     }
-}
 
-impl PreprocessedRequest {
+    /// Get the value of an annotation in the format "key:value"
+    /// Returns None if the annotation is not found or has no value
+    pub fn get_annotation_value(&self, key: &str) -> Option<String> {
+        let prefix = format!("{}:", key);
+        self.annotations
+            .iter()
+            .find(|a| a.starts_with(&prefix))
+            .map(|a| a[prefix.len()..].to_string())
+    }
+
     pub fn builder() -> PreprocessedRequestBuilder {
         PreprocessedRequestBuilder::default()
+    }
+
+    /// Get mutable access to routing hints, creating default if None
+    pub fn routing_mut(&mut self) -> &mut RoutingHints {
+        self.routing.get_or_insert_with(RoutingHints::default)
     }
 }
 

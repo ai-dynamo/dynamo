@@ -50,7 +50,7 @@ class MiddleServer:
 async def main():
     """Start the middle server"""
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, "mem", True)
+    runtime = DistributedRuntime(loop, "file", "nats")
 
     # Create middle server handler
     handler = MiddleServer(runtime)
@@ -58,7 +58,6 @@ async def main():
 
     # Create middle server component
     component = runtime.namespace("demo").component("middle")
-    await component.create_service()
 
     endpoint = component.endpoint("generate")
 

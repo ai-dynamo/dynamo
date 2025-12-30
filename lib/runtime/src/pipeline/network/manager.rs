@@ -15,11 +15,39 @@
 
 use super::egress::unified_client::RequestPlaneClient;
 use super::ingress::unified_server::RequestPlaneServer;
-use crate::config::RequestPlaneMode;
+use crate::distributed::RequestPlaneMode;
 use anyhow::Result;
 use async_once_cell::OnceCell;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tokio_util::sync::CancellationToken;
+
+/// Global storage for the actual TCP RPC port after binding.
+/// Uses OnceLock since the port is set once when the server binds and never changes.
+static ACTUAL_TCP_RPC_PORT: OnceLock<u16> = OnceLock::new();
+
+/// Get the actual TCP RPC port that the server is listening on.
+pub fn get_actual_tcp_rpc_port() -> anyhow::Result<u16> {
+    ACTUAL_TCP_RPC_PORT.get().copied().ok_or_else(|| {
+        tracing::error!(
+            "TCP RPC port not set - request_plane_server() must be called before get_actual_tcp_rpc_port()"
+        );
+        anyhow::anyhow!(
+            "TCP RPC port not initialized. This is not expected."
+        )
+    })
+}
+
+/// Set the actual TCP RPC port (called internally after server binds).
+fn set_actual_tcp_rpc_port(port: u16) {
+    if let Err(existing) = ACTUAL_TCP_RPC_PORT.set(port) {
+        tracing::warn!(
+            existing_port = existing,
+            new_port = port,
+            "TCP RPC port already set, ignoring new value"
+        );
+    }
+}
 
 /// Network configuration loaded from environment variables
 #[derive(Clone)]
@@ -31,7 +59,8 @@ struct NetworkConfig {
 
     // TCP server configuration
     tcp_host: String,
-    tcp_port: u16,
+    /// TCP port to bind to. If None, the OS will assign a free port.
+    tcp_port: Option<u16>,
 
     // HTTP client configuration
     http_client_config: super::egress::http_router::Http2Config,
@@ -60,12 +89,12 @@ impl NetworkConfig {
                 .unwrap_or_else(|_| "/v1/rpc".to_string()),
 
             // TCP server configuration
+            // If DYN_TCP_RPC_PORT is set, use that port; otherwise None means OS will assign a free port
             tcp_host: std::env::var("DYN_TCP_RPC_HOST")
                 .unwrap_or_else(|_| crate::utils::get_tcp_rpc_host_from_env()),
             tcp_port: std::env::var("DYN_TCP_RPC_PORT")
                 .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(9999),
+                .and_then(|p| p.parse().ok()),
 
             // HTTP client configuration (reads DYN_HTTP2_* env vars)
             http_client_config: super::egress::http_router::Http2Config::from_env(),
@@ -99,7 +128,7 @@ impl NetworkConfig {
 ///
 /// ```ignore
 /// // Create manager (typically done once in DistributedRuntime)
-/// let manager = NetworkManager::new(cancel_token, nats_client, component_registry);
+/// let manager = NetworkManager::new(cancel_token, nats_client, component_registry, request_plane_mode);
 ///
 /// // Get server (lazy init, cached)
 /// let server = manager.server().await?;
@@ -136,24 +165,47 @@ impl NetworkManager {
         cancellation_token: CancellationToken,
         nats_client: Option<async_nats::Client>,
         component_registry: crate::component::Registry,
-    ) -> Arc<Self> {
-        let mode = RequestPlaneMode::get();
+        mode: RequestPlaneMode,
+    ) -> Self {
         let config = NetworkConfig::from_env(nats_client);
 
-        tracing::info!(
-            mode = %mode,
-            http_port = config.http_port,
-            tcp_port = config.tcp_port,
-            "Initializing NetworkManager"
-        );
+        match mode {
+            RequestPlaneMode::Http => {
+                tracing::info!(
+                    %mode,
+                    host = %config.http_host,
+                    port = config.http_port,
+                    rpc_root = %config.http_rpc_root,
+                    "Initializing NetworkManager with HTTP request plane"
+                );
+            }
+            RequestPlaneMode::Tcp => {
+                let port_display = config
+                    .tcp_port
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "OS-assigned".to_string());
+                tracing::info!(
+                    %mode,
+                    host = %config.tcp_host,
+                    port = %port_display,
+                    "Initializing NetworkManager with TCP request plane"
+                );
+            }
+            RequestPlaneMode::Nats => {
+                tracing::info!(
+                    %mode,
+                    "Initializing NetworkManager with NATS request plane"
+                );
+            }
+        }
 
-        Arc::new(Self {
+        Self {
             mode,
             config,
             server: Arc::new(OnceCell::new()),
             cancellation_token,
             component_registry,
-        })
+        }
     }
 
     /// Get or create the request plane server
@@ -250,24 +302,31 @@ impl NetworkManager {
     async fn create_tcp_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
         use super::ingress::shared_tcp_endpoint::SharedTcpServer;
 
-        let bind_addr = format!("{}:{}", self.config.tcp_host, self.config.tcp_port)
+        // Use configured port if specified, otherwise use port 0 (OS assigns free port)
+        let port = self.config.tcp_port.unwrap_or(0);
+        let bind_addr = format!("{}:{}", self.config.tcp_host, port)
             .parse()
             .map_err(|e| anyhow::anyhow!("Invalid TCP bind address: {}", e))?;
 
         tracing::info!(
             bind_addr = %bind_addr,
+            port_source = if self.config.tcp_port.is_some() { "DYN_TCP_RPC_PORT" } else { "OS-assigned" },
             "Creating TCP request plane server"
         );
 
         let server = SharedTcpServer::new(bind_addr, self.cancellation_token.clone());
 
-        // Start server in background
-        let server_clone = server.clone();
-        tokio::spawn(async move {
-            if let Err(e) = server_clone.start().await {
-                tracing::error!("TCP request plane server error: {}", e);
-            }
-        });
+        // Bind and start server, getting the actual bound address
+        let actual_addr = server.clone().bind_and_start().await?;
+
+        // Store the actual bound port globally so build_transport_type() can access it
+        set_actual_tcp_rpc_port(actual_addr.port());
+
+        tracing::info!(
+            actual_addr = %actual_addr,
+            actual_port = actual_addr.port(),
+            "TCP request plane server started"
+        );
 
         Ok(server as Arc<dyn RequestPlaneServer>)
     }

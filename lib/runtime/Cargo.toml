@@ -34,6 +34,7 @@ chrono = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
+dynamo-config = { workspace = true }
 either = { workspace = true }
 etcd-client = { workspace = true }
 futures = { workspace = true }
@@ -70,6 +71,7 @@ bincode = { version = "1" }
 console-subscriber = { version = "0.4", optional = true }
 educe = { version = "0.6.0" }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
+notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
 inotify = { version = "0.11" }
 libc = { version = "0.2" }
 local-ip-address = { version = "0.6.3" }
@@ -78,6 +80,7 @@ nid = { version = "3.0.0", features = ["serde"] }
 nix = { version = "0.29", features = ["signal"] }
 nuid = { version = "0.5" }
 once_cell = { version = "1" }
+percent-encoding = { version = "2.3.2" } # also used by tonic, reqwest, axum, etc
 rayon = { version = "1.10" }
 regex = { version = "1" }
 socket2 = { version = "0.5.8" }

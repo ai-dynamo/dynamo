@@ -25,14 +25,13 @@ use tokio_util::sync::CancellationToken;
 mod connector;
 mod lease;
 mod lock;
-mod path;
 
 use connector::Connector;
 use lease::*;
 pub use lock::*;
-pub use path::*;
 
 use super::utils::build_in_runtime;
+use crate::config::environment_names::etcd as env_etcd;
 
 /// ETCD Client
 #[derive(Clone)]
@@ -112,7 +111,7 @@ impl Client {
 
     /// Get a clone of the underlying [`etcd_client::Client`] instance.
     /// This returns a clone since the client is behind an RwLock.
-    pub fn etcd_client(&self) -> etcd_client::Client {
+    fn etcd_client(&self) -> etcd_client::Client {
         self.connector.get_client()
     }
 
@@ -121,28 +120,58 @@ impl Client {
         self.primary_lease
     }
 
-    pub async fn kv_create(&self, key: &str, value: Vec<u8>, lease_id: Option<u64>) -> Result<()> {
+    /// Atomically create a key-value pair if it doesn't already exist.
+    ///
+    /// Returns:
+    /// - `Ok(None)` if the key was successfully created
+    /// - `Ok(Some(version))` if the key already exists (returns the existing version)
+    /// - `Err(...)` only on actual errors (connection failure, timeout, etc.)
+    ///
+    /// This idempotent behavior was introduced in PR #4212 (Nov 10, 2025) to align with
+    /// the StoreOutcome pattern used in KeyValueStore implementations, where both
+    /// Created and Exists are successful outcomes rather than errors. This design supports
+    /// distributed systems where multiple processes might attempt to create the same key.
+    pub async fn kv_create(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        lease_id: Option<u64>,
+    ) -> Result<Option<u64>> {
         let id = lease_id.unwrap_or(self.lease_id());
         let put_options = PutOptions::new().with_lease(id as i64);
 
-        // Build the transaction
+        // Build transaction that creates key only if it doesn't exist
         let txn = Txn::new()
             .when(vec![Compare::version(key, CompareOp::Equal, 0)]) // Ensure the lock does not exist
             .and_then(vec![
                 TxnOp::put(key, value, Some(put_options)), // Create the object
+            ])
+            .or_else(vec![
+                TxnOp::get(key, None), // Key exists, get its info
             ]);
 
         // Execute the transaction
         let result = self.connector.get_client().kv_client().txn(txn).await?;
 
+        // Created
         if result.succeeded() {
-            Ok(())
-        } else {
-            for resp in result.op_responses() {
-                tracing::warn!(response = ?resp, "kv_create etcd op response");
-            }
-            anyhow::bail!("Unable to create key. Check etcd server status")
+            return Ok(None);
         }
+
+        // Already exists
+        if let Some(etcd_client::TxnOpResponse::Get(get_resp)) =
+            result.op_responses().into_iter().next()
+            && let Some(kv) = get_resp.kvs().first()
+        {
+            let version = kv.version() as u64;
+            return Ok(Some(version));
+        }
+
+        // Error
+        for resp in result.op_responses() {
+            tracing::warn!(response = ?resp, "kv_create etcd op response");
+        }
+        anyhow::bail!("Unable to create key. Check etcd server status")
     }
 
     /// Atomically create a key if it does not exist, or validate the values are identical if the key exists.
@@ -547,15 +576,15 @@ impl Default for ClientOptions {
         let mut connect_options = None;
 
         if let (Ok(username), Ok(password)) = (
-            std::env::var("ETCD_AUTH_USERNAME"),
-            std::env::var("ETCD_AUTH_PASSWORD"),
+            std::env::var(env_etcd::auth::ETCD_AUTH_USERNAME),
+            std::env::var(env_etcd::auth::ETCD_AUTH_PASSWORD),
         ) {
             // username and password are set
             connect_options = Some(ConnectOptions::new().with_user(username, password));
         } else if let (Ok(ca), Ok(cert), Ok(key)) = (
-            std::env::var("ETCD_AUTH_CA"),
-            std::env::var("ETCD_AUTH_CLIENT_CERT"),
-            std::env::var("ETCD_AUTH_CLIENT_KEY"),
+            std::env::var(env_etcd::auth::ETCD_AUTH_CA),
+            std::env::var(env_etcd::auth::ETCD_AUTH_CLIENT_CERT),
+            std::env::var(env_etcd::auth::ETCD_AUTH_CLIENT_KEY),
         ) {
             // TLS is set
             connect_options = Some(
@@ -576,7 +605,7 @@ impl Default for ClientOptions {
 }
 
 fn default_servers() -> Vec<String> {
-    match std::env::var("ETCD_ENDPOINTS") {
+    match std::env::var(env_etcd::ETCD_ENDPOINTS) {
         Ok(possible_list_of_urls) => possible_list_of_urls
             .split(',')
             .map(|s| s.to_string())
@@ -731,7 +760,7 @@ mod tests {
     fn test_ectd_client() {
         let rt = Runtime::from_settings().unwrap();
         let rt_clone = rt.clone();
-        let config = DistributedConfig::from_settings(false);
+        let config = DistributedConfig::from_settings();
 
         rt_clone.primary().block_on(async move {
             let drt = DistributedRuntime::new(rt, config).await.unwrap();
@@ -743,16 +772,26 @@ mod tests {
         let key = "__integration_test_key";
         let value = b"test_value";
 
-        let client = drt.etcd_client().expect("etcd client should be available");
+        let client = Client::new(ClientOptions::default(), drt.runtime().clone())
+            .await
+            .expect("etcd client should be available");
         let lease_id = drt.connection_id();
 
         // Create the key
         let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;
         assert!(result.is_ok(), "");
 
-        // Try to create the key again - this should fail
+        // Try to create the key again - this should return Ok(Some(version)) indicating key already exists
+        // Note: Prior to PR #4212 (Nov 10, 2025), kv_create returned Err when key existed.
+        // PR #4212 changed the behavior to return Ok(Some(version)) for idempotency, matching
+        // the StoreOutcome::Exists pattern used in the KeyValueStore abstraction.
+        // The transaction now includes .or_else(TxnOp::get) to retrieve existing key info
+        // instead of failing, making the operation idempotent for distributed systems.
         let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;
-        assert!(result.is_err());
+        assert!(
+            result.is_ok() && result.unwrap().is_some(),
+            "Expected Ok(Some(version)) when key already exists"
+        );
 
         // Create or validate should succeed as the values match
         let result = client
@@ -774,7 +813,7 @@ mod tests {
     fn test_kv_cache() {
         let rt = Runtime::from_settings().unwrap();
         let rt_clone = rt.clone();
-        let config = DistributedConfig::from_settings(false);
+        let config = DistributedConfig::from_settings();
 
         rt_clone.primary().block_on(async move {
             let drt = DistributedRuntime::new(rt, config).await.unwrap();
@@ -783,8 +822,10 @@ mod tests {
     }
 
     async fn test_kv_cache_operations(drt: DistributedRuntime) -> Result<()> {
-        // Get the client and unwrap it
-        let client = drt.etcd_client().expect("etcd client should be available");
+        // Make the client and unwrap it
+        let client = Client::new(ClientOptions::default(), drt.runtime().clone())
+            .await
+            .expect("etcd client should be available");
 
         // Create a unique test prefix to avoid conflicts with other tests
         let test_id = uuid::Uuid::new_v4().to_string();

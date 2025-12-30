@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import argparse
 import asyncio
@@ -24,7 +12,7 @@ from typing import AsyncIterator, Tuple
 import uvloop
 from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 import dynamo.nixl_connect as connect
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
@@ -137,7 +125,7 @@ class VllmEncodeWorker:
             request.embeddings_shape = tuple(embeddings.shape)
             descriptor = connect.Descriptor(embeddings)
 
-            with self._connector.create_readable(descriptor) as readable:
+            with await self._connector.create_readable(descriptor) as readable:
                 request.serialized_request = readable.metadata()
                 # Clear the image URL as hint that the image is passed as embeddings.
                 request.multimodal_input.image_url = None
@@ -170,7 +158,6 @@ class VllmEncodeWorker:
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.
         self._connector = connect.Connector()
-        await self._connector.initialize()
 
         logger.info("Startup completed.")
 
@@ -213,7 +200,7 @@ async def graceful_shutdown(runtime):
     logging.info("DistributedRuntime shutdown complete")
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     # Runtime setup
     # Set up signal handler for graceful shutdown
@@ -238,7 +225,6 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     """
 
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     generate_endpoint = component.endpoint(config.endpoint)
 

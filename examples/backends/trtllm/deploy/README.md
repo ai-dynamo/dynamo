@@ -89,7 +89,7 @@ resources:
 ```yaml
 extraPodSpec:
   mainContainer:
-    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0
+    image: my-registry/tensorrtllm-runtime:my-tag
     workingDir: /workspace/examples/backends/trtllm
     args:
       - "python3"
@@ -102,14 +102,14 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
+1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for TensorRT-LLM runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
 
 ### Container Images
 
-The deployment files currently require access to `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime`. If you don't have access, build and push your own image:
+The deployment files currently require access to `my-registry/tensorrtllm-runtime`. If you don't have access, build and push your own image:
 
 ```bash
 ./container/build.sh --framework tensorrtllm
@@ -141,7 +141,7 @@ Edit the template to match your environment:
 
 ```yaml
 # Update image registry and tag
-image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0
+image: my-registry/tensorrtllm-runtime:my-tag
 
 # Configure your model and deployment settings
 args:
@@ -165,7 +165,7 @@ kubectl create secret generic hf-token-secret \
 
 Then, deploy the model using the deployment file.
 
-Export the NAMESPACE you used in your Dynamo Cloud Installation.
+Export the NAMESPACE you used in your Dynamo Kubernetes Platform Installation.
 
 ```bash
 cd dynamo/examples/backends/trtllm/deploy
@@ -264,7 +264,7 @@ Configure the `model` name and `host` based on your deployment.
 
 - **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create_deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
-- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/kubernetes/installation_guide.md)
+- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation_guide.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
 - **Architecture Docs**: [Disaggregated Serving](../../../../docs/design_docs/disagg_serving.md), [KV-Aware Routing](../../../../docs/router/kv_cache_routing.md)
 - **Multinode Deployment**: [Multinode Examples](../../../../docs/backends/trtllm/multinode/multinode-examples.md)

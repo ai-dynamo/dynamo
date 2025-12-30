@@ -130,7 +130,7 @@ Example 4: Multiple component in a pipeline.
 
 In the P/D disaggregated setup you would have `deepseek-distill-llama8b.prefill.generate` (possibly multiple instances of this) and `deepseek-distill-llama8b.decode.generate`.
 
-For output it is always only `out=auto`. This tells Dynamo to auto-discover the instances, group them by model, and load balance appropriately (depending on `--router-mode` flag). The exception is static workers, see that section.
+For output it is always only `out=auto`. This tells Dynamo to auto-discover the instances, group them by model, and load balance appropriately (depending on `--router-mode` flag).
 
 ### KV-aware routing
 
@@ -148,7 +148,7 @@ The KV-aware routing arguments:
 
 - `--router-temperature`: Sets the temperature when randomly selecting workers to route to via softmax sampling on the router cost logits. Setting it to 0 recovers the deterministic behavior where the min logit is picked.
 
-- `--use-kv-events`: Sets whether to listen to KV events for maintaining the global view of cached blocks. If true, then we use the `KvIndexer` to listen to the block creation and deletion events. If false, `ApproxKvIndexer`, which assumes the kv cache of historical prompts exists for fixed time durations (hard-coded to 120s), is used to predict the kv cache hit ratio in each engine. Set false if your backend engine does not emit KV events.
+- `--use-kv-events`: Sets whether to listen to KV events for maintaining the global view of cached blocks. If true, the router uses KV events to track block creation and deletion from workers. If false, the router predicts cache state based on routing decisions with TTL-based expiration (default 120s) and pruning. Set false if your backend engine does not emit KV events.
 
 ### Request Migration
 
@@ -333,13 +333,12 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 
    # 1. Decorate a function to get the runtime
    #
-   @dynamo_worker(static=False)
+   @dynamo_worker()
    async def worker(runtime: DistributedRuntime):
 
     # 2. Register ourselves on the network
     #
     component = runtime.namespace("namespace").component("component")
-    await component.create_service()
     model_path = "Qwen/Qwen3-0.6B" # or "/data/models/Qwen3-0.6B"
     model_input = ModelInput.Tokens # or ModelInput.Text if engine handles pre-processing
     model_type = ModelType.Chat # or ModelType.Chat | ModelType.Completions if model can be deployed on chat and completions endpoints

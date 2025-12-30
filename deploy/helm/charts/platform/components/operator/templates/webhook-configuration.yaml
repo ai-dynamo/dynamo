@@ -1,0 +1,173 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{- if .Values.webhook.enabled }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  {{- if .Values.namespaceRestriction.enabled }}
+  name: {{ include "dynamo-operator.fullname" . }}-validating-{{ .Release.Namespace }}
+  {{- else }}
+  name: {{ include "dynamo-operator.fullname" . }}-validating
+  {{- end }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  {{- if .Values.webhook.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "dynamo-operator.fullname" . }}-serving-cert
+  {{- end }}
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    {{- if and (not .Values.webhook.certManager.enabled) .Values.webhook.certificateSecret.external }}
+    {{- if .Values.webhook.caBundle }}
+    caBundle: {{ .Values.webhook.caBundle }}
+    {{- end }}
+    {{- end }}
+    service:
+      name: {{ include "dynamo-operator.fullname" . }}-webhook-service
+      namespace: {{ .Release.Namespace }}
+      path: /validate-nvidia-com-v1alpha1-dynamocomponentdeployment
+  failurePolicy: {{ .Values.webhook.failurePolicy }}
+  name: vdynamocomponentdeployment.kb.io
+  {{- if .Values.webhook.namespaceSelector }}
+  namespaceSelector:
+    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
+  {{- else if .Values.namespaceRestriction.enabled }}
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+  {{- end }}
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dynamocomponentdeployments
+  sideEffects: None
+  timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    {{- if and (not .Values.webhook.certManager.enabled) .Values.webhook.certificateSecret.external }}
+    {{- if .Values.webhook.caBundle }}
+    caBundle: {{ .Values.webhook.caBundle }}
+    {{- end }}
+    {{- end }}
+    service:
+      name: {{ include "dynamo-operator.fullname" . }}-webhook-service
+      namespace: {{ .Release.Namespace }}
+      path: /validate-nvidia-com-v1alpha1-dynamographdeployment
+  failurePolicy: {{ .Values.webhook.failurePolicy }}
+  name: vdynamographdeployment.kb.io
+  {{- if .Values.webhook.namespaceSelector }}
+  namespaceSelector:
+    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
+  {{- else if .Values.namespaceRestriction.enabled }}
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+  {{- end }}
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dynamographdeployments
+  sideEffects: None
+  timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    {{- if and (not .Values.webhook.certManager.enabled) .Values.webhook.certificateSecret.external }}
+    {{- if .Values.webhook.caBundle }}
+    caBundle: {{ .Values.webhook.caBundle }}
+    {{- end }}
+    {{- end }}
+    service:
+      name: {{ include "dynamo-operator.fullname" . }}-webhook-service
+      namespace: {{ .Release.Namespace }}
+      path: /validate-nvidia-com-v1alpha1-dynamomodel
+  failurePolicy: {{ .Values.webhook.failurePolicy }}
+  name: vdynamomodel.kb.io
+  {{- if .Values.webhook.namespaceSelector }}
+  namespaceSelector:
+    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
+  {{- else if .Values.namespaceRestriction.enabled }}
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+  {{- end }}
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dynamomodels
+  sideEffects: None
+  timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    {{- if and (not .Values.webhook.certManager.enabled) .Values.webhook.certificateSecret.external }}
+    {{- if .Values.webhook.caBundle }}
+    caBundle: {{ .Values.webhook.caBundle }}
+    {{- end }}
+    {{- end }}
+    service:
+      name: {{ include "dynamo-operator.fullname" . }}-webhook-service
+      namespace: {{ .Release.Namespace }}
+      path: /validate-nvidia-com-v1alpha1-dynamographdeploymentrequest
+  failurePolicy: {{ .Values.webhook.failurePolicy }}
+  name: vdynamographdeploymentrequest.kb.io
+  {{- if .Values.webhook.namespaceSelector }}
+  namespaceSelector:
+    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
+  {{- else if .Values.namespaceRestriction.enabled }}
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+  {{- end }}
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dynamographdeploymentrequests
+  sideEffects: None
+  timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+{{- end }}
+

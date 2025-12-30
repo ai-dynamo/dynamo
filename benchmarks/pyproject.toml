@@ -40,13 +40,14 @@ classifiers = [
 ]
 
 dependencies = [
-    "aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@5554d2eb8206738c66048bf2d72183e9bcd85759",
+    "aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@release/0.5.0",
     "networkx",
     "pandas",
     "pydantic>=2",
     "tabulate",
     "types-tabulate",
-    "transformers",
+    # Satisfies vLLM 0.11.0 (>=4.55.2), vLLM 0.11.2 (>=4.56.0,<5), TRT-LLM 1.2.0rc5 (==4.56.0), SGLang 0.5.6.post2 (==4.57.1)
+    "transformers>=4.56.0,<=4.57.1",
     "pytest-mypy",
 ]
 
@@ -85,5 +86,5 @@ addopts = [
     "--mypy",  # This flag enables mypy type checking during pytest runs
     "--ignore-glob=*model.py",
     "--ignore-glob=*_inc.py",
-    "--ignore-glob=deploy/cloud/api-store/*",
+    "--ignore-glob=deploy/api-store/*",
 ]

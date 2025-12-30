@@ -24,7 +24,9 @@ pub mod component;
 pub mod compute;
 pub mod discovery;
 pub mod engine;
+pub mod engine_routes;
 pub mod health_check;
+pub mod local_endpoint_registry;
 pub mod system_status_server;
 pub use system_status_server::SystemStatusServerInfo;
 pub mod distributed;
@@ -52,10 +54,6 @@ pub use runtime::Runtime;
 pub use system_health::{HealthCheckTarget, SystemHealth};
 pub use tokio_util::sync::CancellationToken;
 pub use worker::Worker;
-
-use crate::{
-    metrics::prometheus_names::distributed_runtime, storage::key_value_store::KeyValueStore,
-};
 
 use component::Endpoint;
 use utils::GracefulShutdownTracker;

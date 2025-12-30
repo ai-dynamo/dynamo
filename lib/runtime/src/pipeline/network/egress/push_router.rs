@@ -3,7 +3,7 @@
 
 use super::{AsyncEngineContextProvider, ResponseStream, STREAM_ERR_MSG};
 use crate::{
-    component::{Client, Endpoint, InstanceSource},
+    component::{Client, Endpoint},
     engine::{AsyncEngine, Data},
     pipeline::{
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
@@ -90,7 +90,7 @@ impl RouterMode {
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
     // Get network manager and create client (no mode checks!)
-    let manager = endpoint.drt().network_manager().await?;
+    let manager = endpoint.drt().network_manager();
     let req_client = manager.create_client()?;
     let resp_transport = endpoint.drt().tcp_server().await?;
 
@@ -122,9 +122,7 @@ where
         let addressed = addressed_router(&client.endpoint).await?;
 
         // Start worker monitor if provided and in dynamic mode
-        if let Some(monitor) = worker_monitor.as_ref()
-            && matches!(client.instance_source.as_ref(), InstanceSource::Dynamic(_))
-        {
+        if let Some(monitor) = worker_monitor.as_ref() {
             monitor.start_monitoring().await?;
         }
 
@@ -149,8 +147,8 @@ where
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
                 ));
             }
             instance_ids[counter % count]
@@ -168,8 +166,8 @@ where
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
                 ));
             }
             let counter = rand::rng().random::<u64>() as usize;
@@ -191,8 +189,8 @@ where
 
         if !found {
             return Err(anyhow::anyhow!(
-                "instance_id={instance_id} not found for endpoint {:?}",
-                self.client.endpoint.etcd_root()
+                "instance_id={instance_id} not found for endpoint {}",
+                self.client.endpoint.id()
             ));
         }
 
@@ -200,6 +198,7 @@ where
             .await
     }
 
+    /*
     pub async fn r#static(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let subject = self.client.endpoint.subject();
         tracing::debug!("static got subject: {subject}");
@@ -207,6 +206,7 @@ where
         tracing::debug!("router generate");
         self.addressed.generate(request).await
     }
+    */
 
     async fn generate_with_fault_detection(
         &self,
@@ -312,16 +312,14 @@ where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
-        match self.client.instance_source.as_ref() {
-            InstanceSource::Static => self.r#static(request).await,
-            InstanceSource::Dynamic(_) => match self.router_mode {
-                RouterMode::Random => self.random(request).await,
-                RouterMode::RoundRobin => self.round_robin(request).await,
-                RouterMode::Direct(instance_id) => self.direct(request, instance_id).await,
-                RouterMode::KV => {
-                    anyhow::bail!("KV routing should not call generate on PushRouter");
-                }
-            },
+        //InstanceSource::Static => self.r#static(request).await,
+        match self.router_mode {
+            RouterMode::Random => self.random(request).await,
+            RouterMode::RoundRobin => self.round_robin(request).await,
+            RouterMode::Direct(instance_id) => self.direct(request, instance_id).await,
+            RouterMode::KV => {
+                anyhow::bail!("KV routing should not call generate on PushRouter");
+            }
         }
     }
 }

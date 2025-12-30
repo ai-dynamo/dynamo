@@ -9,6 +9,7 @@ use arc_swap::ArcSwap;
 use futures::StreamExt;
 use tokio::net::unix::pipe::Receiver;
 
+use crate::discovery::{DiscoveryEvent, DiscoveryInstance};
 use crate::{
     component::{Endpoint, Instance},
     pipeline::async_trait,
@@ -16,106 +17,68 @@ use crate::{
         AddressedPushRouter, AddressedRequest, AsyncEngine, Data, ManyOut, PushRouter, RouterMode,
         SingleIn,
     },
-    storage::key_value_store::{KeyValueStoreManager, WatchEvent},
     traits::DistributedRuntimeProvider,
     transports::etcd::Client as EtcdClient,
 };
 
-/// Each state will be have a nonce associated with it
-/// The state will be emitted in a watch channel, so we can observe the
-/// critical state transitions.
-enum MapState {
-    /// The map is empty; value = nonce
-    Empty(u64),
-
-    /// The map is not-empty; values are (nonce, count)
-    NonEmpty(u64, u64),
-
-    /// The watcher has finished, no more events will be emitted
-    Finished,
-}
-
-enum EndpointEvent {
-    Put(String, u64),
-    Delete(String),
-}
+/// Default interval for periodic reconciliation of instance_avail with instance_source
+const DEFAULT_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 pub struct Client {
     // This is me
     pub endpoint: Endpoint,
-    // These are the remotes I know about from watching etcd
-    pub instance_source: Arc<InstanceSource>,
+    // These are the remotes I know about from watching key-value store
+    pub instance_source: Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
     // These are the instance source ids less those reported as down from sending rpc
     instance_avail: Arc<ArcSwap<Vec<u64>>>,
     // These are the instance source ids less those reported as busy (above threshold)
     instance_free: Arc<ArcSwap<Vec<u64>>>,
-}
-
-#[derive(Clone, Debug)]
-pub enum InstanceSource {
-    Static,
-    Dynamic(tokio::sync::watch::Receiver<Vec<Instance>>),
+    // Watch sender for available instance IDs (for sending updates)
+    instance_avail_tx: Arc<tokio::sync::watch::Sender<Vec<u64>>>,
+    // Watch receiver for available instance IDs (for cloning to external subscribers)
+    instance_avail_rx: tokio::sync::watch::Receiver<Vec<u64>>,
+    /// Interval for periodic reconciliation of instance_avail with instance_source.
+    /// This ensures instances removed via `report_instance_down` are eventually restored.
+    reconcile_interval: Duration,
 }
 
 impl Client {
-    // Client will only talk to a single static endpoint
-    pub(crate) async fn new_static(endpoint: Endpoint) -> Result<Self> {
-        Ok(Client {
-            endpoint,
-            instance_source: Arc::new(InstanceSource::Static),
-            instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
-            instance_free: Arc::new(ArcSwap::from(Arc::new(vec![]))),
-        })
+    // Client with auto-discover instances using key-value store
+    pub(crate) async fn new(endpoint: Endpoint) -> Result<Self> {
+        Self::with_reconcile_interval(endpoint, DEFAULT_RECONCILE_INTERVAL).await
     }
 
-    // Client with auto-discover instances using etcd
-    pub(crate) async fn new_dynamic(endpoint: Endpoint) -> Result<Self> {
-        tracing::debug!(
+    /// Create a client with a custom reconcile interval.
+    /// The reconcile interval controls how often `instance_avail` is reset to match
+    /// `instance_source`, restoring any instances removed via `report_instance_down`.
+    pub(crate) async fn with_reconcile_interval(
+        endpoint: Endpoint,
+        reconcile_interval: Duration,
+    ) -> Result<Self> {
+        tracing::trace!(
             "Client::new_dynamic: Creating dynamic client for endpoint: {}",
-            endpoint.path()
+            endpoint.id()
         );
-        const INSTANCE_REFRESH_PERIOD: Duration = Duration::from_secs(1);
-
         let instance_source = Self::get_or_create_dynamic_instance_source(&endpoint).await?;
-        tracing::debug!(
-            "Client::new_dynamic: Got instance source for endpoint: {}",
-            endpoint.path()
-        );
 
+        let (avail_tx, avail_rx) = tokio::sync::watch::channel(vec![]);
         let client = Client {
             endpoint: endpoint.clone(),
             instance_source: instance_source.clone(),
             instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
             instance_free: Arc::new(ArcSwap::from(Arc::new(vec![]))),
+            instance_avail_tx: Arc::new(avail_tx),
+            instance_avail_rx: avail_rx,
+            reconcile_interval,
         };
-        tracing::debug!(
-            "Client::new_dynamic: Starting instance source monitor for endpoint: {}",
-            endpoint.path()
-        );
         client.monitor_instance_source();
-        tracing::debug!(
-            "Client::new_dynamic: Successfully created dynamic client for endpoint: {}",
-            endpoint.path()
-        );
         Ok(client)
     }
 
-    pub fn path(&self) -> String {
-        self.endpoint.path()
-    }
-
-    /// The root etcd path we watch in etcd to discover new instances to route to.
-    pub fn etcd_root(&self) -> String {
-        self.endpoint.etcd_root()
-    }
-
-    /// Instances available from watching etcd
+    /// Instances available from watching key-value store
     pub fn instances(&self) -> Vec<Instance> {
-        match self.instance_source.as_ref() {
-            InstanceSource::Static => vec![],
-            InstanceSource::Dynamic(watch_rx) => watch_rx.borrow().clone(),
-        }
+        self.instance_source.borrow().clone()
     }
 
     pub fn instance_ids(&self) -> Vec<u64> {
@@ -130,56 +93,34 @@ impl Client {
         self.instance_free.load()
     }
 
-    /// Wait for at least one Instance to be available for this Endpoint
-    pub async fn wait_for_instances(&self) -> Result<Vec<Instance>> {
-        tracing::debug!(
-            "wait_for_instances: Starting wait for endpoint: {}",
-            self.endpoint.path()
-        );
-        let mut instances: Vec<Instance> = vec![];
-        if let InstanceSource::Dynamic(mut rx) = self.instance_source.as_ref().clone() {
-            // wait for there to be 1 or more endpoints
-            let mut iteration = 0;
-            loop {
-                instances = rx.borrow_and_update().to_vec();
-                tracing::debug!(
-                    "wait_for_instances: iteration={}, current_instance_count={}, endpoint={}",
-                    iteration,
-                    instances.len(),
-                    self.endpoint.path()
-                );
-                if instances.is_empty() {
-                    tracing::debug!(
-                        "wait_for_instances: No instances yet, waiting for change notification for endpoint: {}",
-                        self.endpoint.path()
-                    );
-                    rx.changed().await?;
-                    tracing::debug!(
-                        "wait_for_instances: Change notification received for endpoint: {}",
-                        self.endpoint.path()
-                    );
-                } else {
-                    tracing::info!(
-                        "wait_for_instances: Found {} instance(s) for endpoint: {}",
-                        instances.len(),
-                        self.endpoint.path()
-                    );
-                    break;
-                }
-                iteration += 1;
-            }
-        } else {
-            tracing::debug!(
-                "wait_for_instances: Static instance source, no dynamic discovery for endpoint: {}",
-                self.endpoint.path()
-            );
-        }
-        Ok(instances)
+    /// Get a watcher for available instance IDs
+    pub fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
+        self.instance_avail_rx.clone()
     }
 
-    /// Is this component know at startup and not discovered via etcd?
-    pub fn is_static(&self) -> bool {
-        matches!(self.instance_source.as_ref(), InstanceSource::Static)
+    /// Wait for at least one Instance to be available for this Endpoint
+    pub async fn wait_for_instances(&self) -> Result<Vec<Instance>> {
+        tracing::trace!(
+            "wait_for_instances: Starting wait for endpoint: {}",
+            self.endpoint.id()
+        );
+        let mut rx = self.instance_source.as_ref().clone();
+        // wait for there to be 1 or more endpoints
+        let mut instances: Vec<Instance>;
+        loop {
+            instances = rx.borrow_and_update().to_vec();
+            if instances.is_empty() {
+                rx.changed().await?;
+            } else {
+                tracing::info!(
+                    "wait_for_instances: Found {} instance(s) for endpoint: {}",
+                    instances.len(),
+                    self.endpoint.id()
+                );
+                break;
+            }
+        }
+        Ok(instances)
     }
 
     /// Mark an instance as down/unavailable
@@ -189,7 +130,10 @@ impl Client {
             .iter()
             .filter_map(|&id| if id == instance_id { None } else { Some(id) })
             .collect::<Vec<_>>();
-        self.instance_avail.store(Arc::new(filtered));
+        self.instance_avail.store(Arc::new(filtered.clone()));
+
+        // Notify watch channel subscribers about the change
+        let _ = self.instance_avail_tx.send(filtered);
 
         tracing::debug!("inhibiting instance {instance_id}");
     }
@@ -204,26 +148,19 @@ impl Client {
         self.instance_free.store(Arc::new(free_ids));
     }
 
-    /// Monitor the ETCD instance source and update instance_avail.
+    /// Monitor the key-value instance source and update instance_avail.
+    ///
+    /// This function also performs periodic reconciliation: if `instance_source` hasn't
+    /// changed for `reconcile_interval`, we reset `instance_avail` to match
+    /// `instance_source`. This ensures instances removed via `report_instance_down`
+    /// are eventually restored even if the discovery source doesn't emit updates.
     fn monitor_instance_source(&self) {
+        let reconcile_interval = self.reconcile_interval;
         let cancel_token = self.endpoint.drt().primary_token();
         let client = self.clone();
-        let endpoint_path = self.endpoint.path();
-        tracing::debug!(
-            "monitor_instance_source: Starting monitor for endpoint: {}",
-            endpoint_path
-        );
+        let endpoint_id = self.endpoint.id();
         tokio::task::spawn(async move {
-            let mut rx = match client.instance_source.as_ref() {
-                InstanceSource::Static => {
-                    tracing::error!(
-                        "monitor_instance_source: Static instance source is not watchable"
-                    );
-                    return;
-                }
-                InstanceSource::Dynamic(rx) => rx.clone(),
-            };
-            let mut iteration = 0;
+            let mut rx = client.instance_source.as_ref().clone();
             while !cancel_token.is_cancelled() {
                 let instance_ids: Vec<u64> = rx
                     .borrow_and_update()
@@ -231,72 +168,46 @@ impl Client {
                     .map(|instance| instance.id())
                     .collect();
 
-                tracing::debug!(
-                    "monitor_instance_source: iteration={}, instance_count={}, instance_ids={:?}, endpoint={}",
-                    iteration,
-                    instance_ids.len(),
-                    instance_ids,
-                    endpoint_path
-                );
-
                 // TODO: this resets both tracked available and free instances
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
                 client.instance_free.store(Arc::new(instance_ids.clone()));
 
-                tracing::debug!(
-                    "monitor_instance_source: instance source updated, endpoint={}",
-                    endpoint_path
-                );
+                // Send update to watch channel subscribers
+                let _ = client.instance_avail_tx.send(instance_ids);
 
-                if let Err(err) = rx.changed().await {
-                    tracing::error!(
-                        "monitor_instance_source: The Sender is dropped: {}, endpoint={}",
-                        err,
-                        endpoint_path
-                    );
-                    cancel_token.cancel();
+                tokio::select! {
+                    result = rx.changed() => {
+                        if let Err(err) = result {
+                            tracing::error!(
+                                "monitor_instance_source: The Sender is dropped: {err}, endpoint={endpoint_id}",
+                            );
+                            cancel_token.cancel();
+                        }
+                    }
+                    _ = tokio::time::sleep(reconcile_interval) => {
+                        tracing::trace!(
+                            "monitor_instance_source: periodic reconciliation for endpoint={endpoint_id}",
+                        );
+                    }
                 }
-                iteration += 1;
             }
-            tracing::debug!(
-                "monitor_instance_source: Monitor loop exiting for endpoint: {}",
-                endpoint_path
-            );
         });
     }
 
     async fn get_or_create_dynamic_instance_source(
         endpoint: &Endpoint,
-    ) -> Result<Arc<InstanceSource>> {
+    ) -> Result<Arc<tokio::sync::watch::Receiver<Vec<Instance>>>> {
         let drt = endpoint.drt();
         let instance_sources = drt.instance_sources();
         let mut instance_sources = instance_sources.lock().await;
 
-        tracing::debug!(
-            "get_or_create_dynamic_instance_source: Checking cache for endpoint: {}",
-            endpoint.path()
-        );
-
         if let Some(instance_source) = instance_sources.get(endpoint) {
             if let Some(instance_source) = instance_source.upgrade() {
-                tracing::debug!(
-                    "get_or_create_dynamic_instance_source: Found cached instance source for endpoint: {}",
-                    endpoint.path()
-                );
                 return Ok(instance_source);
             } else {
-                tracing::debug!(
-                    "get_or_create_dynamic_instance_source: Cached instance source was dropped, removing for endpoint: {}",
-                    endpoint.path()
-                );
                 instance_sources.remove(endpoint);
             }
         }
-
-        tracing::debug!(
-            "get_or_create_dynamic_instance_source: Creating new instance source for endpoint: {}",
-            endpoint.path()
-        );
 
         let discovery = drt.discovery();
         let discovery_query = crate::discovery::DiscoveryQuery::Endpoint {
@@ -305,40 +216,25 @@ impl Client {
             endpoint: endpoint.name.clone(),
         };
 
-        tracing::debug!(
-            "get_or_create_dynamic_instance_source: Calling discovery.list_and_watch for query: {:?}",
-            discovery_query
-        );
-
         let mut discovery_stream = discovery
             .list_and_watch(discovery_query.clone(), None)
             .await?;
-
-        tracing::debug!(
-            "get_or_create_dynamic_instance_source: Got discovery stream for query: {:?}",
-            discovery_query
-        );
-
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
 
         let secondary = endpoint.component.drt.runtime().secondary().clone();
 
         secondary.spawn(async move {
-            tracing::debug!("endpoint_watcher: Starting for discovery query: {:?}", discovery_query);
+            tracing::trace!("endpoint_watcher: Starting for discovery query: {:?}", discovery_query);
             let mut map: HashMap<u64, Instance> = HashMap::new();
-            let mut event_count = 0;
 
             loop {
                 let discovery_event = tokio::select! {
                     _ = watch_tx.closed() => {
-                        tracing::debug!("endpoint_watcher: all watchers have closed; shutting down for discovery query: {:?}", discovery_query);
                         break;
                     }
                     discovery_event = discovery_stream.next() => {
-                        tracing::debug!("endpoint_watcher: Received stream event for discovery query: {:?}", discovery_query);
                         match discovery_event {
                             Some(Ok(event)) => {
-                                tracing::debug!("endpoint_watcher: Got Ok event: {:?}", event);
                                 event
                             },
                             Some(Err(e)) => {
@@ -346,67 +242,149 @@ impl Client {
                                 break;
                             }
                             None => {
-                                tracing::debug!("endpoint_watcher: watch stream has closed; shutting down for discovery query: {:?}", discovery_query);
                                 break;
                             }
                         }
                     }
                 };
 
-                event_count += 1;
-                tracing::debug!("endpoint_watcher: Processing event #{} for discovery query: {:?}", event_count, discovery_query);
-
                 match discovery_event {
-                    crate::discovery::DiscoveryEvent::Added(discovery_instance) => {
-                        match discovery_instance {
-                            crate::discovery::DiscoveryInstance::Endpoint(instance) => {
-                                tracing::debug!(
-                                    "endpoint_watcher: Added endpoint instance_id={}, namespace={}, component={}, endpoint={}",
-                                    instance.instance_id,
-                                    instance.namespace,
-                                    instance.component,
-                                    instance.endpoint
-                                );
+                    DiscoveryEvent::Added(discovery_instance) => {
+                        if let DiscoveryInstance::Endpoint(instance) = discovery_instance {
+
                                 map.insert(instance.instance_id, instance);
-                            }
-                            _ => {
-                                tracing::debug!("endpoint_watcher: Ignoring non-endpoint instance (Model, etc.) for discovery query: {:?}", discovery_query);
-                            }
                         }
                     }
-                    crate::discovery::DiscoveryEvent::Removed(instance_id) => {
-                        tracing::debug!(
-                            "endpoint_watcher: Removed instance_id={} for discovery query: {:?}",
-                            instance_id,
-                            discovery_query
-                        );
+                    DiscoveryEvent::Removed(instance_id) => {
                         map.remove(&instance_id);
                     }
                 }
 
                 let instances: Vec<Instance> = map.values().cloned().collect();
-                tracing::debug!(
-                    "endpoint_watcher: Current map size={}, sending update for discovery query: {:?}",
-                    instances.len(),
-                    discovery_query
-                );
-
                 if watch_tx.send(instances).is_err() {
-                    tracing::debug!("endpoint_watcher: Unable to send watch updates; shutting down for discovery query: {:?}", discovery_query);
                     break;
                 }
             }
-
-            tracing::debug!("endpoint_watcher: Completed for discovery query: {:?}, total events processed: {}", discovery_query, event_count);
             let _ = watch_tx.send(vec![]);
         });
 
-        let instance_source = Arc::new(InstanceSource::Dynamic(watch_rx));
+        let instance_source = Arc::new(watch_rx);
         instance_sources.insert(endpoint.clone(), Arc::downgrade(&instance_source));
-        tracing::debug!(
-            "get_or_create_dynamic_instance_source: Successfully created and cached instance source for endpoint: {}",
-            endpoint.path()
-        );
         Ok(instance_source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+    /// Test that instances removed via report_instance_down are restored after
+    /// the reconciliation interval elapses.
+    #[tokio::test]
+    async fn test_instance_reconciliation() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(100);
+
+        let rt = Runtime::from_current().unwrap();
+        // Use process_local config to avoid needing etcd/nats
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_reconciliation".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        // Use a short reconcile interval for faster tests
+        let client = Client::with_reconcile_interval(endpoint, TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+
+        // Initially, instance_avail should be empty (no registered instances)
+        assert!(client.instance_ids_avail().is_empty());
+
+        // For this test, we'll directly manipulate instance_avail and verify reconciliation
+        // Store some test IDs
+        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
+
+        assert_eq!(**client.instance_ids_avail(), vec![1u64, 2, 3]);
+
+        // Simulate report_instance_down removing instance 2
+        client.report_instance_down(2);
+        assert_eq!(**client.instance_ids_avail(), vec![1u64, 3]);
+
+        // Wait for reconciliation interval + buffer
+        // The monitor_instance_source will reset instance_avail to match instance_source
+        // Since instance_source is empty, after reconciliation instance_avail should be empty
+        tokio::time::sleep(TEST_RECONCILE_INTERVAL + Duration::from_millis(50)).await;
+
+        // After reconciliation, instance_avail should match instance_source (which is empty)
+        assert!(
+            client.instance_ids_avail().is_empty(),
+            "After reconciliation, instance_avail should match instance_source"
+        );
+
+        rt.shutdown();
+    }
+
+    /// Test that report_instance_down correctly removes an instance from instance_avail.
+    #[tokio::test]
+    async fn test_report_instance_down() {
+        let rt = Runtime::from_current().unwrap();
+        // Use process_local config to avoid needing etcd/nats
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_report_down".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = endpoint.client().await.unwrap();
+
+        // Manually set up instance_avail with test instances
+        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
+        assert_eq!(**client.instance_ids_avail(), vec![1u64, 2, 3]);
+
+        // Report instance 2 as down
+        client.report_instance_down(2);
+
+        // Verify instance 2 is removed
+        let avail = client.instance_ids_avail();
+        assert!(avail.contains(&1), "Instance 1 should still be available");
+        assert!(
+            !avail.contains(&2),
+            "Instance 2 should be removed after report_instance_down"
+        );
+        assert!(avail.contains(&3), "Instance 3 should still be available");
+
+        rt.shutdown();
+    }
+
+    /// Test that instance_avail_watcher receives updates when instances change.
+    #[tokio::test]
+    async fn test_instance_avail_watcher() {
+        let rt = Runtime::from_current().unwrap();
+        // Use process_local config to avoid needing etcd/nats
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_watcher".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = endpoint.client().await.unwrap();
+        let watcher = client.instance_avail_watcher();
+
+        // Set initial instances
+        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
+
+        // Report instance down - this should notify the watcher
+        client.report_instance_down(2);
+
+        // The watcher should receive the update
+        // Note: We need to check if changed() was signaled
+        let current = watcher.borrow().clone();
+        assert_eq!(current, vec![1, 3]);
+
+        rt.shutdown();
     }
 }

@@ -84,24 +84,6 @@ This includes the specific commit [vllm-project/vllm#19790](https://github.com/v
 > [!IMPORTANT]
 > Below we provide simple shell scripts that run the components for each configuration. Each shell script runs `python3 -m dynamo.frontend` to start the ingress and uses `python3 -m dynamo.vllm` to start the vLLM workers. You can also run each command in separate terminals for better log visibility.
 
-This figure shows an overview of the major components to deploy:
-
-```
-+------+      +-----------+      +------------------+             +---------------+
-| HTTP |----->| dynamo    |----->|   vLLM Worker    |------------>|  vLLM Prefill |
-|      |<-----| ingress   |<-----|                  |<------------|    Worker     |
-+------+      +-----------+      +------------------+             +---------------+
-                  |    ^                  |
-       query best |    | return           | publish kv events
-           worker |    | worker_id        v
-                  |    |         +------------------+
-                  |    +---------|     kv-router    |
-                  +------------->|                  |
-                                 +------------------+
-```
-
-Note: The above architecture illustrates all the components. The final components that get spawned depend upon the chosen deployment pattern.
-
 ### Aggregated Serving
 
 ```bash
@@ -150,6 +132,13 @@ bash launch/dep.sh
 ## Advanced Examples
 
 Below we provide a selected list of advanced deployments. Please open up an issue if you'd like to see a specific example!
+
+### Speculative Decoding with Aggregated Serving (Meta-Llama-3.1-8B-Instruct + Eagle3)
+
+Run **Meta-Llama-3.1-8B-Instruct** with **Eagle3** as a draft model using **aggregated speculative decoding** on a single node.
+This setup demonstrates how to use Dynamo to create an instance using Eagle-based speculative decoding under the **VLLM aggregated serving framework** for faster inference while maintaining accuracy.
+
+**Guide:** [Speculative Decoding Quickstart](./speculative_decoding.md)
 
 ### Kubernetes Deployment
 

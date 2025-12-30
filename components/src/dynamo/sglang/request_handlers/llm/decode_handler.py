@@ -25,7 +25,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         config: Config,
         publisher: DynamoSglangPublisher,
         prefill_client: Optional[Client] = None,
-        prefill_router_client: Optional[Client] = None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -35,10 +34,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config: SGLang and Dynamo configuration.
             publisher: Metrics publisher for the worker.
             prefill_client: Optional client for prefill worker in disaggregated mode.
-            prefill_router_client: Optional client for prefill router in disaggregated mode.
-
-        Raises:
-            ValueError: If prefill_client is not provided in decode serving mode.
         """
         super().__init__(
             component,
@@ -48,15 +43,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prefill_client,
         )
         if self.serving_mode == DisaggregationMode.DECODE:
-            if self.prefill_client is None:
-                raise ValueError(
-                    "prefill_client must be provided when serving_mode is decode"
-                )
-            self.prefill_client = prefill_client
-            logging.info("Decode worker handler initialized")
-
-        self.prefill_router_client = prefill_router_client
-        logging.info("Worker handler initialized")
+            logging.info(
+                "Decode worker handler initialized (disaggregated decode mode)"
+            )
+        else:
+            logging.info("Decode worker handler initialized (aggregated mode)")
 
     def cleanup(self) -> None:
         """Shutdown the engine and cleanup resources."""
@@ -112,32 +103,25 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             RuntimeError: If no bootstrap info received from prefill worker.
         """
         logging.debug(f"New Request ID: {context.id()}")
+        trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
         if self.serving_mode == DisaggregationMode.DECODE:
-            # request the bootstrap info from the target prefill worker
-            if (
-                self.prefill_router_client is not None
-                and self.prefill_router_client.instance_ids()
-            ):
-                token_ids = request["token_ids"]
-                stream = await self.prefill_router_client.generate(token_ids)
-                result = await anext(stream)
-                (
-                    worker_id,
-                    overlap,
-                ) = result.data()  # Returns tuple (worker_id, overlap_amount)
-                logging.info(f"Best prefill worker ID: {worker_id}, overlap: {overlap}")
+            # Check if bootstrap_info is pre-computed in the request (from frontend with --router-mode kv)
+            bootstrap_info = request.get("bootstrap_info")
 
-                prefill_stream = await self.prefill_client.direct(
-                    DisaggPreprocessedRequest(
-                        request=request,
-                        sampling_params=sampling_params,
-                    ).model_dump(),
-                    worker_id,
+            if not bootstrap_info:
+                # Fallback: fetch bootstrap_info from prefill worker via round-robin routing
+                if self.prefill_client is None:
+                    raise RuntimeError(
+                        "bootstrap_info is required for disaggregated decode but was not provided, "
+                        "and no prefill_client is available for fallback."
+                    )
+
+                logging.debug(
+                    "No bootstrap_info in request, fetching from prefill worker"
                 )
-            else:
                 prefill_stream = await self.prefill_client.generate(
                     DisaggPreprocessedRequest(
                         request=request,
@@ -146,13 +130,39 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     context=context,
                 )
 
-            bootstrap_info = None
-            async for info in prefill_stream:
-                bootstrap_info = info.data()
-                break
+                prefill_response = None
+                async for info in prefill_stream:
+                    prefill_response = info.data()
+                    break
 
-            if not bootstrap_info:
-                raise RuntimeError("No bootstrap info received from prefill worker")
+                if not prefill_response:
+                    raise RuntimeError("No response received from prefill worker")
+
+                # Extract bootstrap_info from disaggregated_params (PrefillWorkerHandler format)
+                bootstrap_info = prefill_response.get("disaggregated_params")
+                if not bootstrap_info:
+                    raise RuntimeError(
+                        "No bootstrap info (disaggregated_params) received from prefill worker"
+                    )
+
+                logging.debug(
+                    f"Received bootstrap_info from prefill worker: "
+                    f"host={bootstrap_info['bootstrap_host']}, "
+                    f"port={bootstrap_info['bootstrap_port']}, "
+                    f"room={bootstrap_info['bootstrap_room']}"
+                )
+            else:
+                logging.debug(
+                    f"Using pre-computed bootstrap_info: "
+                    f"host={bootstrap_info['bootstrap_host']}, "
+                    f"port={bootstrap_info['bootstrap_port']}, "
+                    f"room={bootstrap_info['bootstrap_room']}"
+                )
+
+            if self.enable_trace:
+                self._propagate_trace_context_to_sglang(
+                    context, bootstrap_info["bootstrap_room"]
+                )
 
             decode = await self.engine.async_generate(
                 **input_param,
@@ -161,6 +171,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
+                rid=trace_id,
             )
 
             if self.skip_tokenizer_init:
@@ -170,10 +181,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(decode, context):
                     yield out
         else:
+            if self.enable_trace:
+                self._propagate_trace_context_to_sglang(context)
+
             agg = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
+                rid=trace_id,
             )
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):
@@ -229,6 +244,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 next_total_toks = len(output_ids)
                 out["token_ids"] = output_ids[num_output_tokens_so_far:]
                 num_output_tokens_so_far = next_total_toks
+                if finish_reason:
+                    input_tokens = res["meta_info"]["prompt_tokens"]
+                    completion_tokens = res["meta_info"]["completion_tokens"]
+                    cached_tokens = res["meta_info"]["cached_tokens"]
+                    prefill_prompt_tokens_details = None
+                    if cached_tokens is not None and cached_tokens > 0:
+                        prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
+                    out["completion_usage"] = {
+                        "prompt_tokens": input_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": input_tokens + completion_tokens,
+                        "prompt_tokens_details": prefill_prompt_tokens_details,
+                    }
                 if not context.is_stopped():
                     yield out
 

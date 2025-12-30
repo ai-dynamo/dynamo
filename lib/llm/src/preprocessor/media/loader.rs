@@ -8,8 +8,14 @@ use anyhow::Result;
 
 use dynamo_async_openai::types::ChatCompletionRequestUserMessageContentPart;
 
-use super::common::EncodedMediaData;
-use super::decoders::{DecodedMediaData, Decoder, MediaDecoder};
+use super::decoders::MediaDecoder;
+use super::rdma::RdmaMediaDataDescriptor;
+
+#[cfg(feature = "media-nixl")]
+use {
+    super::common::EncodedMediaData, super::decoders::Decoder, super::rdma::get_nixl_agent,
+    dynamo_memory::nixl::NixlAgent,
+};
 
 const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -36,15 +42,19 @@ impl Default for MediaFetcher {
 }
 
 pub struct MediaLoader {
+    #[allow(dead_code)]
     media_decoder: MediaDecoder,
+    #[allow(dead_code)]
     http_client: reqwest::Client,
     media_fetcher: MediaFetcher,
-    // TODO: NIXL agent
+    #[cfg(feature = "media-nixl")]
+    nixl_agent: NixlAgent,
 }
 
 impl MediaLoader {
-    pub fn new(media_decoder: MediaDecoder, media_fetcher: MediaFetcher) -> Result<Self> {
-        let mut http_client_builder =
+    pub fn new(media_decoder: MediaDecoder, media_fetcher: Option<MediaFetcher>) -> Result<Self> {
+        let media_fetcher = media_fetcher.unwrap_or_default();
+        let mut http_client_builder: reqwest::ClientBuilder =
             reqwest::Client::builder().user_agent(&media_fetcher.user_agent);
 
         if let Some(timeout) = media_fetcher.timeout {
@@ -53,10 +63,15 @@ impl MediaLoader {
 
         let http_client = http_client_builder.build()?;
 
+        #[cfg(feature = "media-nixl")]
+        let nixl_agent = get_nixl_agent()?;
+
         Ok(Self {
             media_decoder,
             http_client,
             media_fetcher,
+            #[cfg(feature = "media-nixl")]
+            nixl_agent,
         })
     }
 
@@ -89,36 +104,70 @@ impl MediaLoader {
     pub async fn fetch_and_decode_media_part(
         &self,
         oai_content_part: &ChatCompletionRequestUserMessageContentPart,
-        // TODO: request-level options
-    ) -> Result<DecodedMediaData> {
-        // fetch the media
-        // TODO: decode and NIXL-register
-        let decoded = match oai_content_part {
-            ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
-                let url = &image_part.image_url.url;
-                self.check_if_url_allowed(url)?;
-                let data = EncodedMediaData::from_url(url, &self.http_client).await?;
-                self.media_decoder.image_decoder.decode_async(data).await?
-            }
-            ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
-                let url = &video_part.video_url.url;
-                self.check_if_url_allowed(url)?;
-                EncodedMediaData::from_url(url, &self.http_client).await?;
-                anyhow::bail!("Video decoding is not supported yet");
-            }
-            ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
-                anyhow::bail!("Audio decoding is not supported yet");
-            }
-            _ => anyhow::bail!("Unsupported media type"),
-        };
+        media_io_kwargs: Option<&MediaDecoder>,
+    ) -> Result<RdmaMediaDataDescriptor> {
+        #[cfg(not(feature = "media-nixl"))]
+        anyhow::bail!(
+            "NIXL is not supported, cannot decode and register media data {oai_content_part:?} with media_io_kwargs {media_io_kwargs:?}"
+        );
 
-        Ok(decoded)
+        #[cfg(feature = "media-nixl")]
+        {
+            // fetch the media, decode and NIXL-register
+            let decoded = match oai_content_part {
+                ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
+                    let mdc_decoder =
+                        self.media_decoder.image.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!("Model does not support image inputs")
+                        })?;
+
+                    let url = &image_part.image_url.url;
+                    self.check_if_url_allowed(url)?;
+                    let data = EncodedMediaData::from_url(url, &self.http_client).await?;
+
+                    // Use runtime decoder if provided, with MDC limits enforced
+                    let decoder =
+                        mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.image.as_ref()));
+                    decoder.decode_async(data).await?
+                }
+                ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
+                    #[cfg(not(feature = "media-ffmpeg"))]
+                    anyhow::bail!(
+                        "Video decoding requires the 'media-ffmpeg' feature to be enabled"
+                    );
+
+                    #[cfg(feature = "media-ffmpeg")]
+                    {
+                        let mdc_decoder = self.media_decoder.video.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!("Model does not support video inputs")
+                        })?;
+
+                        let url = &video_part.video_url.url;
+                        self.check_if_url_allowed(url)?;
+                        let data = EncodedMediaData::from_url(url, &self.http_client).await?;
+
+                        // Use runtime decoder if provided, with MDC limits enforced
+                        let decoder = mdc_decoder
+                            .with_runtime(media_io_kwargs.and_then(|k| k.video.as_ref()));
+                        decoder.decode_async(data).await?
+                    }
+                }
+                ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
+                    anyhow::bail!("Audio decoding is not supported yet");
+                }
+                _ => anyhow::bail!("Unsupported media type"),
+            };
+
+            let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
+            Ok(rdma_descriptor)
+        }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "media-nixl"))]
 mod tests {
-    use super::super::decoders::DataType;
+    use super::super::decoders::ImageDecoder;
+    use super::super::rdma::DataType;
     use super::*;
     use dynamo_async_openai::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
 
@@ -136,39 +185,69 @@ mod tests {
             .create_async()
             .await;
 
-        let media_decoder = MediaDecoder::default();
+        let media_decoder = MediaDecoder {
+            image: Some(ImageDecoder::default()),
+            #[cfg(feature = "media-ffmpeg")]
+            video: None,
+        };
         let fetcher = MediaFetcher {
             allow_direct_ip: true,
             allow_direct_port: true,
             ..Default::default()
         };
 
-        let loader = MediaLoader::new(media_decoder, fetcher).unwrap();
+        let loader: MediaLoader = MediaLoader::new(media_decoder, Some(fetcher)).unwrap();
 
         let image_url = ImageUrl::from(format!("{}/llm-optimize-deploy-graphic.png", server.url()));
         let content_part = ChatCompletionRequestUserMessageContentPart::ImageUrl(
             ChatCompletionRequestMessageContentPartImage { image_url },
         );
 
-        let result = loader.fetch_and_decode_media_part(&content_part).await;
-        assert!(
-            result.is_ok(),
-            "Failed to fetch and decode image: {:?}",
-            result.err()
-        );
+        let result = loader
+            .fetch_and_decode_media_part(&content_part, None)
+            .await;
 
-        let data = result.unwrap();
-        assert_eq!(data.dtype, DataType::UINT8);
+        let descriptor = match result {
+            Ok(descriptor) => descriptor,
+            Err(e) if e.to_string().contains("NIXL agent is not available") => {
+                println!("test test_fetch_and_decode ... ignored (NIXL agent not available)");
+                return;
+            }
+            Err(e) => panic!("Failed to fetch and decode image: {}", e),
+        };
+        mock.assert_async().await;
+        assert_eq!(descriptor.tensor_info.dtype, DataType::UINT8);
 
         // Verify image dimensions: 1,999px × 1,125px (width × height)
         // Shape format is [height, width, channels]
-        assert_eq!(data.shape.len(), 3);
-        assert_eq!(data.shape[0], 1125, "Height should be 1125");
-        assert_eq!(data.shape[1], 1999, "Width should be 1999");
-        assert_eq!(data.shape[2], 4, "RGBA channels should be 4");
+        assert_eq!(descriptor.tensor_info.shape.len(), 3);
+        assert_eq!(
+            descriptor.tensor_info.shape[0], 1125,
+            "Height should be 1125"
+        );
+        assert_eq!(
+            descriptor.tensor_info.shape[1], 1999,
+            "Width should be 1999"
+        );
+        assert_eq!(
+            descriptor.tensor_info.shape[2], 4,
+            "RGBA channels should be 4"
+        );
 
-        mock.assert_async().await;
+        assert!(
+            descriptor.source_storage.is_some(),
+            "Source storage should be present"
+        );
+        assert!(
+            descriptor.source_storage.unwrap().is_registered(),
+            "Source storage should be registered with NIXL"
+        );
     }
+}
+
+#[cfg(test)]
+mod tests_non_nixl {
+    use super::*;
 
     #[test]
     fn test_direct_ip_blocked() {
@@ -176,7 +255,7 @@ mod tests {
             allow_direct_ip: false,
             ..Default::default()
         };
-        let loader = MediaLoader::new(MediaDecoder::default(), fetcher).unwrap();
+        let loader = MediaLoader::new(MediaDecoder::default(), Some(fetcher)).unwrap();
 
         let url = url::Url::parse("http://192.168.1.1/image.jpg").unwrap();
         let result = loader.check_if_url_allowed(&url);
@@ -196,7 +275,7 @@ mod tests {
             allow_direct_port: false,
             ..Default::default()
         };
-        let loader = MediaLoader::new(MediaDecoder::default(), fetcher).unwrap();
+        let loader = MediaLoader::new(MediaDecoder::default(), Some(fetcher)).unwrap();
 
         let url = url::Url::parse("http://example.com:8080/image.jpg").unwrap();
         let result = loader.check_if_url_allowed(&url);
@@ -220,7 +299,7 @@ mod tests {
             allowed_media_domains: Some(allowed_domains),
             ..Default::default()
         };
-        let loader = MediaLoader::new(MediaDecoder::default(), fetcher).unwrap();
+        let loader = MediaLoader::new(MediaDecoder::default(), Some(fetcher)).unwrap();
 
         // Allowed domain should pass
         let url = url::Url::parse("https://trusted.com/image.jpg").unwrap();
