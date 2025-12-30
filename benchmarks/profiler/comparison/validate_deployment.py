@@ -7,7 +7,6 @@ import argparse
 import json
 import logging
 import subprocess
-import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
