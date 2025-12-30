@@ -3,43 +3,6 @@
 
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 
-#[test]
-fn test_chat_template_kwargs_alias() {
-    // Test that chat_template_kwargs is accepted as an alias
-    let json_with_kwargs = r#"{
-        "model": "test-model",
-        "messages": [],
-        "chat_template_kwargs": {
-            "enable_thinking": false
-        }
-    }"#;
-
-    let request: NvCreateChatCompletionRequest = serde_json::from_str(json_with_kwargs).unwrap();
-    assert!(request.chat_template_args.is_some());
-    assert_eq!(
-        request.chat_template_args.unwrap().get("enable_thinking"),
-        Some(&serde_json::json!(false))
-    );
-}
-
-#[test]
-fn test_chat_template_args_still_works() {
-    // Test that chat_template_args still works
-    let json_with_args = r#"{
-        "model": "test-model",
-        "messages": [],
-        "chat_template_args": {
-            "enable_thinking": true
-        }
-    }"#;
-
-    let request: NvCreateChatCompletionRequest = serde_json::from_str(json_with_args).unwrap();
-    assert!(request.chat_template_args.is_some());
-    assert_eq!(
-        request.chat_template_args.unwrap().get("enable_thinking"),
-        Some(&serde_json::json!(true))
-    );
-}
 
 #[test]
 fn test_both_fields_fails() {
@@ -62,10 +25,9 @@ fn test_both_fields_fails() {
 }
 
 #[test]
-fn test_template_rendering() {
-    // Test that both chat_template_args and chat_template_kwargs work in template rendering
-    // This is a simplified test that focuses on the alias functionality
-    // without requiring complex template setup
+fn test_chat_template_args_rendering() {
+    // Test that both chat_template_args and chat_template_kwargs work correctly
+    // This test covers all the alias functionality cases
 
     // Test cases: both field names with enable_thinking true/false
     let test_cases = [
