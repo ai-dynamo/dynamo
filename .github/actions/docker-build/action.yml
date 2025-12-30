@@ -133,6 +133,7 @@ runs:
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
           --vllm-max-jobs 10 \
+          --no-tag-latest \
           --framework ${{ inputs.framework }} \
           --platform ${{ inputs.platform }} \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
