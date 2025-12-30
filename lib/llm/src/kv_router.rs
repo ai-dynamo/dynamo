@@ -149,7 +149,7 @@ pub struct KvRouterConfig {
     /// TTL for blocks in seconds (only used when use_kv_events is false, default: 120.0)
     pub router_ttl_secs: f64,
 
-    /// Maximum tree size before pruning (only used when use_kv_events is false, default: 1024)
+    /// Maximum tree size before pruning (only used when use_kv_events is false, default: 2^20 = 1048576)
     pub router_max_tree_size: usize,
 
     /// Target size ratio after pruning (only used when use_kv_events is false, default: 0.8)
@@ -167,7 +167,7 @@ impl Default for KvRouterConfig {
             router_snapshot_threshold: Some(1000000),
             router_reset_states: false,
             router_ttl_secs: 120.0,
-            router_max_tree_size: 1024,
+            router_max_tree_size: 2usize.pow(20), // 2^20 = 1048576, matches PruneConfig::default()
             router_prune_target_ratio: 0.8,
         }
     }

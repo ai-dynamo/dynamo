@@ -782,7 +782,7 @@ pub(crate) struct ApproxKvIndexer {
 #[pymethods]
 impl ApproxKvIndexer {
     #[new]
-    #[pyo3(signature = (component, kv_block_size, router_ttl_secs=120.0, router_max_tree_size=1024, router_prune_target_ratio=0.8))]
+    #[pyo3(signature = (component, kv_block_size, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8))]
     fn new(
         component: Component,
         kv_block_size: usize,
