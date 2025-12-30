@@ -2,16 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
+import binascii
+import io
 import logging
 import os
 import tempfile
 import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, Final
+from typing import Any, AsyncGenerator, Dict, Final
 
-if TYPE_CHECKING:
-    import torch
+import torch
 
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
@@ -626,12 +628,6 @@ class BaseWorkerHandler(ABC):
         Raises:
             ValueError: If decoding fails or format is invalid
         """
-        import base64
-        import binascii
-        import io
-
-        import torch
-
         try:
             # Step 1: Decode base64 to bytes
             embeds_bytes = base64.b64decode(prompt_embeds_base64)
@@ -662,7 +658,7 @@ class BaseWorkerHandler(ABC):
 
     def _create_prompt_from_embeddings(
         self, prompt_embeds_base64: str
-    ) -> tuple["EmbedsPrompt", int, "torch.Tensor"]:
+    ) -> tuple[EmbedsPrompt, int, torch.Tensor]:
         """
         Decode prompt embeddings and create EmbedsPrompt for vLLM.
 
