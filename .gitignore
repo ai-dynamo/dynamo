@@ -112,3 +112,6 @@ profiling_results*
 
 # Direnv
 .envrc
+
+# Scripts (local development only)
+scripts/
