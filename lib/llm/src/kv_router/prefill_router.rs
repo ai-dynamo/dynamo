@@ -494,6 +494,7 @@ impl
             // Bootstrap optimization path: spawn prefill in background
             let routing = prefill_req.routing_mut();
             routing.prefill_worker_id = Some(worker_id);
+            routing.backend_instance_id = Some(worker_id); // Route prefill to the SAME worker we got bootstrap_info from
             routing.dp_rank = Some(dp_rank);
             prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 

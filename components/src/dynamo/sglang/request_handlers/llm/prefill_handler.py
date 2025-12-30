@@ -130,8 +130,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         task = asyncio.create_task(self._consume_results(results, context))
         self._consume_tasks.add(task)
         task.add_done_callback(self._consume_tasks.discard)
-        # Wait for prefill to actually complete so Rust stream ends at the right time
-        await task
 
     async def _consume_results(
         self, results: AsyncGenerator[Any, None], context: Context
