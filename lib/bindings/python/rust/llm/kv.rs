@@ -131,9 +131,12 @@ pub struct ZmqKvEventPublisherConfig {
     pub zmq_endpoint: String,
     #[pyo3(get, set)]
     pub zmq_topic: String,
+    // whether the underlying KvEventPublisher publishes to
+    // both global and worker-local KvIndexers
     #[pyo3(get, set)]
-    pub enable_local_indexer: bool, // whether the underlying KvEventPublisher publishes to
-                                    // both global and worker-local KvIndexers
+    pub enable_local_indexer: bool,
+    #[pyo3(get, set)]
+    pub bind: bool,
 }
 
 #[pymethods]
@@ -144,7 +147,8 @@ impl ZmqKvEventPublisherConfig {
         kv_block_size,
         zmq_endpoint = "tcp://127.0.0.1:5557".to_string(),
         zmq_topic = "".to_string(),
-        enable_local_indexer = false
+        enable_local_indexer = false,
+        bind = false,
     ))]
     pub fn new(
         worker_id: WorkerId,
@@ -152,6 +156,7 @@ impl ZmqKvEventPublisherConfig {
         zmq_endpoint: String,
         zmq_topic: String,
         enable_local_indexer: bool,
+        bind: bool,
     ) -> Self {
         Self {
             worker_id,
@@ -159,6 +164,7 @@ impl ZmqKvEventPublisherConfig {
             zmq_endpoint,
             zmq_topic,
             enable_local_indexer,
+            bind,
         }
     }
 }
@@ -178,6 +184,7 @@ impl ZmqKvEventPublisher {
             Some(KvEventSourceConfig::Zmq {
                 endpoint: config.zmq_endpoint,
                 topic: config.zmq_topic,
+                bind: config.bind,
             }),
             config.enable_local_indexer,
         )
@@ -217,6 +224,7 @@ impl ZmqKvEventListener {
                 tx,
                 shutdown_token.clone(),
                 kv_block_size as u32,
+                false,
             ));
 
             Ok(Self {
