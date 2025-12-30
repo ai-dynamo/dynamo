@@ -131,6 +131,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self._consume_tasks.add(task)
         task.add_done_callback(self._consume_tasks.discard)
 
+        await task
+
     async def _consume_results(
         self, results: AsyncGenerator[Any, None], context: Context
     ) -> None:
