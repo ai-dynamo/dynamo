@@ -102,18 +102,13 @@ def build_prefill_service_config(
     num_gpus_per_node: int = 8,
 ) -> tuple[str, dict]:
     """Return (service_name, service_dict) for the prefill worker after applying mapping."""
-    config_modifier = _get_config_modifier_from_args(args)
-    config = _load_and_apply_mappings(
+    return _build_single_worker_service_config(
         config_path=config_path,
         args=args,
-        config_modifier=config_modifier,
-        best_prefill_mapping=best_prefill_mapping,
-        best_decode_mapping=None,
+        mapping=best_prefill_mapping,
+        subcomponent=SubComponentType.PREFILL,
         num_gpus_per_node=num_gpus_per_node,
     )
-    service_name = _find_service_name_for_subcomponent(config, SubComponentType.PREFILL)
-    config_dict = config.model_dump(exclude_unset=False)
-    return service_name, config_dict["spec"]["services"][service_name]
 
 
 def build_decode_service_config(
@@ -124,16 +119,38 @@ def build_decode_service_config(
     num_gpus_per_node: int = 8,
 ) -> tuple[str, dict]:
     """Return (service_name, service_dict) for the decode worker after applying mapping."""
+    return _build_single_worker_service_config(
+        config_path=config_path,
+        args=args,
+        mapping=best_decode_mapping,
+        subcomponent=SubComponentType.DECODE,
+        num_gpus_per_node=num_gpus_per_node,
+    )
+
+
+def _build_single_worker_service_config(
+    *,
+    config_path: str,
+    args,
+    mapping: ParallelizationMapping,
+    subcomponent: SubComponentType,
+    num_gpus_per_node: int,
+) -> tuple[str, dict]:
+    """Shared helper for building a single worker service dict (prefill or decode)."""
     config_modifier = _get_config_modifier_from_args(args)
     config = _load_and_apply_mappings(
         config_path=config_path,
         args=args,
         config_modifier=config_modifier,
-        best_prefill_mapping=None,
-        best_decode_mapping=best_decode_mapping,
+        best_prefill_mapping=mapping
+        if subcomponent == SubComponentType.PREFILL
+        else None,
+        best_decode_mapping=mapping
+        if subcomponent == SubComponentType.DECODE
+        else None,
         num_gpus_per_node=num_gpus_per_node,
     )
-    service_name = _find_service_name_for_subcomponent(config, SubComponentType.DECODE)
+    service_name = _find_service_name_for_subcomponent(config, subcomponent)
     config_dict = config.model_dump(exclude_unset=False)
     return service_name, config_dict["spec"]["services"][service_name]
 

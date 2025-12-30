@@ -493,6 +493,9 @@ async def run_profile(args):
                 selected_prefill_idx, selected_decode_idx = pick_config_with_webui(
                     prefill_data, decode_data, args
                 )
+                # update TTFT/ITL SLA based on selected config
+                args.ttft = prefill_data.ttft[selected_prefill_idx]
+                args.itl = decode_data.itl[selected_decode_idx]
             else:
                 # automatically select P/D config within SLA with the highest throughput/GPU
                 # select best parallel mapping for prefill
