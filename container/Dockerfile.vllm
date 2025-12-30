@@ -621,9 +621,6 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
 ARG ARCH_ALT
 ARG PYTHON_VERSION
 
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
-
 # Install Python, build-essential and python3-dev as apt dependencies
 RUN apt-get update && \
     CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} &&\
@@ -808,9 +805,6 @@ FROM runtime AS dev
 
 # Don't want ubuntu to be editable, just change uid and gid.
 ARG WORKSPACE_DIR=/workspace
-
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 USER root
 # Install utilities as root
