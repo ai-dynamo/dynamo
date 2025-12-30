@@ -422,20 +422,11 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_model(&self.inner.model)?;
 
-        // Validate that at least one of prompt or prompt_embeds is provided
+        // Validate prompt and prompt_embeds together (checks presence, format, and content)
         validate::validate_prompt_or_embeds(
             Some(&self.inner.prompt),
             self.inner.prompt_embeds.as_deref(),
         )?;
-
-        // Only validate prompt if prompt_embeds is NOT provided
-        // When embeddings are present, prompt can be empty/placeholder
-        if self.inner.prompt_embeds.is_none() {
-            validate::validate_prompt(&self.inner.prompt)?;
-        }
-
-        // Validate prompt_embeds if provided
-        validate::validate_prompt_embeds(self.inner.prompt_embeds.as_deref())?;
 
         validate::validate_suffix(self.inner.suffix.as_deref())?;
         validate::validate_max_tokens(self.inner.max_tokens)?;
