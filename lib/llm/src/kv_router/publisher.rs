@@ -2148,6 +2148,7 @@ mod test_integration_publisher {
 mod test_integration_publisher_with_kvindexer {
     use super::*;
 
+    use crate::kv_router::protocols::WorkerId;
     use crate::kv_router::scheduler::DefaultWorkerSelector;
     use crate::kv_router::{KvPushRouter, KvRouter, KvRouterConfig};
     use crate::local_model::LocalModelBuilder;
@@ -2156,6 +2157,7 @@ mod test_integration_publisher_with_kvindexer {
     use crate::mocker::protocols::MockEngineArgs;
     use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dashmap::DashMap;
     use dynamo_runtime::distributed_test_utils::create_test_shared_drt_async;
     use dynamo_runtime::engine::AsyncEngine;
     use dynamo_runtime::pipeline::{Context, PushRouter, RouterMode, network::Ingress};
@@ -2257,10 +2259,13 @@ mod test_integration_publisher_with_kvindexer {
         let selector = Box::new(DefaultWorkerSelector::new(Some(kv_router_config)));
         let consumer_id = format!("test-router-{}", router_distributed.connection_id());
 
+        let workers_with_configs: Arc<DashMap<WorkerId, Option<ModelRuntimeConfig>>> =
+            Arc::new(DashMap::new());
         let kv_router: Arc<KvRouter> = Arc::new(
             KvRouter::new(
                 backend_endpoint.clone(),
                 client.clone(),
+                workers_with_configs,
                 BLOCK_SIZE,
                 Some(selector),
                 Some(kv_router_config),
@@ -2539,10 +2544,13 @@ mod test_integration_publisher_with_kvindexer {
         let selector = Box::new(DefaultWorkerSelector::new(Some(kv_router_config)));
         let consumer_id = format!("test-router-{}", router_distributed.connection_id());
 
+        let workers_with_configs: Arc<DashMap<WorkerId, Option<ModelRuntimeConfig>>> =
+            Arc::new(DashMap::new());
         let kv_router: Arc<KvRouter> = Arc::new(
             KvRouter::new(
                 backend_endpoint.clone(),
                 client.clone(),
+                workers_with_configs,
                 BLOCK_SIZE,
                 Some(selector),
                 Some(kv_router_config),
