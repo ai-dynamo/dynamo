@@ -45,6 +45,30 @@ jobs:
         with:
           filters: .github/filters.yaml
 
+  detect-buildkit-workers:
+    name: Detect Buildkit Workers
+    runs-on: builder-cpu-amd-runner
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+
+    - name: Route Buildkit Workers
+      id: route-buildkit-workers
+      shell: bash
+      run: |
+        .github/scripts/route_buildkit.sh --amd
+        .github/scripts/route_buildkit.sh --arm
+    outputs:
+      vllm_amd64: ${{ steps.route-buildkit-workers.outputs.vllm_amd64 }}
+      vllm_arm64: ${{ steps.route-buildkit-workers.outputs.vllm_arm64 }}
+      trtllm_amd64: ${{ steps.route-buildkit-workers.outputs.trtllm_amd64 }}
+      trtllm_arm64: ${{ steps.route-buildkit-workers.outputs.trtllm_arm64 }}
+      sglang_amd64: ${{ steps.route-buildkit-workers.outputs.sglang_amd64 }}
+      sglang_arm64: ${{ steps.route-buildkit-workers.outputs.sglang_arm64 }}
+      general_amd64: ${{ steps.route-buildkit-workers.outputs.general_amd64 }}
+      general_arm64: ${{ steps.route-buildkit-workers.outputs.general_arm64 }}
+
   build-vllm:
     needs: detect-buildkit-workers
     strategy:
