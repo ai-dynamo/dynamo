@@ -596,30 +596,49 @@ def test_query_instance_id_returns_worker_and_tokens(
 
 @pytest.mark.timeout(29)  # ~3x average (~9.55s), rounded up
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
-@pytest.mark.parametrize("use_nats_core", [False, True], ids=["jetstream", "nats_core"])
+@pytest.mark.parametrize(
+    "use_nats_core,use_kv_events",
+    [
+        (False, True),  # JetStream mode (default)
+        (True, True),  # NATS Core + local indexer mode
+        (False, False),  # Approximate mode (--no-kv-events)
+    ],
+    ids=["jetstream", "nats_core", "no_kv_events"],
+)
 def test_router_decisions(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     use_nats_core,
+    use_kv_events,
     request_plane,
 ):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
 
-    Parameterized to test both JetStream (default) and NATS Core (local indexer) modes.
+    Parameterized to test:
+    - JetStream mode (default): KV events via JetStream
+    - NATS Core mode: KV events via NATS Core with local indexer on workers
+    - Approximate mode (--no-kv-events): No KV events, router predicts cache state
+      based on routing decisions with TTL-based expiration and pruning
     """
     # runtime_services_dynamic_ports handles NATS and etcd startup
-    mode = "NATS Core (local indexer)" if use_nats_core else "JetStream"
+    if not use_kv_events:
+        mode = "Approximate (no-kv-events)"
+    elif use_nats_core:
+        mode = "NATS Core (local indexer)"
+    else:
+        mode = "JetStream"
     logger.info(
         f"Starting test router prefix reuse and KV events synchronization ({mode})"
     )
 
     # Create mocker args dictionary with dp_size=4
+    # Note: enable_local_indexer only applies when use_kv_events=True and use_nats_core=True
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
         "dp_size": 4,
-        "enable_local_indexer": use_nats_core,
+        "enable_local_indexer": use_nats_core and use_kv_events,
     }
 
     try:
@@ -645,7 +664,12 @@ def test_router_decisions(
         endpoint = component.endpoint("generate")
 
         _test_router_decisions(
-            mockers, endpoint, MODEL_NAME, request, test_dp_rank=True
+            mockers,
+            endpoint,
+            MODEL_NAME,
+            request,
+            test_dp_rank=True,
+            use_kv_events=use_kv_events,
         )
 
     finally:
