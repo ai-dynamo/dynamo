@@ -14,7 +14,6 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Final
 
 import torch
-
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -783,10 +782,14 @@ class BaseWorkerHandler(ABC):
                     f"Failed to process prompt_embeds for {log_prefix.lower().strip() or 'request'} "
                     f"{request_id}: {e}"
                 )
-                return None, None, {
-                    "finish_reason": f"error: Invalid prompt_embeds: {e}",
-                    "token_ids": [],
-                }
+                return (
+                    None,
+                    None,
+                    {
+                        "finish_reason": f"error: Invalid prompt_embeds: {e}",
+                        "token_ids": [],
+                    },
+                )
         else:
             # Normal path: use token IDs
             prompt = TokensPrompt(
