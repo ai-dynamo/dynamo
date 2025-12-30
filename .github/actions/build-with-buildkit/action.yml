@@ -1,0 +1,128 @@
+name: 'Build with Remote Buildkit'
+description: 'Setup remote buildkit builders, login to registries, and build container image'
+
+inputs:
+  # Buildkit configuration
+  builder_name:
+    description: 'Name for the buildx builder'
+    required: true
+  buildkit_worker_addresses:
+    description: 'Comma-separated list of remote buildkit worker addresses'
+    required: true
+
+  # Docker Login inputs
+  ngc_ci_access_token:
+    description: 'NGC CI Access Token'
+    required: false
+  aws_default_region:
+    description: 'AWS Default Region'
+    required: false
+  aws_account_id:
+    description: 'AWS Account ID'
+    required: false
+  azure_acr_hostname:
+    description: 'Azure ACR hostname'
+    required: false
+  azure_acr_user:
+    description: 'Azure ACR user'
+    required: false
+  azure_acr_password:
+    description: 'Azure ACR password'
+    required: false
+
+  # Docker Build inputs
+  image_tag:
+    description: 'Image tag for the built container'
+    required: true
+  framework:
+    description: 'Framework to build (vllm, trtllm, sglang)'
+    required: true
+  target:
+    description: 'Build target (runtime, dev, etc.)'
+    required: false
+    default: 'runtime'
+  platform:
+    description: 'Docker platform (linux/amd64, linux/arm64)'
+    required: false
+    default: 'linux/amd64'
+  base_image_tag:
+    description: 'Optional override for base image tag'
+    required: false
+  runtime_image_tag:
+    description: 'Optional override for RUNTIME_IMAGE_TAG build-arg'
+    required: false
+  cuda_version:
+    description: 'Optional override for CUDA_VERSION build-arg'
+    required: false
+  torch_backend:
+    description: 'Optional override for TORCH_BACKEND build-arg'
+    required: false
+  ci_token:
+    description: 'CI Token for GitHub'
+    required: false
+  sccache_s3_bucket:
+    description: 'S3 bucket for sccache'
+    required: false
+  aws_access_key_id:
+    description: 'AWS Access Key ID'
+    required: false
+  aws_secret_access_key:
+    description: 'AWS Secret Access Key'
+    required: false
+  no_cache:
+    description: 'Disable Docker build cache'
+    required: false
+
+outputs:
+  image_tag:
+    description: 'Built image tag'
+    value: ${{ steps.build-image.outputs.image_tag }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Define buildkit builders
+      shell: bash
+      run: |
+        ADDRS="${{ inputs.buildkit_worker_addresses }}"
+        IFS=',' read -ra ADDR_LIST <<< "$ADDRS"
+        FIRST=true
+        for addr in "${ADDR_LIST[@]}"; do
+          if $FIRST; then
+            docker buildx create --use --name ${{ inputs.builder_name }} --driver remote "$addr"
+            FIRST=false
+          else
+            docker buildx create --append --name ${{ inputs.builder_name }} --driver remote "$addr"
+          fi
+        done
+        docker buildx inspect --bootstrap
+
+    - name: Docker Login
+      uses: ./.github/actions/docker-login
+      with:
+        ngc_ci_access_token: ${{ inputs.ngc_ci_access_token }}
+        aws_default_region: ${{ inputs.aws_default_region }}
+        aws_account_id: ${{ inputs.aws_account_id }}
+        azure_acr_hostname: ${{ inputs.azure_acr_hostname }}
+        azure_acr_user: ${{ inputs.azure_acr_user }}
+        azure_acr_password: ${{ inputs.azure_acr_password }}
+
+    - name: Build Container
+      id: build-image
+      uses: ./.github/actions/docker-build
+      with:
+        image_tag: ${{ inputs.image_tag }}
+        framework: ${{ inputs.framework }}
+        target: ${{ inputs.target }}
+        platform: ${{ inputs.platform }}
+        base_image_tag: ${{ inputs.base_image_tag }}
+        runtime_image_tag: ${{ inputs.runtime_image_tag }}
+        cuda_version: ${{ inputs.cuda_version }}
+        torch_backend: ${{ inputs.torch_backend }}
+        ci_token: ${{ inputs.ci_token }}
+        aws_default_region: ${{ inputs.aws_default_region }}
+        sccache_s3_bucket: ${{ inputs.sccache_s3_bucket }}
+        aws_account_id: ${{ inputs.aws_account_id }}
+        aws_access_key_id: ${{ inputs.aws_access_key_id }}
+        aws_secret_access_key: ${{ inputs.aws_secret_access_key }}
+
