@@ -289,7 +289,7 @@ jobs:
   # Run pytest suites against built images (amd64 only, requires GPU runners)
   # ============================================================================
   pytests-vllm:
-    needs: build-vllm
+    needs: [build-vllm, operator]
     strategy:
       fail-fast: false
       matrix:
@@ -323,7 +323,7 @@ jobs:
           platform_arch: ${{ matrix.platform.arch }}
 
   pytests-sglang:
-    needs: build-sglang
+    needs: [build-sglang, operator]
     strategy:
       fail-fast: false
       matrix:
@@ -357,7 +357,7 @@ jobs:
           platform_arch: ${{ matrix.platform.arch }}
 
   pytests-trtllm:
-    needs: build-trtllm
+    needs: [build-trtllm, operator]
     strategy:
       fail-fast: false
       matrix:
