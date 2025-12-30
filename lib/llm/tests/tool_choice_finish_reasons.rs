@@ -32,6 +32,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -45,6 +46,7 @@ fn build_backend_output_with_finish(text: &str, finish: common::FinishReason) ->
         log_probs: None,
         top_logprobs: None,
         finish_reason: Some(finish),
+        stop_reason: None,
         index: Some(0),
         completion_usage: None,
         disaggregated_params: None,

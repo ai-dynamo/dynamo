@@ -137,15 +137,10 @@ async def init(runtime: DistributedRuntime, config: Config):
         "Registered engine routes: /engine/start_profile, /engine/stop_profile"
     )
 
+    # Create prefill client for disaggregated decode mode (fallback when --router-mode kv is not used)
     prefill_client = None
-    prefill_router_client = None
     if config.serving_mode == DisaggregationMode.DECODE:
-        prefill_router_client = (
-            await runtime.namespace(dynamo_args.namespace)
-            .component("router")
-            .endpoint("best_worker_id")
-            .client()
-        )
+        logging.info("Initializing prefill client for disaggregated decode worker")
         prefill_client = (
             await runtime.namespace(dynamo_args.namespace)
             .component("prefill")
@@ -165,9 +160,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    handler = DecodeWorkerHandler(
-        component, engine, config, publisher, prefill_client, prefill_router_client
-    )
+    handler = DecodeWorkerHandler(component, engine, config, publisher, prefill_client)
     print(f"Config: {config}")
     health_check_payload = SglangHealthCheckPayload(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
@@ -272,17 +265,29 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
-    tasks = [
-        generate_endpoint.serve_endpoint(
-            handler.generate,
-            graceful_shutdown=True,
-            metrics_labels=metrics_labels,
-            health_check_payload=health_check_payload,
-        )
-    ]
+    # Readiness gate: requests wait until model is registered
+    ready_event = asyncio.Event()
 
     try:
-        await asyncio.gather(*tasks)
+        # Start endpoint immediately and register model concurrently
+        # Registration publishes runtime_config with bootstrap endpoint for optimization
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=metrics_labels,
+                health_check_payload=health_check_payload,
+            ),
+            register_llm_with_readiness_gate(
+                engine,
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                input_type=ModelInput.Tokens,
+                output_type=ModelType.Prefill,
+                readiness_gate=ready_event,
+            ),
+        )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise

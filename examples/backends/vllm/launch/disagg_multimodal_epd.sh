@@ -79,7 +79,6 @@ python -m dynamo.frontend &
 echo "Starting processor..."
 python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME --mm-prompt-template "$PROMPT_TEMPLATE" &
 
-# Configure GPU memory optimization for specific models
 EXTRA_ARGS=""
 
 # Start encode worker

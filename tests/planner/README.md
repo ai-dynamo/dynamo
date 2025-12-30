@@ -286,8 +286,7 @@ aiperf profile \
   --streaming \
   --input-file /workspace/rr-5-45_i3000o300.jsonl \ # path to the generated load dataset \
   --custom-dataset-type mooncake_trace \
-  --goodput "time_to_first_token:200 inter_token_latency:10" \
-  -v
+  --goodput "time_to_first_token:200 inter_token_latency:10"
 ```
 
 > [!NOTE]
