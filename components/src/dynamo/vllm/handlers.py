@@ -742,6 +742,58 @@ class BaseWorkerHandler(ABC):
 
         return vllm_mm_data if vllm_mm_data else None
 
+    def _build_prompt_from_request(
+        self,
+        request: Dict[str, Any],
+        request_id: str,
+        multi_modal_data: Dict[str, Any] | None,
+        log_prefix: str = "",
+    ) -> tuple[TokensPrompt | EmbedsPrompt | None, int | None, Dict[str, Any] | None]:
+        """
+        Build a prompt from request, handling both prompt_embeds and token_ids.
+
+        Args:
+            request: The request dict containing either prompt_embeds or token_ids
+            request_id: Request ID for logging
+            multi_modal_data: Optional multimodal data to attach to TokensPrompt
+            log_prefix: Prefix for log messages (e.g., "Prefill " for prefill requests)
+
+        Returns:
+            Tuple of (prompt, embedding_sequence_length, error_dict) where:
+            - On success: (prompt, embedding_sequence_length or None, None)
+            - On failure: (None, None, error_dict to yield)
+        """
+        embedding_sequence_length = None
+
+        if "prompt_embeds" in request and request["prompt_embeds"]:
+            try:
+                (
+                    prompt,
+                    embedding_sequence_length,
+                    tensor,
+                ) = self._create_prompt_from_embeddings(request["prompt_embeds"])
+                logger.info(
+                    f"{log_prefix}Using prompt embeddings: shape={tensor.shape}, "
+                    f"dtype={tensor.dtype}, sequence_length={embedding_sequence_length}, "
+                    f"request_id={request_id}"
+                )
+                return prompt, embedding_sequence_length, None
+            except Exception as e:
+                logger.error(
+                    f"Failed to process prompt_embeds for {log_prefix.lower().strip() or 'request'} "
+                    f"{request_id}: {e}"
+                )
+                return None, None, {
+                    "finish_reason": f"error: Invalid prompt_embeds: {e}",
+                    "token_ids": [],
+                }
+        else:
+            # Normal path: use token IDs
+            prompt = TokensPrompt(
+                prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
+            )
+            return prompt, embedding_sequence_length, None
+
     @staticmethod
     def _build_completion_usage(
         request_output: RequestOutput,
@@ -1027,35 +1079,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(request)
 
-        # Check if prompt_embeds is provided (takes precedence over token_ids)
-        embedding_sequence_length = None
-
-        if "prompt_embeds" in request and request["prompt_embeds"]:
-            try:
-                (
-                    prompt,
-                    embedding_sequence_length,
-                    tensor,
-                ) = self._create_prompt_from_embeddings(request["prompt_embeds"])
-                logger.info(
-                    f"Using prompt embeddings: shape={tensor.shape}, "
-                    f"dtype={tensor.dtype}, sequence_length={embedding_sequence_length}, "
-                    f"request_id={request_id}"
-                )
-            except Exception as e:
-                logger.error(
-                    f"Failed to process prompt_embeds for request {request_id}: {e}"
-                )
-                yield {
-                    "finish_reason": f"error: Invalid prompt_embeds: {e}",
-                    "token_ids": [],
-                }
-                return
-        else:
-            # Normal path: use token IDs
-            prompt = TokensPrompt(
-                prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
-            )
+        # Build prompt from request (handles both prompt_embeds and token_ids)
+        prompt, embedding_sequence_length, error = self._build_prompt_from_request(
+            request, request_id, multi_modal_data
+        )
+        if error is not None:
+            yield error
+            return
 
         # Build sampling params from request
         sampling_params = build_sampling_params(
@@ -1248,36 +1278,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(request)
 
-        # Check if prompt_embeds is provided (takes precedence over token_ids)
-        embedding_sequence_length = None
-
-        if "prompt_embeds" in request and request["prompt_embeds"]:
-            try:
-                (
-                    prompt,
-                    embedding_sequence_length,
-                    tensor,
-                ) = self._create_prompt_from_embeddings(request["prompt_embeds"])
-                logger.info(
-                    f"Prefill using prompt embeddings: shape={tensor.shape}, "
-                    f"dtype={tensor.dtype}, sequence_length={embedding_sequence_length}, "
-                    f"request_id={request_id}"
-                )
-            except Exception as e:
-                logger.error(
-                    f"Failed to process prompt_embeds for prefill request {request_id}: {e}"
-                )
-                yield {
-                    "finish_reason": f"error: Invalid prompt_embeds: {e}",
-                    "token_ids": [],
-                    "disaggregated_params": None,
-                }
-                return
-        else:
-            # Normal path: use token IDs
-            prompt = TokensPrompt(
-                prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
-            )
+        # Build prompt from request (handles both prompt_embeds and token_ids)
+        prompt, embedding_sequence_length, error = self._build_prompt_from_request(
+            request, request_id, multi_modal_data, log_prefix="Prefill "
+        )
+        if error is not None:
+            # Prefill errors need disaggregated_params field
+            error["disaggregated_params"] = None
+            yield error
+            return
 
         # Build sampling params from request using shared utility
         sampling_params = build_sampling_params(
