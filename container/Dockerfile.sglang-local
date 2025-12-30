@@ -27,12 +27,13 @@ COPY --from=protoc-downloader /opt/protoc/bin/protoc /usr/local/bin/
 COPY --from=protoc-downloader /opt/protoc/include/google /usr/local/include/google
 ARG SCCACHE_BUCKET="sccache"
 ARG SCCACHE_REGION="us-east-1"
-ARG SCCACHE_ENDPOINT=""
+ARG AWS_ENDPOINT_URL=""
 ENV RUSTC_WRAPPER=sccache \
     SCCACHE_BUCKET=${SCCACHE_BUCKET} \
     SCCACHE_REGION=${SCCACHE_REGION} \
-    SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT} \
     SCCACHE_DIR=/sccache
+# SCCACHE_ENDPOINT is set from AWS_ENDPOINT_URL if provided
+# This allows using custom S3 endpoints (e.g., LocalStack) for sccache
 WORKDIR /app
 RUN apt-get update && apt-get install -y python3 python3-pip python3-venv wget unzip git
 
@@ -51,26 +52,22 @@ ARG BRANCH_TYPE
 ARG CARGO_BUILD_JOBS
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 COPY --from=planner /app/recipe.json recipe.json
+ARG AWS_ENDPOINT_URL
 RUN --mount=type=secret,id=AWS_ACCESS_KEY_ID,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=AWS_SECRET_ACCESS_KEY,env=AWS_SECRET_ACCESS_KEY \
     --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    if [ -n "${AWS_ENDPOINT_URL}" ]; then export SCCACHE_ENDPOINT="${AWS_ENDPOINT_URL}"; fi && \
     cargo chef cook --release --recipe-path recipe.json
 COPY . .
 RUN python3 -m pip install --break-system-packages maturin
+ARG AWS_ENDPOINT_URL
 RUN --mount=type=secret,id=AWS_ACCESS_KEY_ID,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=AWS_SECRET_ACCESS_KEY,env=AWS_SECRET_ACCESS_KEY \
     --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    if [ "$BRANCH_TYPE" = "remote" ]; then \
-        git clone https://github.com/ai-dynamo/dynamo.git /tmp/dynamo-remote && \
-        cd /tmp/dynamo-remote/lib/bindings/python && \
-        python3 -m maturin build --release && \
-        mkdir -p /app/lib/bindings/python/target/wheels && \
-        cp target/wheels/*.whl /app/lib/bindings/python/target/wheels/ ; \
-    else \
-        cd lib/bindings/python && python3 -m maturin build --release ; \
-    fi
+    if [ -n "${AWS_ENDPOINT_URL}" ]; then export SCCACHE_ENDPOINT="${AWS_ENDPOINT_URL}"; fi && \
+    cd lib/bindings/python && python3 -m maturin build --release
 
 FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}
 WORKDIR /sgl-workspace
@@ -100,32 +97,38 @@ etcd-${ETCD_VERSION}-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
 ENV PATH=/usr/local/bin/etcd:$PATH
 ARG BRANCH_TYPE
 ARG CARGO_BUILD_JOBS
-# Only copies local src when BRANCH_TYPE=local
-RUN --mount=type=bind,source=.,target=/mnt/local_src \
-    if [ "$BRANCH_TYPE" = "local" ]; then \
-        cp -r /mnt/local_src /sgl-workspace/dynamo; \
-    fi
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 ARG DYNAMO_VERSION
 
 # SGLang does not use a venv in their container
-# BRANCH_TYPE=local  -> build from local repo with maturin
-# BRANCH_TYPE=remote -> build from github with maturin
-# otherwise          -> pip install ai-dynamo (with optional version)
+# By default: build from local source copied into image
+# BRANCH_TYPE=pypi -> install from PyPI (with optional DYNAMO_VERSION)
 
-# Copy the built wheels from the builder stage
-COPY --from=builder /app/lib/bindings/python/target/wheels/*.whl /tmp/dynamo_wheels/
+# Copy dynamo source into image (default behavior)
+# For BRANCH_TYPE=pypi, we'll remove it after installing from PyPI
+COPY --chmod=755 . /sgl-workspace/dynamo/
 
-RUN --mount=type=bind,source=.,target=/mnt/local_src \
-    if [ "$BRANCH_TYPE" = "local" ] || [ "$BRANCH_TYPE" = "remote" ]; then \
-        python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore /tmp/dynamo_wheels/*.whl && \
+# Copy the built wheels from the builder stage (only used for local builds)
+# Copy the entire wheels directory (works even if empty)
+RUN mkdir -p /tmp/dynamo_wheels
+COPY --from=builder /app/lib/bindings/python/target/wheels/ /tmp/dynamo_wheels/
+
+RUN if [ "$BRANCH_TYPE" = "pypi" ]; then \
+        # Install from PyPI and clean up copied source
+        if [ -n "$DYNAMO_VERSION" ]; then \
+            python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore ai-dynamo==${DYNAMO_VERSION} ; \
+        else \
+            python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore ai-dynamo ; \
+        fi && \
+        rm -rf /sgl-workspace/dynamo ; \
+    else \
+        # Default: build from local source copied into image
+        if [ -n "$(ls -A /tmp/dynamo_wheels/*.whl 2>/dev/null)" ]; then \
+            python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore /tmp/dynamo_wheels/*.whl ; \
+        fi && \
         cd /sgl-workspace/dynamo && \
         python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore -e . && \
-        python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore --requirement /mnt/local_src/container/deps/requirements.txt ; \
-    elif [ -n "$DYNAMO_VERSION" ]; then \
-        python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore ai-dynamo==${DYNAMO_VERSION} ; \
-    else \
-        python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore ai-dynamo ; \
+        python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore --requirement container/deps/requirements.txt ; \
     fi
 
 

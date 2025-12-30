@@ -11,9 +11,9 @@ import time
 from pathlib import Path
 
 import httpx
+import torch
 from transformers import AutoTokenizer
 
-NUM_WORKERS = 3  # 1 prefill + 2 decode
 TIER_BOUNDARIES = [128, 256, 512]  # Token boundaries for decode tiers
 HEALTH_URL = "http://localhost:8080/health"
 CHAT_URL = "http://localhost:8080/v1/chat/completions"
@@ -30,21 +30,34 @@ COLORS = {
     "prefill": "\033[32m",  # green
     "decode1": "\033[36m",  # cyan
     "decode2": "\033[35m",  # magenta
+    "decode3": "\033[34m",  # blue
     "frontend": "\033[33m",  # yellow
     "reset": "\033[0m",
 }
 
-COMMON_ARGS = [
-    "--model-path",
-    str(MODEL_PATH),
-    "--context-length",
-    "512",
-    "--mem-fraction-static",
-    "0.15",
-    "--page-size",
-    "16",
-    "--disable-cuda-graph",
-]
+
+def get_num_gpus() -> int:
+    """Detect the number of available GPUs."""
+    if torch.cuda.is_available():
+        return torch.cuda.device_count()
+    return 0
+
+
+def get_common_args(num_gpus: int) -> list[str]:
+    """Get common arguments, adjusting mem-fraction-static based on GPU count."""
+    mem_fraction = "0.8" if num_gpus > 1 else "0.15"
+    return [
+        "--model-path",
+        str(MODEL_PATH),
+        "--context-length",
+        "512",
+        "--mem-fraction-static",
+        mem_fraction,
+        "--page-size",
+        "16",
+        "--disable-cuda-graph",
+    ]
+
 
 # Load tokenizer for boundary analysis
 tokenizer = None
@@ -166,9 +179,9 @@ def monitor_processes():
         time.sleep(0.5)
 
 
-def wait_for_health(timeout: float = 120.0):
+def wait_for_health(num_workers: int, timeout: float = 120.0):
     """Poll /health until we have the expected number of instances."""
-    print(f"\n⏳ Waiting for {NUM_WORKERS} workers to be ready...")
+    print(f"\n⏳ Waiting for {num_workers} workers to be ready...")
     start = time.time()
 
     while time.time() - start < timeout:
@@ -182,11 +195,11 @@ def wait_for_health(timeout: float = 120.0):
             instances = data.get("instances", [])
             count = len(instances)
 
-            if count >= NUM_WORKERS:
-                print(f"✅ All {NUM_WORKERS} workers are ready!")
+            if count >= num_workers:
+                print(f"✅ All {num_workers} workers are ready!")
                 return True
             else:
-                print(f"   ... {count}/{NUM_WORKERS} workers ready", end="\r")
+                print(f"   ... {count}/{num_workers} workers ready", end="\r")
         except Exception:
             print("   ... waiting for frontend to start", end="\r")
 
@@ -323,15 +336,43 @@ def cleanup():
 
 
 def main():
+    # Detect GPUs
+    num_gpus = get_num_gpus()
+    print(f"🔍 Detected {num_gpus} GPU(s)")
+
+    if num_gpus == 0:
+        print("❌ No GPUs detected, exiting...")
+        return 1
+
+    # Get common args based on GPU count
+    common_args = get_common_args(num_gpus)
+    mem_fraction = "0.8" if num_gpus > 1 else "0.15"
+    print(f"📊 Using mem-fraction-static: {mem_fraction}")
+
+    # Determine worker configuration based on GPU count
+    # GPU 0: prefill worker
+    # GPU 1+: decode workers with different seqlen tiers
+    decode_tiers = [128, 256, 512]  # seqlen tiers for decode workers
+    num_decode_workers = (
+        min(num_gpus - 1, len(decode_tiers)) if num_gpus > 1 else len(decode_tiers)
+    )
+    num_workers = 1 + num_decode_workers  # 1 prefill + N decode
+
+    print(f"🚀 Starting {num_workers} workers: 1 prefill + {num_decode_workers} decode")
+
     try:
-        # Start prefill worker
+        # Start prefill worker on GPU 0 (or all GPUs if only 1)
+        prefill_env = {"DYN_SYSTEM_PORT": "8081"}
+        if num_gpus > 1:
+            prefill_env["CUDA_VISIBLE_DEVICES"] = "0"
+
         start_worker(
             "prefill",
             [
                 sys.executable,
                 "-m",
                 "dynamo.sglang",
-                *COMMON_ARGS,
+                *common_args,
                 "--disaggregation-mode",
                 "prefill",
                 "--disaggregation-bootstrap-port",
@@ -341,74 +382,41 @@ def main():
                 "--host",
                 "0.0.0.0",
             ],
-            env={"DYN_SYSTEM_PORT": "8081"},
+            env=prefill_env,
         )
 
-        # Start decode worker 1 (handles seqlen <= 128)
-        start_worker(
-            "decode1",
-            [
-                sys.executable,
-                "-m",
-                "dynamo.sglang",
-                *COMMON_ARGS,
-                "--disaggregation-mode",
-                "decode",
-                "--disaggregation-bootstrap-port",
-                "12346",
-                "--disaggregation-transfer-backend",
-                "nixl",
-                "--host",
-                "0.0.0.0",
-                "--this-seqlen",
-                "128",
-            ],
-            env={"DYN_SYSTEM_PORT": "8082"},
-        )
+        # Start decode workers
+        for i in range(num_decode_workers):
+            worker_name = f"decode{i + 1}"
+            gpu_id = i + 1 if num_gpus > 1 else 0  # Use separate GPU if available
+            seqlen_tier = decode_tiers[i]
+            bootstrap_port = 12346 + i
+            system_port = 8082 + i
 
-        # Start decode worker 1 (handles seqlen <= 128)
-        start_worker(
-            "decode2",
-            [
-                sys.executable,
-                "-m",
-                "dynamo.sglang",
-                *COMMON_ARGS,
-                "--disaggregation-mode",
-                "decode",
-                "--disaggregation-bootstrap-port",
-                "12347",
-                "--disaggregation-transfer-backend",
-                "nixl",
-                "--host",
-                "0.0.0.0",
-                "--this-seqlen",
-                "256",
-            ],
-            env={"DYN_SYSTEM_PORT": "8082"},
-        )
+            worker_env = {"DYN_SYSTEM_PORT": str(system_port)}
+            if num_gpus > 1:
+                worker_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
-        # Start decode worker 2 (handles seqlen <= 1024)
-        start_worker(
-            "decode3",
-            [
-                sys.executable,
-                "-m",
-                "dynamo.sglang",
-                *COMMON_ARGS,
-                "--disaggregation-mode",
-                "decode",
-                "--disaggregation-bootstrap-port",
-                "12348",
-                "--disaggregation-transfer-backend",
-                "nixl",
-                "--host",
-                "0.0.0.0",
-                "--this-seqlen",
-                "512",
-            ],
-            env={"DYN_SYSTEM_PORT": "8083"},
-        )
+            start_worker(
+                worker_name,
+                [
+                    sys.executable,
+                    "-m",
+                    "dynamo.sglang",
+                    *common_args,
+                    "--disaggregation-mode",
+                    "decode",
+                    "--disaggregation-bootstrap-port",
+                    str(bootstrap_port),
+                    "--disaggregation-transfer-backend",
+                    "nixl",
+                    "--host",
+                    "0.0.0.0",
+                    "--this-seqlen",
+                    str(seqlen_tier),
+                ],
+                env=worker_env,
+            )
 
         # Start frontend
         start_worker(
@@ -431,7 +439,7 @@ def main():
         monitor_thread.start()
 
         # Wait for health
-        if not wait_for_health():
+        if not wait_for_health(num_workers):
             print("Failed to start workers, exiting...")
             return 1
 
