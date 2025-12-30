@@ -69,6 +69,9 @@ inputs:
   aws_secret_access_key:
     description: 'AWS Secret Access Key'
     required: false
+  no_cache:
+    description: 'Disable Docker build cache'
+    required: false
 
 outputs:
   image_tag:
