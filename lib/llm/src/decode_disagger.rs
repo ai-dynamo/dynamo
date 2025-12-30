@@ -336,6 +336,8 @@ struct MigrationContext {
     migration_started_at: Option<(Instant, u32)>,
     /// Chunks drained during migration that should be yielded to the client
     pending_chunks: Vec<Annotated<LLMEngineOutput>>,
+    /// Original prompt length (used to calculate tokens generated for max_tokens adjustment)
+    original_prompt_len: usize,
 }
 
 impl MigrationContext {
@@ -344,6 +346,7 @@ impl MigrationContext {
         request: PreprocessedRequest,
         parent_ctx: Arc<dyn AsyncEngineContext>,
     ) -> Result<Self> {
+        let original_prompt_len = request.token_ids.len();
         let inner_ctx = Context::with_id(request.clone(), parent_ctx.id().to_string());
         parent_ctx.link_child(inner_ctx.context());
         let routed_out = current_tier.router.generate_routed(inner_ctx).await?;
@@ -355,6 +358,7 @@ impl MigrationContext {
             current_tier,
             migration_started_at: None,
             pending_chunks: Vec::new(),
+            original_prompt_len,
         })
     }
 
@@ -430,9 +434,13 @@ impl MigrationContext {
             // Call migrate endpoint - this de-schedules the request on decode1 and returns
             // the full token_ids (origin_input_ids + output_ids) so we know exactly what to send to decode2
             let tokens_seen = running_request.token_ids.len() as u32;
-            let migration_response = self.send_migration(&request_id, tokens_seen, parent_ctx).await;
+            let migration_response = self
+                .send_migration(&request_id, tokens_seen, parent_ctx)
+                .await;
             let Some(response) = migration_response else {
-                return Err(anyhow::anyhow!("Migration failed: no response from migrate endpoint"));
+                return Err(anyhow::anyhow!(
+                    "Migration failed: no response from migrate endpoint"
+                ));
             };
 
             tracing::info!(
@@ -456,9 +464,37 @@ impl MigrationContext {
                 .map(Annotated::from_data)
                 .collect();
 
-            // Create the migrated request with the full token_ids
+            // Calculate tokens generated so far and reduce max_tokens accordingly
+            let tokens_generated = migrated_token_ids
+                .len()
+                .saturating_sub(self.original_prompt_len);
+
+            // Create the migrated request with the full token_ids and adjusted max_tokens
             let mut migrated_request = running_request.clone();
             migrated_request.token_ids = migrated_token_ids;
+
+            // Reduce max_tokens by tokens already generated
+            if let Some(max_tokens) = migrated_request.stop_conditions.max_tokens {
+                let remaining_tokens = max_tokens.saturating_sub(tokens_generated as u32);
+                migrated_request.stop_conditions.max_tokens = Some(remaining_tokens);
+                tracing::info!(
+                    original_max_tokens = max_tokens,
+                    tokens_generated = tokens_generated,
+                    remaining_max_tokens = remaining_tokens,
+                    "Adjusted max_tokens for migrated request",
+                );
+            }
+
+            // Reduce min_tokens by tokens already generated
+            if let Some(min_tokens) = migrated_request.stop_conditions.min_tokens {
+                let remaining_min = min_tokens.saturating_sub(tokens_generated as u32);
+                migrated_request.stop_conditions.min_tokens = Some(remaining_min);
+                tracing::debug!(
+                    original_min_tokens = min_tokens,
+                    remaining_min_tokens = remaining_min,
+                    "Adjusted min_tokens for migrated request",
+                );
+            }
 
             let mut new_context = Context::with_id(migrated_request, request_id.to_string());
             new_context.bootstrap_info = Some(response.bootstrap_info);
@@ -479,6 +515,7 @@ impl MigrationContext {
                 current_tier: new_tier,
                 migration_started_at: Some((migration_start, from_seqlen)),
                 pending_chunks,
+                original_prompt_len: self.original_prompt_len,
             });
         }
         Ok(self)

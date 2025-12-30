@@ -61,7 +61,9 @@ impl InnerPrefillRouter {
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         let (stream, instance) = match self {
             InnerPrefillRouter::KvRouter(router) => router.generate_routed(request).await?.take(),
-            InnerPrefillRouter::SimpleRouter(router) => router.generate_routed(request).await?.take(),
+            InnerPrefillRouter::SimpleRouter(router) => {
+                router.generate_routed(request).await?.take()
+            }
         };
         tracing::info!(
             instance_id = instance,

@@ -11,8 +11,10 @@ import time
 from pathlib import Path
 
 import httpx
+from transformers import AutoTokenizer
 
 NUM_WORKERS = 3  # 1 prefill + 2 decode
+TIER_BOUNDARIES = [128, 256, 512]  # Token boundaries for decode tiers
 HEALTH_URL = "http://localhost:8080/health"
 CHAT_URL = "http://localhost:8080/v1/chat/completions"
 MODEL_PATH = Path.home() / "proj/models/smol2-135m"
@@ -43,6 +45,69 @@ COMMON_ARGS = [
     "16",
     "--disable-cuda-graph",
 ]
+
+# Load tokenizer for boundary analysis
+tokenizer = None
+
+
+def get_tokenizer():
+    """Lazily load the tokenizer."""
+    global tokenizer
+    if tokenizer is None:
+        print("📚 Loading tokenizer...")
+        tokenizer = AutoTokenizer.from_pretrained(str(MODEL_PATH))
+    return tokenizer
+
+
+def format_with_boundaries(text: str, prompt: str) -> str:
+    """Format text with markers at tier boundaries.
+
+    Returns the text with colored markers showing where token boundaries are.
+    """
+    tok = get_tokenizer()
+
+    # Tokenize prompt to get its length
+    prompt_tokens = tok.encode(prompt)
+    prompt_len = len(prompt_tokens)
+
+    # Tokenize full output
+    output_tokens = tok.encode(text, add_special_tokens=False)
+
+    # Build output with boundary markers
+    result_parts = []
+    current_pos = 0
+
+    for boundary in TIER_BOUNDARIES:
+        # Boundary is relative to total tokens (prompt + output)
+        output_boundary = boundary - prompt_len
+
+        if output_boundary <= 0:
+            # Boundary is within prompt, mark at start
+            if current_pos == 0:
+                result_parts.append(f"\033[41m[←{boundary}]\033[0m")
+        elif output_boundary < len(output_tokens):
+            # Decode tokens up to boundary
+            tokens_before = output_tokens[current_pos:output_boundary]
+            text_before = tok.decode(tokens_before)
+            result_parts.append(text_before)
+            result_parts.append(f"\033[41m[{boundary}]\033[0m")
+            current_pos = output_boundary
+
+    # Add remaining tokens
+    if current_pos < len(output_tokens):
+        remaining_tokens = output_tokens[current_pos:]
+        result_parts.append(tok.decode(remaining_tokens))
+
+    formatted = "".join(result_parts)
+
+    # Add summary
+    total_tokens = prompt_len + len(output_tokens)
+    summary = f"\n\n📊 Token counts: prompt={prompt_len}, output={len(output_tokens)}, total={total_tokens}"
+    for boundary in TIER_BOUNDARIES:
+        if total_tokens >= boundary:
+            summary += f"\n   ✓ Crossed {boundary} boundary at output token {boundary - prompt_len}"
+
+    return formatted + summary
 
 
 def stream_output(proc: subprocess.Popen, name: str, stream: str):
@@ -189,7 +254,10 @@ def run_request(max_tokens: int):
         print("-" * 50)
         final_text = "".join(full_output)
         print(f"\n📋 Final output ({len(final_text)} chars):")
-        print(final_text)
+
+        # Format with tier boundary markers
+        formatted_output = format_with_boundaries(final_text, prompt)
+        print(formatted_output)
         print("-" * 50)
     except Exception as e:
         print(f"\n❌ Request failed: {e}")
@@ -298,7 +366,7 @@ def main():
             env={"DYN_SYSTEM_PORT": "8082"},
         )
 
-        # Start decode worker 2 (handles seqlen <= 1024)
+        # Start decode worker 1 (handles seqlen <= 128)
         start_worker(
             "decode2",
             [
@@ -310,6 +378,28 @@ def main():
                 "decode",
                 "--disaggregation-bootstrap-port",
                 "12347",
+                "--disaggregation-transfer-backend",
+                "nixl",
+                "--host",
+                "0.0.0.0",
+                "--this-seqlen",
+                "256",
+            ],
+            env={"DYN_SYSTEM_PORT": "8082"},
+        )
+
+        # Start decode worker 2 (handles seqlen <= 1024)
+        start_worker(
+            "decode3",
+            [
+                sys.executable,
+                "-m",
+                "dynamo.sglang",
+                *COMMON_ARGS,
+                "--disaggregation-mode",
+                "decode",
+                "--disaggregation-bootstrap-port",
+                "12348",
                 "--disaggregation-transfer-backend",
                 "nixl",
                 "--host",
