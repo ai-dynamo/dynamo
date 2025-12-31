@@ -410,18 +410,18 @@ jobs:
           # - { name: trtllm }
           - { name: dynamo-operator }
     name: copy ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-    runs-on: ubuntu-latest
+    runs-on: builder-cpu-amd-runner
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      # - name: Docker Login
+      #   uses: ./.github/actions/docker-login
+      #   with:
+      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Copy image to target registry
         uses: ./.github/actions/skopeo-copy
         with:
