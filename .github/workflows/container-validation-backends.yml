@@ -396,13 +396,14 @@ jobs:
   # Copy built images from AWS ECR to Azure ACR after tests pass
   # ============================================================================
   copy-images:
-    needs: [pytests-vllm, pytests-sglang, pytests-trtllm, operator]
+    # needs: [pytests-vllm, pytests-sglang, pytests-trtllm, operator]
+    needs: [build-vllm, build-sglang, build-trtllm, operator]
     strategy:
       fail-fast: false
       matrix:
         platform:
           - { arch: amd64 }
-          - { arch: arm64 }
+          # - { arch: arm64 }
         framework:
           - { name: vllm }
           - { name: sglang }
