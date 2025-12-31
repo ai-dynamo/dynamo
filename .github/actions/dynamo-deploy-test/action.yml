@@ -175,11 +175,11 @@ runs:
         echo "**Namespace:** \`${NAMESPACE}\`" >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
         
-        echo "### All Pods in Namespace" >> "$GITHUB_STEP_SUMMARY"
-        echo '```' >> "$GITHUB_STEP_SUMMARY"
-        kubectl get pods -n ${NAMESPACE} -o wide >> "$GITHUB_STEP_SUMMARY" 2>&1
-        echo '```' >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"
+        # echo "### All Pods in Namespace" >> "$GITHUB_STEP_SUMMARY"
+        # echo '```' >> "$GITHUB_STEP_SUMMARY"
+        # kubectl get pods -n ${NAMESPACE} -o wide >> "$GITHUB_STEP_SUMMARY" 2>&1
+        # echo '```' >> "$GITHUB_STEP_SUMMARY"
+        # echo "" >> "$GITHUB_STEP_SUMMARY"
         
         echo "### Pod Descriptions" >> "$GITHUB_STEP_SUMMARY"
         echo '```' >> "$GITHUB_STEP_SUMMARY"
