@@ -36,9 +36,11 @@ CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-16}"
 
 # Parse command line arguments
 TAG=""
+PUSH_TAG=""
 TARGET=""
 NO_CACHE=""
 PLATFORM=""
+PUSH=false
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -46,6 +48,11 @@ while [[ $# -gt 0 ]]; do
         --tag)
             TAG="$2"
             shift 2
+            ;;
+        --push)
+            PUSH=true
+            PUSH_TAG="nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-v1"
+            shift
             ;;
         --target)
             TARGET="$2"
@@ -64,6 +71,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --tag TAG              Docker image tag (required)"
+            echo "  --push                 Push to registry and use buildx with cache"
             echo "  --target TARGET         Build target/stage (optional)"
             echo "  --no-cache             Disable build cache"
             echo "  --platform PLATFORM    Target platform (e.g., linux/amd64)"
@@ -143,8 +151,22 @@ fi
 # Enable BuildKit for secret support
 export DOCKER_BUILDKIT=1
 
+# Cache configuration
+CACHE_IMAGE="nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-cache"
+CACHE_FROM=""
+CACHE_TO=""
+
+# Only use cache if --no-cache is not set
+if [[ -z "$NO_CACHE" ]]; then
+    CACHE_FROM="--cache-from type=registry,ref=${CACHE_IMAGE}"
+    CACHE_TO="--cache-to type=registry,ref=${CACHE_IMAGE},mode=max"
+fi
+
 # Build the image
 echo "Building Docker image: ${TAG}"
+if [[ "$PUSH" == "true" ]]; then
+    echo "  Push tag: ${PUSH_TAG}"
+fi
 echo "  SGLang image: ${SGLANG_IMAGE_TAG}"
 echo "  CUDA version: ${CUDA_VERSION}"
 echo "  SCCACHE bucket: ${SCCACHE_BUCKET}"
@@ -155,19 +177,47 @@ fi
 if [[ -n "${BRANCH_TYPE:-}" ]]; then
     echo "  Branch type: ${BRANCH_TYPE}"
 fi
+if [[ -z "$NO_CACHE" ]]; then
+    echo "  Cache: ${CACHE_IMAGE}"
+fi
 echo ""
 
-docker build \
-    -f "${SCRIPT_DIR}/Dockerfile.sglang-local" \
-    ${TARGET_STR} \
-    ${PLATFORM} \
-    "${BUILD_ARGS[@]}" \
-    "${SECRET_ARGS[@]}" \
-    ${NO_CACHE} \
-    --tag "${TAG}" \
-    "${EXTRA_ARGS[@]}" \
-    .
-
-echo ""
-echo "Build complete! Image tagged as: ${TAG}"
+if [[ "$PUSH" == "true" ]]; then
+    # Use buildx for pushing with cache support
+    # Note: --load and --push can't be used together, so we push then pull
+    docker buildx build \
+        --progress=plain \
+        -f "${SCRIPT_DIR}/Dockerfile.sglang-local" \
+        ${TARGET_STR} \
+        ${PLATFORM} \
+        "${BUILD_ARGS[@]}" \
+        "${SECRET_ARGS[@]}" \
+        ${CACHE_FROM} \
+        ${CACHE_TO} \
+        ${NO_CACHE} \
+        --tag "${PUSH_TAG}" \
+        --push \
+        "${EXTRA_ARGS[@]}" \
+        .
+    # Pull the image locally with the local tag
+    docker pull "${PUSH_TAG}"
+    docker tag "${PUSH_TAG}" "${TAG}"
+    echo ""
+    echo "Build complete! Image tagged as: ${TAG}"
+    echo "Pushed to registry as: ${PUSH_TAG}"
+else
+    # Use regular docker build for local builds
+    docker build \
+        -f "${SCRIPT_DIR}/Dockerfile.sglang-local" \
+        ${TARGET_STR} \
+        ${PLATFORM} \
+        "${BUILD_ARGS[@]}" \
+        "${SECRET_ARGS[@]}" \
+        ${NO_CACHE} \
+        --tag "${TAG}" \
+        "${EXTRA_ARGS[@]}" \
+        .
+    echo ""
+    echo "Build complete! Image tagged as: ${TAG}"
+fi
 

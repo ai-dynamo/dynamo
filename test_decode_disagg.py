@@ -1,5 +1,6 @@
 """Test script for decode disaggregation with interactive UI."""
 
+import argparse
 import json
 import os
 import random
@@ -17,7 +18,6 @@ from transformers import AutoTokenizer
 TIER_BOUNDARIES = [128, 256, 512]  # Token boundaries for decode tiers
 HEALTH_URL = "http://localhost:8080/health"
 CHAT_URL = "http://localhost:8080/v1/chat/completions"
-MODEL_PATH = Path.home() / "proj/models/smol2-135m"
 
 # Event to signal all processes should stop
 stop_event = threading.Event()
@@ -43,12 +43,12 @@ def get_num_gpus() -> int:
     return 0
 
 
-def get_common_args(num_gpus: int) -> list[str]:
+def get_common_args(num_gpus: int, model_path: Path) -> list[str]:
     """Get common arguments, adjusting mem-fraction-static based on GPU count."""
     mem_fraction = "0.8" if num_gpus > 1 else "0.15"
     return [
         "--model-path",
-        str(MODEL_PATH),
+        str(model_path),
         "--context-length",
         "512",
         "--mem-fraction-static",
@@ -61,23 +61,25 @@ def get_common_args(num_gpus: int) -> list[str]:
 
 # Load tokenizer for boundary analysis
 tokenizer = None
+_tokenizer_model_path = None
 
 
-def get_tokenizer():
+def get_tokenizer(model_path: Path):
     """Lazily load the tokenizer."""
-    global tokenizer
-    if tokenizer is None:
-        print("📚 Loading tokenizer...")
-        tokenizer = AutoTokenizer.from_pretrained(str(MODEL_PATH))
+    global tokenizer, _tokenizer_model_path
+    if tokenizer is None or _tokenizer_model_path != model_path:
+        print(f"📚 Loading tokenizer from {model_path}...")
+        tokenizer = AutoTokenizer.from_pretrained(str(model_path))
+        _tokenizer_model_path = model_path
     return tokenizer
 
 
-def format_with_boundaries(text: str, prompt: str) -> str:
+def format_with_boundaries(text: str, prompt: str, model_path: Path) -> str:
     """Format text with markers at tier boundaries.
 
     Returns the text with colored markers showing where token boundaries are.
     """
-    tok = get_tokenizer()
+    tok = get_tokenizer(model_path)
 
     # Tokenize prompt to get its length
     prompt_tokens = tok.encode(prompt)
@@ -232,7 +234,7 @@ def random_prompt() -> str:
     return f"{random.choice(topics)} {random.choice(subjects)}"
 
 
-def run_request(max_tokens: int):
+def run_request(max_tokens: int, model_path: Path):
     """Run a chat completion request with streaming."""
     prompt = random_prompt()
     print(f"\n📝 Prompt: {prompt}")
@@ -240,7 +242,7 @@ def run_request(max_tokens: int):
     print("-" * 50)
 
     payload = {
-        "model": str(MODEL_PATH),
+        "model": str(model_path),
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "stream": True,
@@ -269,14 +271,14 @@ def run_request(max_tokens: int):
         print(f"\n📋 Final output ({len(final_text)} chars):")
 
         # Format with tier boundary markers
-        formatted_output = format_with_boundaries(final_text, prompt)
+        formatted_output = format_with_boundaries(final_text, prompt, model_path)
         print(formatted_output)
         print("-" * 50)
     except Exception as e:
         print(f"\n❌ Request failed: {e}")
 
 
-def interactive_loop():
+def interactive_loop(model_path: Path):
     """Interactive loop for entering OSL and running requests."""
     print("\n" + "=" * 50)
     print("🎮 Interactive Mode")
@@ -310,7 +312,7 @@ def interactive_loop():
                 if osl <= 0:
                     print("⚠️  Please enter a positive integer.")
                     continue
-                run_request(osl)
+                run_request(osl, model_path)
             except ValueError:
                 print("⚠️  Please enter a valid integer.")
         except (EOFError, KeyboardInterrupt):
@@ -336,16 +338,32 @@ def cleanup():
 
 
 def main():
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description="Test script for decode disaggregation with interactive UI"
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=str(Path.home() / "proj/models/smol2-135m"),
+        help="Path to the model directory (default: ~/proj/models/smol2-135m)",
+    )
+    args = parser.parse_args()
+
+    # Set model path from arguments
+    MODEL_PATH = Path(args.model_path)
+
     # Detect GPUs
     num_gpus = get_num_gpus()
     print(f"🔍 Detected {num_gpus} GPU(s)")
+    print(f"📦 Model path: {MODEL_PATH}")
 
     if num_gpus == 0:
         print("❌ No GPUs detected, exiting...")
         return 1
 
     # Get common args based on GPU count
-    common_args = get_common_args(num_gpus)
+    common_args = get_common_args(num_gpus, MODEL_PATH)
     mem_fraction = "0.8" if num_gpus > 1 else "0.15"
     print(f"📊 Using mem-fraction-static: {mem_fraction}")
 
@@ -444,7 +462,7 @@ def main():
             return 1
 
         # Interactive loop
-        interactive_loop()
+        interactive_loop(MODEL_PATH)
 
     finally:
         stop_event.set()  # Signal monitor to stop

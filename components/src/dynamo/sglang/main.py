@@ -564,13 +564,12 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     logging.info("Start of prefill disaggregation warmup ...")
     try:
         from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
-        from sglang.srt.sampling.sampling_params import SamplingParams
 
-        sampling_params = SamplingParams(
-            temperature=0.0,
-            max_new_tokens=8,
-            ignore_eos=True,
-        )
+        sampling_params = {
+            "temperature": 0.0,
+            "max_new_tokens": 8,
+            "ignore_eos": True,
+        }
 
         # Timeout: 1800s (30 min) for deep gemm precache
         async def _do_warmup():

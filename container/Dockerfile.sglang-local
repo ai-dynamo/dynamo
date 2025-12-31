@@ -69,7 +69,7 @@ RUN --mount=type=secret,id=AWS_ACCESS_KEY_ID,env=AWS_ACCESS_KEY_ID \
     if [ -n "${AWS_ENDPOINT_URL}" ]; then export SCCACHE_ENDPOINT="${AWS_ENDPOINT_URL}"; fi && \
     cd lib/bindings/python && python3 -m maturin build --release
 
-FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}
+FROM nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-base-img-v1
 WORKDIR /sgl-workspace
 # Install NATS and ETCD
 RUN case "$(uname -m)" in \
@@ -113,22 +113,31 @@ COPY --chmod=755 . /sgl-workspace/dynamo/
 RUN mkdir -p /tmp/dynamo_wheels
 COPY --from=builder /app/lib/bindings/python/target/wheels/ /tmp/dynamo_wheels/
 
+# Capture pre-installed sglang version to prevent reinstallation during dynamo install
+RUN SGLANG_VERSION=$(python3 -c "import sglang; print(sglang.__version__)" 2>/dev/null || echo "") && \
+    if [ -n "$SGLANG_VERSION" ]; then \
+        echo "sglang==${SGLANG_VERSION}" > /tmp/constraints.txt ; \
+    else \
+        touch /tmp/constraints.txt ; \
+    fi
+
 RUN if [ "$BRANCH_TYPE" = "pypi" ]; then \
         # Install from PyPI and clean up copied source
         if [ -n "$DYNAMO_VERSION" ]; then \
-            python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore ai-dynamo==${DYNAMO_VERSION} ; \
+            python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore --constraint /tmp/constraints.txt ai-dynamo==${DYNAMO_VERSION} ; \
         else \
-            python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore ai-dynamo ; \
+            python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore --constraint /tmp/constraints.txt ai-dynamo ; \
         fi && \
         rm -rf /sgl-workspace/dynamo ; \
     else \
         # Default: build from local source copied into image
+        # Use --constraint to prevent sglang reinstallation and --upgrade-strategy=only-if-needed for other deps
         if [ -n "$(ls -A /tmp/dynamo_wheels/*.whl 2>/dev/null)" ]; then \
-            python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore /tmp/dynamo_wheels/*.whl ; \
+            python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore --constraint /tmp/constraints.txt --upgrade-strategy=only-if-needed /tmp/dynamo_wheels/*.whl ; \
         fi && \
         cd /sgl-workspace/dynamo && \
-        python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore -e . && \
-        python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore --requirement container/deps/requirements.txt ; \
+        python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore --constraint /tmp/constraints.txt --upgrade-strategy=only-if-needed -e . && \
+        python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore --constraint /tmp/constraints.txt --upgrade-strategy=only-if-needed --requirement container/deps/requirements.txt ; \
     fi
 
 
