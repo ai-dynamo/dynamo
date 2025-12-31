@@ -534,7 +534,6 @@ mod tests {
         value.eq_ignore_ascii_case("true") || value == "1"
     }
 
-
     #[test]
     fn test_eager_start_env_var_name() {
         // Verify the env var name is correct
@@ -583,7 +582,6 @@ mod tests {
             "OnceCell should only initialize once"
         );
     }
-
 
     #[tokio::test]
     async fn test_daemon_handles_receiver_clone() {
