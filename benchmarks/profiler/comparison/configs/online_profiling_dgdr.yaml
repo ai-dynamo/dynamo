@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Profile-ALL (online AIPerf) profiling for Qwen3-32B
+# Online-ALL (online AIPerf) profiling for Qwen3-32B
 # Duration: ~30-60 minutes (real deployments with AIPerf benchmarks)
 
 apiVersion: nvidia.com/v1alpha1

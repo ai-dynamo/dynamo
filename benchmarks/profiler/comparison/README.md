@@ -4,11 +4,26 @@ All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Profiling Method Comparison
+# Profiling Method Comparison Framework
 
-Compare profiling methods across two dimensions:
-- **Predictive accuracy**: Does predicted perf match actual perf?
-- **Optimization accuracy**: Did the sweep find the best config?
+Compare profiling methods across **three dimensions**:
+1. **Cost**: Time, GPU-hours, number of deployments
+2. **Predictive accuracy**: Does predicted latency match actual latency?
+3. **Optimization accuracy**: Did the sweep find the best config?
+
+## Methods
+
+This framework compares two **baselines** plus any number of **experimental methods**:
+
+| Method | Description | Role |
+|--------|-------------|------|
+| **AIC-ALL** | AI Configurator simulation, no deployments | Baseline (fastest, cheapest) |
+| **Online-ALL** | Online AIPerf on all configs | Baseline (most accurate, most expensive) |
+| *Additional methods* | Stack rank, Bayesian search, hybrids, etc. | Experimental (1-n methods) |
+
+The goal is to find methods that approach Online-ALL accuracy at AIC-ALL cost.
+
+---
 
 ## Test Configuration
 
@@ -29,91 +44,156 @@ Compare profiling methods across two dimensions:
 export NAMESPACE=hannahz
 ```
 
-### AIC-Search ALL (~30 seconds)
+### Baseline 1: AIC-ALL (~30 seconds)
 
 ```bash
-kubectl delete dgdr qwen3-32b-aic -n hannahz
+kubectl delete dgdr qwen3-32b-aic -n $NAMESPACE 2>/dev/null
 kubectl apply -n $NAMESPACE -f benchmarks/profiler/comparison/configs/aic_profiling_dgdr.yaml
-
-# Watch progress
 kubectl logs -f job/profile-qwen3-32b-aic -n $NAMESPACE
 ```
 
-### Profile-ALL Online (~30-60 min)
+### Baseline 2: Online-ALL (~30-60 min)
 
 ```bash
-kubectl delete dgdr qwen3-32b-online -n hannahz
+kubectl delete dgdr qwen3-32b-online -n $NAMESPACE 2>/dev/null
 kubectl apply -n $NAMESPACE -f benchmarks/profiler/comparison/configs/online_profiling_dgdr.yaml
-
-# Watch progress
 kubectl logs -f job/profile-qwen3-32b-online -n $NAMESPACE
 ```
 
+### Additional Methods
+
+For each experimental method, run its profiling and save results to `results/<method_name>/`.
+
 ---
 
-## Step 2: Get Results from ConfigMaps
+## Step 2: Download Results & Configs
 
 ```bash
-# List profiling ConfigMaps
-kubectl get configmaps -n $NAMESPACE | grep dgdr-output
+# Create results directories
+mkdir -p benchmarks/profiler/comparison/results/{aic_all,online_all}
 
-# Save AIC results
-mkdir -p benchmarks/profiler/comparison/results/aic_all
-kubectl get configmap dgdr-output-qwen3-32b-aic -n $NAMESPACE -o jsonpath='{.data}' \
-  > benchmarks/profiler/comparison/results/aic_all/configmap_data.json
-
-# Save Online results
-mkdir -p benchmarks/profiler/comparison/results/online_all
-kubectl get configmap dgdr-output-qwen3-32b-online -n $NAMESPACE -o jsonpath='{.data}' \
-  > benchmarks/profiler/comparison/results/online_all/configmap_data.json
-
-# Also save the logs
+# Download AIC results
+kubectl get configmap dgdr-output-qwen3-32b-aic -n $NAMESPACE \
+  -o jsonpath='{.data.config_with_planner\.yaml}' \
+  > benchmarks/profiler/comparison/results/aic_all/config_with_planner.yaml
 kubectl logs job/profile-qwen3-32b-aic -n $NAMESPACE \
   > benchmarks/profiler/comparison/results/aic_all/profile_sla.log
+
+# Download Online results
+kubectl get configmap dgdr-output-qwen3-32b-online -n $NAMESPACE \
+  -o jsonpath='{.data.config_with_planner\.yaml}' \
+  > benchmarks/profiler/comparison/results/online_all/config_with_planner.yaml
 kubectl logs job/profile-qwen3-32b-online -n $NAMESPACE \
   > benchmarks/profiler/comparison/results/online_all/profile_sla.log
+
+# Repeat for each additional method → results/<method_name>/
 ```
 
 ---
 
-## Step 3: Compare Results
+## Step 3: Predictive Accuracy Testing
+
+For each method, deploy its recommended config and measure actual latency at different loads.
+
+### Deploy a method's config
+
+```bash
+kubectl apply -n $NAMESPACE \
+  -f benchmarks/profiler/comparison/results/<method>/config_with_planner.yaml
+kubectl port-forward svc/<deployment>-frontend 8000:8000 -n $NAMESPACE &
+```
+
+### Run AIPerf at 4 load levels
+
+```bash
+MAX_BS=64  # Adjust based on profiler output
+
+for LEVEL in idle medium saturation overload; do
+  case $LEVEL in
+    idle) CONC=1 ;;
+    medium) CONC=$((MAX_BS / 2)) ;;
+    saturation) CONC=$((MAX_BS * 9 / 10)) ;;
+    overload) CONC=$((MAX_BS * 11 / 10)) ;;
+  esac
+  
+  aiperf profile --model Qwen/Qwen3-32B --url localhost:8000 --streaming \
+    --concurrency $CONC --request-count 100 \
+    --synthetic-input-tokens-mean 2048 --output-tokens-mean 256 \
+    --goodput "time_to_first_token:500 inter_token_latency:50" \
+    --artifact-dir benchmarks/profiler/comparison/results/<method>/validation/$LEVEL
+done
+```
+
+**Repeat for each method** (aic_all, online_all, and all experimental methods).
+
+---
+
+## Step 4: Optimization Accuracy Testing
+
+Test all configs under realistic workloads to measure actual goodput.
+
+### Generate sinusoidal load
+
+```bash
+python benchmarks/sin_load_generator/sin_synth.py \
+  --time-duration 1800 \
+  --request-rate-min 5 --request-rate-max 45 \
+  --isl1 2048 --osl1 256 \
+  --output-file benchmarks/profiler/comparison/results/sinusoidal.jsonl
+```
+
+### Benchmark each method's config
+
+```bash
+# For each method:
+aiperf profile --model Qwen/Qwen3-32B --url localhost:8000 --streaming \
+  --input-file benchmarks/profiler/comparison/results/sinusoidal.jsonl \
+  --custom-dataset-type mooncake_trace \
+  --goodput "time_to_first_token:500 inter_token_latency:50" \
+  --artifact-dir benchmarks/profiler/comparison/results/<method>/optimization
+```
+
+---
+
+## Step 5: Compare All Results
 
 ```bash
 python -m benchmarks.profiler.comparison.run_comparison \
   --aic-results benchmarks/profiler/comparison/results/aic_all \
   --online-results benchmarks/profiler/comparison/results/online_all \
+  --additional-results stack_rank:benchmarks/profiler/comparison/results/stack_rank \
+  --additional-results bayesian:benchmarks/profiler/comparison/results/bayesian \
   --model Qwen/Qwen3-32B \
-  --ttft 500 --itl 50 \
-  --isl 2048 --osl 256 \
+  --ttft 500 --itl 50 --isl 2048 --osl 256 \
   --output-dir benchmarks/profiler/comparison/results/comparison
 ```
 
 ---
 
-## Step 4: Validate Predictions (Optional)
+## Output Structure
 
-Deploy the recommended config and test at multiple load levels:
-
-```bash
-python -m benchmarks.profiler.comparison.validate_deployment \
-  --url localhost:8000 \
-  --model Qwen/Qwen3-32B \
-  --max-batch-size 64 \
-  --predicted-ttft <from_profiler> \
-  --predicted-itl <from_profiler> \
-  --ttft-target 500 --itl-target 50 \
-  --output-dir benchmarks/profiler/comparison/results/validation
+```
+results/
+├── aic_all/                        # Baseline: AIC
+│   ├── config_with_planner.yaml
+│   ├── profile_sla.log
+│   ├── validation/{idle,medium,saturation,overload}/
+│   └── optimization/
+├── online_all/                     # Baseline: Online
+│   ├── config_with_planner.yaml
+│   ├── profile_sla.log
+│   ├── validation/
+│   └── optimization/
+├── <method_name>/                  # Each experimental method
+│   ├── config_with_planner.yaml
+│   ├── profile_sla.log
+│   ├── validation/
+│   └── optimization/
+├── sinusoidal.jsonl
+└── comparison/
+    ├── comparison_results.json
+    ├── summary.txt
+    └── *.png
 ```
 
----
-
-## Output Files
-
-Each profiling run creates:
-- `profile_sla.log` - Timing and recommendations
-- `selected_prefill_interpolation/raw_data.npz` - Prefill perf data
-- `selected_decode_interpolation/raw_data.npz` - Decode perf data
-- `prefill_performance.png`, `decode_performance.png` - Plots
-- `config_with_planner.yaml` - Recommended DGD config
-
-See [TEST_PLAN.md](./TEST_PLAN.md) for full methodology.
+See [TEST_PLAN.md](./TEST_PLAN.md) for methodology details.
