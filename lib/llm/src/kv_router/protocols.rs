@@ -4,6 +4,82 @@
 use crate::tokens::{SequenceHash, Token};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use xxhash_rust::xxh3;
+
+/// Seed for XXH3 hashing, consistent with indexer.rs
+pub const XXH3_SEED: u64 = 1337;
+
+/// Compute hash of data using XXH3 with the standard seed.
+pub fn compute_hash(data: &[u8]) -> u64 {
+    xxh3::xxh3_64_with_seed(data, XXH3_SEED)
+}
+
+/// Compute the hash of a local block.
+pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
+    LocalBlockHash(compute_hash(data))
+}
+
+/// Compute the hash for a sequence of tokens, optionally including multimodal metadata.
+///
+/// When multimodal extra info is provided, the mm_hashes are included in the hash computation
+/// to ensure that blocks with identical tokens but different multimodal objects produce
+/// different hashes.
+pub fn compute_block_hash_for_seq(
+    tokens: &[u32],
+    kv_block_size: u32,
+    block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+) -> Vec<LocalBlockHash> {
+    tokens
+        .chunks_exact(kv_block_size as usize)
+        .enumerate()
+        .map(|(block_idx, chunk)| {
+            let mut bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
+
+            // Include MM hashes in the block hash computation if present
+            if let Some(mm_infos) = block_mm_infos
+                && let Some(Some(block_mm_info)) = mm_infos.get(block_idx)
+            {
+                let mut mm_hashes: Vec<u64> = block_mm_info
+                    .mm_objects
+                    .iter()
+                    .map(|obj| obj.mm_hash)
+                    .collect();
+                mm_hashes.sort_unstable();
+
+                for mm_hash in mm_hashes {
+                    bytes.extend_from_slice(&mm_hash.to_le_bytes());
+                }
+            }
+
+            compute_block_hash(&bytes)
+        })
+        .collect()
+}
+
+/// Compute rolling sequence hashes for a vector of block hashes.
+///
+/// - The first block's sequence hash equals its block hash
+/// - Subsequent blocks' sequence hash = hash([parent_sequence_hash, current_block_hash], seed)
+pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<SequenceHash> {
+    if block_hashes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut sequence_hashes = Vec::with_capacity(block_hashes.len());
+    sequence_hashes.push(block_hashes[0].0);
+
+    for i in 1..block_hashes.len() {
+        let parent_seq_hash = sequence_hashes[i - 1];
+        let current_block_hash = block_hashes[i].0;
+
+        let combined = [parent_seq_hash, current_block_hash];
+        let bytes: Vec<u8> = combined.iter().flat_map(|&num| num.to_le_bytes()).collect();
+        let seq_hash = compute_hash(&bytes);
+        sequence_hashes.push(seq_hash);
+    }
+
+    sequence_hashes
+}
 
 /// A worker identifier.
 pub type WorkerId = u64;
@@ -436,6 +512,103 @@ impl<'de> Deserialize<'de> for ExternalSequenceBlockHash {
     {
         let value = u64::deserialize(deserializer)?;
         Ok(ExternalSequenceBlockHash(value))
+    }
+}
+
+// ------
+// TokensWithHashes
+// ------
+
+/// A container for tokens with lazily computed block and sequence hashes.
+///
+/// This struct avoids redundant hash computations by caching results:
+/// - `get_or_compute_block_hashes()` computes block hashes if not cached
+/// - `get_or_compute_seq_hashes()` computes seq hashes if not cached,
+///   and will also compute block hashes first if needed (since seq hashes depend on them)
+#[derive(Debug, Clone)]
+pub struct TokensWithHashes {
+    tokens: Vec<u32>,
+    block_size: u32,
+    block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+    block_hashes: Option<Vec<LocalBlockHash>>,
+    seq_hashes: Option<Vec<SequenceHash>>,
+}
+
+impl TokensWithHashes {
+    /// Creates a new TokensWithHashes from tokens and block size.
+    pub fn new(tokens: Vec<u32>, block_size: u32) -> Self {
+        Self {
+            tokens,
+            block_size,
+            block_mm_infos: None,
+            block_hashes: None,
+            seq_hashes: None,
+        }
+    }
+
+    /// Adds multimodal extra info for blocks.
+    pub fn with_mm_infos(mut self, infos: Vec<Option<BlockExtraInfo>>) -> Self {
+        self.block_mm_infos = Some(infos);
+        self
+    }
+
+    /// Returns a reference to the tokens.
+    pub fn tokens(&self) -> &[u32] {
+        &self.tokens
+    }
+
+    /// Returns the number of tokens.
+    pub fn len(&self) -> usize {
+        self.tokens.len()
+    }
+
+    /// Returns true if there are no tokens.
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
+    }
+
+    /// Returns the block size.
+    pub fn block_size(&self) -> u32 {
+        self.block_size
+    }
+
+    /// Returns the multimodal extra info, if set.
+    pub fn block_mm_infos(&self) -> Option<&[Option<BlockExtraInfo>]> {
+        self.block_mm_infos.as_deref()
+    }
+
+    /// Returns block hashes, computing them if not already cached.
+    pub fn get_or_compute_block_hashes(&mut self) -> &[LocalBlockHash] {
+        if self.block_hashes.is_none() {
+            self.block_hashes = Some(compute_block_hash_for_seq(
+                &self.tokens,
+                self.block_size,
+                self.block_mm_infos.as_deref(),
+            ));
+        }
+        self.block_hashes.as_ref().unwrap()
+    }
+
+    /// Returns sequence hashes, computing them if not already cached.
+    /// This will also compute block hashes if they haven't been computed yet,
+    /// since sequence hashes depend on block hashes.
+    pub fn get_or_compute_seq_hashes(&mut self) -> &[SequenceHash] {
+        if self.seq_hashes.is_none() {
+            // Ensure block hashes are computed first
+            let block_hashes = self.get_or_compute_block_hashes();
+            self.seq_hashes = Some(compute_seq_hash_for_block(block_hashes));
+        }
+        self.seq_hashes.as_ref().unwrap()
+    }
+
+    /// Returns cached block hashes without computing. Returns None if not yet computed.
+    pub fn block_hashes(&self) -> Option<&[LocalBlockHash]> {
+        self.block_hashes.as_deref()
+    }
+
+    /// Returns cached seq hashes without computing. Returns None if not yet computed.
+    pub fn seq_hashes(&self) -> Option<&[SequenceHash]> {
+        self.seq_hashes.as_deref()
     }
 }
 

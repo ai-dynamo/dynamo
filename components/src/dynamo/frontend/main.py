@@ -161,8 +161,8 @@ def parse_args():
     parser.add_argument(
         "--router-max-tree-size",
         type=int,
-        default=int(os.environ.get("DYN_ROUTER_MAX_TREE_SIZE", str(2**10))),
-        help="KV Router: Maximum tree size before pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_MAX_TREE_SIZE env var (default: 1024).",
+        default=int(os.environ.get("DYN_ROUTER_MAX_TREE_SIZE", str(2**20))),
+        help="KV Router: Maximum tree size before pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_MAX_TREE_SIZE env var (default: 1048576, which is 2^20).",
     )
     parser.add_argument(
         "--router-prune-target-ratio",

@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig};
+use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
+use dashmap::DashMap;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::traits::events::EventPublisher;
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, watch};
+use tokio::sync::watch;
 
 use super::KV_HIT_RATE_SUBJECT;
 use super::KvRouterConfig;
@@ -90,8 +91,6 @@ impl SchedulingRequest {
 pub struct KvScheduler {
     request_tx: tokio::sync::mpsc::Sender<SchedulingRequest>,
     slots: Arc<ActiveSequencesMultiWorker>,
-    /// Worker runtime configs for looking up disaggregated endpoints
-    workers_with_configs: Arc<RwLock<HashMap<WorkerId, Option<ModelRuntimeConfig>>>>,
 }
 
 impl KvScheduler {
@@ -99,92 +98,71 @@ impl KvScheduler {
         component: Component,
         block_size: u32,
         instance_ids_rx: watch::Receiver<Vec<u64>>,
-        runtime_configs_rx: watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>,
+        workers_with_configs: Arc<DashMap<WorkerId, Option<ModelRuntimeConfig>>>,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
         router_uuid: String,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
-        let instance_ids: Vec<u64> = instance_ids_rx.borrow().clone();
-        let runtime_configs: HashMap<WorkerId, ModelRuntimeConfig> =
-            runtime_configs_rx.borrow().clone();
 
-        // Create shared workers_with_configs wrapped in Arc<RwLock>
-        let workers_with_configs: Arc<RwLock<HashMap<WorkerId, Option<ModelRuntimeConfig>>>> = {
-            let mut initial_map = HashMap::new();
-            for worker_id in &instance_ids {
-                let config = runtime_configs.get(worker_id).cloned();
-                if config.is_some() {
-                    tracing::info!("Runtime config found for worker_id: {}", worker_id);
-                }
-                initial_map.insert(*worker_id, config);
-            }
-            Arc::new(RwLock::new(initial_map))
-        };
+        // Get initial workers from DashMap for slot initialization
+        let initial_workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> = workers_with_configs
+            .iter()
+            .map(|r| (*r.key(), r.value().clone()))
+            .collect();
 
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             component.clone(),
             block_size as usize,
-            workers_with_configs.read().await.clone(), // this includes dp_size info
+            initial_workers,
             replica_sync,
             router_uuid,
         ));
 
-        // Spawn background task to monitor and update workers_with_configs
-        let workers_monitor = workers_with_configs.clone();
+        // Spawn background task to monitor workers_with_configs changes and update slots
         let slots_monitor = slots.clone();
+        let workers_monitor = workers_with_configs.clone();
         let mut instance_ids_monitor_rx = instance_ids_rx.clone();
-        let mut configs_monitor_rx = runtime_configs_rx.clone();
         let monitor_cancel_token = component.drt().child_token();
         tokio::spawn(async move {
-            tracing::trace!("workers monitoring task started");
+            tracing::trace!("KvScheduler workers monitoring task started");
+            let mut last_workers: HashSet<WorkerId> = HashSet::new();
+
             loop {
-                // Wait for either instances or configs to change
+                // Wait for instance changes (ModelManager handles config updates to the DashMap)
                 tokio::select! {
                     _ = monitor_cancel_token.cancelled() => {
-                        tracing::trace!("workers monitoring task shutting down");
+                        tracing::trace!("KvScheduler workers monitoring task shutting down");
                         break;
                     }
                     result = instance_ids_monitor_rx.changed() => {
                         if result.is_err() {
-                            tracing::warn!("instance IDs watch sender shutdown in monitor");
-                            break;
-                        }
-                    }
-                    result = configs_monitor_rx.changed() => {
-                        if result.is_err() {
-                            tracing::warn!("runtime configs watch sender shutdown in monitor");
+                            tracing::warn!("instance IDs watch sender shutdown in KvScheduler monitor");
                             break;
                         }
                     }
                 }
 
-                // Get the latest values from both channels
-                let new_instance_ids = instance_ids_monitor_rx.borrow_and_update().clone();
-                let new_configs = configs_monitor_rx.borrow_and_update().clone();
+                // Get current workers from DashMap
+                let current_workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> =
+                    workers_monitor
+                        .iter()
+                        .map(|r| (*r.key(), r.value().clone()))
+                        .collect();
+                let current_worker_ids: HashSet<WorkerId> =
+                    current_workers.keys().copied().collect();
 
-                // Build the new workers_with_configs map
-                let mut new_workers_with_configs = HashMap::new();
-                for worker_id in &new_instance_ids {
-                    let config = new_configs.get(worker_id).cloned();
-                    if config.is_some() {
-                        tracing::info!("Runtime config found for worker_id: {}", worker_id);
-                    }
-                    new_workers_with_configs.insert(*worker_id, config);
+                // Only update slots if workers have changed
+                if current_worker_ids != last_workers {
+                    slots_monitor.update_workers(current_workers);
+                    last_workers = current_worker_ids;
+                    tracing::trace!(
+                        "KvScheduler: Updated slots with {} workers",
+                        last_workers.len()
+                    );
                 }
-
-                // Update workers when instances change
-                slots_monitor.update_workers(new_workers_with_configs.clone());
-
-                // Update the shared workers_with_configs
-                let mut workers_map = workers_monitor.write().await;
-                *workers_map = new_workers_with_configs;
-                tracing::trace!(
-                    "Updated workers_with_configs with {} workers",
-                    workers_map.len()
-                );
             }
-            tracing::trace!("workers monitoring task shutting down");
+            tracing::trace!("KvScheduler workers monitoring task shutting down");
         });
 
         let slots_clone = slots.clone();
@@ -222,8 +200,11 @@ impl KvScheduler {
                 request.decode_blocks = decode_blocks;
                 request.prefill_tokens = prefill_tokens;
 
-                // Read the current workers configuration
-                let workers = workers_scheduler.read().await.clone();
+                // Read the current workers configuration from DashMap
+                let workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> = workers_scheduler
+                    .iter()
+                    .map(|r| (*r.key(), r.value().clone()))
+                    .collect();
 
                 match selector.select_worker(&workers, &request, block_size) {
                     Ok(selection) => {
@@ -289,11 +270,7 @@ impl KvScheduler {
             tracing::trace!("background endpoint subscriber shutting down");
         });
 
-        Ok(KvScheduler {
-            request_tx,
-            slots,
-            workers_with_configs,
-        })
+        Ok(KvScheduler { request_tx, slots })
     }
 
     pub async fn schedule(
@@ -350,17 +327,6 @@ impl KvScheduler {
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots.free(&request_id.to_string()).await
-    }
-
-    pub async fn get_disaggregated_endpoint(
-        &self,
-        worker_id: WorkerId,
-    ) -> Option<DisaggregatedEndpoint> {
-        let workers = self.workers_with_configs.read().await;
-        workers
-            .get(&worker_id)
-            .and_then(|config| config.as_ref())
-            .and_then(|config| config.disaggregated_endpoint.clone())
     }
 
     pub async fn get_potential_loads(

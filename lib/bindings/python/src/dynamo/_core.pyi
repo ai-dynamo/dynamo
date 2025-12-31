@@ -684,7 +684,7 @@ class ApproxKvIndexer:
         component: Component,
         kv_block_size: int,
         router_ttl_secs: float = 120.0,
-        router_max_tree_size: int = 1024,
+        router_max_tree_size: int = 1048576,
         router_prune_target_ratio: float = 0.8,
     ) -> None:
         """
@@ -694,7 +694,7 @@ class ApproxKvIndexer:
             component: The component to associate with this indexer
             kv_block_size: The KV cache block size
             router_ttl_secs: TTL for blocks in seconds (default: 120.0)
-            router_max_tree_size: Maximum tree size before pruning (default: 1024)
+            router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
             router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
         """
         ...
@@ -1091,7 +1091,7 @@ class KvRouterConfig:
         router_snapshot_threshold: Optional[int] = 1000000,
         router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
-        router_max_tree_size: int = 1024,
+        router_max_tree_size: int = 1048576,
         router_prune_target_ratio: float = 0.8,
     ) -> None:
         """
@@ -1106,7 +1106,7 @@ class KvRouterConfig:
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
             router_reset_states: Reset router state on startup (default: False)
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
-            router_max_tree_size: Maximum tree size before pruning (default: 1024)
+            router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
             router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
         """
         ...
