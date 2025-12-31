@@ -21,6 +21,12 @@ from tests.fault_tolerance.deploy.scenarios import (
 )
 from tests.utils.managed_deployment import ManagedDeployment
 
+from dynamo.planner.defaults import (
+    SGLangComponentName,
+    TrtllmComponentName,
+    VllmComponentName,
+)
+
 
 @pytest.fixture
 def scenario(scenario_name, client_type):
@@ -369,12 +375,10 @@ async def test_fault_scenario(
         # Get model from the appropriate worker based on backend
         try:
             if scenario.backend == "vllm":
-                from dynamo.planner.defaults import VllmComponentName
                 model = scenario.deployment[VllmComponentName.decode_worker_k8s_name].model
             elif scenario.backend == "sglang":
-                model = scenario.deployment["decode"].model
+                model = scenario.deployment[SGLangComponentName.decode_worker_k8s_name].model
             elif scenario.backend == "trtllm":
-                from dynamo.planner.defaults import TrtllmComponentName
                 # Determine deployment type from scenario deployment name
                 if (
                     "agg" in scenario.deployment.name

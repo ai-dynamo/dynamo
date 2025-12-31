@@ -70,39 +70,24 @@ else:
 
 ---
 
-## 3. `"decode"` - SGLang Short Component Name
+## 3. ~~`"decode"`~~ - SGLang Component Name (REFACTORED)
 
-**Location:**
+**Status:** ✅ **This has been refactored in the PR**
+
+**Previous location:**
 - `tests/fault_tolerance/deploy/test_deployment.py` (line 375)
 
-**Why it's intentional:**
-- This is **NOT actually a hardcoded string** - it's the actual value of `SGLangComponentName.decode_worker_k8s_name`
-- SGLang uses short component names (`"decode"` and `"prefill"`) to stay within Kubernetes name length limits
-- The code could use `SGLangComponentName.decode_worker_k8s_name` instead, but using `"decode"` directly is also correct since that's the actual value
+**Refactoring:**
+- Changed from hardcoded `"decode"` to `SGLangComponentName.decode_worker_k8s_name`
+- This completes the refactoring for consistency with the PR objective
+- The value is still `"decode"` (SGLang uses short names for Kubernetes limits), but now references the source of truth
 
-**Verification:**
+**Current usage:**
 ```python
-# From defaults.py
-class SGLangComponentName:
-    decode_worker_k8s_name = "decode"  # Short name for k8s limits
-    prefill_worker_k8s_name = "prefill"
-```
-
-**Example usage:**
-```python
-# test_deployment.py line 375
+# test_deployment.py (after refactoring)
 elif scenario.backend == "sglang":
-    model = scenario.deployment["decode"].model  # Uses actual component name value
+    model = scenario.deployment[SGLangComponentName.decode_worker_k8s_name].model
 ```
-
-**Should this be refactored?**
-- **Optional improvement** - Could be changed to:
-  ```python
-  from dynamo.planner.defaults import SGLangComponentName
-  model = scenario.deployment[SGLangComponentName.decode_worker_k8s_name].model
-  ```
-- However, since `SGLangComponentName.decode_worker_k8s_name == "decode"`, the current code is functionally correct
-- This is a minor consistency improvement, not a bug
 
 ---
 
@@ -112,19 +97,18 @@ elif scenario.backend == "sglang":
 |--------|----------|--------|-------------------|
 | `"Frontend"` | Multiple | Common component, no ComponentName class | No - by design |
 | `"TRTLLMWorker"` | Multiple | Aggregated deployment name (not in defaults yet) | Future - when added to defaults |
-| `"decode"` | test_deployment.py:375 | Actual SGLang component name value | Optional - consistency improvement |
+| ~~`"decode"`~~ | ~~test_deployment.py:375~~ | ~~Actual SGLang component name value~~ | ✅ **Refactored** - now uses `SGLangComponentName.decode_worker_k8s_name` |
 
 ## Recommendations
 
 1. **`"Frontend"`** - Keep as-is. It's a shared component name.
-2. **`"TRTLLMWorker"`** - Keep as-is for now. Refactor when `TrtllmComponentName` is extended.
-3. **`"decode"`** - Optional: Consider using `SGLangComponentName.decode_worker_k8s_name` for consistency, but current code is correct.
+2. **`"TRTLLMWorker"`** - Keep as-is for now. Refactor when `TrtllmComponentName` is extended (tracked in issue #5116).
+3. ~~**`"decode"`**~~ - ✅ **Completed**: Now uses `SGLangComponentName.decode_worker_k8s_name` for consistency.
 
 ## Conclusion
 
 All remaining hardcoded strings are **intentional and documented**. They represent:
 - Shared components (`Frontend`)
 - Special cases with clear comments (`TRTLLMWorker`)
-- Direct use of actual component name values (`decode`)
 
-The refactoring successfully replaced all **unintentional** hardcoded backend-specific deployment names with component name class references. ✅
+The refactoring successfully replaced all **unintentional** hardcoded backend-specific deployment names with component name class references. The SGLang `"decode"` string has also been refactored for consistency. ✅
