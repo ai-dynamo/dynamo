@@ -11,11 +11,11 @@ use tokio_stream::StreamExt;
 use super::*;
 use crate::Component;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
-use llm_rs::kv_router::indexer::compute_block_hash_for_seq;
 use llm_rs::kv_router::protocols::ForwardPassMetrics as RsForwardPassMetrics;
 use llm_rs::kv_router::protocols::KvStats as RsKvStats;
 use llm_rs::kv_router::protocols::SpecDecodeStats as RsSpecDecodeStats;
 use llm_rs::kv_router::protocols::WorkerStats as RsWorkerStats;
+use llm_rs::kv_router::protocols::compute_block_hash_for_seq;
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::traits::events::EventSubscriber;
 use tracing;
@@ -782,7 +782,7 @@ pub(crate) struct ApproxKvIndexer {
 #[pymethods]
 impl ApproxKvIndexer {
     #[new]
-    #[pyo3(signature = (component, kv_block_size, router_ttl_secs=120.0, router_max_tree_size=1024, router_prune_target_ratio=0.8))]
+    #[pyo3(signature = (component, kv_block_size, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8))]
     fn new(
         component: Component,
         kv_block_size: usize,
@@ -851,10 +851,12 @@ impl ApproxKvIndexer {
         dp_rank: DpRank,
     ) -> PyResult<Bound<'p, PyAny>> {
         let indexer = self.inner.clone();
+        let block_size = self.inner.block_size();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let worker = llm_rs::kv_router::protocols::WorkerWithDpRank::new(worker_id, dp_rank);
+            let mut tokens_with_hashes = TokensWithHashes::new(tokens, block_size);
             indexer
-                .process_routing_decision_for_request(tokens.as_slice(), worker)
+                .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
                 .await
                 .map_err(to_pyerr)?;
             Ok(())

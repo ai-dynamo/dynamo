@@ -15,7 +15,7 @@ import sglang as sgl
 from sglang.srt.tracing import trace as sglang_trace
 from sglang.srt.utils import get_local_ip_auto
 
-from dynamo._core import Client, Component, Context
+from dynamo._core import Component, Context
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -30,7 +30,6 @@ class BaseWorkerHandler(ABC):
         engine: sgl.Engine,
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
-        prefill_client: Optional[Client] = None,
     ) -> None:
         """Initialize base worker handler.
 
@@ -39,7 +38,6 @@ class BaseWorkerHandler(ABC):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher for the worker.
-            prefill_client: Optional client for prefill worker in disaggregated mode.
         """
         self.component = component
         self.engine = engine
@@ -50,7 +48,6 @@ class BaseWorkerHandler(ABC):
         else:
             self.metrics_publisher = None
             self.kv_publisher = None
-        self.prefill_client = prefill_client
         self.serving_mode = config.serving_mode
         self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
         self.enable_trace = config.server_args.enable_trace

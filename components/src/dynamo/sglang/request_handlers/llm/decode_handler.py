@@ -107,12 +107,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         input_param = self._get_input_param(request)
 
         if self.serving_mode == DisaggregationMode.DECODE:
-            # Check if bootstrap_info is in the request
+            # Check if bootstrap_info is pre-computed in the request (from frontend)
             bootstrap_info = request.get("bootstrap_info")
 
             if not bootstrap_info:
                 raise RuntimeError(
-                    "bootstrap_info is required for disaggregated decode but was not provided."
+                    "bootstrap_info is required for disaggregated decode but was not provided"
                 )
 
             logging.debug(
