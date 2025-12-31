@@ -122,7 +122,8 @@ runs:
         echo "graph_name=${GRAPH_NAME}" >> $GITHUB_OUTPUT
 
         # Update the deployment file with the runtime image
-        yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE
+        # Use strenv() to ensure the image string is treated as plain string, not parsed as YAML
+        yq -i '.spec.services.[].extraPodSpec.mainContainer.image = strenv(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE
 
         echo "=== DEPLOYMENT CONFIGURATION ==="
         echo "Framework: ${FRAMEWORK}"
@@ -147,28 +148,7 @@ runs:
           --timeout=${POD_READY_TIMEOUT}; then
           
           echo "::error::Pods failed to become ready within timeout"
-          
-          # Output debug info to GitHub Step Summary
-          {
-            echo "## ❌ Pod Readiness Failure"
-            echo ""
-            echo "### All Pods in Namespace"
-            echo '```'
-            kubectl get pods -n ${KUBE_NS} -o wide
-            echo '```'
-            echo ""
-            echo "### Pod Descriptions"
-            echo '```'
-            kubectl describe pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS}
-            echo '```'
-            echo ""
-            echo "### Pod Logs (last 30 lines per container)"
-            echo '```'
-            kubectl logs --tail=30 --all-containers=true --prefix=true \
-              -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} || echo "No logs available"
-            echo '```'
-          } >> $GITHUB_STEP_SUMMARY
-          
+          echo "deploy_failed=true" >> $GITHUB_OUTPUT
           exit 1
         fi
 
@@ -176,6 +156,54 @@ runs:
         kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $KUBE_NS -o wide
         echo ""
         kubectl get all -n $KUBE_NS
+
+    - name: Debug Pod Failure
+      id: debug-failure
+      if: failure() && steps.deploy.outputs.deploy_failed == 'true'
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        FRAMEWORK: ${{ inputs.framework }}
+        DEPLOYMENT_FILE: ${{ inputs.deployment_file }}
+        GRAPH_NAME: ${{ steps.deploy.outputs.graph_name }}
+      run: |
+        export KUBECONFIG=${{ github.workspace }}/.kubeconfig
+        
+        echo "## ❌ Pod Readiness Failure: ${FRAMEWORK} / ${DEPLOYMENT_FILE}" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "**Graph Name:** \`${GRAPH_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
+        echo "**Namespace:** \`${NAMESPACE}\`" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        
+        echo "### All Pods in Namespace" >> "$GITHUB_STEP_SUMMARY"
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        kubectl get pods -n ${NAMESPACE} -o wide >> "$GITHUB_STEP_SUMMARY" 2>&1
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        
+        echo "### Pod Descriptions" >> "$GITHUB_STEP_SUMMARY"
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        kubectl describe pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${NAMESPACE} >> "$GITHUB_STEP_SUMMARY" 2>&1
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        
+        echo "### Pod Logs (last 30 lines per container)" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        
+        # Get logs pod by pod for better readability
+        PODS=$(kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${NAMESPACE} -o jsonpath='{.items[*].metadata.name}')
+        
+        if [ -z "$PODS" ]; then
+          echo "_No pods found matching the deployment label_" >> "$GITHUB_STEP_SUMMARY"
+        else
+          for POD in $PODS; do
+            echo "#### Pod: \`${POD}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            kubectl logs --tail=30 --all-containers=true ${POD} -n ${NAMESPACE} >> "$GITHUB_STEP_SUMMARY" 2>&1 || echo "No logs available for ${POD}" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          done
+        fi
 
     - name: Run Validation Tests
       id: test

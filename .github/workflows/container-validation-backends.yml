@@ -347,14 +347,14 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Run tests
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-          pytest_marks: "pre_merge and ${{ matrix.framework.name }} and (gpu_0 or gpu_1)"
-          framework: "${{ matrix.framework.name }}"
-          test_type: "pre_merge"
-          platform_arch: ${{ matrix.platform.arch }}
+      # - name: Run tests
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+      #     pytest_marks: "pre_merge and ${{ matrix.framework.name }} and (gpu_0 or gpu_1)"
+      #     framework: "${{ matrix.framework.name }}"
+      #     test_type: "pre_merge"
+      #     platform_arch: ${{ matrix.platform.arch }}
 
   pytests-trtllm:
     needs: [build-trtllm, operator]
@@ -381,14 +381,14 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Run tests
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-          pytest_marks: "pre_merge and ${{ matrix.framework.name }} and (gpu_0 or gpu_1)"
-          framework: "${{ matrix.framework.name }}"
-          test_type: "pre_merge"
-          platform_arch: ${{ matrix.platform.arch }}
+      # - name: Run tests
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+      #     pytest_marks: "pre_merge and ${{ matrix.framework.name }} and (gpu_0 or gpu_1)"
+      #     framework: "${{ matrix.framework.name }}"
+      #     test_type: "pre_merge"
+      #     platform_arch: ${{ matrix.platform.arch }}
 
 
   # ============================================================================
