@@ -28,6 +28,7 @@ use dynamo_runtime::{
 };
 
 use crate::kv_router::publisher::WorkerMetricsPublisher;
+use crate::mocker::bootstrap::{BootstrapServer, connect_to_prefill};
 use crate::mocker::protocols::DirectRequest;
 use crate::mocker::protocols::{MockEngineArgs, OutputSignal, WorkerType};
 use crate::mocker::scheduler::Scheduler;
@@ -47,6 +48,8 @@ pub struct MockVllmEngine {
     active_requests: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>>,
     request_senders: Arc<OnceCell<Vec<mpsc::UnboundedSender<DirectRequest>>>>,
     engine_args: MockEngineArgs,
+    /// Bootstrap server for prefill workers in disaggregated mode
+    bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
 }
 
 impl MockVllmEngine {
@@ -56,6 +59,7 @@ impl MockVllmEngine {
             active_requests: Arc::new(Mutex::new(HashMap::new())),
             request_senders: Arc::new(OnceCell::new()),
             engine_args: args,
+            bootstrap_server: Arc::new(OnceCell::new()),
         }
     }
 
@@ -71,6 +75,15 @@ impl MockVllmEngine {
             tracing::info!("Simulating engine startup time: {:.2}s", startup_time_secs);
             tokio::time::sleep(Duration::from_secs_f64(startup_time_secs)).await;
             tracing::info!("Engine startup simulation completed");
+        }
+
+        // Start bootstrap server for prefill workers in disaggregated mode
+        if self.engine_args.worker_type == WorkerType::Prefill
+            && let Some(port) = self.engine_args.bootstrap_port
+        {
+            let server = BootstrapServer::start(port, cancel_token.clone()).await?;
+            let _ = self.bootstrap_server.set(server);
+            tracing::info!(port = port, "Bootstrap server started for prefill worker");
         }
 
         // Pass component to schedulers only if prefix caching is enabled and not a decode worker
@@ -251,6 +264,26 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                 "dp_rank {} is out of bounds for dp_size {}",
                 dp_rank, self.engine_args.dp_size
             )));
+        }
+
+        // Handle bootstrap rendezvous for disaggregated serving
+        // Follows the SGLang pattern:
+        // - Prefill: yields bootstrap_info first, then engine handles KV transfer internally
+        // - Decode: connects to prefill right away before generating tokens
+        //
+        // For the mocker, prefill doesn't need to actively wait - the server just needs to be
+        // running so decode can connect. Decode connects before generating output.
+        // Decode worker connects to prefill's bootstrap server for KV transfer handshake
+        if let Some(bootstrap_info) = &request.bootstrap_info
+            && self.engine_args.worker_type == WorkerType::Decode
+        {
+            connect_to_prefill(
+                &bootstrap_info.bootstrap_host,
+                bootstrap_info.bootstrap_port,
+                bootstrap_info.bootstrap_room,
+            )
+            .await
+            .map_err(|e| Error::msg(format!("Bootstrap connection failed: {e}")))?;
         }
 
         let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());

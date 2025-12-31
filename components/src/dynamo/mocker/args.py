@@ -108,12 +108,15 @@ def create_temp_engine_args_file(args) -> Path:
         "speedup_ratio": getattr(args, "speedup_ratio", None),
         "dp_size": getattr(args, "dp_size", None),
         "startup_time": getattr(args, "startup_time", None),
-        "planner_profile_data": str(getattr(args, "planner_profile_data", None))
-        if getattr(args, "planner_profile_data", None)
-        else None,
+        "planner_profile_data": (
+            str(getattr(args, "planner_profile_data", None))
+            if getattr(args, "planner_profile_data", None)
+            else None
+        ),
         "is_prefill": getattr(args, "is_prefill_worker", None),
         "is_decode": getattr(args, "is_decode_worker", None),
         "enable_local_indexer": getattr(args, "enable_local_indexer", None),
+        # Note: bootstrap_port is NOT included here - it's set per-worker in launch_workers()
     }
 
     # Remove None values to only include explicitly set arguments
@@ -140,6 +143,13 @@ def validate_worker_type_args(args):
             "Cannot specify both --is-prefill-worker and --is-decode-worker. "
             "A worker must be either prefill, decode, or aggregated (neither flag set)."
         )
+
+
+def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
+    """Parse comma-separated bootstrap ports string into list of integers."""
+    if not ports_str:
+        return []
+    return [int(p.strip()) for p in ports_str.split(",")]
 
 
 def parse_args():
@@ -292,6 +302,15 @@ def parse_args():
         help="Enable worker-local KV indexer for tracking this worker's own KV cache state (default: False)",
     )
     parser.add_argument(
+        "--bootstrap-ports",
+        type=str,
+        default=None,
+        help="Comma-separated list of bootstrap ports for disaggregated serving rendezvous. "
+        "One port per worker (must match --num-workers). "
+        "Prefill workers listen on these ports; decode workers connect to them. "
+        "If not specified, bootstrap rendezvous is disabled.",
+    )
+    parser.add_argument(
         "--store-kv",
         type=str,
         choices=["etcd", "file", "mem"],
@@ -312,6 +331,15 @@ def parse_args():
     # Validate num_workers
     if args.num_workers < 1:
         raise ValueError(f"--num-workers must be at least 1, got {args.num_workers}")
+
+    # Parse and validate bootstrap_ports
+    args.bootstrap_ports_list = parse_bootstrap_ports(args.bootstrap_ports)
+    if args.bootstrap_ports_list:
+        if len(args.bootstrap_ports_list) != args.num_workers:
+            raise ValueError(
+                f"--bootstrap-ports must have exactly --num-workers ({args.num_workers}) ports, "
+                f"got {len(args.bootstrap_ports_list)}: {args.bootstrap_ports_list}"
+            )
 
     # Set endpoint default based on worker type if not explicitly provided
     if args.endpoint is None:

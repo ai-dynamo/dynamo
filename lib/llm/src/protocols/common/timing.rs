@@ -6,9 +6,12 @@
 //! This module provides [`RequestTracker`] for tracking timing and routing information
 //! that can be returned to clients via the `nvext` response field.
 
-use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use utoipa::ToSchema;
 
 use crate::protocols::openai::nvext::WorkerIdInfo;
@@ -80,6 +83,12 @@ pub struct RequestTracker {
 
     /// Request phase (Prefill/Decode/Aggregated)
     phase: Mutex<RequestPhase>,
+
+    /// Semaphore for coordinating phase transitions.
+    /// Acquiring a permit blocks subsequent set_phase calls until the permit is dropped.
+    /// This prevents race conditions in the bootstrap optimization path where prefill
+    /// runs in background and needs to complete record_worker before phase changes.
+    phase_semaphore: Arc<Semaphore>,
 }
 
 impl RequestTracker {
@@ -102,6 +111,7 @@ impl RequestTracker {
             prefill_worker_id: OnceLock::new(),
             decode_worker_id: OnceLock::new(),
             phase: Mutex::new(RequestPhase::Aggregated),
+            phase_semaphore: Arc::new(Semaphore::new(1)),
         }
     }
 
@@ -175,14 +185,29 @@ impl RequestTracker {
         self.decode_worker_id.set(id).is_ok()
     }
 
-    /// Set the request phase. Can be called multiple times to update the phase.
-    pub fn set_phase(&self, phase: RequestPhase) {
-        *self.phase.lock().unwrap() = phase;
+    /// Set the request phase and return a permit that blocks subsequent phase changes.
+    ///
+    /// The returned permit must be dropped to allow the next `set_phase` call to proceed.
+    /// Under normal operation, callers can simply ignore the returned permit (letting it
+    /// drop immediately). In the bootstrap optimization path, the permit is held and
+    /// passed to the spawned prefill task, which drops it after `record_worker` completes.
+    ///
+    /// This prevents the race condition where the phase changes to Decode before the
+    /// background prefill task has recorded its worker ID.
+    pub async fn set_phase(&self, phase: RequestPhase) -> OwnedSemaphorePermit {
+        let permit = self
+            .phase_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("phase semaphore should never be closed");
+        *self.phase.lock() = phase;
+        permit
     }
 
     /// Get the current request phase.
     pub fn phase(&self) -> RequestPhase {
-        *self.phase.lock().unwrap()
+        *self.phase.lock()
     }
 
     /// Record worker ID based on the current phase.

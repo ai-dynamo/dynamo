@@ -5,9 +5,12 @@
 # Now supports vLLM-style individual arguments for MockEngineArgs
 
 import asyncio
+import json
 import logging
 import os
 import signal
+import tempfile
+from pathlib import Path
 
 import uvloop
 
@@ -85,6 +88,13 @@ async def launch_workers(args, extra_engine_args_path):
     loop = asyncio.get_running_loop()
     futures = []
     runtimes = []
+    per_worker_temp_files: list[Path] = []
+
+    # Load base engine args if we need to create per-worker files with bootstrap_port
+    base_engine_args = None
+    if args.bootstrap_ports_list:
+        with open(extra_engine_args_path) as f:
+            base_engine_args = json.load(f)
 
     for worker_id in range(args.num_workers):
         logger.info(f"Creating mocker worker {worker_id + 1}/{args.num_workers}")
@@ -93,13 +103,30 @@ async def launch_workers(args, extra_engine_args_path):
         runtime = DistributedRuntime(loop, args.store_kv, args.request_plane)
         runtimes.append(runtime)
 
+        # Determine which engine args file to use
+        if args.bootstrap_ports_list:
+            # Create per-worker temp file with this worker's bootstrap_port
+            worker_args = base_engine_args.copy()
+            worker_args["bootstrap_port"] = args.bootstrap_ports_list[worker_id]
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", delete=False
+            ) as f:
+                json.dump(worker_args, f)
+                worker_engine_args_path = Path(f.name)
+            per_worker_temp_files.append(worker_engine_args_path)
+            logger.debug(
+                f"Worker {worker_id}: using bootstrap_port {args.bootstrap_ports_list[worker_id]}"
+            )
+        else:
+            worker_engine_args_path = extra_engine_args_path
+
         # Create EntrypointArgs for this worker
         entrypoint_args = EntrypointArgs(
             engine_type=EngineType.Mocker,
             model_path=args.model_path,
             model_name=args.model_name,
             endpoint_id=args.endpoint,
-            extra_engine_args=extra_engine_args_path,
+            extra_engine_args=worker_engine_args_path,
             is_prefill=args.is_prefill_worker,
         )
 
@@ -129,6 +156,13 @@ async def launch_workers(args, extra_engine_args_path):
         logger.info("Shutting down DistributedRuntime instances")
         for runtime in runtimes:
             runtime.shutdown()
+
+        # Clean up per-worker temp files
+        for temp_file in per_worker_temp_files:
+            try:
+                temp_file.unlink()
+            except Exception:
+                pass
 
 
 def main():
