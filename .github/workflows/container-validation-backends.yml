@@ -64,7 +64,7 @@ jobs:
     - name: Route Buildkit Workers
       id: route-buildkit-workers
       shell: bash
-        run: |
+      run: |
         .github/scripts/route_buildkit.sh --amd
         # .github/scripts/route_buildkit.sh --arm
     outputs:
