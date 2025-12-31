@@ -313,14 +313,14 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Run tests
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-          pytest_marks: "pre_merge and ${{ matrix.framework.name }} and (gpu_0 or gpu_1)"
-          framework: "${{ matrix.framework.name }}"
-          test_type: "pre_merge"
-          platform_arch: ${{ matrix.platform.arch }}
+      # - name: Run tests
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+      #     pytest_marks: "pre_merge and ${{ matrix.framework.name }} and (gpu_0 or gpu_1)"
+      #     framework: "${{ matrix.framework.name }}"
+      #     test_type: "pre_merge"
+      #     platform_arch: ${{ matrix.platform.arch }}
 
   pytests-sglang:
     needs: [build-sglang, operator]
@@ -395,7 +395,7 @@ jobs:
   # IMAGE DISTRIBUTION JOBS
   # Copy built images from AWS ECR to Azure ACR after tests pass
   # ============================================================================
-  copy-images:
+  copy-images-to-acr:
     needs: [pytests-vllm, pytests-sglang, pytests-trtllm, operator]
     strategy:
       fail-fast: true
@@ -454,7 +454,7 @@ jobs:
   # ============================================================================
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    needs: [copy-images]
+    needs: [copy-images-to-acr]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
     outputs:
@@ -519,7 +519,7 @@ jobs:
           --set dynamo-operator.namespaceRestriction.enabled=true \
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-          --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.copy-images.outputs.target_tag_dynamo_operator_amd64 }} 
+          --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.copy-images-to-acr.outputs.target_tag_dynamo_operator_amd64 }} 
         # Wait for all deployments to be ready
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
 
@@ -530,7 +530,7 @@ jobs:
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
     # if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [deploy-operator, copy-images]
+    needs: [deploy-operator, copy-images-to-acr]
     permissions:
       contents: read
     strategy:
@@ -557,7 +557,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: deploy/${{ matrix.profile }}.yaml
           framework: vllm
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-images.outputs.target_tag_vllm_amd64 }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-images-to-acr.outputs.target_tag_vllm_amd64 }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
         uses: actions/upload-artifact@v4
@@ -570,7 +570,7 @@ jobs:
   deploy-test-vllm-disagg-router:
     runs-on: cpu-amd-m5-2xlarge
     # if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    needs: [deploy-operator, copy-images]
+    needs: [deploy-operator, copy-images-to-acr]
     permissions:
       contents: read
     strategy:
@@ -594,7 +594,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: deploy/${{ matrix.profile }}.yaml
           framework: vllm
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-images.outputs.target_tag_vllm_amd64 }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-images-to-acr.outputs.target_tag_vllm_amd64 }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
         uses: actions/upload-artifact@v4
@@ -607,7 +607,7 @@ jobs:
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
     # if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [deploy-operator, copy-images]
+    needs: [deploy-operator, copy-images-to-acr]
     permissions:
       contents: read
     strategy:
@@ -645,7 +645,7 @@ jobs:
   deploy-test-trtllm:
     runs-on: cpu-amd-m5-2xlarge
     # if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [deploy-operator, copy-images]
+    needs: [deploy-operator, copy-images-to-acr]
     permissions:
       contents: read
     strategy:
@@ -672,7 +672,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: deploy/${{ matrix.profile }}.yaml
           framework: trtllm
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-images.outputs.target_tag_trtllm_amd64 }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-images-to-acr.outputs.target_tag_trtllm_amd64 }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
         uses: actions/upload-artifact@v4

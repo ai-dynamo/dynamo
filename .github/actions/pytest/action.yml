@@ -37,6 +37,11 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Pull relevant images
+      shell: bash
+      run: |
+        docker pull ${{ inputs.image_tag }}
+        docker pull quay.io/minio/minio
     - name: Setup Test Environment
       shell: bash
       run: |
