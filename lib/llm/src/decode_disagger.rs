@@ -28,12 +28,14 @@ use dynamo_runtime::{
 
 use crate::{
     discovery::{DecodeTierNotification, ModelManager},
+    http::service::metrics::Metrics,
     kv_router::{KvPushRouter, KvRouterConfig},
     protocols::common::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         preprocessor::{MigrationRequest, MigrationResponse},
     },
 };
+use dynamo_runtime::metrics::prometheus_names::frontend_service::decode_disagg::failure_reason;
 
 /// Shared tiers storage wrapped in Arc for cloning across async tasks
 type SharedTiers = RwLock<Vec<Arc<Tier>>>;
@@ -88,22 +90,30 @@ pub struct DecodeDisagger {
     tiers: Arc<SharedTiers>,
     /// Cancellation token for background tasks
     cancel_token: CancellationToken,
+    /// Metrics for decode disaggregation
+    metrics: Arc<Metrics>,
+    /// Model name for metrics labels
+    model_name: Arc<String>,
 }
 
 impl DecodeDisagger {
     /// Create a disabled DecodeDisagger that just forwards to next (passthrough mode)
-    pub fn disabled() -> Arc<Self> {
+    pub fn disabled(model_name: &str, metrics: Arc<Metrics>) -> Arc<Self> {
         Arc::new(Self {
             tiers: Arc::new(RwLock::new(Vec::new())),
             cancel_token: CancellationToken::new(),
+            metrics,
+            model_name: Arc::new(model_name.to_string()),
         })
     }
 
     /// Create a new DecodeDisagger (no tiers yet, can be added dynamically)
-    pub fn new() -> Self {
+    pub fn new(model_name: &str, metrics: Arc<Metrics>) -> Self {
         Self {
             tiers: Arc::new(RwLock::new(Vec::new())),
             cancel_token: CancellationToken::new(),
+            metrics,
+            model_name: Arc::new(model_name.to_string()),
         }
     }
 
@@ -116,19 +126,24 @@ impl DecodeDisagger {
     /// * `router_mode` - Router mode for tier routers
     /// * `kv_router_config` - Optional KV router config for tier routers
     /// * `kv_cache_block_size` - KV cache block size for KV routing
+    /// * `metrics` - Metrics for decode disaggregation tracking
     pub fn with_dynamic_tiers(
         model_name: &str,
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
         kv_router_config: Option<KvRouterConfig>,
         kv_cache_block_size: u32,
+        metrics: Arc<Metrics>,
     ) -> Arc<Self> {
         let tiers = Arc::new(RwLock::new(Vec::new()));
         let cancel_token = CancellationToken::new();
+        let model_name_arc = Arc::new(model_name.to_string());
 
         let disagger = Arc::new(Self {
             tiers: tiers.clone(),
             cancel_token: cancel_token.clone(),
+            metrics: metrics.clone(),
+            model_name: model_name_arc.clone(),
         });
 
         // Get existing tiers that were activated before we subscribed
@@ -142,6 +157,7 @@ impl DecodeDisagger {
         // Subscribe to tier notifications and spawn background task
         let mut tier_rx = model_manager.subscribe_decode_tiers(model_name);
         let model_name = model_name.to_string();
+        let metrics_clone = metrics.clone();
 
         tokio::spawn(async move {
             // First, activate any existing tiers
@@ -170,6 +186,8 @@ impl DecodeDisagger {
                         error = %e,
                         "Failed to activate existing tier"
                     );
+                } else {
+                    metrics_clone.inc_active_tiers(&model_name);
                 }
             }
 
@@ -200,6 +218,8 @@ impl DecodeDisagger {
                                         error = %e,
                                         "Failed to activate tier"
                                     );
+                                } else {
+                                    metrics_clone.inc_active_tiers(&model_name);
                                 }
                             }
                             Ok(DecodeTierNotification::Removed { seqlen }) => {
@@ -211,6 +231,7 @@ impl DecodeDisagger {
 
                                 let mut tiers_guard = tiers.write();
                                 tiers_guard.retain(|t| t.seqlen != seqlen);
+                                metrics_clone.dec_active_tiers(&model_name);
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
                                 tracing::warn!(
@@ -338,6 +359,10 @@ struct MigrationContext {
     pending_chunks: Vec<Annotated<LLMEngineOutput>>,
     /// Original prompt length (used to calculate tokens generated for max_tokens adjustment)
     original_prompt_len: usize,
+    /// Metrics for tracking migration performance
+    metrics: Arc<Metrics>,
+    /// Model name for metrics labels
+    model_name: Arc<String>,
 }
 
 impl MigrationContext {
@@ -345,12 +370,18 @@ impl MigrationContext {
         current_tier: Arc<Tier>,
         request: PreprocessedRequest,
         parent_ctx: Arc<dyn AsyncEngineContext>,
+        metrics: Arc<Metrics>,
+        model_name: Arc<String>,
     ) -> Result<Self> {
         let original_prompt_len = request.token_ids.len();
         let inner_ctx = Context::with_id(request.clone(), parent_ctx.id().to_string());
         parent_ctx.link_child(inner_ctx.context());
         let routed_out = current_tier.router.generate_routed(inner_ctx).await?;
         let (current_stream, current_instance_id) = routed_out.take();
+
+        // Track inflight request for this tier
+        metrics.inc_tier_inflight(&model_name, current_tier.seqlen);
+
         Ok(Self {
             previous_stream: None,
             current_stream,
@@ -359,6 +390,8 @@ impl MigrationContext {
             migration_started_at: None,
             pending_chunks: Vec::new(),
             original_prompt_len,
+            metrics,
+            model_name,
         })
     }
 
@@ -391,12 +424,20 @@ impl MigrationContext {
                     Some(annotated_response) => annotated_response.data,
                     None => {
                         tracing::warn!("Migration endpoint returned empty response");
+                        self.metrics.inc_tier_migration_failure(
+                            &self.model_name,
+                            failure_reason::MIGRATE_EMPTY_RESPONSE,
+                        );
                         None
                     }
                 }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to call migrate endpoint");
+                self.metrics.inc_tier_migration_failure(
+                    &self.model_name,
+                    failure_reason::MIGRATE_ENDPOINT_FAILED,
+                );
                 None
             }
         }
@@ -424,6 +465,8 @@ impl MigrationContext {
             );
             let Some(new_tier) = find_tier(tiers, (running_request.token_ids.len() + 1) as u32)
             else {
+                self.metrics
+                    .inc_tier_migration_failure(&self.model_name, failure_reason::NO_NEXT_TIER);
                 return Err(anyhow::anyhow!("No next tier available for migration"));
             };
 
@@ -438,6 +481,7 @@ impl MigrationContext {
                 .send_migration(&request_id, tokens_seen, parent_ctx)
                 .await;
             let Some(response) = migration_response else {
+                // Migration failure already recorded in send_migration
                 return Err(anyhow::anyhow!(
                     "Migration failed: no response from migrate endpoint"
                 ));
@@ -468,6 +512,14 @@ impl MigrationContext {
             let tokens_generated = migrated_token_ids
                 .len()
                 .saturating_sub(self.original_prompt_len);
+
+            // Record migration detail metrics
+            self.metrics
+                .observe_migration_pending_chunks(&self.model_name, pending_chunks.len());
+            self.metrics
+                .observe_migration_tokens_transferred(&self.model_name, migrated_token_ids.len());
+            self.metrics
+                .observe_migration_tokens_generated_before(&self.model_name, tokens_generated);
 
             // Create the migrated request with the full token_ids and adjusted max_tokens
             let mut migrated_request = running_request.clone();
@@ -500,7 +552,16 @@ impl MigrationContext {
             new_context.bootstrap_info = Some(response.bootstrap_info);
 
             parent_ctx.link_child(new_context.context());
-            let routed_out = new_tier.router.generate_routed(new_context).await?;
+            let routed_out = match new_tier.router.generate_routed(new_context).await {
+                Ok(out) => out,
+                Err(e) => {
+                    self.metrics.inc_tier_migration_failure(
+                        &self.model_name,
+                        failure_reason::ROUTING_FAILED,
+                    );
+                    return Err(e);
+                }
+            };
             let (new_stream, new_instance_id) = routed_out.take();
             tracing::info!(
                 new_instance_id = new_instance_id,
@@ -508,6 +569,13 @@ impl MigrationContext {
                 pending_chunks = pending_chunks.len(),
                 "Created new stream for next tier",
             );
+
+            // Update tier inflight counts
+            self.metrics
+                .dec_tier_inflight(&self.model_name, from_seqlen);
+            self.metrics
+                .inc_tier_inflight(&self.model_name, new_tier.seqlen);
+
             // Keep the old stream alive until we receive the first token from the new tier.
             // This prevents the old context from being cancelled before KV transfer completes.
             // The old stream will be dropped on the next tick() call (after first token received).
@@ -519,6 +587,8 @@ impl MigrationContext {
                 migration_started_at: Some((migration_start, from_seqlen)),
                 pending_chunks,
                 original_prompt_len: self.original_prompt_len,
+                metrics: self.metrics.clone(),
+                model_name: self.model_name.clone(),
             });
         }
         Ok(self)
@@ -547,7 +617,7 @@ impl MigrationContext {
             return Vec::new();
         };
 
-        // Log migration duration if we just migrated
+        // Record migration duration if we just migrated
         if let Some((migration_start, from_seqlen)) = self.migration_started_at.take() {
             let duration = migration_start.elapsed();
             tracing::info!(
@@ -556,6 +626,14 @@ impl MigrationContext {
                 to_seqlen = self.current_tier.seqlen,
                 "Migration completed, received first token from new tier"
             );
+
+            // Record migration metrics
+            self.metrics.observe_tier_migration(
+                &self.model_name,
+                from_seqlen,
+                self.current_tier.seqlen,
+                duration.as_secs_f64(),
+            );
         }
 
         if let Some(ref data) = chunk.data {
@@ -563,12 +641,6 @@ impl MigrationContext {
             running_request.token_ids.extend(data.token_ids.iter());
         }
         vec![chunk]
-    }
-}
-
-impl Default for DecodeDisagger {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -600,6 +672,8 @@ impl
                 available_tiers = ?tier_seqlens,
                 "No tier found for request, routing to next tier"
             );
+            // Record passthrough metric
+            self.metrics.inc_tier_passthrough(&self.model_name);
             return next.generate(request).await;
         };
 
@@ -609,15 +683,28 @@ impl
             "Routing request to tier"
         );
 
+        // Record tier request metric
+        self.metrics.inc_tier_request(&self.model_name, tier.seqlen);
+
         let (mut running_request, context) = request.transfer(());
         let parent_engine_ctx = context.context();
-        let mut migration_context =
-            MigrationContext::new(tier, running_request.clone(), parent_engine_ctx.clone()).await?;
+        let mut migration_context = MigrationContext::new(
+            tier,
+            running_request.clone(),
+            parent_engine_ctx.clone(),
+            self.metrics.clone(),
+            self.model_name.clone(),
+        )
+        .await?;
 
         let request_id = context.id().to_string();
         let tiers = self.tiers.clone();
+        let metrics = self.metrics.clone();
+        let model_name = self.model_name.clone();
         let migrating_stream = async_stream::stream! {
             let parent_engine_ctx = context.context();
+            // Track the current tier seqlen for inflight decrement on completion
+            let mut current_tier_seqlen = migration_context.current_tier.seqlen;
             loop {
                 if parent_engine_ctx.is_stopped() || parent_engine_ctx.is_killed() {
                     break;
@@ -625,6 +712,7 @@ impl
                 match migration_context.tick(&tiers, &request_id, &running_request, &parent_engine_ctx).await {
                     Ok(ctx) => {
                         migration_context = ctx;
+                        current_tier_seqlen = migration_context.current_tier.seqlen;
                     }
                     Err(e)=> {
                         yield Annotated::from_error(e.to_string());
@@ -639,6 +727,8 @@ impl
                     yield chunk;
                 }
             }
+            // Decrement inflight for the final tier when stream completes
+            metrics.dec_tier_inflight(&model_name, current_tier_seqlen);
         };
 
         Ok(ResponseStream::new(

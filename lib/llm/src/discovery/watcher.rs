@@ -517,6 +517,7 @@ impl ModelWatcher {
                         self.router_config.router_mode,
                         Some(self.router_config.kv_router_config),
                         card.kv_cache_block_size,
+                        self.metrics.clone(),
                     ))
                 } else {
                     None

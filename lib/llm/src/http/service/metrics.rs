@@ -180,6 +180,18 @@ pub struct Metrics {
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
     model_migration_total: IntCounterVec,
+
+    // Decode disaggregation (tier migration) metrics
+    tier_migration_total: IntCounterVec,
+    tier_migration_duration: HistogramVec,
+    tier_migration_failures: IntCounterVec,
+    tier_requests_total: IntCounterVec,
+    tier_passthrough_total: IntCounterVec,
+    migration_pending_chunks: HistogramVec,
+    migration_tokens_transferred: HistogramVec,
+    migration_tokens_generated_before: HistogramVec,
+    tier_inflight_requests: IntGaugeVec,
+    active_tiers: IntGaugeVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -397,7 +409,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::OUTPUT_SEQUENCE_TOKENS),
                 "Output sequence length in tokens",
             )
-            .buckets(output_sequence_buckets),
+            .buckets(output_sequence_buckets.clone()),
             &["model"],
         )
         .unwrap();
@@ -517,6 +529,117 @@ impl Metrics {
         )
         .unwrap();
 
+        // Decode disaggregation (tier migration) metrics
+        use frontend_service::decode_disagg;
+
+        let tier_migration_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(decode_disagg::TIER_MIGRATION_TOTAL),
+                "Total number of decode tier migrations",
+            ),
+            &[
+                "model",
+                decode_disagg::FROM_SEQLEN_LABEL,
+                decode_disagg::TO_SEQLEN_LABEL,
+            ],
+        )
+        .unwrap();
+
+        // Tier migration duration buckets: 1ms to 10s in log scale
+        let tier_migration_duration_buckets = generate_log_buckets(0.001, 10.0, 12);
+        let tier_migration_duration = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(decode_disagg::TIER_MIGRATION_DURATION_SECONDS),
+                "Duration of decode tier migrations in seconds (time to first token from new tier)",
+            )
+            .buckets(tier_migration_duration_buckets),
+            &[
+                "model",
+                decode_disagg::FROM_SEQLEN_LABEL,
+                decode_disagg::TO_SEQLEN_LABEL,
+            ],
+        )
+        .unwrap();
+
+        let tier_migration_failures = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(decode_disagg::TIER_MIGRATION_FAILURES_TOTAL),
+                "Total number of decode tier migration failures",
+            ),
+            &["model", decode_disagg::REASON_LABEL],
+        )
+        .unwrap();
+
+        let tier_requests_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(decode_disagg::TIER_REQUESTS_TOTAL),
+                "Total requests routed to decode tiers",
+            ),
+            &["model", decode_disagg::TIER_SEQLEN_LABEL],
+        )
+        .unwrap();
+
+        let tier_passthrough_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(decode_disagg::TIER_PASSTHROUGH_TOTAL),
+                "Total requests passed through (no tier found)",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
+        // Pending chunks buckets: 0 to 100 chunks
+        let pending_chunks_buckets = generate_log_buckets(1.0, 100.0, 8);
+        let migration_pending_chunks = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(decode_disagg::MIGRATION_PENDING_CHUNKS),
+                "Number of pending output chunks buffered during tier migration",
+            )
+            .buckets(pending_chunks_buckets),
+            &["model"],
+        )
+        .unwrap();
+
+        // Tokens transferred buckets: use similar buckets to input sequence
+        let migration_tokens_transferred = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(decode_disagg::MIGRATION_TOKENS_TRANSFERRED),
+                "Total tokens in migrated request",
+            )
+            .buckets(input_sequence_buckets.clone()),
+            &["model"],
+        )
+        .unwrap();
+
+        // Tokens generated before migration buckets: use output sequence buckets
+        let migration_tokens_generated_before = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(decode_disagg::MIGRATION_TOKENS_GENERATED_BEFORE),
+                "Tokens generated before tier migration was triggered",
+            )
+            .buckets(output_sequence_buckets.clone()),
+            &["model"],
+        )
+        .unwrap();
+
+        let tier_inflight_requests = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(decode_disagg::TIER_INFLIGHT_REQUESTS),
+                "Current inflight requests per decode tier",
+            ),
+            &["model", decode_disagg::TIER_SEQLEN_LABEL],
+        )
+        .unwrap();
+
+        let active_tiers = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(decode_disagg::ACTIVE_TIERS),
+                "Current number of active decode tiers",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
         Metrics {
             request_counter,
             inflight_gauge,
@@ -536,6 +659,16 @@ impl Metrics {
             model_kv_cache_block_size,
             model_migration_limit,
             model_migration_total,
+            tier_migration_total,
+            tier_migration_duration,
+            tier_migration_failures,
+            tier_requests_total,
+            tier_passthrough_total,
+            migration_pending_chunks,
+            migration_tokens_transferred,
+            migration_tokens_generated_before,
+            tier_inflight_requests,
+            active_tiers,
         }
     }
 
@@ -636,6 +769,18 @@ impl Metrics {
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
 
+        // Register decode disaggregation metrics
+        registry.register(Box::new(self.tier_migration_total.clone()))?;
+        registry.register(Box::new(self.tier_migration_duration.clone()))?;
+        registry.register(Box::new(self.tier_migration_failures.clone()))?;
+        registry.register(Box::new(self.tier_requests_total.clone()))?;
+        registry.register(Box::new(self.tier_passthrough_total.clone()))?;
+        registry.register(Box::new(self.migration_pending_chunks.clone()))?;
+        registry.register(Box::new(self.migration_tokens_transferred.clone()))?;
+        registry.register(Box::new(self.migration_tokens_generated_before.clone()))?;
+        registry.register(Box::new(self.tier_inflight_requests.clone()))?;
+        registry.register(Box::new(self.active_tiers.clone()))?;
+
         Ok(())
     }
 
@@ -716,6 +861,99 @@ impl Metrics {
         self.model_migration_total
             .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
             .get()
+    }
+
+    // ==================== Decode Disaggregation Metrics ====================
+
+    /// Record a successful tier migration with its duration
+    pub fn observe_tier_migration(
+        &self,
+        model: &str,
+        from_seqlen: u32,
+        to_seqlen: u32,
+        duration_secs: f64,
+    ) {
+        let from_seqlen_str = from_seqlen.to_string();
+        let to_seqlen_str = to_seqlen.to_string();
+        self.tier_migration_total
+            .with_label_values(&[model, &from_seqlen_str, &to_seqlen_str])
+            .inc();
+        self.tier_migration_duration
+            .with_label_values(&[model, &from_seqlen_str, &to_seqlen_str])
+            .observe(duration_secs);
+    }
+
+    /// Record a tier migration failure
+    pub fn inc_tier_migration_failure(&self, model: &str, reason: &str) {
+        self.tier_migration_failures
+            .with_label_values(&[model, reason])
+            .inc();
+    }
+
+    /// Record a request routed to a specific tier
+    pub fn inc_tier_request(&self, model: &str, tier_seqlen: u32) {
+        self.tier_requests_total
+            .with_label_values(&[model, &tier_seqlen.to_string()])
+            .inc();
+    }
+
+    /// Record a request that passed through (no tier found)
+    pub fn inc_tier_passthrough(&self, model: &str) {
+        self.tier_passthrough_total
+            .with_label_values(&[model])
+            .inc();
+    }
+
+    /// Record migration pending chunks count
+    pub fn observe_migration_pending_chunks(&self, model: &str, count: usize) {
+        self.migration_pending_chunks
+            .with_label_values(&[model])
+            .observe(count as f64);
+    }
+
+    /// Record tokens transferred during migration
+    pub fn observe_migration_tokens_transferred(&self, model: &str, tokens: usize) {
+        self.migration_tokens_transferred
+            .with_label_values(&[model])
+            .observe(tokens as f64);
+    }
+
+    /// Record tokens generated before migration
+    pub fn observe_migration_tokens_generated_before(&self, model: &str, tokens: usize) {
+        self.migration_tokens_generated_before
+            .with_label_values(&[model])
+            .observe(tokens as f64);
+    }
+
+    /// Increment inflight requests for a tier
+    pub fn inc_tier_inflight(&self, model: &str, tier_seqlen: u32) {
+        self.tier_inflight_requests
+            .with_label_values(&[model, &tier_seqlen.to_string()])
+            .inc();
+    }
+
+    /// Decrement inflight requests for a tier
+    pub fn dec_tier_inflight(&self, model: &str, tier_seqlen: u32) {
+        self.tier_inflight_requests
+            .with_label_values(&[model, &tier_seqlen.to_string()])
+            .dec();
+    }
+
+    /// Set the number of active tiers for a model
+    pub fn set_active_tiers(&self, model: &str, count: usize) {
+        self.active_tiers
+            .with_label_values(&[model])
+            .set(count as i64);
+    }
+
+    /// Increment active tiers count
+    pub fn inc_active_tiers(&self, model: &str) {
+        self.active_tiers.with_label_values(&[model]).inc();
+    }
+
+    /// Decrement active tiers count
+    pub fn dec_active_tiers(&self, model: &str) {
+        self.active_tiers.with_label_values(&[model]).dec();
     }
 
     /// Create a new [`InflightGuard`] for the given model and annotate if its a streaming request,

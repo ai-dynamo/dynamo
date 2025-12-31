@@ -276,7 +276,7 @@ where
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
-    let migration = Migration::from_mdc(card, metrics).into_operator();
+    let migration = Migration::from_mdc(card, metrics.clone()).into_operator();
 
     // For KV routing, use the client from the chooser to ensure shared state
     let router_client = if router_mode == RouterMode::KV {
@@ -324,7 +324,8 @@ where
     let prefill_op = prefill_chooser.into_operator();
 
     // Use provided decode disagger or create a disabled (passthrough) one
-    let decode_disagger = decode_disagger.unwrap_or_else(DecodeDisagger::disabled);
+    let decode_disagger =
+        decode_disagger.unwrap_or_else(|| DecodeDisagger::disabled(card.name(), metrics.clone()));
     let decode_disagger_op = decode_disagger.into_operator();
 
     // Link with prefill chooser including backward edge for response flow

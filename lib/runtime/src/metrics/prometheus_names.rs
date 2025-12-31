@@ -162,6 +162,66 @@ pub mod frontend_service {
         pub const ONGOING_REQUEST: &str = "ongoing_request";
     }
 
+    /// Decode disaggregation (tier migration) metrics
+    pub mod decode_disagg {
+        /// Total number of tier migrations
+        pub const TIER_MIGRATION_TOTAL: &str = "tier_migration_total";
+
+        /// Duration of tier migrations in seconds (time to first token from new tier)
+        pub const TIER_MIGRATION_DURATION_SECONDS: &str = "tier_migration_duration_seconds";
+
+        /// Total number of tier migration failures
+        pub const TIER_MIGRATION_FAILURES_TOTAL: &str = "tier_migration_failures_total";
+
+        /// Total requests routed to decode tiers
+        pub const TIER_REQUESTS_TOTAL: &str = "tier_requests_total";
+
+        /// Total requests passed through (no tier found)
+        pub const TIER_PASSTHROUGH_TOTAL: &str = "tier_passthrough_total";
+
+        /// Number of pending chunks buffered during migration
+        pub const MIGRATION_PENDING_CHUNKS: &str = "migration_pending_chunks";
+
+        /// Total tokens in migrated request
+        pub const MIGRATION_TOKENS_TRANSFERRED: &str = "migration_tokens_transferred";
+
+        /// Tokens generated before migration was triggered
+        pub const MIGRATION_TOKENS_GENERATED_BEFORE: &str = "migration_tokens_generated_before";
+
+        /// Current inflight requests per tier
+        pub const TIER_INFLIGHT_REQUESTS: &str = "tier_inflight_requests";
+
+        /// Current number of active decode tiers
+        pub const ACTIVE_TIERS: &str = "active_tiers";
+
+        /// Label for source tier sequence length
+        pub const FROM_SEQLEN_LABEL: &str = "from_seqlen";
+
+        /// Label for destination tier sequence length
+        pub const TO_SEQLEN_LABEL: &str = "to_seqlen";
+
+        /// Label for tier sequence length
+        pub const TIER_SEQLEN_LABEL: &str = "tier_seqlen";
+
+        /// Label for migration failure reason
+        pub const REASON_LABEL: &str = "reason";
+
+        /// Migration failure reasons
+        pub mod failure_reason {
+            /// No next tier available for migration
+            pub const NO_NEXT_TIER: &str = "no_next_tier";
+
+            /// Migrate endpoint call failed
+            pub const MIGRATE_ENDPOINT_FAILED: &str = "migrate_endpoint_failed";
+
+            /// Migrate endpoint returned empty response
+            pub const MIGRATE_EMPTY_RESPONSE: &str = "migrate_empty_response";
+
+            /// Routing to new tier failed
+            pub const ROUTING_FAILED: &str = "routing_failed";
+        }
+    }
+
     /// Status label values
     pub mod status {
         /// Value for successful requests
