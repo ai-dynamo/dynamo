@@ -90,6 +90,12 @@ class StandaloneRouterHandler:
 
         # Wrap incoming request into PreprocessedRequest format for KvPushRouter
         # The request should already have most fields, but we ensure it has the structure
+        # Build routing hints from request (supports both nested routing object and legacy dp_rank)
+        routing = request.get("routing")
+        dp_rank = request.get("dp_rank")
+        if routing is None and dp_rank is not None:
+            routing = {"dp_rank": dp_rank}
+
         preprocessed_request = {
             "model": request.get("model", "unknown"),
             "token_ids": request["token_ids"],
@@ -98,9 +104,11 @@ class StandaloneRouterHandler:
             "output_options": request.get("output_options", {}),
             "eos_token_ids": request.get("eos_token_ids", []),
             "annotations": request.get("annotations", []),
-            "disaggregated_params": request.get("disaggregated_params"),
-            "dp_rank": request.get("dp_rank"),
-            "extra_args": request.get("extra_args", {}),
+            "routing": routing,
+            "router_config_override": request.get("router_config_override"),
+            "prefill_result": request.get("prefill_result"),
+            "bootstrap_info": request.get("bootstrap_info"),
+            "extra_args": request.get("extra_args"),
         }
 
         # Route and process through KvPushRouter
@@ -117,6 +125,7 @@ class StandaloneRouterHandler:
                 "log_probs": worker_output.get("log_probs"),
                 "top_logprobs": worker_output.get("top_logprobs"),
                 "finish_reason": worker_output.get("finish_reason"),
+                "stop_reason": worker_output.get("stop_reason"),
                 "index": worker_output.get("index"),
                 "disaggregated_params": worker_output.get("disaggregated_params"),
                 "extra_args": worker_output.get("extra_args"),
@@ -228,8 +237,8 @@ def parse_args():
     parser.add_argument(
         "--router-max-tree-size",
         type=int,
-        default=2**10,
-        help="KV Router: Maximum tree size before pruning. Only used when --no-kv-events is set. When the indexer tree exceeds this size, pruning is triggered (default: 1024)",
+        default=2**20,
+        help="KV Router: Maximum tree size before pruning. Only used when --no-kv-events is set. When the indexer tree exceeds this size, pruning is triggered (default: 1048576, which is 2^20)",
     )
 
     parser.add_argument(

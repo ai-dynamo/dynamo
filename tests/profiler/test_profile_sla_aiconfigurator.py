@@ -66,6 +66,7 @@ class TestProfileSlaAiconfigurator:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
+                self.pick_with_webui = False
                 # Provide minimal model_info to avoid HF queries
                 self.model_info = ModelInfo(
                     model_size=16384.0,
@@ -113,7 +114,7 @@ class TestProfileSlaAiconfigurator:
     @pytest.mark.parallel
     @pytest.mark.asyncio
     @pytest.mark.gpu_1
-    @pytest.mark.performance
+    @pytest.mark.integration
     async def test_trtllm_aiconfigurator_single_model(self, llm_args):
         # Test that profile_sla works with the model & backend in the llm_args fixture.
         await run_profile(llm_args)
@@ -121,8 +122,8 @@ class TestProfileSlaAiconfigurator:
     @pytest.mark.parallel
     @pytest.mark.asyncio
     @pytest.mark.gpu_1
+    @pytest.mark.integration
     @pytest.mark.nightly
-    @pytest.mark.performance
     @pytest.mark.parametrize(
         "backend, aic_backend_version",
         [

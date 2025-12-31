@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import json
 import logging
@@ -20,12 +8,16 @@ import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
 import psutil
 import requests
+
+from tests.utils.constants import DefaultPort
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 
 def terminate_process(process, logger=logging.getLogger(), immediate_kill=False):
@@ -116,6 +108,17 @@ class ManagedProcess:
         try:
             self._logger = logging.getLogger(self.__class__.__name__)
             self._command_name = self.command[0]
+
+            # Keep test logs out of the git working tree: many tests pass a relative
+            # `log_dir` derived from `request.node.name`, which otherwise creates a large
+            # number of untracked directories under the repo root during pytest runs.
+            if not os.path.isabs(self.log_dir):
+                log_root = os.environ.get(
+                    "DYN_TEST_OUTPUT_PATH",
+                    os.path.join(tempfile.gettempdir(), "dynamo_tests"),
+                )
+                self.log_dir = os.path.join(log_root, self.log_dir)
+
             os.makedirs(self.log_dir, exist_ok=True)
             log_name = f"{self._command_name}.log.txt"
             self._log_path = os.path.join(self.log_dir, log_name)
@@ -559,6 +562,10 @@ class ManagedProcess:
             hasattr(self, "proc") and self.proc is not None and self.proc.poll() is None
         )
 
+    def get_pid(self) -> int | None:
+        """Get the PID of the managed process."""
+        return self.proc.pid if self.proc else None
+
     def subprocesses(self) -> list[psutil.Process]:
         """Find child processes of the current process."""
         if (
@@ -580,12 +587,48 @@ class DynamoFrontendProcess(ManagedProcess):
 
     _logger = logging.getLogger()
 
-    def __init__(self, request):
-        command = ["python", "-m", "dynamo.frontend", "--router-mode", "round-robin"]
+    def __init__(
+        self,
+        request: Any,
+        *,
+        frontend_port: Optional[int] = None,
+        router_mode: str = "round-robin",
+        extra_args: Optional[list[str]] = None,
+        extra_env: Optional[dict[str, str]] = None,
+        # Default to false so pytest-xdist workers don't kill each other's frontends.
+        terminate_existing: bool = False,
+    ):
+        # TODO: Refactor remaining duplicate "DynamoFrontendProcess" helpers in tests to
+        # use this shared implementation (and delete the copies):
+        # - tests/fault_tolerance/cancellation/utils.py
+        # - tests/fault_tolerance/migration/utils.py
+        # - tests/fault_tolerance/etcd_ha/utils.py
+        # - tests/fault_tolerance/test_vllm_health_check.py
+        self._allocated_http_port: Optional[int] = None
+        if frontend_port == 0:
+            # Treat `0` as "allocate a random free port" for xdist-safe tests.
+            # We allocate within the i16-safe range required by the Rust side.
+            frontend_port = allocate_port(DefaultPort.FRONTEND.value)
+            self._allocated_http_port = frontend_port
+
+        # If frontend_port is unset, dynamo.frontend defaults to DefaultPort.FRONTEND.
+        self.http_port = (
+            DefaultPort.FRONTEND.value if frontend_port is None else int(frontend_port)
+        )
+
+        command = ["python", "-m", "dynamo.frontend", "--router-mode", router_mode]
+
+        # dynamo.frontend defaults to 8000 when neither env nor flag is provided.
+        if frontend_port is not None:
+            command.extend(["--http-port", str(frontend_port)])
+        if extra_args:
+            command.extend(extra_args)
 
         # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
         env = os.environ.copy()
         env.pop("DYN_SYSTEM_PORT", None)
+        if extra_env:
+            env.update(extra_env)
 
         log_dir = f"{request.node.name}_frontend"
 
@@ -601,24 +644,29 @@ class DynamoFrontendProcess(ManagedProcess):
             command=command,
             env=env,
             display_output=True,
-            terminate_existing=True,
+            terminate_existing=terminate_existing,
             log_dir=log_dir,
         )
 
-    def get_pid(self) -> int | None:
-        """Get the PID of the worker process"""
-        return self.proc.pid if self.proc else None
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            return super().__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            if self._allocated_http_port is not None:
+                deallocate_port(self._allocated_http_port)
+                self._allocated_http_port = None
+
+    @property
+    def frontend_port(self) -> int:
+        """Back-compat alias for older tests that expect `frontend.frontend_port`."""
+        return self.http_port
 
 
 def main():
+    # NOTE: This entrypoint is for manual testing/debugging of `ManagedProcess` only.
+    # It is not used by the pytest suite.
     with ManagedProcess(
-        command=[
-            "dynamo",
-            "run",
-            "in=http",
-            "out=vllm",
-            "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        ],
+        command=["python", "-m", "dynamo.frontend"],
         display_output=True,
         terminate_existing=True,
         health_check_ports=[8000],

@@ -113,6 +113,9 @@ pub mod frontend_service {
     /// Output sequence length in tokens
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "output_sequence_tokens";
 
+    /// Number of cached tokens (prefix cache hits) per request
+    pub const CACHED_TOKENS: &str = "cached_tokens";
+
     /// Total number of output tokens generated (counter that updates in real-time)
     pub const OUTPUT_TOKENS_TOTAL: &str = "output_tokens_total";
 
@@ -143,6 +146,21 @@ pub mod frontend_service {
 
     /// Request migration limit for a worker serving the model (MDC)
     pub const MODEL_MIGRATION_LIMIT: &str = "model_migration_limit";
+
+    /// Total number of request migrations due to worker unavailability
+    pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
+
+    /// Label name for the type of migration
+    pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
+
+    /// Migration type label values
+    pub mod migration_type {
+        /// Migration during initial stream creation (NoResponders error)
+        pub const NEW_REQUEST: &str = "new_request";
+
+        /// Migration during ongoing request (stream disconnected)
+        pub const ONGOING_REQUEST: &str = "ongoing_request";
+    }
 
     /// Status label values
     pub mod status {
@@ -261,6 +279,27 @@ pub mod kvbm {
 
     /// Disk cache hit rate (0.0-1.0) from the sliding window
     pub const DISK_CACHE_HIT_RATE: &str = "disk_cache_hit_rate";
+
+    /// Object storage cache hit rate (0.0-1.0) from the sliding window
+    pub const OBJECT_CACHE_HIT_RATE: &str = "object_cache_hit_rate";
+
+    /// Number of blocks offloaded from device to object storage
+    pub const OFFLOAD_BLOCKS_D2O: &str = "offload_blocks_d2o";
+
+    /// Number of blocks onboarded from object storage to device
+    pub const ONBOARD_BLOCKS_O2D: &str = "onboard_blocks_o2d";
+
+    /// Bytes transferred to object storage (offload)
+    pub const OFFLOAD_BYTES_OBJECT: &str = "offload_bytes_object";
+
+    /// Bytes transferred from object storage (onboard)
+    pub const ONBOARD_BYTES_OBJECT: &str = "onboard_bytes_object";
+
+    /// Number of failed object storage read operations (blocks)
+    pub const OBJECT_READ_FAILURES: &str = "object_read_failures";
+
+    /// Number of failed object storage write operations (blocks)
+    pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
 }
 
 /// KvStats metrics from LLM workers

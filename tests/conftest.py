@@ -1,30 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import logging
 import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Generator, Optional
 
 import pytest
 from filelock import FileLock
 
-from tests.utils.constants import TEST_MODELS
+from tests.utils.constants import TEST_MODELS, DefaultPort
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.port_utils import (
+    ServicePorts,
+    allocate_port,
+    allocate_ports,
+    deallocate_port,
+    deallocate_ports,
+)
+
+_logger = logging.getLogger(__name__)
 
 
 def pytest_configure(config):
@@ -228,42 +225,152 @@ def pytest_collection_modifyitems(config, items):
 
 class EtcdServer(ManagedProcess):
     def __init__(self, request, port=2379, timeout=300):
+        # Allocate free ports if port is 0
+        use_random_port = port == 0
+        if use_random_port:
+            # Need two ports: client port and peer port for parallel execution
+            # Start from 2380 (etcd default 2379 + 1)
+            port, peer_port = allocate_ports(2, 2380)
+        else:
+            peer_port = None
+
+        self.port = port
+        self.peer_port = peer_port  # Store for cleanup
+        self.use_random_port = use_random_port  # Track if we allocated the port
         port_string = str(port)
         etcd_env = os.environ.copy()
         etcd_env["ALLOW_NONE_AUTHENTICATION"] = "yes"
         data_dir = tempfile.mkdtemp(prefix="etcd_")
+
         command = [
             "etcd",
             "--listen-client-urls",
             f"http://0.0.0.0:{port_string}",
             "--advertise-client-urls",
             f"http://0.0.0.0:{port_string}",
-            "--data-dir",
-            data_dir,
         ]
+
+        # Add peer port configuration only for random ports (parallel execution)
+        if peer_port is not None:
+            peer_port_string = str(peer_port)
+            command.extend(
+                [
+                    "--listen-peer-urls",
+                    f"http://0.0.0.0:{peer_port_string}",
+                    "--initial-advertise-peer-urls",
+                    f"http://localhost:{peer_port_string}",
+                    "--initial-cluster",
+                    f"default=http://localhost:{peer_port_string}",
+                ]
+            )
+
+        command.extend(
+            [
+                "--data-dir",
+                data_dir,
+            ]
+        )
         super().__init__(
             env=etcd_env,
             command=command,
             timeout=timeout,
             display_output=False,
+            terminate_existing=not use_random_port,  # Disabled for parallel test execution with random ports
             health_check_ports=[port],
             data_dir=data_dir,
             log_dir=request.node.name,
         )
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Release allocated ports when server exits."""
+        try:
+            # Only deallocate ports that were dynamically allocated (not default ports)
+            if self.use_random_port:
+                ports_to_release = [self.port]
+                if self.peer_port is not None:
+                    ports_to_release.append(self.peer_port)
+                deallocate_ports(ports_to_release)
+        except Exception as e:
+            logging.warning(f"Failed to release EtcdServer port: {e}")
+
+        return super().__exit__(exc_type, exc_val, exc_tb)
 
 
 class NatsServer(ManagedProcess):
     def __init__(self, request, port=4222, timeout=300):
+        # Allocate a free port if port is 0
+        use_random_port = port == 0
+        if use_random_port:
+            # Start from 4223 (nats-server default 4222 + 1)
+            port = allocate_port(4223)
+
+        self.port = port
+        self.use_random_port = use_random_port  # Track if we allocated the port
+        self._request = request  # Store for restart
+        self._timeout = timeout
         data_dir = tempfile.mkdtemp(prefix="nats_")
-        command = ["nats-server", "-js", "--trace", "--store_dir", data_dir]
+        command = [
+            "nats-server",
+            "-js",
+            "--trace",
+            "--store_dir",
+            data_dir,
+            "-p",
+            str(port),
+        ]
         super().__init__(
             command=command,
             timeout=timeout,
             display_output=False,
+            terminate_existing=not use_random_port,  # Disabled for parallel test execution with random ports
             data_dir=data_dir,
             health_check_ports=[port],
             log_dir=request.node.name,
         )
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Release allocated port when server exits."""
+        try:
+            # Only deallocate ports that were dynamically allocated (not default ports)
+            if self.use_random_port:
+                deallocate_port(self.port)
+        except Exception as e:
+            logging.warning(f"Failed to release NatsServer port: {e}")
+
+        return super().__exit__(exc_type, exc_val, exc_tb)
+
+    def stop(self):
+        """Stop the NATS server for restart. Does not release port or clean up fully."""
+        _logger.info(f"Stopping NATS server on port {self.port}")
+        self._terminate_process_group()
+        if self.proc:
+            try:
+                self.proc.wait(timeout=10)
+            except Exception as e:
+                _logger.warning(f"Error waiting for NATS process to stop: {e}")
+            self.proc = None
+
+    def start(self):
+        """Restart a stopped NATS server with fresh state."""
+        _logger.info(f"Starting NATS server on port {self.port} with fresh state")
+        # Clean up old data directory and create fresh one
+        if self.data_dir:
+            shutil.rmtree(self.data_dir, ignore_errors=True)
+        self.data_dir = tempfile.mkdtemp(prefix="nats_")
+
+        # Rebuild command with new data_dir
+        self.command = [
+            "nats-server",
+            "-js",
+            "--trace",
+            "--store_dir",
+            self.data_dir,
+            "-p",
+            str(self.port),
+        ]
+
+        self._start_process()
+        self._check_ports(self._timeout)
 
 
 class SharedManagedProcess:
@@ -391,11 +498,100 @@ class SharedNatsServer(SharedManagedProcess):
         return server
 
 
+@pytest.fixture
+def store_kv(request):
+    """
+    KV store for runtime. Defaults to "etcd".
+
+    To iterate over multiple stores in a test:
+        @pytest.mark.parametrize("store_kv", ["file", "etcd"], indirect=True)
+        def test_example(runtime_services):
+            ...
+    """
+    return getattr(request, "param", "etcd")
+
+
+@pytest.fixture
+def request_plane(request):
+    """
+    Request plane for runtime. Defaults to "nats".
+
+    To iterate over multiple transports in a test:
+        @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+        def test_example(runtime_services):
+            ...
+    """
+    return getattr(request, "param", "nats")
+
+
 @pytest.fixture()
-def runtime_services(request):
-    with NatsServer(request) as nats_process:
+def runtime_services(request, store_kv, request_plane):
+    """
+    Start runtime services (NATS and/or etcd) based on store_kv and request_plane.
+
+    - If store_kv != "etcd", etcd is not started (returns None)
+    - If request_plane != "nats", NATS is not started (returns None)
+
+    Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
+    """
+    # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
+    if request_plane == "nats" and store_kv == "etcd":
+        with NatsServer(request) as nats_process:
+            with EtcdServer(request) as etcd_process:
+                yield nats_process, etcd_process
+    elif request_plane == "nats":
+        with NatsServer(request) as nats_process:
+            yield nats_process, None
+    elif store_kv == "etcd":
         with EtcdServer(request) as etcd_process:
-            yield nats_process, etcd_process
+            yield None, etcd_process
+    else:
+        yield None, None
+
+
+@pytest.fixture()
+def runtime_services_dynamic_ports(request, store_kv, request_plane):
+    """Provide NATS and Etcd servers with truly dynamic ports per test.
+
+    This fixture actually allocates dynamic ports by passing port=0 to the servers.
+    It also sets the NATS_SERVER and ETCD_ENDPOINTS environment variables so that
+    Dynamo processes can find the services on the dynamic ports.
+
+    xdist/parallel safety:
+    - Function-scoped: each test gets its own NATS/etcd instances and ports.
+    - Each pytest-xdist worker runs tests in a separate process, so env vars do not
+      leak across workers.
+
+    - If store_kv != "etcd", etcd is not started (returns None)
+    - NATS is always started when etcd is used, because KV events require NATS
+      regardless of the request_plane (tcp/nats only affects request transport)
+
+    Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
+    """
+    import os
+
+    # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
+    # Always start NATS when etcd is used - KV events require NATS regardless of request_plane
+    if store_kv == "etcd":
+        with NatsServer(request, port=0) as nats_process:
+            with EtcdServer(request, port=0) as etcd_process:
+                # Set environment variables for Rust/Python runtime to use. Note that xdist (parallel execution)
+                # will launch isolated tests in a new process, so no need to worry about environment pollution.
+                os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
+                os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
+
+                yield nats_process, etcd_process
+
+                # No test should rely on these variables after the test, but clean up just in case.
+                os.environ.pop("NATS_SERVER", None)
+                os.environ.pop("ETCD_ENDPOINTS", None)
+    elif request_plane == "nats":
+        with NatsServer(request, port=0) as nats_process:
+            os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
+            yield nats_process, None
+            os.environ.pop("NATS_SERVER", None)
+    else:
+        yield None, None
 
 
 @pytest.fixture(scope="session")
@@ -405,7 +601,14 @@ def runtime_services_session(request, tmp_path_factory):
     Uses file-based reference counting to coordinate between pytest-xdist worker processes.
     Only the first worker starts services, and only the last worker tears them down.
 
-    Test isolation is achieved through unique namespaces (test-namespace-{random-suffix}).
+    WARNING: may not be parallel/xdist safe.
+    - This fixture shares one NATS + one etcd across many tests (and across xdist workers).
+    - It is only safe if tests fully isolate state (e.g. unique namespaces) and do not
+      assume exclusive access to global streams/keys/ports.
+    - Prefer `runtime_services_dynamic_ports` for true per-test isolation in parallel runs.
+
+    TODO: once nothing uses `runtime_services_session`, make the per-test dynamic ports
+    behavior the default for router/frontend integration tests.
     """
     with SharedNatsServer(request, tmp_path_factory) as nats:
         with SharedEtcdServer(request, tmp_path_factory) as etcd:
@@ -429,3 +632,37 @@ def file_storage_backend():
             os.environ["DYN_FILE_KV"] = old_env
         else:
             os.environ.pop("DYN_FILE_KV", None)
+
+
+########################################################
+# Shared Port Allocation (Dynamo deployments)
+########################################################
+
+
+@pytest.fixture(scope="function")
+def num_system_ports(request) -> int:
+    """Number of system ports to allocate for this test.
+
+    Default: 1 port.
+
+    Tests that need multiple system ports (e.g. SYSTEM_PORT1 + SYSTEM_PORT2) must
+    explicitly request them via indirect parametrization:
+      @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+    """
+    return getattr(request, "param", 1)
+
+
+@pytest.fixture(scope="function")
+def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None]:
+    """Allocate per-test ports for Dynamo deployments.
+
+    - frontend_port: OpenAI-compatible HTTP/gRPC ingress (dynamo.frontend)
+    - system_ports: List of worker metrics/system ports (configurable count via num_system_ports)
+    """
+    frontend_port = allocate_port(DefaultPort.FRONTEND.value)
+    system_port_list = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
+    all_ports = [frontend_port, *system_port_list]
+    try:
+        yield ServicePorts(frontend_port=frontend_port, system_ports=system_port_list)
+    finally:
+        deallocate_ports(all_ports)

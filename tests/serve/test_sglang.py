@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
+from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload,
@@ -50,11 +52,11 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
-            pytest.mark.timeout(120),  # 3x measured time (39s)
+            pytest.mark.timeout(240),  # 3x measured time (39s) + download time (120s)
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
-        models_port=8000,
+        frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -68,7 +70,7 @@ sglang_configs = {
         marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         env={},
-        models_port=8000,
+        frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -76,7 +78,8 @@ sglang_configs = {
     ),
     "disaggregated_same_gpu": SGLangConfig(
         # Uses disagg_same_gpu.sh for single-GPU disaggregated testing
-        # Validates metrics from both prefill (port 8081) and decode (port 8082) workers
+        # Validates metrics from both prefill (DefaultPort.SYSTEM1) and decode
+        # (DefaultPort.SYSTEM2) workers
         name="disaggregated_same_gpu",
         directory=sglang_dir,
         script_name="disagg_same_gpu.sh",
@@ -87,26 +90,36 @@ sglang_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
-        models_port=8000,
+        frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
-            # Validate dynamo_component_* and sglang:* metrics from prefill worker (port 8081)
-            metric_payload_default(min_num_requests=6, backend="sglang", port=8081),
-            # Validate dynamo_component_* and sglang:* metrics from decode worker (port 8082)
-            metric_payload_default(min_num_requests=6, backend="sglang", port=8082),
+            # Validate dynamo_component_* and sglang:* metrics from prefill worker
+            # (DefaultPort.SYSTEM1)
+            metric_payload_default(
+                min_num_requests=6,
+                backend="sglang",
+                port=DefaultPort.SYSTEM1.value,
+            ),
+            # Validate dynamo_component_* and sglang:* metrics from decode worker
+            # (DefaultPort.SYSTEM2)
+            metric_payload_default(
+                min_num_requests=6,
+                backend="sglang",
+                port=DefaultPort.SYSTEM2.value,
+            ),
         ],
     ),
     "kv_events": SGLangConfig(
         name="kv_events",
         directory=sglang_dir,
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         env={
             "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
         },
-        models_port=8000,
+        frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(
                 expected_log=[
@@ -131,11 +144,11 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.nightly,
-            pytest.mark.timeout(60),  # 3x measured time (20s)
+            pytest.mark.timeout(240),  # 3x measured time (20s) + download time (180s)
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
-        models_port=8000,
+        frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(
                 expected_response=["Successfully Applied Chat Template"]
@@ -150,7 +163,7 @@ sglang_configs = {
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,
         timeout=360,
-        models_port=8000,
+        frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(
                 [
@@ -179,11 +192,11 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.nightly,
-            pytest.mark.timeout(90),  # 3x measured time (29s)
+            pytest.mark.timeout(270),  # 3x measured time (29s) + download time (180s)
         ],
         model="Qwen/Qwen3-Embedding-4B",
         delayed_start=0,
-        models_port=8000,
+        frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             # Test default payload with multiple inputs
             embedding_payload_default(
@@ -214,9 +227,10 @@ sglang_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.post_merge,
             pytest.mark.timeout(
-                160
-            ),  # Total test timeout: 2x measured average (79.36s)
+                420
+            ),  # Total test timeout: 2x measured average (79.36s) + download time (240s) for 7B model
         ],
         model="deepseek-ai/deepseek-llm-7b-base",
         script_args=[
@@ -240,22 +254,37 @@ def sglang_config_test(request):
 
 @pytest.mark.e2e
 @pytest.mark.sglang
+# Use 2 system ports because some `sglang_configs` validate metrics on multiple ports.
+# This test iterates over all configs via `sglang_config_test`.
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_sglang_deployment(
-    sglang_config_test, request, runtime_services, predownload_models
+    sglang_config_test,
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    num_system_ports,
+    predownload_models,
 ):
     """Test SGLang deployment scenarios using common helpers"""
-    config = sglang_config_test
-    run_serve_deployment(config, request)
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    config = dataclasses.replace(
+        sglang_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
 @pytest.mark.e2e
 @pytest.mark.sglang
-@pytest.mark.gpu_1
+@pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.skip(
     reason="Requires 4 GPUs - enable when hardware is consistently available"
 )
-def test_sglang_disagg_dp_attention(request, runtime_services, predownload_models):
+def test_sglang_disagg_dp_attention(
+    request, runtime_services_dynamic_ports, dynamo_dynamic_ports, predownload_models
+):
     """Test sglang disaggregated with DP attention (requires 4 GPUs)"""
 
     # Kept for reference; this test uses a different launch path and is skipped

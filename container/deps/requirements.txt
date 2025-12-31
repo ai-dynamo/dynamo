@@ -11,15 +11,15 @@
 #   maximum versions available on different platforms (x86_64 vs aarch64, different CUDA versions)
 
 # For Multimodal EPD (required for device_map="auto" in vision model loading)
-accelerate==1.12.0
-aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@5554d2eb8206738c66048bf2d72183e9bcd85759
-aiofiles==24.1.0
+accelerate
+aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@9db6a1a5011c0ff80b5349f377f17846c5274b02
+aiofiles
 aiperf @ git+https://github.com/ai-dynamo/aiperf.git@4d3fa29403c8f75da22a14f1f7b3aeb27db9288f
 av==15.0.0
 fastapi==0.120.1
 ftfy==6.3.1
 genai-perf==0.0.15
-grpcio-tools<=1.66.0  # May have platform-specific builds
+grpcio-tools<=1.76.0  # May have platform-specific builds
 httpx==0.28.1
 kr8s==0.20.13
 kubernetes==32.0.1
@@ -38,8 +38,8 @@ pre-commit==4.5.0
 prometheus-api-client==0.6.0
 prometheus_client==0.23.1
 prophet==1.2.1
-protobuf==5.29.5
-pydantic>=2.11.4,<2.12  # Required by aiconfigurator==0.4.0
+protobuf>=5.29.5,<7.0.0
+pydantic>=2.11.4,<2.13  # vllm==0.12.0 depends on pydantic>=2.12.0
 pyright==1.1.407
 PyYAML==6.0.3
 scikit-learn==1.7.2
@@ -48,12 +48,12 @@ sentencepiece==0.2.1
 # Required by kr8s
 # https://github.com/kr8s-org/kr8s/blob/750022c3ebbb7988cddb5a979aca2ee8074a1069/examples/kubectl-ng/uv.lock#L988
 sniffio==1.3.1
-tensorboard==2.19.0
+tensorboard>=2.19.0,<2.21.0
 tensorboardX==2.6.2.2
 # Transformers version constraint for container builds
 # - vLLM 0.11.0: >=4.55.2, vLLM 0.11.2: >=4.56.0,<5
-# - TensorRT-LLM 1.2.0rc2/rc3: ==4.56.0
-# - SGLang 0.5.6: ==4.57.1
+# - TensorRT-LLM 1.2.0rc5: ==4.56.0
+# - SGLang 0.5.6.post2: ==4.57.1
 # Using >=4.56.0 and <=4.57.1 to satisfy all frameworks
 transformers>=4.56.0,<=4.57.1
 types-aiofiles==25.1.0.20251011
