@@ -34,48 +34,48 @@ jobs:
   # ============================================================================
   # SETUP & DETECTION JOBS
   # ============================================================================
-  # changed-files:
-  #   runs-on: ubuntu-latest
-  #   environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
-  #   outputs:
-  #     core: ${{ steps.filter.outputs.core }}
-  #     operator: ${{ steps.filter.outputs.operator }}
-  #     deploy: ${{ steps.filter.outputs.deploy }}
-  #     vllm: ${{ steps.filter.outputs.vllm }}
-  #     sglang: ${{ steps.filter.outputs.sglang }}
-  #     trtllm: ${{ steps.filter.outputs.trtllm }}
-  #   steps:
-  #     - name: Checkout code
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-  #     - name: Check for changes
-  #       uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
-  #       id: filter
-  #       with:
-  #         filters: .github/filters.yaml
+  changed-files:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
+    outputs:
+      core: ${{ steps.filter.outputs.core }}
+      operator: ${{ steps.filter.outputs.operator }}
+      deploy: ${{ steps.filter.outputs.deploy }}
+      vllm: ${{ steps.filter.outputs.vllm }}
+      sglang: ${{ steps.filter.outputs.sglang }}
+      trtllm: ${{ steps.filter.outputs.trtllm }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Check for changes
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
+        id: filter
+        with:
+          filters: .github/filters.yaml
 
-  # detect-buildkit-workers:
-  #   name: Detect Buildkit Workers
-  #   runs-on: builder-cpu-amd-runner
-  #   steps:
-  #   - name: Checkout code
-  #     uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  detect-buildkit-workers:
+    name: Detect Buildkit Workers
+    runs-on: builder-cpu-amd-runner
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
 
 
-  #   - name: Route Buildkit Workers
-  #     id: route-buildkit-workers
-  #     shell: bash
-  #     run: |
-  #       .github/scripts/route_buildkit.sh --amd
-  #       # .github/scripts/route_buildkit.sh --arm
-  #   outputs:
-  #     vllm_amd64: ${{ steps.route-buildkit-workers.outputs.vllm_amd64 }}
-  #     vllm_arm64: ${{ steps.route-buildkit-workers.outputs.vllm_arm64 }}
-  #     trtllm_amd64: ${{ steps.route-buildkit-workers.outputs.trtllm_amd64 }}
-  #     trtllm_arm64: ${{ steps.route-buildkit-workers.outputs.trtllm_arm64 }}
-  #     sglang_amd64: ${{ steps.route-buildkit-workers.outputs.sglang_amd64 }}
-  #     sglang_arm64: ${{ steps.route-buildkit-workers.outputs.sglang_arm64 }}
-  #     general_amd64: ${{ steps.route-buildkit-workers.outputs.general_amd64 }}
-  #     general_arm64: ${{ steps.route-buildkit-workers.outputs.general_arm64 }}
+    - name: Route Buildkit Workers
+      id: route-buildkit-workers
+      shell: bash
+      run: |
+        .github/scripts/route_buildkit.sh --amd
+        # .github/scripts/route_buildkit.sh --arm
+    outputs:
+      vllm_amd64: ${{ steps.route-buildkit-workers.outputs.vllm_amd64 }}
+      vllm_arm64: ${{ steps.route-buildkit-workers.outputs.vllm_arm64 }}
+      trtllm_amd64: ${{ steps.route-buildkit-workers.outputs.trtllm_amd64 }}
+      trtllm_arm64: ${{ steps.route-buildkit-workers.outputs.trtllm_arm64 }}
+      sglang_amd64: ${{ steps.route-buildkit-workers.outputs.sglang_amd64 }}
+      sglang_arm64: ${{ steps.route-buildkit-workers.outputs.sglang_arm64 }}
+      general_amd64: ${{ steps.route-buildkit-workers.outputs.general_amd64 }}
+      general_arm64: ${{ steps.route-buildkit-workers.outputs.general_arm64 }}
 
   # # ============================================================================
   # # BUILD JOBS
@@ -83,206 +83,206 @@ jobs:
   # # Each framework builds for both amd64 and arm64 architectures
   # # ============================================================================
 
-  # operator:
-  #   needs: detect-buildkit-workers
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       platform:
-  #         - { arch: amd64 }
-  #         # - { arch: arm64  }
-  #   name: operator (${{ matrix.platform.arch }})
-  #   runs-on: builder-cpu-amd-runner
-  #   steps:
-  #     - name: define buildkit builders
-  #       shell: bash
-  #       run: |
-  #         ADDRS="${{ needs.detect-buildkit-workers.outputs[format('general_{0}', matrix.platform.arch)] }}"
-  #         IFS=',' read -ra ADDR_LIST <<< "$ADDRS"
-  #         FIRST=true
-  #         for addr in "${ADDR_LIST[@]}"; do
-  #           if $FIRST; then
-  #             docker buildx create --use --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
-  #             FIRST=false
-  #           else
-  #             docker buildx create --append --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
-  #           fi
-  #         done
-  #         docker buildx inspect --bootstrap
-  #     - name: Checkout repository
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-  #     - name: Docker Login
-  #       uses: ./.github/actions/docker-login
-  #       with:
-  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-  #     - name: Linter
-  #       shell: bash
-  #       working-directory: ./deploy/operator
-  #       env:
-  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #       run: |
-  #         docker buildx build --platform linux/${{ matrix.platform.arch }} --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-  #     - name: Tester
-  #       shell: bash
-  #       working-directory: ./deploy/operator
-  #       env:
-  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #       run: |
-  #         docker buildx build --platform linux/${{ matrix.platform.arch }}  --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-  #     - name: Set up Go
-  #       uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-  #       with:
-  #         go-version: '1.24'
-  #     - name: Check for uncommitted changes
-  #       shell: bash
-  #       working-directory: ./deploy/operator
-  #       env:
-  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #       run: |
-  #         sudo apt-get update && sudo apt-get install -y make
-  #         make check
-  #     - name: Build Container
-  #       id: build-image
-  #       shell: bash
-  #       working-directory: ./deploy/operator
-  #       env:
-  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #       run: |
-  #         docker buildx build --push \
-  #             --platform linux/${{ matrix.platform.arch }} \
-  #             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-  #             -f Dockerfile \
-  #             -t  ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-dynamo-operator-${{ matrix.platform.arch }} .
+  operator:
+    needs: detect-buildkit-workers
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64 }
+          # - { arch: arm64  }
+    name: operator (${{ matrix.platform.arch }})
+    runs-on: builder-cpu-amd-runner
+    steps:
+      - name: define buildkit builders
+        shell: bash
+        run: |
+          ADDRS="${{ needs.detect-buildkit-workers.outputs[format('general_{0}', matrix.platform.arch)] }}"
+          IFS=',' read -ra ADDR_LIST <<< "$ADDRS"
+          FIRST=true
+          for addr in "${ADDR_LIST[@]}"; do
+            if $FIRST; then
+              docker buildx create --use --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
+              FIRST=false
+            else
+              docker buildx create --append --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
+            fi
+          done
+          docker buildx inspect --bootstrap
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Linter
+        shell: bash
+        working-directory: ./deploy/operator
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker buildx build --platform linux/${{ matrix.platform.arch }} --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Tester
+        shell: bash
+        working-directory: ./deploy/operator
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker buildx build --platform linux/${{ matrix.platform.arch }}  --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.24'
+      - name: Check for uncommitted changes
+        shell: bash
+        working-directory: ./deploy/operator
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          sudo apt-get update && sudo apt-get install -y make
+          make check
+      - name: Build Container
+        id: build-image
+        shell: bash
+        working-directory: ./deploy/operator
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker buildx build --push \
+              --platform linux/${{ matrix.platform.arch }} \
+              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              -f Dockerfile \
+              -t  ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-dynamo-operator-${{ matrix.platform.arch }} .
 
 
-  # build-vllm:
-  #   needs: detect-buildkit-workers
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       platform:
-  #         - { arch: amd64 }
-  #         # - { arch: arm64 }
-  #       framework:
-  #         - { name: vllm, arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04', arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04', arm_cuda_version: '12.9', arm_torch_backend: 'cu129' }
-  #   name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-  #   runs-on: builder-cpu-amd-runner
-  #   steps:
-  #     - name: Checkout repository
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-  #     - name: Build with Remote Buildkit
-  #       id: build-image
-  #       uses: ./.github/actions/build-with-buildkit
-  #       with:
-  #         # no_cache: 'true'
-  #         builder_name: ${{ env.BUILDER_NAME }}
-  #         buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
-  #         image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-  #         framework: ${{ matrix.framework.name }}
-  #         target: runtime
-  #         platform: 'linux/${{ matrix.platform.arch }}'
-  #         base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
-  #         runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
-  #         cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
-  #         torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
-  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-  #         ci_token: ${{ secrets.CI_TOKEN }}
-  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  build-vllm:
+    needs: detect-buildkit-workers
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64 }
+          # - { arch: arm64 }
+        framework:
+          - { name: vllm, arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04', arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04', arm_cuda_version: '12.9', arm_torch_backend: 'cu129' }
+    name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+    runs-on: builder-cpu-amd-runner
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Build with Remote Buildkit
+        id: build-image
+        uses: ./.github/actions/build-with-buildkit
+        with:
+          # no_cache: 'true'
+          builder_name: ${{ env.BUILDER_NAME }}
+          buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
+          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+          framework: ${{ matrix.framework.name }}
+          target: runtime
+          platform: 'linux/${{ matrix.platform.arch }}'
+          base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
+          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
+          cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
+          torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
 
-  # build-sglang:
-  #   needs: detect-buildkit-workers
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       platform:
-  #         - { arch: amd64 }
-  #         # - { arch: arm64 }
-  #       framework:
-  #         - { name: sglang, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
-  #   name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-  #   runs-on: builder-cpu-amd-runner
-  #   steps:
-  #     - name: Checkout repository
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-  #     - name: Build with Remote Buildkit
-  #       id: build-image
-  #       uses: ./.github/actions/build-with-buildkit
-  #       with:
-  #         # no_cache: 'true'
-  #         builder_name: ${{ env.BUILDER_NAME }}
-  #         buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
-  #         image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-  #         framework: ${{ matrix.framework.name }}
-  #         target: runtime
-  #         platform: 'linux/${{ matrix.platform.arch }}'
-  #         base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
-  #         runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
-  #         cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
-  #         torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
-  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-  #         ci_token: ${{ secrets.CI_TOKEN }}
-  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  build-sglang:
+    needs: detect-buildkit-workers
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64 }
+          # - { arch: arm64 }
+        framework:
+          - { name: sglang, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
+    name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+    runs-on: builder-cpu-amd-runner
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Build with Remote Buildkit
+        id: build-image
+        uses: ./.github/actions/build-with-buildkit
+        with:
+          # no_cache: 'true'
+          builder_name: ${{ env.BUILDER_NAME }}
+          buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
+          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+          framework: ${{ matrix.framework.name }}
+          target: runtime
+          platform: 'linux/${{ matrix.platform.arch }}'
+          base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
+          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
+          cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
+          torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-  # build-trtllm:
-  #   needs: detect-buildkit-workers
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       platform:
-  #         - { arch: amd64 }
-  #         # - { arch: arm64 }
-  #       framework:
-  #         - { name: trtllm, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
-  #   name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-  #   runs-on: builder-cpu-amd-runner
-  #   steps:
-  #     - name: Checkout repository
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-  #     - name: Build with Remote Buildkit
-  #       id: build-image
-  #       uses: ./.github/actions/build-with-buildkit
-  #       with:
-  #         # no_cache: 'true'
-  #         builder_name: ${{ env.BUILDER_NAME }}
-  #         buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
-  #         image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-  #         framework: ${{ matrix.framework.name }}
-  #         target: runtime
-  #         platform: 'linux/${{ matrix.platform.arch }}'
-  #         base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
-  #         runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
-  #         cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
-  #         torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
-  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-  #         ci_token: ${{ secrets.CI_TOKEN }}
-  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  build-trtllm:
+    needs: detect-buildkit-workers
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64 }
+          # - { arch: arm64 }
+        framework:
+          - { name: trtllm, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
+    name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+    runs-on: builder-cpu-amd-runner
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Build with Remote Buildkit
+        id: build-image
+        uses: ./.github/actions/build-with-buildkit
+        with:
+          # no_cache: 'true'
+          builder_name: ${{ env.BUILDER_NAME }}
+          buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
+          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+          framework: ${{ matrix.framework.name }}
+          target: runtime
+          platform: 'linux/${{ matrix.platform.arch }}'
+          base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
+          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
+          cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
+          torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   # ============================================================================
   # TEST JOBS
@@ -397,7 +397,7 @@ jobs:
   # ============================================================================
   copy-images:
     # needs: [pytests-vllm, pytests-sglang, pytests-trtllm, operator]
-    # needs: [build-vllm, build-sglang, build-trtllm, operator]
+    needs: [build-vllm, build-sglang, build-trtllm, operator]
     strategy:
       fail-fast: true
       matrix:
@@ -405,23 +405,15 @@ jobs:
           - { arch: amd64 }
           # - { arch: arm64 }
         framework:
-          # - { name: vllm }
-          # - { name: sglang }
-          # - { name: trtllm }
+          - { name: vllm }
+          - { name: sglang }
+          - { name: trtllm }
           - { name: dynamo-operator }
     name: copy ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
     runs-on: builder-cpu-amd-runner
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      # - name: Docker Login
-      #   uses: ./.github/actions/docker-login
-      #   with:
-      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Copy image to target registry
         uses: ./.github/actions/skopeo-copy
         with:
