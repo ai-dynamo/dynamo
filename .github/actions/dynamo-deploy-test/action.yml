@@ -175,17 +175,17 @@ runs:
         echo "**Namespace:** \`${NAMESPACE}\`" >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
         
-        # echo "### All Pods in Namespace" >> "$GITHUB_STEP_SUMMARY"
-        # echo '```' >> "$GITHUB_STEP_SUMMARY"
-        # kubectl get pods -n ${NAMESPACE} -o wide >> "$GITHUB_STEP_SUMMARY" 2>&1
-        # echo '```' >> "$GITHUB_STEP_SUMMARY"
-        # echo "" >> "$GITHUB_STEP_SUMMARY"
-        
-        echo "### Pod Descriptions" >> "$GITHUB_STEP_SUMMARY"
+        echo "### All relevant Pods in Namespace" >> "$GITHUB_STEP_SUMMARY"
         echo '```' >> "$GITHUB_STEP_SUMMARY"
-        kubectl describe pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${NAMESPACE} >> "$GITHUB_STEP_SUMMARY" 2>&1
+        kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${NAMESPACE} -o wide >> "$GITHUB_STEP_SUMMARY" 2>&1
         echo '```' >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
+        
+        # echo "### Pod Descriptions" >> "$GITHUB_STEP_SUMMARY"
+        # echo '```' >> "$GITHUB_STEP_SUMMARY"
+        # kubectl describe pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${NAMESPACE} >> "$GITHUB_STEP_SUMMARY" 2>&1
+        # echo '```' >> "$GITHUB_STEP_SUMMARY"
+        # echo "" >> "$GITHUB_STEP_SUMMARY"
         
         echo "### Pod Logs (last 30 lines per container)" >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
