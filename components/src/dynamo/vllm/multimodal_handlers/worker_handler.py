@@ -217,7 +217,14 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                                 )
                             )
                     else:
-                        multi_modal_data["image"].append(mm_data["image"])
+                        logger.info(f"Get embedding of shape {mm_data['image'].shape}")
+                        # [gluo FIXME] embedding with multiple images?
+                        if multi_modal_data["image"] == []:
+                            multi_modal_data["image"] = mm_data["image"]
+                        else:
+                            multi_modal_data["image"] = torch.cat(
+                                (multi_modal_data["image"], mm_data["image"])
+                            )
             else:
                 # Use PIL image instead of image embeddings
                 multi_modal_data["image"].append(
@@ -228,6 +235,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         request.multimodal_inputs = None
 
         logger.info(f"Prepared multimodal data size: {len(multi_modal_data['image'])}")
+        logger.info(f"{multi_modal_data}")
 
         # Deepcopy the request to avoid modifying the original
         # when we adjust sampling params for prefill
@@ -289,10 +297,17 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                     ).model_dump_json()
 
         else:
+            CHECK_LENGTH = False
             async for response in gen:
                 logger.debug(
                     f"Response kv_transfer_params: {response.kv_transfer_params}"
                 )
+                if not CHECK_LENGTH:
+                    CHECK_LENGTH = True
+                    logger.info(
+                        f"length of expanded prompt ids: {len(response.prompt_token_ids)}"
+                    )
+                logger.info(f"Response outputs: {response.outputs}")
                 yield MyRequestOutput(
                     request_id=response.request_id,
                     prompt=response.prompt,

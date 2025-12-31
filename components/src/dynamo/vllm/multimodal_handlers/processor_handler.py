@@ -113,10 +113,11 @@ class ProcessorHandler(ProcessMixIn):
         worker_request.multimodal_inputs = []
         async for response in response_generator:
             logger.debug(f"Received response from encode worker: {response}")
-            worker_request.multimodal_inputs.extend(response.multimodal_inputs)
+            output = vLLMMultimodalRequest.model_validate_json(response.data())
+            worker_request.multimodal_inputs.extend(output.multimodal_inputs)
 
         response_generator = await self.pd_worker_client.round_robin(
-            request.model_dump_json(), context=context
+            worker_request.model_dump_json(), context=context
         )
 
         output = self._generate_responses(response_generator, request_type)
@@ -178,7 +179,9 @@ class ProcessorHandler(ProcessMixIn):
 
         prompt = template.replace("<prompt>", user_text)
         # [gluo FIXME] only for Qwen2.5-VL-7B-Instruct
-        if is_model_supported(raw_request.model, SupportedModels.QWEN_2_5_VL_7B):
+        if is_model_supported(
+            raw_request.model, SupportedModels.QWEN_2_5_VL_7B
+        ) or is_model_supported(raw_request.model, SupportedModels.QWEN_2_5_VL_3B):
             image_template = "<|vision_start|><|image_pad|><|vision_end|>"
             video_template = "<|vision_start|><|video_pad|><|vision_end|>"
         elif is_model_supported(raw_request.model, SupportedModels.LLAVA_1_5_7B):
