@@ -3,7 +3,6 @@
 
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 
-
 #[test]
 fn test_both_fields_fails() {
     // Test that when both are present, serde will fail with duplicate field error
