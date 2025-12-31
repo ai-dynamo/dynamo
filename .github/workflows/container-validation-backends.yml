@@ -689,7 +689,7 @@ jobs:
   cleanup:
     runs-on: cpu-amd-m5-2xlarge
     if: always()
-    needs: [deploy-operator]
+    needs: [deploy-test-sglang, deploy-test-trtllm, deploy-test-vllm, deploy-test-vllm-disagg-router]
     steps:
     - name: Output Node Name
       shell: bash
