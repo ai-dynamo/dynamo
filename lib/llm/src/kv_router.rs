@@ -41,13 +41,11 @@ use worker_query::WorkerQueryClient;
 use crate::{
     kv_router::{
         approx::PruneConfig,
-        indexer::{
-            KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent,
-            compute_block_hash_for_seq, compute_seq_hash_for_block,
-        },
+        indexer::{KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent},
         protocols::{
-            LocalBlockHash, RouterRequest, RouterResponse, WorkerId, WorkerSelectionResult,
-            WorkerWithDpRank,
+            LocalBlockHash, RouterRequest, RouterResponse, TokensWithHashes, WorkerId,
+            WorkerSelectionResult, WorkerWithDpRank, compute_block_hash_for_seq,
+            compute_seq_hash_for_block,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         sequence::SequenceError,
@@ -246,13 +244,13 @@ impl Indexer {
 
     async fn process_routing_decision_for_request(
         &self,
-        tokens: &[u32],
+        tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
         match self {
             Indexer::KvIndexer(indexer) => {
                 indexer
-                    .process_routing_decision_for_request(tokens, worker)
+                    .process_routing_decision_for_request(tokens_with_hashes, worker)
                     .await
             }
             Indexer::None => Ok(()),
@@ -858,10 +856,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // This covers both pre-selected workers and find_best_match selections.
         if !is_query_only && !self.chooser.kv_router_config.use_kv_events {
             let worker = WorkerWithDpRank::new(instance_id, dp_rank);
+            let mut tokens_with_hashes =
+                TokensWithHashes::new(request.token_ids.clone(), self.chooser.block_size);
             if let Err(e) = self
                 .chooser
                 .indexer
-                .process_routing_decision_for_request(&request.token_ids, worker)
+                .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
                 .await
             {
                 tracing::warn!(

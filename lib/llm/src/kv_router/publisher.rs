@@ -28,10 +28,7 @@ use futures::StreamExt;
 use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
     WORKER_KV_INDEXER_QUERY_SUBJECT,
-    indexer::{
-        KvIndexerMetrics, LocalKvIndexer, RouterEvent, WorkerKvQueryRequest,
-        compute_block_hash_for_seq,
-    },
+    indexer::{KvIndexerMetrics, LocalKvIndexer, RouterEvent, WorkerKvQueryRequest},
     protocols::*,
 };
 use dynamo_runtime::config::environment_names::nats as env_nats;
@@ -1105,7 +1102,7 @@ impl WorkerMetricsPublisher {
 #[cfg(test)]
 mod test_event_processing {
     use super::*;
-    use crate::kv_router::indexer::compute_block_hash_for_seq;
+    use crate::kv_router::protocols::compute_block_hash_for_seq;
 
     // ---------------------------------------------------------------------
     // create_stored_block_from_parts --------------------------------------
