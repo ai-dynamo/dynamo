@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import base64
-import json
 import logging
 import random
 import socket
@@ -12,7 +10,6 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 
 import sglang as sgl
-from sglang.srt.tracing import trace as sglang_trace
 from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Component, Context
@@ -143,38 +140,20 @@ class BaseWorkerHandler(ABC):
 
         return bootstrap_host, bootstrap_port
 
-    def _propagate_trace_context_to_sglang(
-        self, context: Context, bootstrap_room: int = 0
-    ):
-        """Propagate Dynamo's trace context to SGLang for distributed tracing. SGLang expects a certain
-        format derived by loooking at https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/tracing/trace.py
-        in the to_dict() method.
+    def _get_trace_header(self, context: Context) -> Optional[Dict[str, str]]:
+        """Get trace header dict for passing to SGLang's external_trace_header parameter.
 
         Args:
             context: Dynamo Context object containing trace information.
-            bootstrap_room: Bootstrap room ID (0 for aggregated, actual room for disaggregated).
+
+        Returns:
+            Dict with traceparent header if trace context available, None otherwise.
         """
         trace_id = context.trace_id
         span_id = context.span_id
         if not trace_id or not span_id:
-            return
-
-        # Build trace context for SGLang
-        trace_context = {
-            str(bootstrap_room): {
-                "root_span": {"traceparent": f"00-{trace_id}-{span_id}-01"},
-                "prev_span": {
-                    "span_id": int(span_id, 16),
-                    "trace_id": int(trace_id, 16),
-                },
-            }
-        }
-
-        # Encode and propagate
-        base64_context = base64.b64encode(
-            json.dumps(trace_context, ensure_ascii=False).encode("utf-8")
-        ).decode("utf-8")
-        sglang_trace.trace_set_remote_propagate_context(base64_context)
+            return None
+        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
 
     async def _handle_cancellation(
         self, request_id_future: asyncio.Future, context: Context

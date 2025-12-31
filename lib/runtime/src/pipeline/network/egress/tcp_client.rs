@@ -324,7 +324,8 @@ impl TcpConnection {
         // Encode request on caller's thread (hot path optimization)
         // This allows multiple concurrent callers to encode in parallel
         // rather than serializing through the writer task
-        let request_msg = TcpRequestMessage::new(endpoint_path, payload);
+        // Include all headers (especially trace headers) in the message
+        let request_msg = TcpRequestMessage::with_headers(endpoint_path, headers.clone(), payload);
         let encoded_data = request_msg.encode()?;
 
         // Create response channel

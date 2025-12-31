@@ -266,6 +266,15 @@ impl SharedTcpServer {
             let mut path_buf = vec![0u8; path_len];
             read_half.read_exact(&mut path_buf).await?;
 
+            // Read headers length (2 bytes)
+            let mut headers_len_buf = [0u8; 2];
+            read_half.read_exact(&mut headers_len_buf).await?;
+            let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
+
+            // Read headers
+            let mut headers_buf = vec![0u8; headers_len];
+            read_half.read_exact(&mut headers_buf).await?;
+
             // Read payload length (4 bytes)
             let mut len_buf = [0u8; 4];
             read_half.read_exact(&mut len_buf).await?;
@@ -293,9 +302,12 @@ impl SharedTcpServer {
             read_half.read_exact(&mut payload_buf).await?;
 
             // Reconstruct the full message buffer for decoding using BytesMut
-            let mut full_msg = BytesMut::with_capacity(2 + path_len + 4 + payload_len);
+            let mut full_msg =
+                BytesMut::with_capacity(2 + path_len + 2 + headers_len + 4 + payload_len);
             full_msg.extend_from_slice(&path_len_buf);
             full_msg.extend_from_slice(&path_buf);
+            full_msg.extend_from_slice(&headers_len_buf);
+            full_msg.extend_from_slice(&headers_buf);
             full_msg.extend_from_slice(&len_buf);
             full_msg.extend_from_slice(&payload_buf);
 
@@ -316,6 +328,7 @@ impl SharedTcpServer {
             };
 
             let endpoint_path = request_msg.endpoint_path;
+            let headers = request_msg.headers;
             let payload = request_msg.payload;
 
             // Look up handler (lock-free read with DashMap)
@@ -361,15 +374,18 @@ impl SharedTcpServer {
             tokio::spawn(async move {
                 tracing::trace!(instance_id, "handling TCP request");
 
+                // Create span with trace context from headers
+                let span = crate::logging::make_handle_payload_span_from_tcp_headers(
+                    &headers,
+                    &component_name,
+                    &endpoint_name,
+                    &namespace,
+                    instance_id,
+                );
+
                 let result = service_handler
                     .handle_payload(payload)
-                    .instrument(tracing::info_span!(
-                        "handle_payload",
-                        component = component_name.as_str(),
-                        endpoint = endpoint_name.as_str(),
-                        namespace = namespace.as_str(),
-                        instance_id = instance_id,
-                    ))
+                    .instrument(span)
                     .await;
 
                 match result {
