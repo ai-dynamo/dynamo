@@ -46,10 +46,10 @@ class BaseWorkerHandler(ABC):
         self.config = config
         if publisher is not None:
             self.metrics_publisher = publisher.metrics_publisher
-            self.kv_publisher = publisher.kv_publisher
+            self.kv_publishers = publisher.kv_publishers
         else:
             self.metrics_publisher = None
-            self.kv_publisher = None
+            self.kv_publishers = None
         self.prefill_client = prefill_client
         self.serving_mode = config.serving_mode
         self.skip_tokenizer_init = config.server_args.skip_tokenizer_init

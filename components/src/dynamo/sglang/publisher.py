@@ -136,29 +136,44 @@ class DynamoSglangPublisher:
         logging.info("Sending dummy metrics to initialize")
         self.metrics_publisher.publish(metrics)
 
-    def init_kv_event_publish(self) -> Optional[ZmqKvEventPublisher]:
+    def init_kv_event_publish(self) -> Optional[list[ZmqKvEventPublisher]]:
         """Initialize KV event publisher if configured.
 
         Returns:
             ZmqKvEventPublisher instance if kv_events_config is set, None otherwise.
         """
-        self.kv_publisher = None
-        if self.server_args.kv_events_config:
+        self.kv_publishers = []
+        if self.server_args.kv_events_config and self.server_args.node_rank == 0:
             kv_events = json.loads(self.server_args.kv_events_config)
             ep = kv_events.get("endpoint")
-            zmq_ep = format_zmq_endpoint(ep, get_local_ip_auto()) if ep else None
+            zmq_ep = ep.replace("*", get_local_ip_auto()) if ep else None
 
-            zmq_config = ZmqKvEventPublisherConfig(
-                worker_id=self.generate_endpoint.connection_id(),
-                kv_block_size=self.server_args.page_size,
-                zmq_endpoint=zmq_ep,
-                enable_local_indexer=self.dynamo_args.enable_local_indexer,
-            )
-            logging.info(f"Setting up ZMQ kv event publisher at {zmq_ep}")
-            self.kv_publisher = ZmqKvEventPublisher(
-                component=self.component, config=zmq_config
-            )
-        return self.kv_publisher
+            from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
+
+            data_parallel_size = getattr(self.server_args, "dp_size", 1)
+            local_dp_size = data_parallel_size // self.server_args.nnodes
+
+            for dp_rank in range(data_parallel_size):
+                # Each dp_rank publishes to a different port
+                zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
+                    zmq_ep,
+                    data_parallel_rank=dp_rank,
+                )
+                zmq_config = ZmqKvEventPublisherConfig(
+                    worker_id=self.generate_endpoint.connection_id(),
+                    kv_block_size=self.server_args.page_size,
+                    zmq_endpoint=zmq_endpoint,
+                    bind=(dp_rank >= local_dp_size),
+                )
+                kv_publisher = ZmqKvEventPublisher(
+                    component=self.component, config=zmq_config
+                )
+                self.kv_publishers.append(kv_publisher)
+                logging.info(
+                    f"KV event publisher for dp_rank={dp_rank} subscribing to sglang at {zmq_endpoint}"
+                )
+
+        return self.kv_publishers
 
     def _record(
         self,
