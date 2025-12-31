@@ -66,7 +66,7 @@ jobs:
       shell: bash
       run: |
         .github/scripts/route_buildkit.sh --amd
-        .github/scripts/route_buildkit.sh --arm
+        # .github/scripts/route_buildkit.sh --arm
     outputs:
       vllm_amd64: ${{ steps.route-buildkit-workers.outputs.vllm_amd64 }}
       vllm_arm64: ${{ steps.route-buildkit-workers.outputs.vllm_arm64 }}
@@ -90,7 +90,7 @@ jobs:
       matrix:
         platform:
           - { arch: amd64 }
-          - { arch: arm64  }
+          # - { arch: arm64  }
     name: operator (${{ matrix.platform.arch }})
     runs-on: builder-cpu-amd-runner
     steps:
@@ -167,7 +167,7 @@ jobs:
       matrix:
         platform:
           - { arch: amd64 }
-          - { arch: arm64 }
+          # - { arch: arm64 }
         framework:
           - { name: vllm, arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04', arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04', arm_cuda_version: '12.9', arm_torch_backend: 'cu129' }
     name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
@@ -209,7 +209,7 @@ jobs:
       matrix:
         platform:
           - { arch: amd64 }
-          - { arch: arm64 }
+          # - { arch: arm64 }
         framework:
           - { name: sglang, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
     name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
@@ -250,7 +250,7 @@ jobs:
       matrix:
         platform:
           - { arch: amd64 }
-          - { arch: arm64 }
+          # - { arch: arm64 }
         framework:
           - { name: trtllm, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
     name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
