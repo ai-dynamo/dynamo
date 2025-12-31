@@ -20,6 +20,11 @@ from typing import Dict, Optional, Pattern
 
 from typing_extensions import TypedDict
 
+from dynamo.planner.defaults import (
+    VllmComponentName,
+    SGLangComponentName,
+    TrtllmComponentName,
+)
 from tests.utils.managed_deployment import DeploymentSpec
 
 
@@ -52,48 +57,50 @@ OVERFLOW_SUFFIX = f"_{TestPhase.OVERFLOW.name.lower()}"
 RECOVERY_SUFFIX = f"_{TestPhase.RECOVERY.name.lower()}"
 
 # Worker name mapping for different backends
+# Uses component name attributes from dynamo.planner.defaults as source of truth
 WORKER_MAP = {
     "vllm": {
-        "decode": "VllmDecodeWorker",
-        "prefill": "VllmPrefillWorker",
+        "decode": VllmComponentName.decode_worker_k8s_name,
+        "prefill": VllmComponentName.prefill_worker_k8s_name,
     },
     "sglang": {
-        "decode": "decode",
-        "prefill": "prefill",
+        "decode": SGLangComponentName.decode_worker_k8s_name,
+        "prefill": SGLangComponentName.prefill_worker_k8s_name,
     },
     "trtllm": {
-        "decode": "TRTLLMDecodeWorker",
-        "decode_agg": "TRTLLMWorker",  # Aggregated uses different name
-        "prefill": "TRTLLMPrefillWorker",
+        "decode": TrtllmComponentName.decode_worker_k8s_name,
+        "decode_agg": "TRTLLMWorker",  # Aggregated uses different name (not in defaults yet)
+        "prefill": TrtllmComponentName.prefill_worker_k8s_name,
     },
 }
 
 # Process ready patterns for recovery detection
+# Uses component name attributes from dynamo.planner.defaults as keys
 WORKER_READY_PATTERNS: Dict[str, Pattern] = {
     # Frontend
     "Frontend": re.compile(r"added model"),
     # vLLM workers
-    "VllmDecodeWorker": re.compile(
+    VllmComponentName.decode_worker_k8s_name: re.compile(
         r"VllmWorker for (?P<model_name>.*?) has been initialized"
     ),
-    "VllmPrefillWorker": re.compile(
+    VllmComponentName.prefill_worker_k8s_name: re.compile(
         r"VllmWorker for (?P<model_name>.*?) has been initialized"
     ),
     # SGLang workers - look for their specific initialization messages
-    "decode": re.compile(
+    SGLangComponentName.decode_worker_k8s_name: re.compile(
         r"Model registration succeeded|Decode worker handler initialized|Worker handler initialized"
     ),
-    "prefill": re.compile(
+    SGLangComponentName.prefill_worker_k8s_name: re.compile(
         r"Model registration succeeded|Prefill worker handler initialized|Worker handler initialized"
     ),
     # TensorRT-LLM workers
     "TRTLLMWorker": re.compile(
         r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
     ),
-    "TRTLLMDecodeWorker": re.compile(
+    TrtllmComponentName.decode_worker_k8s_name: re.compile(
         r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
     ),
-    "TRTLLMPrefillWorker": re.compile(
+    TrtllmComponentName.prefill_worker_k8s_name: re.compile(
         r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
     ),
 }

@@ -369,10 +369,12 @@ async def test_fault_scenario(
         # Get model from the appropriate worker based on backend
         try:
             if scenario.backend == "vllm":
-                model = scenario.deployment["VllmDecodeWorker"].model
+                from dynamo.planner.defaults import VllmComponentName
+                model = scenario.deployment[VllmComponentName.decode_worker_k8s_name].model
             elif scenario.backend == "sglang":
                 model = scenario.deployment["decode"].model
             elif scenario.backend == "trtllm":
+                from dynamo.planner.defaults import TrtllmComponentName
                 # Determine deployment type from scenario deployment name
                 if (
                     "agg" in scenario.deployment.name
@@ -380,7 +382,7 @@ async def test_fault_scenario(
                 ):
                     model = scenario.deployment["TRTLLMWorker"].model
                 else:
-                    model = scenario.deployment["TRTLLMDecodeWorker"].model
+                    model = scenario.deployment[TrtllmComponentName.decode_worker_k8s_name].model
             else:
                 model = None
         except (KeyError, AttributeError):
