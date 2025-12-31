@@ -266,14 +266,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             )));
         }
 
-        // Handle bootstrap rendezvous for disaggregated serving
-        // Follows the SGLang pattern:
-        // - Prefill: yields bootstrap_info first, then engine handles KV transfer internally
-        // - Decode: connects to prefill right away before generating tokens
-        //
-        // For the mocker, prefill doesn't need to actively wait - the server just needs to be
-        // running so decode can connect. Decode connects before generating output.
-        // Decode worker connects to prefill's bootstrap server for KV transfer handshake
+        // Bootstrap rendezvous for disaggregated serving
+        // - Decode: connect to prefill's server, block until prefill completes
+        // - Prefill: complete_room() is called after first token (see below)
+        let bootstrap_room = request.bootstrap_info.as_ref().map(|b| b.bootstrap_room);
         if let Some(bootstrap_info) = &request.bootstrap_info
             && self.engine_args.worker_type == WorkerType::Decode
         {
@@ -321,6 +317,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
+        let bootstrap_server = self.bootstrap_server.clone();
 
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
@@ -357,6 +354,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             extra_args: None,
                             completion_usage: None,
                         };
+
+                        // Prefill: after first token, mark room complete (unblocks decode)
+                        if is_prefill
+                            && token_count == 1
+                            && let (Some(server), Some(room_id)) = (bootstrap_server.get(), bootstrap_room)
+                        {
+                            server.complete_room(room_id);
+                        }
 
                         if signal.completed && token_count < max_output_tokens {
                             let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string()));
