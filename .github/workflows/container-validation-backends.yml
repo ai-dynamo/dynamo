@@ -404,17 +404,25 @@ jobs:
       matrix:
         platform:
           - { arch: amd64 }
-          # - { arch: arm64 }
+          - { arch: arm64 }
         framework:
-          # - { name: vllm }
-          # - { name: sglang }
-          # - { name: trtllm }
+          - { name: vllm }
+          - { name: sglang }
+          - { name: trtllm }
           - { name: dynamo-operator }
     name: copy ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
     runs-on: builder-cpu-amd-runner
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          TARGET_TAG="${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}"
+          echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
+          # Set framework+arch specific output for static output mapping
+          echo "target_tag_${{ matrix.framework.name }}_${{ matrix.platform.arch }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
       - name: Copy image to target registry
         uses: ./.github/actions/skopeo-copy
         with:
@@ -423,7 +431,7 @@ jobs:
           source_tag: ${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
           target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_image: ai-dynamo/dynamo
-          target_tag: ${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+          target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
           # Source ECR credentials
           source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -431,6 +439,15 @@ jobs:
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+    outputs:
+      target_tag_vllm_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_vllm_amd64 }}
+      target_tag_vllm_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_vllm_arm64 }}
+      target_tag_sglang_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_sglang_amd64 }}
+      target_tag_sglang_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_sglang_arm64 }}
+      target_tag_trtllm_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_trtllm_amd64 }}
+      target_tag_trtllm_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_trtllm_arm64 }}
+      target_tag_dynamo_operator_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_dynamo-operator_amd64 }}
+      target_tag_dynamo_operator_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_dynamo-operator_arm64 }}
 
 
   # ============================================================================
@@ -506,7 +523,7 @@ jobs:
           --set dynamo-operator.namespaceRestriction.enabled=true \
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-          --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
+          --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.copy-images.outputs.target_tag_dynamo_operator_amd64 }} \
           --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
         # Wait for all deployments to be ready
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
