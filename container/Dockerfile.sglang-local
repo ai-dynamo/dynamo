@@ -69,7 +69,10 @@ RUN --mount=type=secret,id=AWS_ACCESS_KEY_ID,env=AWS_ACCESS_KEY_ID \
     if [ -n "${AWS_ENDPOINT_URL}" ]; then export SCCACHE_ENDPOINT="${AWS_ENDPOINT_URL}"; fi && \
     cd lib/bindings/python && python3 -m maturin build --release
 
-FROM nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-base-img-v1
+# Use an arch-specific base image tag to avoid cross-arch tag clobbering.
+# BuildKit provides TARGETARCH automatically for buildx builds.
+ARG TARGETARCH
+FROM nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-base-img-v1-${TARGETARCH}
 WORKDIR /sgl-workspace
 # Install NATS and ETCD
 RUN case "$(uname -m)" in \

@@ -51,7 +51,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --push)
             PUSH=true
-            PUSH_TAG="nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-v1"
             shift
             ;;
         --target)
@@ -96,6 +95,34 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Determine arch suffix for registry tags (arm64/amd64).
+# Prefer --platform if provided; otherwise fall back to host arch.
+arch_suffix=""
+if [[ -n "${PLATFORM}" ]]; then
+    # PLATFORM looks like: "--platform linux/amd64" (set above)
+    case "${PLATFORM}" in
+        *linux/amd64*) arch_suffix="amd64" ;;
+        *linux/arm64*) arch_suffix="arm64" ;;
+        *)
+            echo "Warning: Unrecognized platform '${PLATFORM}'. Defaulting arch suffix based on host uname -m."
+            ;;
+    esac
+fi
+if [[ -z "${arch_suffix}" ]]; then
+    case "$(uname -m)" in
+        x86_64) arch_suffix="amd64" ;;
+        aarch64|arm64) arch_suffix="arm64" ;;
+        *)
+            echo "Error: Unsupported architecture: $(uname -m)"
+            exit 1
+            ;;
+    esac
+fi
+
+if [[ "$PUSH" == "true" ]]; then
+    PUSH_TAG="nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-v1-${arch_suffix}"
+fi
 
 # Validate required arguments
 if [[ -z "$TAG" ]]; then
@@ -151,8 +178,8 @@ fi
 # Enable BuildKit for secret support
 export DOCKER_BUILDKIT=1
 
-# Cache configuration
-CACHE_IMAGE="nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-cache"
+# Cache configuration (arch-specific to avoid cross-arch cache clobbering)
+CACHE_IMAGE="nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-cache-${arch_suffix}"
 CACHE_FROM=""
 CACHE_TO=""
 
