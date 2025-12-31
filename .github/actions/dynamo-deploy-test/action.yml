@@ -31,7 +31,7 @@ inputs:
   pod_ready_timeout:
     description: 'Timeout for pods to become ready (kubectl wait format)'
     required: false
-    default: '1800s'
+    default: '120s'
   model_available_max_attempts:
     description: 'Maximum attempts to wait for model availability'
     required: false
