@@ -160,129 +160,129 @@ jobs:
               -t  ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-dynamo-operator-${{ matrix.platform.arch }} .
 
 
-  build-vllm:
-    needs: detect-buildkit-workers
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64 }
-          # - { arch: arm64 }
-        framework:
-          - { name: vllm, arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04', arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04', arm_cuda_version: '12.9', arm_torch_backend: 'cu129' }
-    name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-    runs-on: builder-cpu-amd-runner
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Build with Remote Buildkit
-        id: build-image
-        uses: ./.github/actions/build-with-buildkit
-        with:
-          # no_cache: 'true'
-          builder_name: ${{ env.BUILDER_NAME }}
-          buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-          framework: ${{ matrix.framework.name }}
-          target: runtime
-          platform: 'linux/${{ matrix.platform.arch }}'
-          base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
-          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
-          cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
-          torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  # build-vllm:
+  #   needs: detect-buildkit-workers
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64 }
+  #         # - { arch: arm64 }
+  #       framework:
+  #         - { name: vllm, arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04', arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04', arm_cuda_version: '12.9', arm_torch_backend: 'cu129' }
+  #   name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #   runs-on: builder-cpu-amd-runner
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Build with Remote Buildkit
+  #       id: build-image
+  #       uses: ./.github/actions/build-with-buildkit
+  #       with:
+  #         # no_cache: 'true'
+  #         builder_name: ${{ env.BUILDER_NAME }}
+  #         buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
+  #         image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #         framework: ${{ matrix.framework.name }}
+  #         target: runtime
+  #         platform: 'linux/${{ matrix.platform.arch }}'
+  #         base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
+  #         runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
+  #         cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
+  #         torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
+  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #         ci_token: ${{ secrets.CI_TOKEN }}
+  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
 
-  build-sglang:
-    needs: detect-buildkit-workers
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64 }
-          # - { arch: arm64 }
-        framework:
-          - { name: sglang, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
-    name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-    runs-on: builder-cpu-amd-runner
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Build with Remote Buildkit
-        id: build-image
-        uses: ./.github/actions/build-with-buildkit
-        with:
-          # no_cache: 'true'
-          builder_name: ${{ env.BUILDER_NAME }}
-          buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-          framework: ${{ matrix.framework.name }}
-          target: runtime
-          platform: 'linux/${{ matrix.platform.arch }}'
-          base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
-          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
-          cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
-          torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  # build-sglang:
+  #   needs: detect-buildkit-workers
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64 }
+  #         # - { arch: arm64 }
+  #       framework:
+  #         - { name: sglang, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
+  #   name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #   runs-on: builder-cpu-amd-runner
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Build with Remote Buildkit
+  #       id: build-image
+  #       uses: ./.github/actions/build-with-buildkit
+  #       with:
+  #         # no_cache: 'true'
+  #         builder_name: ${{ env.BUILDER_NAME }}
+  #         buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
+  #         image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #         framework: ${{ matrix.framework.name }}
+  #         target: runtime
+  #         platform: 'linux/${{ matrix.platform.arch }}'
+  #         base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
+  #         runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
+  #         cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
+  #         torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
+  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #         ci_token: ${{ secrets.CI_TOKEN }}
+  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-  build-trtllm:
-    needs: detect-buildkit-workers
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64 }
-          # - { arch: arm64 }
-        framework:
-          - { name: trtllm, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
-    name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-    runs-on: builder-cpu-amd-runner
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Build with Remote Buildkit
-        id: build-image
-        uses: ./.github/actions/build-with-buildkit
-        with:
-          # no_cache: 'true'
-          builder_name: ${{ env.BUILDER_NAME }}
-          buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-          framework: ${{ matrix.framework.name }}
-          target: runtime
-          platform: 'linux/${{ matrix.platform.arch }}'
-          base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
-          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
-          cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
-          torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  # build-trtllm:
+  #   needs: detect-buildkit-workers
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64 }
+  #         # - { arch: arm64 }
+  #       framework:
+  #         - { name: trtllm, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
+  #   name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #   runs-on: builder-cpu-amd-runner
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Build with Remote Buildkit
+  #       id: build-image
+  #       uses: ./.github/actions/build-with-buildkit
+  #       with:
+  #         # no_cache: 'true'
+  #         builder_name: ${{ env.BUILDER_NAME }}
+  #         buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
+  #         image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #         framework: ${{ matrix.framework.name }}
+  #         target: runtime
+  #         platform: 'linux/${{ matrix.platform.arch }}'
+  #         base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
+  #         runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
+  #         cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
+  #         torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
+  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #         ci_token: ${{ secrets.CI_TOKEN }}
+  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   # ============================================================================
   # TEST JOBS
@@ -397,7 +397,8 @@ jobs:
   # ============================================================================
   copy-images:
     # needs: [pytests-vllm, pytests-sglang, pytests-trtllm, operator]
-    needs: [build-vllm, build-sglang, build-trtllm, operator]
+    # needs: [build-vllm, build-sglang, build-trtllm, operator]
+    needs: [operator]
     strategy:
       fail-fast: true
       matrix:
@@ -405,9 +406,9 @@ jobs:
           - { arch: amd64 }
           # - { arch: arm64 }
         framework:
-          - { name: vllm }
-          - { name: sglang }
-          - { name: trtllm }
+          # - { name: vllm }
+          # - { name: sglang }
+          # - { name: trtllm }
           - { name: dynamo-operator }
     name: copy ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
     runs-on: builder-cpu-amd-runner
@@ -436,80 +437,79 @@ jobs:
   # DEPLOYMENT JOBS
   # Deploy operator and run end-to-end tests on Kubernetes cluster
   # ============================================================================
-  # deploy-operator:
-  #   runs-on: cpu-amd-m5-2xlarge
-  #   if: needs.changed-files.outputs.core == 'true'
-  #   needs: [copy-images]
-  #   env:
-  #     DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-  #   outputs:
-  #     NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}
-  #   steps:
-  #   - name: Output Node Name
-  #     shell: bash
-  #     run: |
-  #       echo ${K8S_NODE_NAME}
-  #   - uses: actions/checkout@v4
-  #   - name: Deploy Operator
-  #     id: deploy-operator-step
-  #     env:
-  #       BRANCH: ${{ github.ref_name }}
-  #     run: |
-  #       set -x
+  deploy-operator:
+    runs-on: cpu-amd-m5-2xlarge
+    needs: [copy-images]
+    env:
+      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+    outputs:
+      NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}
+    steps:
+    - name: Output Node Name
+      shell: bash
+      run: |
+        echo ${K8S_NODE_NAME}
+    - uses: actions/checkout@v4
+    - name: Deploy Operator
+      id: deploy-operator-step
+      env:
+        BRANCH: ${{ github.ref_name }}
+      run: |
+        set -x
 
-  #       # Set namespace
-  #       # Invalid patterns: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
-  #       BRANCH_SANITIZED="${BRANCH//\//-}"
-  #       BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
-  #       BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
-  #       NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
-  #       echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+        # Set namespace
+        # Invalid patterns: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
+        BRANCH_SANITIZED="${BRANCH//\//-}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+        NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
+        echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
 
-  #       # Setup kubeconfig
-  #       echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-  #       chmod 600 .kubeconfig
-  #       export KUBECONFIG=$(pwd)/.kubeconfig
-  #       kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-  #       kubectl config current-context
+        # Setup kubeconfig
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+        kubectl config current-context
 
-  #       # Create a namespace for this job
-  #       echo "Creating an ephemeral namespace..."
-  #       kubectl create namespace $NAMESPACE
-  #       echo "Attaching the labels for secrets and cleanup"
-  #       kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
+        # Create a namespace for this job
+        echo "Creating an ephemeral namespace..."
+        kubectl create namespace $NAMESPACE
+        echo "Attaching the labels for secrets and cleanup"
+        kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
 
-  #       # Set the namespace as default
-  #       kubectl config set-context --current --namespace=$NAMESPACE
+        # Set the namespace as default
+        kubectl config set-context --current --namespace=$NAMESPACE
 
-  #       # Check if Istio is installed
-  #       kubectl get pods -n istio-system
-  #       # Check if default storage class exists
-  #       kubectl get storageclass
+        # Check if Istio is installed
+        kubectl get pods -n istio-system
+        # Check if default storage class exists
+        kubectl get storageclass
 
-  #       # Install Helm chart
-  #       export VIRTUAL_ENV=/opt/dynamo/venv
-  #       export KUBE_NS=$NAMESPACE
-  #       export ISTIO_ENABLED=true
-  #       export ISTIO_GATEWAY=istio-system/ingress-alb
-  #       export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
+        # Install Helm chart
+        export VIRTUAL_ENV=/opt/dynamo/venv
+        export KUBE_NS=$NAMESPACE
+        export ISTIO_ENABLED=true
+        export ISTIO_GATEWAY=istio-system/ingress-alb
+        export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
 
-  #       # Install dynamo env secrets
-  #       kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
-  #       # Create docker pull secret for operator image
-  #       kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
-  #       # Install helm dependencies
-  #       helm repo add bitnami https://charts.bitnami.com/bitnami
-  #       cd deploy/helm/charts/platform/
-  #       helm dep build .
-  #       # Install platform with namespace restriction for single profile testing
-  #       helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
-  #         --set dynamo-operator.namespaceRestriction.enabled=true \
-  #         --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
-  #         --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-  #         --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
-  #         --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
-  #       # Wait for all deployments to be ready
-  #       timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+        # Install dynamo env secrets
+        kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
+        # Create docker pull secret for operator image
+        kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
+        # Install helm dependencies
+        helm repo add bitnami https://charts.bitnami.com/bitnami
+        cd deploy/helm/charts/platform/
+        helm dep build .
+        # Install platform with namespace restriction for single profile testing
+        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+          --set dynamo-operator.namespaceRestriction.enabled=true \
+          --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
+          --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
+          --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
+          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+        # Wait for all deployments to be ready
+        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
 
   # ============================================================================
   # DEPLOYMENT TESTS (CURRENTLY DISABLED)
@@ -775,52 +775,52 @@ jobs:
   # CLEANUP JOBS 
   # Clean up ephemeral Kubernetes namespace and resources
   # ============================================================================
-  # cleanup:
-  #   runs-on: cpu-amd-m5-2xlarge
-  #   if: always()
-  #   needs: [deploy-operator]
-  #   steps:
-  #   - name: Output Node Name
-  #     shell: bash
-  #     run: |
-  #       echo ${K8S_NODE_NAME}
-  #   - uses: actions/checkout@v4
-  #   - name: Setup Kubeconfig
-  #     env:
-  #       NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-  #     run: |
-  #       set -x
-  #       # Setup kubeconfig
-  #       echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-  #       chmod 600 .kubeconfig
-  #       export KUBECONFIG=$(pwd)/.kubeconfig
-  #       kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-  #       kubectl config current-context
-  #   - name: Cleanup
-  #     timeout-minutes: 5
-  #     env:
-  #       NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-  #     run: |
-  #       set -x
-  #       export KUBECONFIG=$(pwd)/.kubeconfig
-  #       kubectl config set-context --current --namespace=$NAMESPACE
+  cleanup:
+    runs-on: cpu-amd-m5-2xlarge
+    if: always()
+    needs: [deploy-operator]
+    steps:
+    - name: Output Node Name
+      shell: bash
+      run: |
+        echo ${K8S_NODE_NAME}
+    - uses: actions/checkout@v4
+    - name: Setup Kubeconfig
+      env:
+        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+      run: |
+        set -x
+        # Setup kubeconfig
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+        kubectl config current-context
+    - name: Cleanup
+      timeout-minutes: 5
+      env:
+        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+      run: |
+        set -x
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE
 
-  #       echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-  #       chmod 600 .kubeconfig
-  #       export KUBECONFIG=$(pwd)/.kubeconfig
-  #       kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
 
-  #       # For debugging purposes, list all the resources before we uninstall
-  #       kubectl get dynamographdeployments
-  #       kubectl get all
+        # For debugging purposes, list all the resources before we uninstall
+        kubectl get dynamographdeployments
+        kubectl get all
 
-  #       echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
-  #       kubectl delete dynamographdeployments --all -n $NAMESPACE || true
+        echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
+        kubectl delete dynamographdeployments --all -n $NAMESPACE || true
 
-  #       # Uninstall the helm chart
-  #       helm ls
-  #       helm uninstall dynamo-platform --namespace $NAMESPACE || true
+        # Uninstall the helm chart
+        helm ls
+        helm uninstall dynamo-platform --namespace $NAMESPACE || true
 
-  #       echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
-  #       kubectl delete namespace $NAMESPACE || true
-  #       echo "Namespace $NAMESPACE completed."
+        echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
+        kubectl delete namespace $NAMESPACE || true
+        echo "Namespace $NAMESPACE completed."
