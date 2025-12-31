@@ -64,7 +64,7 @@ jobs:
     - name: Route Buildkit Workers
       id: route-buildkit-workers
       shell: bash
-      run: |
+        run: |
         .github/scripts/route_buildkit.sh --amd
         # .github/scripts/route_buildkit.sh --arm
     outputs:
@@ -529,261 +529,261 @@ jobs:
   # DEPLOYMENT TESTS (CURRENTLY DISABLED)
   # End-to-end tests for each framework with various deployment profiles
   # ============================================================================
-  deploy-test-vllm:
-    runs-on: cpu-amd-m5-2xlarge
-    # Run if push to main, or manually triggered
-    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [changed-files, deploy-operator, vllm]
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        profile:
-          - agg
-          - agg_router
-          - disagg
-          # - disagg_router
-    name: deploy-test-vllm (${{ matrix.profile }})
-    env:
-      FRAMEWORK: vllm
-      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-      DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
-      MODEL_NAME: "Qwen/Qwen3-0.6B"
-    steps: &deploy-test-steps
-    - name: Output Node Name
-      shell: bash
-      run: |
-        echo ${K8S_NODE_NAME}
-    - uses: actions/checkout@v4
-    - name: Setup Kubeconfig
-      env:
-        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-      run: |
-        set -x
-        # Setup kubeconfig
-        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-        chmod 600 .kubeconfig
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-        kubectl config get-contexts
-    - name: Run Tests
-      id: run-tests
-      working-directory: ./examples/backends/$FRAMEWORK
-      env:
-        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-      run: |
-        set -x
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE
+  # deploy-test-vllm:
+  #   runs-on: cpu-amd-m5-2xlarge
+  #   # Run if push to main, or manually triggered
+  #   if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
+  #   needs: [changed-files, deploy-operator, vllm]
+  #   permissions:
+  #     contents: read
+  #   strategy:
+  #     fail-fast: false
+  #     max-parallel: 1
+  #     matrix:
+  #       profile:
+  #         - agg
+  #         - agg_router
+  #         - disagg
+  #         # - disagg_router
+  #   name: deploy-test-vllm (${{ matrix.profile }})
+  #   env:
+  #     FRAMEWORK: vllm
+  #     DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+  #     DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
+  #     MODEL_NAME: "Qwen/Qwen3-0.6B"
+  #   steps: &deploy-test-steps
+  #   - name: Output Node Name
+  #     shell: bash
+  #     run: |
+  #       echo ${K8S_NODE_NAME}
+  #   - uses: actions/checkout@v4
+  #   - name: Setup Kubeconfig
+  #     env:
+  #       NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+  #     run: |
+  #       set -x
+  #       # Setup kubeconfig
+  #       echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+  #       chmod 600 .kubeconfig
+  #       export KUBECONFIG=$(pwd)/.kubeconfig
+  #       kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+  #       kubectl config get-contexts
+  #   - name: Run Tests
+  #     id: run-tests
+  #     working-directory: ./examples/backends/$FRAMEWORK
+  #     env:
+  #       NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+  #     run: |
+  #       set -x
+  #       export KUBECONFIG=$(pwd)/.kubeconfig
+  #       kubectl config set-context --current --namespace=$NAMESPACE
 
-        # Redirect all output to a log file while still showing it
-        exec > >(tee -a test-output.log) 2>&1
+  #       # Redirect all output to a log file while still showing it
+  #       exec > >(tee -a test-output.log) 2>&1
 
-        export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-images.outputs.target_tag_${FRAMEWORK}_amd64 }}"
-        export KUBE_NS=$NAMESPACE
-        export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
-        echo "GRAPH_NAME=${GRAPH_NAME}" >> $GITHUB_ENV
-        # Update the deployment file in-place
-        yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE
+  #       export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-images.outputs[format('target_tag_{0}_amd64', env.FRAMEWORK)] }}"
+  #       export KUBE_NS=$NAMESPACE
+  #       export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
+  #       echo "GRAPH_NAME=${GRAPH_NAME}" >> $GITHUB_ENV
+  #       # Update the deployment file in-place
+  #       yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE
 
-        # Debug: Show updated deployment file
-        echo "=== UPDATED DEPLOYMENT FILE ==="
-        cat $DEPLOYMENT_FILE
+  #       # Debug: Show updated deployment file
+  #       echo "=== UPDATED DEPLOYMENT FILE ==="
+  #       cat $DEPLOYMENT_FILE
 
-        # Apply the updated file
-        kubectl apply -n $KUBE_NS -f $DEPLOYMENT_FILE
+  #       # Apply the updated file
+  #       kubectl apply -n $KUBE_NS -f $DEPLOYMENT_FILE
 
-        # --- Wait for all pods in the dynamo graph deployment to be ready ---
-        sleep 20
-        # Get the deployment name from the file
-        export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
-        echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
-        # Wait for all pods with the deployment label to be ready
-        kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1800s
+  #       # --- Wait for all pods in the dynamo graph deployment to be ready ---
+  #       sleep 20
+  #       # Get the deployment name from the file
+  #       export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
+  #       echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
+  #       # Wait for all pods with the deployment label to be ready
+  #       kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1800s
 
-        # Debug: Show final pod statuses for the deployment
-        echo "=== FINAL POD STATUSES ==="
-        kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $KUBE_NS -o wide
-        echo ""
+  #       # Debug: Show final pod statuses for the deployment
+  #       echo "=== FINAL POD STATUSES ==="
+  #       kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $KUBE_NS -o wide
+  #       echo ""
 
-        kubectl get all -n $KUBE_NS
-        export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} -l nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} | tail -n1 | awk '{print $1}')
-        export CONTAINER_PORT=$(kubectl get pod $FRONTEND_POD -n ${KUBE_NS} -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
-        echo "Container port is ${CONTAINER_PORT}"
-        kubectl port-forward pod/$FRONTEND_POD 8000:${CONTAINER_PORT} -n ${KUBE_NS} &
-        export LLM_URL="http://localhost:8000"
-        sleep 10  # Give port-forward time to establish the connection
-        echo "LLM URL: ${LLM_URL}"
-        echo "MODEL NAME: ${MODEL_NAME}"
-        # Wait until the model is available in the /v1/models response
-        MAX_ATTEMPTS=30
-        ATTEMPT=1
-        while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-          MODELS_RESPONSE=$(curl -s --retry 5 --retry-delay 2 --retry-connrefused "${LLM_URL}/v1/models")
-          if echo "$MODELS_RESPONSE" | jq -e --arg MODEL_NAME "$MODEL_NAME" '.data[]?.id == $MODEL_NAME' >/dev/null 2>&1; then
-            echo "Model $MODEL_NAME is available in /v1/models"
-            break
-          fi
-          echo "Waiting for model $MODEL_NAME to be available in /v1/models... (attempt $ATTEMPT/$MAX_ATTEMPTS)"
-          sleep 5
-          ATTEMPT=$((ATTEMPT + 1))
-        done
-        if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-          echo "Model $MODEL_NAME not found in /v1/models after $MAX_ATTEMPTS attempts"
-          echo "Last response: $MODELS_RESPONSE"
-          exit 1
-        fi
-        RESPONSE=$(curl -s -N --no-buffer --retry 10 --retry-delay 5 --retry-connrefused -X POST "${LLM_URL}/v1/chat/completions" \
-          -H 'accept: text/event-stream' \
-          -H 'Content-Type: application/json' \
-          -d '{
-            "model": "'"${MODEL_NAME:-Qwen/Qwen3-0.6B}"'",
-            "messages": [
-            {
-                "role": "user",
-                "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
-            }
-            ],
-            "stream":false,
-            "max_tokens": 30,
-            "temperature": 0.0
-          }' 2>&1)
-        echo "Response: $RESPONSE"
-        TEST_RESULT=0
-        if ! echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
-          echo "Test failed: Response is not valid JSON"
-          echo "Got: $RESPONSE"
-          TEST_RESULT=1
-        elif ! echo "$RESPONSE" | jq -e '.choices[0].message.role == "assistant"' >/dev/null 2>&1; then
-          echo "Test failed: Message role is not 'assistant'"
-          echo "Got: $(echo "$RESPONSE" | jq '.choices[0].message.role')"
-          TEST_RESULT=1
-        elif ! echo "$RESPONSE" | jq -e '.model == "'"${MODEL_NAME}"'"' >/dev/null 2>&1; then
-          echo "Test failed: Model name is incorrect"
-          echo "Got: $(echo "$RESPONSE" | jq '.model')"
-          TEST_RESULT=1
-        elif ! echo "$RESPONSE" | jq -e '.choices[0].message.content | length > 100' >/dev/null 2>&1; then
-          echo "Test failed: Response content length is not greater than 100 characters"
-          echo "Got length: $(echo "$RESPONSE" | jq '.choices[0].message.content | length')"
-          TEST_RESULT=1
-        else
-          echo "Test passed: Response matches expected format and content"
-        fi
-        exit $TEST_RESULT
-    - name: Process Deployment Test Results
-      if: always()
-      run: |
-        set -x
+  #       kubectl get all -n $KUBE_NS
+  #       export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} -l nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} | tail -n1 | awk '{print $1}')
+  #       export CONTAINER_PORT=$(kubectl get pod $FRONTEND_POD -n ${KUBE_NS} -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
+  #       echo "Container port is ${CONTAINER_PORT}"
+  #       kubectl port-forward pod/$FRONTEND_POD 8000:${CONTAINER_PORT} -n ${KUBE_NS} &
+  #       export LLM_URL="http://localhost:8000"
+  #       sleep 10  # Give port-forward time to establish the connection
+  #       echo "LLM URL: ${LLM_URL}"
+  #       echo "MODEL NAME: ${MODEL_NAME}"
+  #       # Wait until the model is available in the /v1/models response
+  #       MAX_ATTEMPTS=30
+  #       ATTEMPT=1
+  #       while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+  #         MODELS_RESPONSE=$(curl -s --retry 5 --retry-delay 2 --retry-connrefused "${LLM_URL}/v1/models")
+  #         if echo "$MODELS_RESPONSE" | jq -e --arg MODEL_NAME "$MODEL_NAME" '.data[]?.id == $MODEL_NAME' >/dev/null 2>&1; then
+  #           echo "Model $MODEL_NAME is available in /v1/models"
+  #           break
+  #         fi
+  #         echo "Waiting for model $MODEL_NAME to be available in /v1/models... (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+  #         sleep 5
+  #         ATTEMPT=$((ATTEMPT + 1))
+  #       done
+  #       if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+  #         echo "Model $MODEL_NAME not found in /v1/models after $MAX_ATTEMPTS attempts"
+  #         echo "Last response: $MODELS_RESPONSE"
+  #         exit 1
+  #       fi
+  #       RESPONSE=$(curl -s -N --no-buffer --retry 10 --retry-delay 5 --retry-connrefused -X POST "${LLM_URL}/v1/chat/completions" \
+  #         -H 'accept: text/event-stream' \
+  #         -H 'Content-Type: application/json' \
+  #         -d '{
+  #           "model": "'"${MODEL_NAME:-Qwen/Qwen3-0.6B}"'",
+  #           "messages": [
+  #           {
+  #               "role": "user",
+  #               "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+  #           }
+  #           ],
+  #           "stream":false,
+  #           "max_tokens": 30,
+  #           "temperature": 0.0
+  #         }' 2>&1)
+  #       echo "Response: $RESPONSE"
+  #       TEST_RESULT=0
+  #       if ! echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
+  #         echo "Test failed: Response is not valid JSON"
+  #         echo "Got: $RESPONSE"
+  #         TEST_RESULT=1
+  #       elif ! echo "$RESPONSE" | jq -e '.choices[0].message.role == "assistant"' >/dev/null 2>&1; then
+  #         echo "Test failed: Message role is not 'assistant'"
+  #         echo "Got: $(echo "$RESPONSE" | jq '.choices[0].message.role')"
+  #         TEST_RESULT=1
+  #       elif ! echo "$RESPONSE" | jq -e '.model == "'"${MODEL_NAME}"'"' >/dev/null 2>&1; then
+  #         echo "Test failed: Model name is incorrect"
+  #         echo "Got: $(echo "$RESPONSE" | jq '.model')"
+  #         TEST_RESULT=1
+  #       elif ! echo "$RESPONSE" | jq -e '.choices[0].message.content | length > 100' >/dev/null 2>&1; then
+  #         echo "Test failed: Response content length is not greater than 100 characters"
+  #         echo "Got length: $(echo "$RESPONSE" | jq '.choices[0].message.content | length')"
+  #         TEST_RESULT=1
+  #       else
+  #         echo "Test passed: Response matches expected format and content"
+  #       fi
+  #       exit $TEST_RESULT
+  #   - name: Process Deployment Test Results
+  #     if: always()
+  #     run: |
+  #       set -x
 
-        # Create test-results directory
-        mkdir -p test-results
+  #       # Create test-results directory
+  #       mkdir -p test-results
 
-        # Copy and rename the test output log with unique naming
-        if [ -f "test-output.log" ]; then
-          cp test-output.log "test-results/deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log"
-          echo "✅ Test output log copied to test-results/"
-        else
-          echo "⚠️  test-output.log not found"
-        fi
+  #       # Copy and rename the test output log with unique naming
+  #       if [ -f "test-output.log" ]; then
+  #         cp test-output.log "test-results/deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log"
+  #         echo "✅ Test output log copied to test-results/"
+  #       else
+  #         echo "⚠️  test-output.log not found"
+  #       fi
 
-    - name: Upload Deployment Test Results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: test-results-${{ env.FRAMEWORK }}-deploy-${{ matrix.profile }}-amd64-${{ github.run_id }}-${{ job.check_run_id }}
-        path: test-results/deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log
-        retention-days: 7
+  #   - name: Upload Deployment Test Results
+  #     uses: actions/upload-artifact@v4
+  #     if: always()
+  #     with:
+  #       name: test-results-${{ env.FRAMEWORK }}-deploy-${{ matrix.profile }}-amd64-${{ github.run_id }}-${{ job.check_run_id }}
+  #       path: test-results/deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log
+  #       retention-days: 7
 
-    - name: Cleanup
-      if: always()
-      timeout-minutes: 5
-      env:
-        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-      run: |
-        set -x
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE
+  #   - name: Cleanup
+  #     if: always()
+  #     timeout-minutes: 5
+  #     env:
+  #       NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+  #     run: |
+  #       set -x
+  #       export KUBECONFIG=$(pwd)/.kubeconfig
+  #       kubectl config set-context --current --namespace=$NAMESPACE
 
-        # For debugging purposes, list all the resources before we delete
-        kubectl get dynamographdeployments
-        kubectl get all
+  #       # For debugging purposes, list all the resources before we delete
+  #       kubectl get dynamographdeployments
+  #       kubectl get all
 
-        echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
-        kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE || true
+  #       echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
+  #       kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE || true
 
-  # For now, this job is separated from the job matrix above for easier flow control handling
-  # Uncomment the disagg_router matrix entry from the above job and delete the below job
-  # when we want to run them under the same conditions.
-  # Current conditions:
-  # - Run vllm disagg_router on all commits
-  # - Run rest of jobs only on push to main or manual trigger
-  deploy-test-vllm-disagg-router:
-    runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    needs: [changed-files, deploy-operator, vllm]
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        profile:
-          - disagg_router
-    name: deploy-test-vllm (${{ matrix.profile }})
-    env:
-      FRAMEWORK: vllm
-      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-      DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
-      MODEL_NAME: "Qwen/Qwen3-0.6B"
-    steps: *deploy-test-steps
+  # # For now, this job is separated from the job matrix above for easier flow control handling
+  # # Uncomment the disagg_router matrix entry from the above job and delete the below job
+  # # when we want to run them under the same conditions.
+  # # Current conditions:
+  # # - Run vllm disagg_router on all commits
+  # # - Run rest of jobs only on push to main or manual trigger
+  # deploy-test-vllm-disagg-router:
+  #   runs-on: cpu-amd-m5-2xlarge
+  #   if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+  #   needs: [changed-files, deploy-operator, vllm]
+  #   permissions:
+  #     contents: read
+  #   strategy:
+  #     fail-fast: false
+  #     max-parallel: 1
+  #     matrix:
+  #       profile:
+  #         - disagg_router
+  #   name: deploy-test-vllm (${{ matrix.profile }})
+  #   env:
+  #     FRAMEWORK: vllm
+  #     DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+  #     DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
+  #     MODEL_NAME: "Qwen/Qwen3-0.6B"
+  #   steps: *deploy-test-steps
 
-  deploy-test-sglang:
-    runs-on: cpu-amd-m5-2xlarge
-    # Run if push to main, or manually triggered
-    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [changed-files, deploy-operator, sglang]
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        profile:
-          - agg
-          - agg_router
-    name: deploy-test-sglang (${{ matrix.profile }})
-    env:
-      FRAMEWORK: sglang
-      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-      DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
-      MODEL_NAME: "Qwen/Qwen3-0.6B"
-    steps: *deploy-test-steps
+  # deploy-test-sglang:
+  #   runs-on: cpu-amd-m5-2xlarge
+  #   # Run if push to main, or manually triggered
+  #   if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
+  #   needs: [changed-files, deploy-operator, sglang]
+  #   permissions:
+  #     contents: read
+  #   strategy:
+  #     fail-fast: false
+  #     max-parallel: 1
+  #     matrix:
+  #       profile:
+  #         - agg
+  #         - agg_router
+  #   name: deploy-test-sglang (${{ matrix.profile }})
+  #   env:
+  #     FRAMEWORK: sglang
+  #     DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+  #     DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
+  #     MODEL_NAME: "Qwen/Qwen3-0.6B"
+  #   steps: *deploy-test-steps
 
-  deploy-test-trtllm:
-    runs-on: cpu-amd-m5-2xlarge
-    # Run if push to main, or manually triggered
-    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [changed-files, deploy-operator, trtllm]
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        profile:
-          - agg
-          - agg_router
-          - disagg
-          - disagg_router
-    name: deploy-test-trtllm (${{ matrix.profile }})
-    env:
-      FRAMEWORK: trtllm
-      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-      DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
-      MODEL_NAME: "Qwen/Qwen3-0.6B"
-    steps: *deploy-test-steps
+  # deploy-test-trtllm:
+  #   runs-on: cpu-amd-m5-2xlarge
+  #   # Run if push to main, or manually triggered
+  #   if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
+  #   needs: [changed-files, deploy-operator, trtllm]
+  #   permissions:
+  #     contents: read
+  #   strategy:
+  #     fail-fast: false
+  #     max-parallel: 1
+  #     matrix:
+  #       profile:
+  #         - agg
+  #         - agg_router
+  #         - disagg
+  #         - disagg_router
+  #   name: deploy-test-trtllm (${{ matrix.profile }})
+  #   env:
+  #     FRAMEWORK: trtllm
+  #     DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+  #     DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
+  #     MODEL_NAME: "Qwen/Qwen3-0.6B"
+  #   steps: *deploy-test-steps
 
   # ============================================================================
   # CLEANUP JOBS 
