@@ -245,7 +245,8 @@ impl Decoder for TcpRequestCodec {
 
         // Peek at headers length
         let headers_len_offset = 2 + endpoint_len;
-        let headers_len = u16::from_be_bytes([src[headers_len_offset], src[headers_len_offset + 1]]) as usize;
+        let headers_len =
+            u16::from_be_bytes([src[headers_len_offset], src[headers_len_offset + 1]]) as usize;
 
         // Need path + headers + payload_len
         let header_size = 2 + endpoint_len + 2 + headers_len + 4;
