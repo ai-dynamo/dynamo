@@ -90,7 +90,9 @@ jobs:
         stress:
           - { round: 1 }
           - { round: 2 }
-          # - { round: 3 }
+          - { round: 3 }
+          - { round: 4 }
+          - { round: 5 }
         platform:
           - { arch: amd64 }
           - { arch: arm64 }
