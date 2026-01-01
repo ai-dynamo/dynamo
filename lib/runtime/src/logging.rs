@@ -299,7 +299,9 @@ pub fn make_request_span<B>(req: &Request<B>) -> Span {
 }
 
 /// Extract OpenTelemetry context from HTTP headers for distributed tracing
-fn extract_otel_context_from_http_headers(headers: &http::HeaderMap) -> Option<opentelemetry::Context> {
+fn extract_otel_context_from_http_headers(
+    headers: &http::HeaderMap,
+) -> Option<opentelemetry::Context> {
     let traceparent_value = headers.get("traceparent")?.to_str().ok()?;
 
     struct HttpHeaderExtractor<'a>(&'a http::HeaderMap);
