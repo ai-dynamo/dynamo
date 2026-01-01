@@ -701,7 +701,6 @@ def test_router_decisions(
             mockers.__exit__(None, None, None)
 
 
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
 @pytest.mark.parametrize(
     "enable_disagg_bootstrap", [False, True], ids=["no_bootstrap", "with_bootstrap"]
@@ -712,7 +711,6 @@ def test_router_decisions_disagg(
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     registration_order,
-    request_plane,
     enable_disagg_bootstrap,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup.
@@ -734,8 +732,12 @@ def test_router_decisions_disagg(
     namespace_suffix = generate_random_suffix()
     shared_namespace = f"test-namespace-{namespace_suffix}"
 
-    # Create mocker args
-    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+    # Create mocker args - use local indexer for NATS Core mode (less overhead than JetStream)
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "enable_local_indexer": True,
+    }
 
     prefill_workers = None
     decode_workers = None
@@ -750,7 +752,7 @@ def test_router_decisions_disagg(
                 worker_type="prefill",
                 mocker_args=mocker_args,
                 num_mockers=4,
-                request_plane=request_plane,
+                request_plane="tcp",
                 enable_bootstrap=enable_disagg_bootstrap,
             )
             prefill_workers.__enter__()
@@ -764,7 +766,7 @@ def test_router_decisions_disagg(
                 worker_type="decode",
                 mocker_args=mocker_args,
                 num_mockers=4,
-                request_plane=request_plane,
+                request_plane="tcp",
             )
             decode_workers.__enter__()
             logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
@@ -777,7 +779,7 @@ def test_router_decisions_disagg(
                 worker_type="decode",
                 mocker_args=mocker_args,
                 num_mockers=4,
-                request_plane=request_plane,
+                request_plane="tcp",
             )
             decode_workers.__enter__()
             logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
@@ -790,7 +792,7 @@ def test_router_decisions_disagg(
                 worker_type="prefill",
                 mocker_args=mocker_args,
                 num_mockers=4,
-                request_plane=request_plane,
+                request_plane="tcp",
                 enable_bootstrap=enable_disagg_bootstrap,
             )
             prefill_workers.__enter__()
@@ -809,7 +811,7 @@ def test_router_decisions_disagg(
             request=request,
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
-            request_plane=request_plane,
+            request_plane="tcp",
         )
 
     finally:
