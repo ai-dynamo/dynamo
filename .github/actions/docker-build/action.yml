@@ -52,7 +52,9 @@ inputs:
   dynamo_base_image:
     description: 'Pre-built Dynamo base image to use instead of building from scratch'
     required: false
-
+  no_cache:
+    description: 'Disable Docker build cache'
+    required: false
 outputs:
   image_tag:
     description: 'Image Tag'

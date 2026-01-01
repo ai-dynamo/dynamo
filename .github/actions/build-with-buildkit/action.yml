@@ -125,4 +125,5 @@ runs:
         aws_account_id: ${{ inputs.aws_account_id }}
         aws_access_key_id: ${{ inputs.aws_access_key_id }}
         aws_secret_access_key: ${{ inputs.aws_secret_access_key }}
+        no_cache: ${{ inputs.no_cache }}
 
