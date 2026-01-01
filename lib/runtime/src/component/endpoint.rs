@@ -162,7 +162,6 @@ impl EndpointConfigBuilder {
         let endpoint_name_for_cleanup = endpoint_name_for_task.clone();
         let server_for_cleanup = server.clone();
         let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
-        let instance_id_for_cleanup = connection_id;
 
         let task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             cancel_token_for_cleanup.cancelled().await;
@@ -174,7 +173,7 @@ impl EndpointConfigBuilder {
 
             // Unregister from server
             if let Err(e) = server_for_cleanup
-                .unregister_endpoint(&endpoint_name_for_cleanup, instance_id_for_cleanup)
+                .unregister_endpoint(&endpoint_name_for_cleanup)
                 .await
             {
                 tracing::warn!(

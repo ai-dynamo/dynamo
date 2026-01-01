@@ -77,13 +77,12 @@ pub trait RequestPlaneServer: Send + Sync {
     /// # Arguments
     ///
     /// * `endpoint_name` - Name of the endpoint to unregister
-    /// * `instance_id` - Instance ID (used by TCP to reconstruct the routing key)
     ///
     /// # Returns
     ///
     /// Returns `Ok(())` if unregistration succeeds or endpoint doesn't exist.
     /// Errors are only returned for transport-specific failures.
-    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()>;
+    async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()>;
 
     /// Get server bind address or identifier
     ///

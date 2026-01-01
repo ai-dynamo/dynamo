@@ -189,7 +189,7 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         Ok(())
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str, _instance_id: u64) -> Result<()> {
+    async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
         if let Some((_, task)) = self.handlers.remove(endpoint_name) {
             tracing::info!(
                 endpoint_name = %endpoint_name,
