@@ -14,6 +14,7 @@
 //! directly accesses transport implementations or configuration.
 
 use super::egress::unified_client::RequestPlaneClient;
+use super::ingress::shared_tcp_endpoint::SharedTcpServer;
 use super::ingress::unified_server::RequestPlaneServer;
 use crate::distributed::RequestPlaneMode;
 use anyhow::Result;
@@ -25,6 +26,17 @@ use tokio_util::sync::CancellationToken;
 /// Global storage for the actual TCP RPC port after binding.
 /// Uses OnceLock since the port is set once when the server binds and never changes.
 static ACTUAL_TCP_RPC_PORT: OnceLock<u16> = OnceLock::new();
+
+/// Global storage for the shared TCP server instance.
+///
+/// When multiple workers run in the same process, they must share a single TCP server
+/// to ensure all endpoints are registered on the same server. Without this, each worker
+/// would create its own server on a different port, but all would publish the same port
+/// (from ACTUAL_TCP_RPC_PORT) to discovery, causing "No handler found" errors.
+///
+/// Uses `tokio::sync::OnceCell` to support async initialization (binding the TCP socket).
+static GLOBAL_TCP_SERVER: tokio::sync::OnceCell<Arc<SharedTcpServer>> =
+    tokio::sync::OnceCell::const_new();
 
 /// Get the actual TCP RPC port that the server is listening on.
 pub fn get_actual_tcp_rpc_port() -> anyhow::Result<u16> {
@@ -300,35 +312,41 @@ impl NetworkManager {
     }
 
     async fn create_tcp_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
-        use super::ingress::shared_tcp_endpoint::SharedTcpServer;
+        // Use the global TCP server to ensure all workers in the same process share
+        // a single server. This is critical for correct endpoint routing.
+        let server = GLOBAL_TCP_SERVER
+            .get_or_try_init(|| async {
+                // Use configured port if specified, otherwise use port 0 (OS assigns free port)
+                let port = self.config.tcp_port.unwrap_or(0);
+                let bind_addr = format!("{}:{}", self.config.tcp_host, port)
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("Invalid TCP bind address: {}", e))?;
 
-        // Use configured port if specified, otherwise use port 0 (OS assigns free port)
-        let port = self.config.tcp_port.unwrap_or(0);
-        let bind_addr = format!("{}:{}", self.config.tcp_host, port)
-            .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid TCP bind address: {}", e))?;
+                tracing::info!(
+                    bind_addr = %bind_addr,
+                    port_source = if self.config.tcp_port.is_some() { "DYN_TCP_RPC_PORT" } else { "OS-assigned" },
+                    "Creating TCP request plane server"
+                );
 
-        tracing::info!(
-            bind_addr = %bind_addr,
-            port_source = if self.config.tcp_port.is_some() { "DYN_TCP_RPC_PORT" } else { "OS-assigned" },
-            "Creating TCP request plane server"
-        );
+                let server = SharedTcpServer::new(bind_addr, self.cancellation_token.clone());
 
-        let server = SharedTcpServer::new(bind_addr, self.cancellation_token.clone());
+                // Bind and start server, getting the actual bound address
+                let actual_addr = server.clone().bind_and_start().await?;
 
-        // Bind and start server, getting the actual bound address
-        let actual_addr = server.clone().bind_and_start().await?;
+                // Store the actual bound port globally so build_transport_type() can access it
+                set_actual_tcp_rpc_port(actual_addr.port());
 
-        // Store the actual bound port globally so build_transport_type() can access it
-        set_actual_tcp_rpc_port(actual_addr.port());
+                tracing::info!(
+                    actual_addr = %actual_addr,
+                    actual_port = actual_addr.port(),
+                    "TCP request plane server started"
+                );
 
-        tracing::info!(
-            actual_addr = %actual_addr,
-            actual_port = actual_addr.port(),
-            "TCP request plane server started"
-        );
+                Ok::<_, anyhow::Error>(server)
+            })
+            .await?;
 
-        Ok(server as Arc<dyn RequestPlaneServer>)
+        Ok(server.clone() as Arc<dyn RequestPlaneServer>)
     }
 
     async fn create_nats_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
