@@ -29,7 +29,7 @@ This is a single machine example.
 
 ### Start the Observability Stack
 
-Start the observability stack (Prometheus, Grafana, Tempo, exporters). See [Observability Getting Started](README.md#getting-started-quickly) for instructions and prerequisites.
+Start the observability stack (Prometheus, Grafana, Jaeger, exporters). See [Observability Getting Started](README.md#getting-started-quickly) for instructions and prerequisites.
 
 ### Start Dynamo Components
 
@@ -69,7 +69,7 @@ Once Dynamo components are running:
 
 Other interfaces:
 - **Prometheus**: `http://localhost:9090`
-- **Tempo** (tracing): Accessible through Grafana's Explore view. See [Tracing Guide](tracing.md) for details.
+- **Jaeger** (tracing): Access the Jaeger UI at `http://localhost:16686` or through Grafana's Explore view. See [Tracing Guide](tracing.md) for details.
 
 **Note:** If accessing from another machine, replace `localhost` with the machine's hostname or IP address, and ensure firewall rules allow access to these ports (3000, 9090).
 
@@ -101,7 +101,7 @@ Grafana is pre-configured with:
 
 4. If you encounter issues with stale data or configuration, stop services and wipe volumes using `docker compose down -v` then restart.
 
-  **Note:** The `-v` flag removes named volumes (grafana-data, tempo-data), which will reset dashboards and stored metrics.
+  **Note:** The `-v` flag removes named volumes (grafana-data), which will reset dashboards and stored data.
 
 For specific Docker Compose commands, see [Observability Getting Started](README.md#getting-started-quickly).
 

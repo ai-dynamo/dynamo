@@ -18,7 +18,7 @@ Install these on your machine:
 
 ### Starting the Observability Stack
 
-Dynamo provides a Docker Compose-based observability stack that includes Prometheus, Grafana, Tempo, and various exporters for metrics, tracing, and visualization.
+Dynamo provides a Docker Compose-based observability stack that includes Prometheus, Grafana, Jaeger, and various exporters for metrics, tracing, and visualization.
 
 From the Dynamo root directory:
 
@@ -26,7 +26,7 @@ From the Dynamo root directory:
 # Start infrastructure (NATS, etcd)
 docker compose -f deploy/docker-compose.yml up -d
 
-# Start observability stack (Prometheus, Grafana, Tempo, DCGM GPU exporter, NATS exporter)
+# Start observability stack (Prometheus, Grafana, Jaeger, DCGM GPU exporter, NATS exporter)
 docker compose -f deploy/docker-observability.yml up -d
 ```
 
@@ -38,7 +38,7 @@ For detailed setup instructions and configuration, see [Prometheus + Grafana Set
 |-------|-------------|----------------------------------|
 | [Metrics](metrics.md) | Available metrics reference | `DYN_SYSTEM_PORT`† |
 | [Health Checks](health-checks.md) | Component health monitoring and readiness probes | `DYN_SYSTEM_PORT`†, `DYN_SYSTEM_STARTING_HEALTH_STATUS`, `DYN_SYSTEM_HEALTH_PATH`, `DYN_SYSTEM_LIVE_PATH`, `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` |
-| [Tracing](tracing.md) | Distributed tracing with OpenTelemetry and Tempo | `DYN_LOGGING_JSONL`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_SERVICE_NAME`† |
+| [Tracing](tracing.md) | Distributed tracing with OpenTelemetry and Jaeger | `DYN_LOGGING_JSONL`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_SERVICE_NAME`† |
 | [Logging](logging.md) | Structured logging configuration | `DYN_LOGGING_JSONL`†, `DYN_LOG`, `DYN_LOG_USE_LOCAL_TZ`, `DYN_LOGGING_CONFIG_PATH`, `OTEL_SERVICE_NAME`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`† |
 
 **Variables marked with † are shared across multiple observability systems.**
@@ -60,7 +60,7 @@ For Kubernetes-specific setup and configuration, see [docs/kubernetes/observabil
 This provides:
 - **Prometheus** on `http://localhost:9090` - metrics collection and querying
 - **Grafana** on `http://localhost:3000` - visualization dashboards (username: `dynamo`, password: `dynamo`)
-- **Tempo** on `http://localhost:3200` - distributed tracing backend
+- **Jaeger** on `http://localhost:16686` - distributed tracing UI
 - **DCGM Exporter** on `http://localhost:9401/metrics` - GPU metrics
 - **NATS Exporter** on `http://localhost:7777/metrics` - NATS messaging metrics
 
@@ -86,7 +86,7 @@ The dcgm-exporter service in the Docker Compose network is configured to use por
 
 The following configuration files are located in the `deploy/observability/` directory:
 - [docker-compose.yml](../../deploy/docker-compose.yml): Defines NATS and etcd services
-- [docker-observability.yml](../../deploy/docker-observability.yml): Defines Prometheus, Grafana, Tempo, and exporters
+- [docker-observability.yml](../../deploy/docker-observability.yml): Defines Prometheus, Grafana, Jaeger, OpenTelemetry Collector, and exporters
 - [prometheus.yml](../../deploy/observability/prometheus.yml): Contains Prometheus scraping configuration
 - [grafana-datasources.yml](../../deploy/observability/grafana-datasources.yml): Contains Grafana datasource configuration
 - [grafana_dashboards/dashboard-providers.yml](../../deploy/observability/grafana_dashboards/dashboard-providers.yml): Contains Grafana dashboard provider configuration
