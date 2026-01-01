@@ -66,7 +66,13 @@ def create_profiler_parser() -> argparse.Namespace:
         deployment:
             namespace: String (kubernetes namespace, default: dynamo-sla-profiler)
             service_name: String (service name, default: "")
-            model: String (model to serve, can be HF model name or local model path)
+            model: String (served model name)
+            model_cache_pvc_name: String (name of the PVC to mount the model cache,
+                if not provided, model must be HF name and will download from HF, default: "")
+            model_cache_pvc_path: String (path to the model cache in the PVC, default: "")
+            model_cache_pvc_mount_path: String (path to the model cache in the container,
+                note that the PVC must be mounted to the same path for the profiling job,
+                default: "/opt/model-cache")
         engine:
             backend: String (backend type, currently support [vllm, sglang, trtllm], default: vllm)
             config: String (path to the DynamoGraphDeployment config file, default: "")
@@ -122,7 +128,27 @@ def create_profiler_parser() -> argparse.Namespace:
         "--model",
         type=str,
         default=config.get("deployment", {}).get("model", ""),
-        help="Model to serve, can be HF model name or local model path",
+        help="Served model name",
+    )
+    parser.add_argument(
+        "--model-cache-pvc-name",
+        type=str,
+        default=config.get("deployment", {}).get("model_cache_pvc_name", ""),
+        help="Name of the PVC that contains the model weights. If not provided, args.model must be a HF model name and will download from HF",
+    )
+    parser.add_argument(
+        "--model-cache-pvc-path",
+        type=str,
+        default=config.get("deployment", {}).get("model_cache_pvc_path", ""),
+        help="Path to the model cache in the PVC",
+    )
+    parser.add_argument(
+        "--model-cache-pvc-mount-path",
+        type=str,
+        default=config.get("deployment", {}).get(
+            "model_cache_pvc_mount_path", "/opt/model-cache"
+        ),
+        help="Path to the model cache in the container, note that the PVC must be mounted to the same path for the profiling job",
     )
     parser.add_argument(
         "--dgd-image",

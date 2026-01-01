@@ -16,6 +16,7 @@ from benchmarks.profiler.utils.config import (
     update_image,
     validate_and_get_worker_args,
 )
+from benchmarks.profiler.utils.config_modifiers.protocol import BaseConfigModifier
 from benchmarks.profiler.utils.defaults import (
     DEFAULT_MODEL_NAME,
     DYNAMO_RUN_DEFAULT_PORT,
@@ -37,7 +38,9 @@ logger.addHandler(console_handler)
 DEFAULT_VLLM_CONFIG_PATH = "examples/backends/vllm/deploy/disagg.yaml"
 
 
-class VllmV1ConfigModifier:
+class VllmV1ConfigModifier(BaseConfigModifier):
+    BACKEND = "vllm"
+
     @classmethod
     def load_default_config(cls) -> dict:
         with open(DEFAULT_VLLM_CONFIG_PATH, "r") as f:
@@ -57,8 +60,9 @@ class VllmV1ConfigModifier:
                 args = validate_and_get_worker_args(worker_service, backend="vllm")
                 args = break_arguments(args)
 
-                # Update --model (vllm uses --model instead of --model-path and --served-model-name)
+                # Update --model path; also set served model name if supported by the backend wrapper.
                 args = set_argument_value(args, "--model", model_name)
+                args = set_argument_value(args, "--served-model-name", model_name)
 
                 worker_service.extraPodSpec.mainContainer.args = args
             except (ValueError, KeyError):
@@ -69,6 +73,30 @@ class VllmV1ConfigModifier:
                 continue
 
         return cfg.model_dump()
+
+    @classmethod
+    def _update_workers_model_args(
+        cls, cfg: Config, model_name: str, model_path: str
+    ) -> None:
+        # Update model for both prefill and decode workers
+        for sub_component_type in [SubComponentType.PREFILL, SubComponentType.DECODE]:
+            try:
+                worker_service = get_worker_service_from_config(
+                    cfg, backend="vllm", sub_component_type=sub_component_type
+                )
+                args = validate_and_get_worker_args(worker_service, backend="vllm")
+                args = break_arguments(args)
+
+                # vLLM uses --model for path; served model name is optional but supported.
+                args = set_argument_value(args, "--model", model_path)
+                args = set_argument_value(args, "--served-model-name", model_name)
+
+                worker_service.extraPodSpec.mainContainer.args = args
+            except (ValueError, KeyError):
+                logger.debug(
+                    f"Skipping {sub_component_type} service as it doesn't exist"
+                )
+                continue
 
     @classmethod
     def update_image(cls, config, image: str) -> dict:
