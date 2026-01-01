@@ -815,17 +815,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
 
         // Determine if this router should handle local state updates (add_request, free, etc.)
-        // Only skip local updates for GAIE Stage 2: when BOTH prefill and decode worker IDs
-        // are externally specified (indicates external orchestrator handles tracking).
-        // For internal routing (e.g., bootstrap optimization with only prefill_worker_id set),
-        // we still handle updates locally.
-        let routing = request.routing.as_ref();
-        let handle_local_updates = routing
-            .map(|r| {
-                // GAIE Stage 2 sets both worker IDs - external caller handles tracking
-                // All other cases (including backend_instance_id for routing) - we handle locally
-                r.prefill_worker_id.is_none() || r.decode_worker_id.is_none()
-            })
+        // Default is true (router handles bookkeeping). Set to false for GAIE Stage 2 where
+        // an external orchestrator (e.g., EPP sidecar) handles bookkeeping via C FFI.
+        let handle_local_updates = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.enable_local_updates)
             .unwrap_or(true);
 
         // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
@@ -917,9 +912,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
 
-        // TODO: When handle_local_updates=false, consider moving mark_prefill_completed
-        // to an external caller (e.g., sidecar) if they support a first-token hook.
-        // Currently mark_prefill_completed is called here for all flows.
+        // Wrap stream with lifecycle management (mark_prefill_completed, free)
+        // Only perform these operations if handle_local_updates is true.
+        // When false, an external caller (e.g., GAIE sidecar) handles bookkeeping via C FFI.
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut prefill_marked = false;
 
@@ -937,7 +932,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             break;
                         };
 
-                        if !prefill_marked {
+                        if handle_local_updates && !prefill_marked {
                             // Only mark prefill completed when we receive actual tokens,
                             // not empty bootstrap info (token_ids: []) from disaggregated prefill
                             let has_tokens = item.data.as_ref()
@@ -956,8 +951,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }
             }
 
-            // Always call free() - it's idempotent and safe even if already freed or never added
-            if let Err(e) = chooser.free(&context_id).await {
+            // Only call free() if we handle local updates.
+            // When handle_local_updates=false, external caller handles cleanup via C FFI.
+            if handle_local_updates
+                && let Err(e) = chooser.free(&context_id).await
+            {
                 tracing::warn!("Failed to free request {context_id}: {e}");
             }
         });

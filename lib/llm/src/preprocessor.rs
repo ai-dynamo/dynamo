@@ -245,6 +245,7 @@ impl OpenAIPreprocessor {
                 prefill_worker_id: nvext.prefill_worker_id,
                 decode_worker_id: nvext.decode_worker_id,
                 dp_rank: None, // dp_rank is set later in the pipeline
+                enable_local_updates: nvext.enable_local_updates,
             };
             builder.routing(Some(routing));
         }
