@@ -3,13 +3,13 @@ SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Distributed Tracing with Tempo
+# Distributed Tracing with Jaeger
 
 ## Overview
 
-Dynamo supports OpenTelemetry-based distributed tracing for visualizing request flows across Frontend and Worker components. Traces are exported to Tempo via OTLP (OpenTelemetry Protocol) and visualized in Grafana.
+Dynamo supports OpenTelemetry-based distributed tracing for visualizing request flows across Frontend and Worker components. Traces are exported via OTLP (OpenTelemetry Protocol) to an OpenTelemetry Collector, which forwards them to Jaeger for visualization.
 
-**Requirements:** Set `DYN_LOGGING_JSONL=true` and `OTEL_EXPORT_ENABLED=true` to export traces to Tempo.
+**Requirements:** Set `DYN_LOGGING_JSONL=true` and `OTEL_EXPORT_ENABLED=true` to export traces.
 
 This guide covers single GPU demo setup using Docker Compose. For Kubernetes deployments, see [Kubernetes Deployment](#kubernetes-deployment).
 
@@ -21,14 +21,14 @@ This guide covers single GPU demo setup using Docker Compose. For Kubernetes dep
 |----------|-------------|---------|---------|
 | `DYN_LOGGING_JSONL` | Enable JSONL logging format (required for tracing) | `false` | `true` |
 | `OTEL_EXPORT_ENABLED` | Enable OTLP trace export | `false` | `true` |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for Tempo | `http://localhost:4317` | `http://tempo:4317` |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for trace collector | `http://localhost:4317` | `http://otel-collector:4317` |
 | `OTEL_SERVICE_NAME` | Service name for identifying components | `dynamo` | `dynamo-frontend` |
 
 ## Getting Started Quickly
 
 ### 1. Start Observability Stack
 
-Start the observability stack (Prometheus, Grafana, Tempo, exporters). See [Observability Getting Started](README.md#getting-started-quickly) for instructions.
+Start the observability stack (Prometheus, Grafana, Jaeger, exporters). See [Observability Getting Started](README.md#getting-started-quickly) for instructions.
 
 ### 2. Set Environment Variables
 
@@ -123,22 +123,22 @@ curl -H 'Content-Type: application/json' \
 http://localhost:8000/v1/chat/completions
 ```
 
-### 5. View Traces in Grafana Tempo
+### 5. View Traces in Jaeger
 
-1. Open Grafana at `http://localhost:3000`
-2. Login with username `dynamo` and password `dynamo`
-3. Navigate to **Explore** (compass icon in the left sidebar)
-4. Select **Tempo** as the data source (should be selected by default)
-5. In the query type, select **"Search"** (not TraceQL, not Service Graph)
-6. Use the **Search** tab to find traces:
-   - Search by **Service Name** (e.g., `dynamo-frontend`)
-   - Search by **Span Name** (e.g., `http-request`, `handle_payload`)
-   - Search by **Tags** (e.g., `x_request_id=test-trace-001`)
-7. Click on a trace to view the detailed flame graph
+1. Open Jaeger UI at `http://localhost:16686`
+2. Select a **Service** from the dropdown (e.g., `dynamo-frontend`)
+3. Optionally filter by **Operation**, **Tags**, or **Time Range**
+4. Click **Find Traces** to search
+5. Click on a trace to view the detailed timeline and spans
+
+**Alternative:** You can also view traces through Grafana:
+1. Open Grafana at `http://localhost:3000` (username: `dynamo`, password: `dynamo`)
+2. Navigate to **Explore** and select **Jaeger** as the data source
+3. Search by service name or trace ID
 
 #### Example Trace View
 
-Below is an example of what a trace looks like in Grafana Tempo:
+Below is an example of what a trace looks like in Jaeger:
 
 ![Trace Example](trace.png)
 
@@ -150,7 +150,7 @@ When done, stop the observability stack. See [Observability Getting Started](REA
 
 ## Kubernetes Deployment
 
-For Kubernetes deployments, ensure you have a Tempo instance deployed and accessible (e.g., `http://tempo.observability.svc.cluster.local:4317`).
+For Kubernetes deployments, ensure you have an OpenTelemetry Collector or Jaeger instance deployed and accessible (e.g., `http://otel-collector.observability.svc.cluster.local:4317`).
 
 ### Modify DynamoGraphDeployment for Tracing
 
@@ -169,7 +169,7 @@ spec:
     - name: OTEL_EXPORT_ENABLED
       value: "true"
     - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-      value: "http://tempo.observability.svc.cluster.local:4317"
+      value: "http://otel-collector.observability.svc.cluster.local:4317"
 
   services:
     Frontend:
@@ -206,5 +206,5 @@ Apply the updated DynamoGraphDeployment:
 kubectl apply -f examples/backends/vllm/deploy/disagg.yaml
 ```
 
-Traces will now be exported to Tempo and can be viewed in Grafana.
+Traces will now be exported to Jaeger and can be viewed in the Jaeger UI or Grafana.
 

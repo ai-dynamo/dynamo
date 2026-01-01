@@ -7,8 +7,6 @@
 # Usage:
 #   docker compose -f deploy/docker-observability.yml up -d
 
-version: '3.8'
-
 networks:
   server:
     external: true
@@ -16,7 +14,6 @@ networks:
 
 volumes:
   grafana-data:
-  tempo-data:
 
 services:
   # DCGM stands for Data Center GPU Manager: https://developer.nvidia.com/dcgm
@@ -83,23 +80,37 @@ services:
       - dcgm-exporter
       - nats-prometheus-exporter
 
-  # Tempo - Distributed tracing backend
-  tempo:
-    image: grafana/tempo:2.8.2
-    command: [ "-config.file=/etc/tempo.yaml" ]
-    user: root
-    volumes:
-      - ./observability/tempo.yaml:/etc/tempo.yaml
-      - tempo-data:/tmp/tempo
+  # Jaeger - Distributed tracing backend
+  # Access UI at http://localhost:16686
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger
     ports:
-      - "3200:3200"   # Tempo HTTP
-      - "4317:4317"   # OTLP gRPC receiver (accessible from host)
-      - "4318:4318"   # OTLP HTTP receiver (accessible from host)
+      - "16686:16686"  # Jaeger UI
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    restart: unless-stopped
     networks:
       - server
 
-  # Grafana - Visualization and dashboards
-  # Supports both Prometheus (metrics) and Tempo (tracing) datasources
+  # OpenTelemetry Collector - Receives traces and forwards to Jaeger
+  otel-collector:
+    image: otel/opentelemetry-collector:latest
+    container_name: otel-collector
+    volumes:
+      - ./observability/opentelemetry.yaml:/etc/otelcol/config.yaml
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+    depends_on:
+      - jaeger
+    restart: unless-stopped
+    networks:
+      - server
+
+  # Grafana - Visualization and dashboards for metrics
+  # For tracing, use Jaeger UI at http://localhost:16686
   # Default credentials: dynamo/dynamo
   # To access Grafana from another machine, you may need to disable te firewall on your host. On Ubuntu:
   # sudo ufw allow 3000/tcp
@@ -110,14 +121,13 @@ services:
       - grafana-data:/var/lib/grafana
       - ./observability/grafana_dashboards:/etc/grafana/provisioning/dashboards
       - ./observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/prometheus.yml
-      - ./observability/tempo-datasource.yml:/etc/grafana/provisioning/datasources/tempo.yml
+      - ./observability/jaeger-datasource.yml:/etc/grafana/provisioning/datasources/jaeger.yml
     environment:
       - GF_SERVER_HTTP_PORT=3000
       # do not make it admin/admin, because you will be prompted to change the password every time
       - GF_SECURITY_ADMIN_USER=dynamo
       - GF_SECURITY_ADMIN_PASSWORD=dynamo
       - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
       - GF_INSTALL_PLUGINS=grafana-piechart-panel
       # Default min interval is 5s, but can be configured lower
       - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=2s
@@ -133,5 +143,5 @@ services:
       - server
     depends_on:
       - prometheus
-      - tempo
+      - jaeger
 
