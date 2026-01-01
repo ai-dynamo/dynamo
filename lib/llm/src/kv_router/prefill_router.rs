@@ -386,18 +386,25 @@ impl PrefillRouter {
         prefill_request: SingleIn<PreprocessedRequest>,
         target_worker: Option<u64>,
     ) {
-        let router = self.prefill_router.get().cloned();
+        use tracing::Instrument;
 
-        tokio::spawn(async move {
-            match Self::execute_prefill(router, prefill_request, target_worker).await {
-                Ok(_) => {
-                    tracing::debug!("Prefill background task completed");
-                }
-                Err(e) => {
-                    tracing::warn!("Prefill background task error: {e:?}");
+        let router = self.prefill_router.get().cloned();
+        // Capture current span to propagate trace context to the spawned task
+        let span = tracing::Span::current();
+
+        tokio::spawn(
+            async move {
+                match Self::execute_prefill(router, prefill_request, target_worker).await {
+                    Ok(_) => {
+                        tracing::debug!("Prefill background task completed");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Prefill background task error: {e:?}");
+                    }
                 }
             }
-        });
+            .instrument(span),
+        );
     }
 
     /// Call the prefill router and extract structured prefill result and worker ID
