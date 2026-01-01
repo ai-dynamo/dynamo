@@ -8,6 +8,7 @@ use futures::StreamExt;
 use rand::Rng;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use dynamo_runtime::{
     component::Endpoint,
@@ -264,10 +265,14 @@ impl PrefillRouter {
                 InnerPrefillRouter::KvRouter(r) => r,
                 _ => return None,
             };
-            match kv_router
-                .chooser
-                .find_best_match(None, &req.token_ids, None, false)
-                .await
+            match async {
+                kv_router
+                    .chooser
+                    .find_best_match(None, &req.token_ids, None, false)
+                    .await
+            }
+            .instrument(tracing::info_span!("kv_find_best_match"))
+            .await
             {
                 Ok((worker, _overlap)) => (worker.worker_id, worker.dp_rank),
                 Err(_) => return None,
@@ -387,17 +392,22 @@ impl PrefillRouter {
         target_worker: Option<u64>,
     ) {
         let router = self.prefill_router.get().cloned();
+        // Capture current span to propagate trace context to the spawned task
+        let span = tracing::Span::current();
 
-        tokio::spawn(async move {
-            match Self::execute_prefill(router, prefill_request, target_worker).await {
-                Ok(_) => {
-                    tracing::debug!("Prefill background task completed");
-                }
-                Err(e) => {
-                    tracing::warn!("Prefill background task error: {e:?}");
+        tokio::spawn(
+            async move {
+                match Self::execute_prefill(router, prefill_request, target_worker).await {
+                    Ok(_) => {
+                        tracing::debug!("Prefill background task completed");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Prefill background task error: {e:?}");
+                    }
                 }
             }
-        });
+            .instrument(span),
+        );
     }
 
     /// Call the prefill router and extract structured prefill result and worker ID
@@ -532,38 +542,42 @@ impl
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
 
-        let prefill_result = if !is_gaie_stage1
-            && let Some((worker_id, dp_rank, bootstrap_info)) = self
-                .build_bootstrap_info(&prefill_req, preselected_worker)
-                .await
-        {
-            // Bootstrap optimization path: spawn prefill in background
-            let routing = prefill_req.routing_mut();
-            routing.prefill_worker_id = Some(worker_id);
-            routing.backend_instance_id = Some(worker_id); // Route prefill to the SAME worker we got bootstrap_info from
-            routing.dp_rank = Some(dp_rank);
-            prefill_req.bootstrap_info = Some(bootstrap_info.clone());
+        let prefill_result = async {
+            if !is_gaie_stage1
+                && let Some((worker_id, dp_rank, bootstrap_info)) = self
+                    .build_bootstrap_info(&prefill_req, preselected_worker)
+                    .await
+            {
+                // Bootstrap optimization path: spawn prefill in background
+                let routing = prefill_req.routing_mut();
+                routing.prefill_worker_id = Some(worker_id);
+                routing.backend_instance_id = Some(worker_id); // Route prefill to the SAME worker we got bootstrap_info from
+                routing.dp_rank = Some(dp_rank);
+                prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 
-            let prefill_context = Context::with_id(prefill_req, request_id.clone());
-            engine_ctx.link_child(prefill_context.context());
+                let prefill_context = Context::with_id(prefill_req, request_id.clone());
+                engine_ctx.link_child(prefill_context.context());
 
-            self.spawn_prefill_task(prefill_context, Some(worker_id));
+                self.spawn_prefill_task(prefill_context, Some(worker_id));
 
-            Ok((None, Some(worker_id), Some(bootstrap_info)))
-        } else {
-            // Original prefill path: wait for prefill to complete
-            tracing::debug!(
-                is_gaie_stage1 = is_gaie_stage1,
-                "Using original prefill path"
-            );
+                Ok((None, Some(worker_id), Some(bootstrap_info)))
+            } else {
+                // Original prefill path: wait for prefill to complete
+                tracing::debug!(
+                    is_gaie_stage1 = is_gaie_stage1,
+                    "Using original prefill path"
+                );
 
-            let prefill_context = Context::with_id(prefill_req, request_id.clone());
-            engine_ctx.link_child(prefill_context.context());
+                let prefill_context = Context::with_id(prefill_req, request_id.clone());
+                engine_ctx.link_child(prefill_context.context());
 
-            self.call_prefill(prefill_context)
-                .await
-                .map(|(result, worker_id)| (Some(result), worker_id, None))
-        };
+                self.call_prefill(prefill_context)
+                    .await
+                    .map(|(result, worker_id)| (Some(result), worker_id, None))
+            }
+        }
+        .instrument(tracing::info_span!("prefill_routing"))
+        .await;
 
         // Abort if cancelled during prefill
         if engine_ctx.is_stopped() || engine_ctx.is_killed() {
