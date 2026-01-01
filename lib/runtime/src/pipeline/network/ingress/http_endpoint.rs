@@ -326,7 +326,7 @@ impl super::unified_server::RequestPlaneServer for SharedHttpServer {
         .await
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
+    async fn unregister_endpoint(&self, endpoint_name: &str, _instance_id: u64) -> Result<()> {
         self.unregister_endpoint(endpoint_name, endpoint_name).await;
         Ok(())
     }

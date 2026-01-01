@@ -413,9 +413,11 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         component_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
-        // For TCP, we use endpoint_name as both the endpoint_path (routing key) and endpoint_name
+        // Include instance_id in the routing key to avoid collisions when multiple workers
+        // share the same TCP server (e.g., --num-workers > 1 in tests)
+        let endpoint_path = format!("{:x}/{}", instance_id, endpoint_name);
         self.register_endpoint(
-            endpoint_name.clone(),
+            endpoint_path,
             service_handler,
             instance_id,
             namespace,
@@ -426,8 +428,10 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         .await
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
-        self.unregister_endpoint(endpoint_name, endpoint_name).await;
+    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+        let endpoint_path = format!("{:x}/{}", instance_id, endpoint_name);
+        self.unregister_endpoint(&endpoint_path, endpoint_name)
+            .await;
         Ok(())
     }
 

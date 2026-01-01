@@ -511,7 +511,7 @@ def test_kv_push_router_bindings(
     "store_backend,use_nats_core,request_plane",
     [
         ("etcd", False, "nats"),  # JetStream mode
-        ("etcd", True, "nats"),  # NATS core mode (with gap detection)
+        ("etcd", True, "tcp"),  # NATS core mode (with gap detection)
         ("file", False, "nats"),  # File backend
     ],
     ids=[
@@ -536,7 +536,7 @@ def test_indexers_sync(
 
     Tests with three configurations:
     - jetstream: etcd backend, JetStream for KV events, NATS request plane
-    - nats_core: etcd backend, local indexer with NATS Core, NATS request plane
+    - nats_core: etcd backend, local indexer with NATS Core, TCP request plane
                  (includes NATS interruption/recovery testing)
     - file: file backend, JetStream for KV events, NATS request plane
     """
