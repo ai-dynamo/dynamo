@@ -119,7 +119,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"room={bootstrap_info['bootstrap_room']}"
             )
 
-            trace_header = self._get_trace_header(context) if self.enable_trace else None
+            trace_header = (
+                self._get_trace_header(context) if self.enable_trace else None
+            )
 
             decode = await self.engine.async_generate(
                 **input_param,
@@ -139,7 +141,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(decode, context):
                     yield out
         else:
-            trace_header = self._get_trace_header(context) if self.enable_trace else None
+            trace_header = (
+                self._get_trace_header(context) if self.enable_trace else None
+            )
 
             agg = await self.engine.async_generate(
                 **input_param,
