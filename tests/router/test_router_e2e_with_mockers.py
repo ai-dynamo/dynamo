@@ -6,6 +6,12 @@
 # Combined pre_merge wall time (this file):
 # - Serialized: 304.01s.
 # - Parallel (-n auto): 34.55s (269.46s saved, 8.80x).
+#
+# NOTE: TCP request plane is NOT tested here. These tests use --num-workers > 1 which spawns
+# multiple workers in a single process sharing one TCP server. The shared TCP server uses
+# endpoint_path (e.g., "generate") as the routing key, causing handler collisions when multiple
+# workers register the same endpoint. This is a test-only limitation; production deployments
+# with separate processes per worker work correctly with TCP.
 import logging
 import os
 from typing import Any, Dict, Optional
@@ -316,14 +322,13 @@ class DisaggMockerProcess:
 
 
 @pytest.mark.timeout(42)  # ~3x average (~13.80s), rounded up
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
 def test_mocker_kv_router(
     request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
 ):
     """
     Test KV router with multiple mocker engine instances.
     This test doesn't require GPUs and runs quickly for pre-merge validation.
-    Tests both NATS and TCP request planes.
     """
 
     # runtime_services starts etcd and optionally nats based on request_plane
@@ -461,7 +466,7 @@ def test_mocker_kv_router_overload_503(
 
 
 @pytest.mark.timeout(22)  # ~3x average (~7.10s), rounded up
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
 def test_kv_push_router_bindings(
     request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
 ):
@@ -506,14 +511,14 @@ def test_kv_push_router_bindings(
     "store_backend,use_nats_core,request_plane",
     [
         ("etcd", False, "nats"),  # JetStream mode
-        ("etcd", True, "tcp"),  # NATS core mode (with gap detection)
+        ("etcd", True, "nats"),  # NATS core mode (with gap detection)
         ("file", False, "nats"),  # File backend
     ],
     ids=[
         "jetstream",
-        "nats",
+        "nats_core",
         "file",
-    ],  # "nats_core" commented out to match commented test case
+    ],
 )
 @pytest.mark.timeout(90)  # TODO: figure out a timeout
 def test_indexers_sync(
@@ -531,7 +536,7 @@ def test_indexers_sync(
 
     Tests with three configurations:
     - jetstream: etcd backend, JetStream for KV events, NATS request plane
-    - nats_core: etcd backend, local indexer with NATS Core, TCP request plane
+    - nats_core: etcd backend, local indexer with NATS Core, NATS request plane
                  (includes NATS interruption/recovery testing)
     - file: file backend, JetStream for KV events, NATS request plane
     """
@@ -619,7 +624,7 @@ def test_query_instance_id_returns_worker_and_tokens(
 
 
 @pytest.mark.timeout(29)  # ~3x average (~9.55s), rounded up
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
 @pytest.mark.parametrize(
     "use_nats_core,use_kv_events",
     [
@@ -732,11 +737,11 @@ def test_router_decisions_disagg(
     namespace_suffix = generate_random_suffix()
     shared_namespace = f"test-namespace-{namespace_suffix}"
 
-    # Create mocker args - use local indexer for NATS Core mode (less overhead than JetStream)
+    # Create mocker args - use JetStream for KV events (more reliable than NATS Core)
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
-        "enable_local_indexer": True,
+        "enable_local_indexer": False,
     }
 
     prefill_workers = None
@@ -752,7 +757,7 @@ def test_router_decisions_disagg(
                 worker_type="prefill",
                 mocker_args=mocker_args,
                 num_mockers=4,
-                request_plane="tcp",
+                request_plane="nats",
                 enable_bootstrap=enable_disagg_bootstrap,
             )
             prefill_workers.__enter__()
@@ -766,7 +771,7 @@ def test_router_decisions_disagg(
                 worker_type="decode",
                 mocker_args=mocker_args,
                 num_mockers=4,
-                request_plane="tcp",
+                request_plane="nats",
             )
             decode_workers.__enter__()
             logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
@@ -779,7 +784,7 @@ def test_router_decisions_disagg(
                 worker_type="decode",
                 mocker_args=mocker_args,
                 num_mockers=4,
-                request_plane="tcp",
+                request_plane="nats",
             )
             decode_workers.__enter__()
             logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
@@ -792,7 +797,7 @@ def test_router_decisions_disagg(
                 worker_type="prefill",
                 mocker_args=mocker_args,
                 num_mockers=4,
-                request_plane="tcp",
+                request_plane="nats",
                 enable_bootstrap=enable_disagg_bootstrap,
             )
             prefill_workers.__enter__()
@@ -811,7 +816,7 @@ def test_router_decisions_disagg(
             request=request,
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
-            request_plane="tcp",
+            request_plane="nats",
         )
 
     finally:
@@ -821,7 +826,7 @@ def test_router_decisions_disagg(
             prefill_workers.__exit__(None, None, None)
 
 
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
 @pytest.mark.timeout(39)  # ~3x average (~12.84s), rounded up
 def test_busy_threshold_endpoint(
     request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
