@@ -322,13 +322,14 @@ class DisaggMockerProcess:
 
 
 @pytest.mark.timeout(42)  # ~3x average (~13.80s), rounded up
-@pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_mocker_kv_router(
     request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
 ):
     """
     Test KV router with multiple mocker engine instances.
     This test doesn't require GPUs and runs quickly for pre-merge validation.
+    Tests both NATS and TCP request planes.
     """
 
     # runtime_services starts etcd and optionally nats based on request_plane
@@ -466,7 +467,7 @@ def test_mocker_kv_router_overload_503(
 
 
 @pytest.mark.timeout(22)  # ~3x average (~7.10s), rounded up
-@pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_kv_push_router_bindings(
     request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
 ):
@@ -624,7 +625,7 @@ def test_query_instance_id_returns_worker_and_tokens(
 
 
 @pytest.mark.timeout(29)  # ~3x average (~9.55s), rounded up
-@pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.parametrize(
     "use_nats_core,use_kv_events",
     [
@@ -826,7 +827,7 @@ def test_router_decisions_disagg(
             prefill_workers.__exit__(None, None, None)
 
 
-@pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.timeout(39)  # ~3x average (~12.84s), rounded up
 def test_busy_threshold_endpoint(
     request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
