@@ -1894,6 +1894,7 @@ def _test_router_decisions(
     request,
     test_dp_rank: bool = False,
     block_size: int = BLOCK_SIZE,
+    use_kv_events: bool = True,
 ):
     """Validate KV cache prefix reuse and worker routing by sending requests diverging prefixes.
 
@@ -1912,12 +1913,17 @@ def _test_router_decisions(
         model_name: Name of the model
         request: Pytest request fixture
         test_dp_rank: If True, also forces and validates dp_rank routing (for data parallel setups)
+        use_kv_events: If True (default), uses KV events from workers. If False, uses
+            approximate routing with TTL-based expiration (--no-kv-events mode).
 
     Raises:
         AssertionError: If routing decisions don't follow KV cache prefix reuse as expected
     """
     # Create KvRouterConfig with lower snapshot threshold for testing
-    kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
+    kv_router_config = KvRouterConfig(
+        router_snapshot_threshold=20,
+        use_kv_events=use_kv_events,
+    )
     kv_push_router = KvPushRouter(
         endpoint=endpoint,
         block_size=block_size,

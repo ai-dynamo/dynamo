@@ -6,6 +6,7 @@ use std::{
     sync::Arc,
 };
 
+use dashmap::{DashMap, mapref::entry::Entry};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::oneshot;
 
@@ -13,13 +14,17 @@ use crate::discovery::KvWorkerMonitor;
 
 use dynamo_runtime::{
     component::{Client, Endpoint, build_transport_type},
-    discovery::DiscoverySpec,
+    discovery::{DiscoveryQuery, DiscoverySpec, watch_and_extract_field},
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
 };
 
 use crate::{
-    kv_router::{KvRouter, KvRouterConfig, router_endpoint_id, scheduler::DefaultWorkerSelector},
+    kv_router::{
+        KvRouter, KvRouterConfig, protocols::WorkerId, router_endpoint_id,
+        scheduler::DefaultWorkerSelector,
+    },
+    local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig},
     model_card::ModelDeploymentCard,
     model_type::ModelType,
     types::{
@@ -73,6 +78,11 @@ pub struct ModelManager {
     /// Key: model name, Value: cloneable monitor (all fields are Arc).
     /// HTTP endpoint can update thresholds via monitor.set_threshold().
     worker_monitors: RwLock<HashMap<String, KvWorkerMonitor>>,
+
+    /// Runtime configs per endpoint using DashMap for lock-free access.
+    /// Outer DashMap: keyed by EndpointId
+    /// Inner Arc<DashMap>: keyed by WorkerId, shared with KvScheduler
+    runtime_configs: DashMap<EndpointId, Arc<DashMap<WorkerId, Option<ModelRuntimeConfig>>>>,
 }
 
 impl Default for ModelManager {
@@ -93,6 +103,7 @@ impl ModelManager {
             kv_choosers: Mutex::new(HashMap::new()),
             prefill_router_activators: Mutex::new(HashMap::new()),
             worker_monitors: RwLock::new(HashMap::new()),
+            runtime_configs: DashMap::new(),
         }
     }
 
@@ -360,10 +371,14 @@ impl ModelManager {
         // Use instance_id (hex) as the consumer ID for NATS consumer coordination
         let consumer_id = instance_id.to_string();
 
+        // Get or create runtime config watcher for this endpoint
+        let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
+
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
         let chooser = KvRouter::new(
             endpoint.clone(),
             client,
+            workers_with_configs,
             kv_cache_block_size,
             Some(selector),
             kv_router_config,
@@ -600,6 +615,146 @@ impl ModelManager {
     /// Gets an existing worker monitor for a model, if one exists.
     pub fn get_worker_monitor(&self, model: &str) -> Option<KvWorkerMonitor> {
         self.worker_monitors.read().get(model).cloned()
+    }
+
+    /// Get or create a runtime config watcher for an endpoint.
+    /// Spawns a background task to watch DiscoveryQuery::EndpointModels.
+    /// Returns a shared Arc<DashMap> that KvScheduler can use directly.
+    pub async fn get_or_create_runtime_config_watcher(
+        &self,
+        endpoint: &Endpoint,
+    ) -> anyhow::Result<Arc<DashMap<WorkerId, Option<ModelRuntimeConfig>>>> {
+        let endpoint_id = endpoint.id();
+
+        // Fast path: return existing if present
+        if let Some(existing) = self.runtime_configs.get(&endpoint_id) {
+            return Ok(existing.clone());
+        }
+
+        // Atomic get-or-insert to avoid TOCTOU race
+        let inner_map = Arc::new(DashMap::new());
+        let (map, is_new) = match self.runtime_configs.entry(endpoint_id) {
+            Entry::Occupied(e) => (e.get().clone(), false),
+            Entry::Vacant(e) => {
+                e.insert(inner_map.clone());
+                (inner_map, true)
+            }
+        };
+
+        // Only spawn watcher if we were the one who inserted
+        if is_new {
+            self.spawn_runtime_config_watcher(endpoint, map.clone())
+                .await?;
+        }
+
+        Ok(map)
+    }
+
+    /// Get disaggregated endpoint for a specific worker.
+    /// Used by PrefillRouter for bootstrap info - works for ANY routing mode.
+    pub fn get_disaggregated_endpoint(
+        &self,
+        endpoint_id: &EndpointId,
+        worker_id: WorkerId,
+    ) -> Option<DisaggregatedEndpoint> {
+        let inner_map = self.runtime_configs.get(endpoint_id)?;
+        let config_ref = inner_map.get(&worker_id)?;
+        config_ref.as_ref()?.disaggregated_endpoint.clone()
+    }
+
+    /// Spawn background task to watch runtime configs via discovery.
+    async fn spawn_runtime_config_watcher(
+        &self,
+        endpoint: &Endpoint,
+        inner_map: Arc<DashMap<WorkerId, Option<ModelRuntimeConfig>>>,
+    ) -> anyhow::Result<()> {
+        let component = endpoint.component();
+        let cancellation_token = component.drt().primary_token();
+
+        // Set up discovery watch for EndpointModels
+        let discovery = component.drt().discovery();
+        let endpoint_id = endpoint.id();
+        let discovery_key = DiscoveryQuery::EndpointModels {
+            namespace: endpoint_id.namespace.clone(),
+            component: endpoint_id.component.clone(),
+            endpoint: endpoint_id.name.clone(),
+        };
+        let discovery_stream = discovery
+            .list_and_watch(discovery_key.clone(), Some(cancellation_token.clone()))
+            .await?;
+
+        // Extract runtime_config from ModelDeploymentCard
+        let mut runtime_configs_rx =
+            watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
+                card.runtime_config
+            });
+
+        // Also watch instance IDs
+        let client = endpoint.client().await?;
+        let mut instance_ids_rx = client.instance_avail_watcher();
+
+        // Spawn background task to update inner_map
+        let cancel_token = cancellation_token.clone();
+        tokio::spawn(async move {
+            tracing::trace!("ModelManager runtime config watcher started");
+            loop {
+                // Wait for either instances or configs to change
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        tracing::trace!("ModelManager runtime config watcher shutting down");
+                        break;
+                    }
+                    result = instance_ids_rx.changed() => {
+                        if result.is_err() {
+                            tracing::warn!("instance IDs watch sender shutdown in ModelManager");
+                            break;
+                        }
+                    }
+                    result = runtime_configs_rx.changed() => {
+                        if result.is_err() {
+                            tracing::warn!("runtime configs watch sender shutdown in ModelManager");
+                            break;
+                        }
+                    }
+                }
+
+                // Get the latest values from both channels
+                let new_instance_ids = instance_ids_rx.borrow_and_update().clone();
+                let new_configs = runtime_configs_rx.borrow_and_update().clone();
+
+                // Update the DashMap
+                // First, remove workers that no longer exist
+                let current_workers: HashSet<WorkerId> =
+                    inner_map.iter().map(|r| *r.key()).collect();
+                let new_workers: HashSet<WorkerId> = new_instance_ids.iter().copied().collect();
+                for removed_worker in current_workers.difference(&new_workers) {
+                    inner_map.remove(removed_worker);
+                }
+
+                // Then, add/update workers
+                for worker_id in &new_instance_ids {
+                    let config = new_configs.get(worker_id).cloned();
+                    if config.is_some() {
+                        let prev_config = inner_map.get(worker_id);
+                        if prev_config.as_ref().map(|r| r.value()) != Some(&config) {
+                            tracing::info!(
+                                "ModelManager: Runtime config found for worker_id: {}",
+                                worker_id
+                            );
+                        }
+                    }
+                    inner_map.insert(*worker_id, config);
+                }
+
+                tracing::trace!(
+                    "ModelManager: Updated runtime_configs with {} workers",
+                    inner_map.len()
+                );
+            }
+            tracing::trace!("ModelManager runtime config watcher shutting down");
+        });
+
+        Ok(())
     }
 
     /// Lists all models that have worker monitors (and thus busy thresholds) configured.

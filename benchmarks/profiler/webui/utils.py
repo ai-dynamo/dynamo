@@ -20,6 +20,11 @@ from aiconfigurator.webapp.components.profiling import (
     load_profiling_javascript,
 )
 
+from benchmarks.profiler.utils.dgd_generation import (
+    generate_decode_service_config_preview,
+    generate_prefill_decode_services_config_preview,
+    generate_prefill_service_config_preview,
+)
 from benchmarks.profiler.utils.pareto import compute_pareto
 
 logger = logging.getLogger(__name__)
@@ -56,149 +61,87 @@ def clear_profiling_errors() -> None:
     _profiling_errors.clear()
 
 
-def generate_dgd_worker_config_yaml(
-    parallel_mapping,
+def dump_yaml_with_header(header_lines: list[str], obj: dict) -> str:
+    """Dump YAML with a leading comment header (used for WebUI config previews)."""
+    header = "\n".join(header_lines + ["#"])
+    body = yaml.safe_dump(obj, sort_keys=False)
+    return f"{header}\n{body}"
+
+
+def _maybe_add_model_backend_header_lines(header_lines: list[str], args) -> None:
+    model = getattr(args, "model", None)
+    backend = getattr(args, "backend", None)
+    if model:
+        header_lines.append(f"# Model: {model}")
+    if backend:
+        header_lines.append(f"# Backend: {backend}")
+
+
+def build_single_service_preview_header_lines(
+    *,
+    service_name: str,
     engine_type: str,
-    model: str | None = None,
-    backend: str | None = None,
-    ttft_or_itl: float | None = None,
-    thpt_per_gpu: float | None = None,
-) -> str:
-    """
-    Generate a DGD worker service config snippet for display in the WebUI.
-
-    Uses ParallelizationMapping.label() for display and shows the service structure
-    that would be used in the final DynamoGraphDeployment.
-
-    Args:
-        parallel_mapping: ParallelizationMapping instance
-        engine_type: "prefill" or "decode"
-        model: Model name/path
-        backend: Backend name (sglang, vllm, trtllm)
-        ttft_or_itl: TTFT (prefill) or ITL (decode) in ms
-        thpt_per_gpu: Throughput per GPU in tokens/s/GPU
-
-    Returns:
-        YAML string representation of the DGD worker config
-    """
-    num_gpus = parallel_mapping.get_num_gpus()
-
-    # Build the worker config in DGD style
-    # Note: Actual args vary by backend; this shows the structure
-    worker_config = {
-        "componentType": "worker",
-        "subComponentType": engine_type,
-        "replicas": 1,
-        "resources": {
-            "limits": {
-                "gpu": str(num_gpus),
-            }
-        },
-    }
-
-    # Build header comments with profiling metadata
+    mapping,
+    ttft_or_itl_ms: float | None,
+    thpt_per_gpu: float | None,
+    args,
+) -> list[str]:
     header_lines = [
-        "# DynamoGraphDeployment Worker Config",
+        "# DynamoGraphDeployment Service Config Preview",
+        f"# Service: {service_name}",
         f"# Engine: {engine_type}",
-        f"# Num GPUs: {num_gpus}",
-        f"# Parallelization: {parallel_mapping.label()}",
+        f"# Num GPUs: {mapping.get_num_gpus()}",
+        f"# Parallelization: {mapping.label()}",
     ]
-
-    if engine_type == "prefill" and ttft_or_itl is not None:
-        header_lines.append(f"# Profiled TTFT: {round(ttft_or_itl, 2)} ms")
-    elif engine_type == "decode" and ttft_or_itl is not None:
-        header_lines.append(f"# Profiled ITL: {round(ttft_or_itl, 2)} ms")
-
+    if engine_type == "prefill" and ttft_or_itl_ms is not None:
+        header_lines.append(f"# Profiled TTFT: {round(ttft_or_itl_ms, 2)} ms")
+    if engine_type == "decode" and ttft_or_itl_ms is not None:
+        header_lines.append(f"# Profiled ITL: {round(ttft_or_itl_ms, 2)} ms")
     if thpt_per_gpu is not None:
         header_lines.append(
             f"# Profiled Throughput: {round(thpt_per_gpu, 2)} tokens/s/GPU"
         )
-
-    if model:
-        header_lines.append(f"# Model: {model}")
-    if backend:
-        header_lines.append(f"# Backend: {backend}")
-
-    header_lines.append("#")
-    header_lines.append("# Note: Final config generated after selection includes")
-    header_lines.append("# backend-specific args and planner configuration.")
-
-    # Add the actual config
-    service_name = f"{engine_type.capitalize()}Worker"
-    body = yaml.dump(
-        {service_name: worker_config}, default_flow_style=False, sort_keys=False
+    _maybe_add_model_backend_header_lines(header_lines, args)
+    header_lines.append(
+        "# Note: This is a service-only preview. Final config includes planner."
     )
+    return header_lines
 
-    return "\n".join(header_lines) + "\n" + body
 
-
-def generate_dgd_config_yaml_for_display(
+def build_two_service_preview_header_lines(
+    *,
+    prefill_service_name: str,
+    decode_service_name: str,
     prefill_mapping,
     decode_mapping,
-    model: str | None = None,
-    backend: str | None = None,
-) -> str:
-    """
-    Generate a DGD config snippet for display in the WebUI.
-
-    This shows the combined prefill + decode DynamoGraphDeployment structure.
-    Uses ParallelizationMapping.label() for parallelization info.
-
-    Args:
-        prefill_mapping: ParallelizationMapping for prefill
-        decode_mapping: ParallelizationMapping for decode
-        model: Model name/path
-        backend: Backend name
-
-    Returns:
-        YAML string representation of the DGD configuration
-    """
-    prefill_gpus = prefill_mapping.get_num_gpus()
-    decode_gpus = decode_mapping.get_num_gpus()
-
-    # Build DGD-style config showing the service structure
-    config = {
-        "apiVersion": "nvidia.com/v1alpha1",
-        "kind": "DynamoGraphDeployment",
-        "spec": {
-            "services": {
-                "PrefillWorker": {
-                    "componentType": "worker",
-                    "subComponentType": "prefill",
-                    "replicas": 1,
-                    "resources": {
-                        "limits": {"gpu": str(prefill_gpus)},
-                    },
-                },
-                "DecodeWorker": {
-                    "componentType": "worker",
-                    "subComponentType": "decode",
-                    "replicas": 1,
-                    "resources": {
-                        "limits": {"gpu": str(decode_gpus)},
-                    },
-                },
-            }
-        },
-    }
-
-    # Build header comments with parallelization and model info
+    prefill_ttft_ms: float | None,
+    prefill_thpt_per_gpu: float | None,
+    decode_itl_ms: float | None,
+    decode_thpt_per_gpu: float | None,
+    args,
+) -> list[str]:
     header_lines = [
-        "# DynamoGraphDeployment Configuration Preview",
-        f"# Prefill: {prefill_gpus} GPU(s), {prefill_mapping.label()}",
-        f"# Decode: {decode_gpus} GPU(s), {decode_mapping.label()}",
+        "# DynamoGraphDeployment Services Config Preview",
+        f"# Prefill service: {prefill_service_name} ({prefill_mapping.get_num_gpus()} GPU(s), {prefill_mapping.label()})",
+        f"# Decode service: {decode_service_name} ({decode_mapping.get_num_gpus()} GPU(s), {decode_mapping.label()})",
     ]
-    if model:
-        header_lines.append(f"# Model: {model}")
-    if backend:
-        header_lines.append(f"# Backend: {backend}")
-    header_lines.append("#")
-    header_lines.append("# Full config with planner saved to: config_with_planner.yaml")
-
-    header = "\n".join(header_lines)
-    body = yaml.dump(config, default_flow_style=False, sort_keys=False)
-
-    return f"{header}\n{body}"
+    if prefill_ttft_ms is not None:
+        header_lines.append(f"# Profiled TTFT: {round(prefill_ttft_ms, 2)} ms")
+    if decode_itl_ms is not None:
+        header_lines.append(f"# Profiled ITL: {round(decode_itl_ms, 2)} ms")
+    if prefill_thpt_per_gpu is not None:
+        header_lines.append(
+            f"# Profiled Prefill Throughput: {round(prefill_thpt_per_gpu, 2)} tokens/s/GPU"
+        )
+    if decode_thpt_per_gpu is not None:
+        header_lines.append(
+            f"# Profiled Decode Throughput: {round(decode_thpt_per_gpu, 2)} tokens/s/GPU"
+        )
+    _maybe_add_model_backend_header_lines(header_lines, args)
+    header_lines.append(
+        "# Note: This is a services-only preview. Final config includes planner."
+    )
+    return header_lines
 
 
 class PlotType(str, Enum):
@@ -326,15 +269,22 @@ def populate_prefill_data(data, prefill_data, args):
             prefill_data.parallel_mappings,
         )
     ):
-        # Generate DGD worker config YAML for display
-        config_yaml = generate_dgd_worker_config_yaml(
-            parallel_mapping=mapping,
-            engine_type="prefill",
-            model=getattr(args, "model", None),
-            backend=getattr(args, "backend", None),
-            ttft_or_itl=ttft,
-            thpt_per_gpu=thpt,
+        config_obj = generate_prefill_service_config_preview(
+            config_path=args.config,
+            args=args,
+            best_prefill_mapping=mapping,
+            num_gpus_per_node=getattr(args, "num_gpus_per_node", 8),
         )
+        service_name = next(iter(config_obj.keys()))
+        header_lines = build_single_service_preview_header_lines(
+            service_name=service_name,
+            engine_type="prefill",
+            mapping=mapping,
+            ttft_or_itl_ms=ttft,
+            thpt_per_gpu=thpt,
+            args=args,
+        )
+        config_yaml = dump_yaml_with_header(header_lines, config_obj)
         table_data.append([gpu, round(ttft, 2), round(thpt, 2), config_yaml])
     data[PlotType.PREFILL]["table"]["data"] = table_data
 
@@ -383,15 +333,22 @@ def populate_decode_data(data, decode_data, args):
             decode_data.parallel_mappings,
         )
     ):
-        # Generate DGD worker config YAML for display
-        config_yaml = generate_dgd_worker_config_yaml(
-            parallel_mapping=mapping,
-            engine_type="decode",
-            model=getattr(args, "model", None),
-            backend=getattr(args, "backend", None),
-            ttft_or_itl=itl,
-            thpt_per_gpu=thpt,
+        config_obj = generate_decode_service_config_preview(
+            config_path=args.config,
+            args=args,
+            best_decode_mapping=mapping,
+            num_gpus_per_node=getattr(args, "num_gpus_per_node", 8),
         )
+        service_name = next(iter(config_obj.keys()))
+        header_lines = build_single_service_preview_header_lines(
+            service_name=service_name,
+            engine_type="decode",
+            mapping=mapping,
+            ttft_or_itl_ms=itl,
+            thpt_per_gpu=thpt,
+            args=args,
+        )
+        config_yaml = dump_yaml_with_header(header_lines, config_obj)
         table_data.append([gpu, round(itl, 2), round(thpt, 2), config_yaml])
     data[PlotType.DECODE]["table"]["data"] = table_data
 
@@ -468,13 +425,32 @@ def populate_cost_data(
             # Store mapping from cost table row to original indices
             cost_index_mapping[table_idx] = (orig_prefill_idx, orig_decode_idx)
 
-            # Generate DGD config YAML for display
-            config_yaml = generate_dgd_config_yaml_for_display(
+            services_obj = generate_prefill_decode_services_config_preview(
+                config_path=args.config,
+                args=args,
+                best_prefill_mapping=prefill_mapping,
+                best_decode_mapping=decode_mapping,
+                num_gpus_per_node=getattr(args, "num_gpus_per_node", 8),
+            )
+            # Determine service names (backend-dependent)
+            service_names = list(services_obj.keys())
+            # Prefer stable names by picking based on subComponentType if present; fallback to insertion order.
+            prefill_service_name = service_names[0]
+            decode_service_name = (
+                service_names[1] if len(service_names) > 1 else service_names[0]
+            )
+            header_lines = build_two_service_preview_header_lines(
+                prefill_service_name=prefill_service_name,
+                decode_service_name=decode_service_name,
                 prefill_mapping=prefill_mapping,
                 decode_mapping=decode_mapping,
-                model=getattr(args, "model", None),
-                backend=getattr(args, "backend", None),
+                prefill_ttft_ms=float(_p_ttft),
+                prefill_thpt_per_gpu=float(_p_thpt),
+                decode_itl_ms=float(_d_itl),
+                decode_thpt_per_gpu=float(_d_thpt),
+                args=args,
             )
+            config_yaml = dump_yaml_with_header(header_lines, services_obj)
 
             # Add to table data (GPU hours, not cost - frontend handles cost conversion)
             table_data.append(

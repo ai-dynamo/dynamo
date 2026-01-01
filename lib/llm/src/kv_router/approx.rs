@@ -223,7 +223,7 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
 mod tests {
     use super::*;
     use crate::kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
-    use crate::kv_router::protocols::{WorkerId, WorkerWithDpRank};
+    use crate::kv_router::protocols::{TokensWithHashes, WorkerId, WorkerWithDpRank};
     use std::sync::Arc;
     use tokio::time::{self, Duration, Instant};
     use tokio_util::sync::CancellationToken;
@@ -355,9 +355,10 @@ mod tests {
         assert!(pre_scores.scores.is_empty());
 
         // 2. Inform indexer about routing decision
+        let mut tokens_with_hashes = TokensWithHashes::new(tokens.clone(), KV_BLOCK_SIZE);
         indexer
             .process_routing_decision_for_request(
-                &tokens,
+                &mut tokens_with_hashes,
                 WorkerWithDpRank::from_worker_id(worker_id),
             )
             .await
@@ -401,9 +402,10 @@ mod tests {
         let tokens: Vec<u32> = vec![10, 11, 12, 13];
         let worker_id: WorkerId = 7;
 
+        let mut tokens_with_hashes = TokensWithHashes::new(tokens.clone(), KV_BLOCK_SIZE);
         indexer
             .process_routing_decision_for_request(
-                &tokens,
+                &mut tokens_with_hashes,
                 WorkerWithDpRank::from_worker_id(worker_id),
             )
             .await
@@ -454,16 +456,18 @@ mod tests {
         let worker_1: WorkerId = 31;
 
         // Register on both workers
+        let mut tokens_with_hashes = TokensWithHashes::new(tokens.clone(), KV_BLOCK_SIZE);
         indexer
             .process_routing_decision_for_request(
-                &tokens,
+                &mut tokens_with_hashes,
                 WorkerWithDpRank::from_worker_id(worker_0),
             )
             .await
             .unwrap();
+        let mut tokens_with_hashes = TokensWithHashes::new(tokens.clone(), KV_BLOCK_SIZE);
         indexer
             .process_routing_decision_for_request(
-                &tokens,
+                &mut tokens_with_hashes,
                 WorkerWithDpRank::from_worker_id(worker_1),
             )
             .await
@@ -524,9 +528,10 @@ mod tests {
         let worker_a: WorkerId = 11;
 
         // Register Sequence A on worker A
+        let mut tokens_with_hashes = TokensWithHashes::new(seq_a.clone(), KV_BLOCK_SIZE);
         indexer
             .process_routing_decision_for_request(
-                &seq_a,
+                &mut tokens_with_hashes,
                 WorkerWithDpRank::from_worker_id(worker_a),
             )
             .await
@@ -582,16 +587,18 @@ mod tests {
         let worker_1: WorkerId = 22;
 
         // Register the same sequence on two different workers
+        let mut tokens_with_hashes = TokensWithHashes::new(tokens.clone(), KV_BLOCK_SIZE);
         indexer
             .process_routing_decision_for_request(
-                &tokens,
+                &mut tokens_with_hashes,
                 WorkerWithDpRank::from_worker_id(worker_0),
             )
             .await
             .unwrap();
+        let mut tokens_with_hashes = TokensWithHashes::new(tokens.clone(), KV_BLOCK_SIZE);
         indexer
             .process_routing_decision_for_request(
-                &tokens,
+                &mut tokens_with_hashes,
                 WorkerWithDpRank::from_worker_id(worker_1),
             )
             .await
@@ -759,8 +766,9 @@ mod tests {
         // Insert 5 sequences (5 blocks total, at max_tree_size but not exceeding)
         for i in 0..5 {
             let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
+            let mut tokens_with_hashes = TokensWithHashes::new(tokens, KV_BLOCK_SIZE);
             indexer
-                .process_routing_decision_for_request(&tokens, worker)
+                .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
                 .await
                 .unwrap();
             time::sleep(Duration::from_millis(1)).await; // Ensure different timestamps
@@ -780,8 +788,9 @@ mod tests {
 
         // Insert 6th block - this exceeds max_tree_size and should trigger reactive pruning
         let tokens: Vec<u32> = vec![50, 51, 52, 53];
+        let mut tokens_with_hashes = TokensWithHashes::new(tokens, KV_BLOCK_SIZE);
         indexer
-            .process_routing_decision_for_request(&tokens, worker)
+            .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
             .await
             .unwrap();
 

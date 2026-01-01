@@ -84,12 +84,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 k: v for k, v in sampling_params.items() if v is not None
             }
 
-        # Use provided bootstrap_room if available, otherwise generate one
+        # Use provided bootstrap_room from bootstrap_info if available, otherwise generate one
         bootstrap_room = None
-        extra_args = inner_request.get("extra_args", {})
-        if isinstance(extra_args, dict):
-            bootstrap_room = extra_args.get("bootstrap_room")
-            logging.debug(f"Using router-provided bootstrap_room: {bootstrap_room}")
+        bootstrap_info_from_req = inner_request.get("bootstrap_info")
+        if isinstance(bootstrap_info_from_req, dict):
+            bootstrap_room = bootstrap_info_from_req.get("bootstrap_room")
+            if bootstrap_room is not None:
+                logging.debug(f"Using router-provided bootstrap_room: {bootstrap_room}")
 
         if bootstrap_room is None:
             bootstrap_room = self._generate_bootstrap_room()
@@ -129,6 +130,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         task = asyncio.create_task(self._consume_results(results, context))
         self._consume_tasks.add(task)
         task.add_done_callback(self._consume_tasks.discard)
+
+        await task
 
     async def _consume_results(
         self, results: AsyncGenerator[Any, None], context: Context
