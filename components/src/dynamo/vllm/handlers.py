@@ -71,6 +71,7 @@ def build_sampling_params(
     request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
     model_max_len: int | None = None,
+    structured_outputs_backend: str | None = None,
 ) -> SamplingParams:
     """
     Build SamplingParams from a PreprocessedRequest (internal protocol format).
@@ -96,6 +97,20 @@ def build_sampling_params(
             grammar=guided_decoding.get("grammar"),
             whitespace_pattern=guided_decoding.get("whitespace_pattern"),
         )
+
+        # vLLM sets/validates the backend during input processing based on the engine's
+        # StructuredOutputsConfig.backend (often "auto"). Do NOT set request-level backend
+        # here, because vLLM rejects per-request backend selection when the engine is
+        # initialized with a different backend (see vLLM _validate_structured_output).
+        #
+        # If the engine backend is a concrete value (not "auto"), we can optionally set it
+        # for older vLLM variants that rely on StructuredOutputsParams._backend. For vLLM
+        # v0.12+, leaving it unset is fine and preferred.
+        if structured_outputs_backend and structured_outputs_backend != "auto":
+            try:
+                sampling_params.structured_outputs._backend = structured_outputs_backend  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
     # Apply remaining sampling_options
     for key, value in request["sampling_options"].items():
@@ -234,6 +249,7 @@ class BaseWorkerHandler(ABC):
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
+        structured_outputs_backend: str | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
         config=None,
@@ -250,6 +266,7 @@ class BaseWorkerHandler(ABC):
         self.image_loader = ImageLoader()
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
+        self.structured_outputs_backend = structured_outputs_backend
         self.enable_multimodal = enable_multimodal
         # LoRA tracking
         self.lora_id_for_name: dict[str, int] = {}
@@ -854,6 +871,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
+        structured_outputs_backend: str | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
         config=None,
@@ -865,6 +883,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             engine,
             default_sampling_params,
             model_max_len,
+            structured_outputs_backend,
             enable_multimodal,
             generate_endpoint,
             config,
@@ -896,7 +915,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Build sampling params from request
         sampling_params = build_sampling_params(
-            request, self.default_sampling_params, self.model_max_len
+            request,
+            self.default_sampling_params,
+            self.model_max_len,
+            structured_outputs_backend=self.structured_outputs_backend,
         )
 
         prefill_result = request.get("prefill_result")
@@ -1053,6 +1075,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
+        structured_outputs_backend: str | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
         config=None,
@@ -1064,6 +1087,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             engine,
             default_sampling_params,
             model_max_len,
+            structured_outputs_backend,
             enable_multimodal,
             generate_endpoint,
             config,
