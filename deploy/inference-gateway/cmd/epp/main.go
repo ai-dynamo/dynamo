@@ -38,10 +38,8 @@ import (
 	"os"
 
 	ctrl "sigs.k8s.io/controller-runtime"
-	eppplugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
-
-	// Dynamo runner (registers built-in GAIE plugins)
-	dynamorunner "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/runner"
+	"sigs.k8s.io/gateway-api-inference-extension/cmd/epp/runner"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
 
 	// Dynamo plugins
 	dyncleanup "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_cleanup"
@@ -50,19 +48,16 @@ import (
 )
 
 func main() {
-	// Register built-in GAIE plugins
-	dynamorunner.RegisterInTreePlugins()
-
 	// Register Dynamo custom plugins:
 	// - kv-aware-scorer: Calls Dynamo router to select workers based on KV cache
 	// - dynamo-inject-workerid: Normalizes routing headers for backend consumption
 	// - dynamo-cleanup: Cleans up router state after request completion
-	eppplugins.Register("kv-aware-scorer", dynscorer.KVAwareScorerFactory)
-	eppplugins.Register("dynamo-inject-workerid", dynprereq.InjectWorkerIDPreRequestFactory)
-	eppplugins.Register("dynamo-cleanup", dyncleanup.DynamoCleanupPluginFactory)
+	plugins.Register("kv-aware-scorer", dynscorer.KVAwareScorerFactory)
+	plugins.Register("dynamo-inject-workerid", dynprereq.InjectWorkerIDPreRequestFactory)
+	plugins.Register("dynamo-cleanup", dyncleanup.DynamoCleanupPluginFactory)
 
-	// Run the EPP
-	if err := dynamorunner.NewRunner().Run(ctrl.SetupSignalHandler()); err != nil {
+	// Run using standard GAIE runner (it registers built-in plugins automatically)
+	if err := runner.NewRunner().Run(ctrl.SetupSignalHandler()); err != nil {
 		os.Exit(1)
 	}
 }
