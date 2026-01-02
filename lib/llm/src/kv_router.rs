@@ -354,71 +354,76 @@ impl KvRouter {
         tracing::info!("Worker query client initialized");
 
         // Start KV event subscriber background process (only when use_kv_events is enabled)
-        // This is spawned as a background task to avoid blocking router startup.
-        // The task waits for runtime_configs to determine whether to use NATS Core or JetStream.
+        // We block here until at least one worker runtime config is registered,
+        // then spawn the subscriber. This ensures the router is ready before accepting requests.
         if kv_router_config.use_kv_events
             && let Indexer::KvIndexer(ref kv_indexer) = indexer
         {
-            // Clone everything needed for the background task
+            let mut runtime_configs_rx_clone = runtime_configs_rx.clone();
+
+            // Wait for at least one worker runtime config to be registered
+            tracing::info!("Waiting for at least one worker runtime config to be registered...");
+            let (all_local_indexer, count) = loop {
+                {
+                    let configs = runtime_configs_rx_clone.borrow();
+                    if !configs.is_empty() {
+                        let all_local_indexer = configs.values().all(|c| c.enable_local_indexer);
+                        break (all_local_indexer, configs.len());
+                    }
+                }
+
+                // Wait for changes to runtime_configs
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => {
+                        tracing::debug!("KvRouter startup cancelled while waiting for workers");
+                        anyhow::bail!("KvRouter startup cancelled");
+                    }
+                    result = runtime_configs_rx_clone.changed() => {
+                        if result.is_err() {
+                            tracing::debug!("Runtime configs channel closed");
+                            anyhow::bail!("Runtime configs channel closed before any workers registered");
+                        }
+                    }
+                }
+            };
+            tracing::info!("Found {count} worker runtime config(s), starting KV event subscriber");
+
+            // Clone everything needed for the background subscriber task
             let component_clone = component.clone();
             let kv_indexer_clone = kv_indexer.clone();
             let cancellation_token_clone = cancellation_token.clone();
-            let mut runtime_configs_rx_clone = runtime_configs_rx.clone();
             let worker_query_client_clone =
                 worker_query::WorkerQueryClient::new(component.clone(), runtime_configs_rx.clone());
 
-            tokio::spawn(async move {
-                // Wait for runtime_configs to have at least one entry
-                let (all_local_indexer, count) = loop {
-                    {
-                        let configs = runtime_configs_rx_clone.borrow();
-                        if !configs.is_empty() {
-                            let all_local_indexer =
-                                configs.values().all(|c| c.enable_local_indexer);
-                            break (all_local_indexer, configs.len());
-                        }
-                    }
+            // Spawn subscriber as background task (long-running)
+            if all_local_indexer {
+                // All workers have local_indexer enabled - use NATS Core
+                tracing::info!(
+                    "All {count} workers have local_indexer enabled, using NATS Core subscription"
+                );
 
-                    // Wait for changes to runtime_configs
-                    tokio::select! {
-                        _ = cancellation_token_clone.cancelled() => {
-                            tracing::debug!("Subscriber selection task cancelled");
-                            return;
-                        }
-                        result = runtime_configs_rx_clone.changed() => {
-                            if result.is_err() {
-                                tracing::debug!("Runtime configs channel closed");
-                                return;
-                            }
-                        }
-                    }
-                };
-
-                if all_local_indexer {
-                    // All workers have local_indexer enabled - use NATS Core
-                    tracing::info!(
-                        "All {count} workers have local_indexer enabled, using NATS Core subscription"
-                    );
-
+                tokio::spawn(async move {
                     if let Err(e) = start_kv_router_background_nats_core(
-                        component_clone.clone(),
+                        component_clone,
                         kv_indexer_clone.event_sender(),
                         kv_indexer_clone.remove_worker_sender(),
-                        cancellation_token_clone.clone(),
+                        cancellation_token_clone,
                         worker_query_client_clone,
                     )
                     .await
                     {
                         tracing::error!("Failed to start NATS Core subscriber: {e}");
                     }
-                } else {
-                    // Not all workers have local_indexer - use JetStream
-                    tracing::info!(
-                        "Not all workers have local_indexer enabled, using JetStream subscription"
-                    );
+                });
+            } else {
+                // Not all workers have local_indexer - use JetStream
+                tracing::info!(
+                    "Not all workers have local_indexer enabled, using JetStream subscription"
+                );
 
+                tokio::spawn(async move {
                     if let Err(e) = start_kv_router_background(
-                        component_clone.clone(),
+                        component_clone,
                         consumer_id,
                         kv_indexer_clone.event_sender(),
                         kv_indexer_clone.remove_worker_sender(),
@@ -428,7 +433,7 @@ impl KvRouter {
                         kv_router_config
                             .router_snapshot_threshold
                             .map(|_| kv_indexer_clone.snapshot_event_sender()),
-                        cancellation_token_clone.clone(),
+                        cancellation_token_clone,
                         kv_router_config.router_snapshot_threshold,
                         kv_router_config.router_reset_states,
                     )
@@ -436,8 +441,8 @@ impl KvRouter {
                     {
                         tracing::error!("Failed to start JetStream subscriber: {e}");
                     }
-                }
-            });
+                });
+            }
         }
 
         tracing::info!("KV Routing initialized");
