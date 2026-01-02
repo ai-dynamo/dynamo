@@ -198,6 +198,7 @@ impl KvConnectorLeaderRecorder {
             block_size: page_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),
+            worker_tracked_requests: HashSet::new(),
             iteration_counter: 0,
             kvbm_metrics,
         };
