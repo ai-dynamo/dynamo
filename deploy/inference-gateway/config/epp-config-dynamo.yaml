@@ -1,0 +1,39 @@
+# Dynamo EPP Configuration for Gateway API Inference Extension v1.2.1
+#
+# This configuration sets up the EPP to use Dynamo's KV-aware router for
+# intelligent worker selection based on KV cache overlap.
+#
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  # Required: tells EPP which profile to use (even if you only have one)
+  - type: single-profile-handler
+
+  # Picker: chooses the final endpoint after scoring
+  - name: picker
+    type: max-score-picker
+
+  # Dynamo PreRequest: sets up headers for worker routing
+  # NOTE: In v1.2.1, this plugin sets headers that can be used by
+  # gateway-level body transformation (e.g., BBR extension or Envoy filter)
+  # to inject nvext fields into the request body.
+  - name: dyn-pre
+    type: dynamo-inject-workerid
+    parameters: {}
+
+  # Dynamo KV-aware Scorer: calls Dynamo router FFI for worker selection
+  - name: dyn-kv
+    type: kv-aware-scorer
+
+  # Dynamo Cleanup: frees router bookkeeping when request completes
+  # NOTE: In v1.2.1, this uses the ResponseComplete interface instead of PostResponse
+  - name: dyn-cleanup
+    type: dynamo-cleanup
+
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: dyn-kv
+        weight: 1
+      - pluginRef: picker
+
