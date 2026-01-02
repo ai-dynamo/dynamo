@@ -53,7 +53,8 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
                 args.model_cache_pvc_path,
             )
         else:
-            config = config_modifier.update_model(config, args.model)
+            # Non-PVC: workers download from HF, so model_path == model_name
+            config = config_modifier.update_model(config, args.model, args.model)
         if args.dgd_image:
             logger.info(f"Updating DGD image to {args.dgd_image}")
             config = config_modifier.update_image(config, args.dgd_image)

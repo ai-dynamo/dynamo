@@ -97,7 +97,9 @@ class ConfigModifierProtocol(Protocol):
         ...
 
     @classmethod
-    def update_model(cls, config: dict, model_name: str) -> dict:
+    def update_model(
+        cls, config: dict, model_name: str, model_path: str | None = None
+    ) -> dict:
         ...
 
     @classmethod
@@ -126,6 +128,9 @@ class BaseConfigModifier:
 
     # Subclasses should override, e.g. "vllm" / "sglang" / "trtllm"
     BACKEND: str = ""
+    # Worker CLI arg name for model path / name. vLLM uses "--model"; others use "--model-path".
+    WORKER_MODEL_PATH_ARG: str = "--model-path"
+    WORKER_SERVED_MODEL_NAME_ARG: str = "--served-model-name"
 
     @classmethod
     def _normalize_model_path(cls, pvc_mount_path: str, pvc_path: str) -> str:
@@ -232,13 +237,80 @@ class BaseConfigModifier:
         cls._update_container_args_preserving_shell_form(c, _patch)
 
     @classmethod
-    def _update_workers_model_args(
-        cls, cfg: Config, model_name: str, model_path: str
+    def _apply_model_update_to_cfg(
+        cls,
+        cfg: Config,
+        model_name: str,
+        model_path: str,
+        patch_frontend: bool,
     ) -> None:
         """
-        Backend-specific worker arg updates; subclasses must implement.
+        Apply model updates to a validated DGD config object.
+
+        This is the shared implementation for both:
+        - update_model()
+        - update_model_from_pvc()
         """
-        raise NotImplementedError
+        # Update workers (prefill + decode) if present.
+        for sct in (SubComponentType.PREFILL, SubComponentType.DECODE):
+            try:
+                svc_name = get_service_name_by_type(cfg, cls.BACKEND, sct)
+            except Exception:
+                continue
+            if svc_name not in cfg.spec.services:
+                continue
+
+            service = cfg.spec.services[svc_name]
+            if not service.extraPodSpec or not service.extraPodSpec.mainContainer:
+                continue
+
+            c = service.extraPodSpec.mainContainer
+
+            def _patch(tokens: list[str]) -> list[str]:
+                tokens = set_argument_value(
+                    tokens, cls.WORKER_MODEL_PATH_ARG, model_path
+                )
+                tokens = set_argument_value(
+                    tokens, cls.WORKER_SERVED_MODEL_NAME_ARG, model_name
+                )
+                return tokens
+
+            cls._update_container_args_preserving_shell_form(c, _patch)
+
+        if patch_frontend:
+            cls._update_frontend_cli(cfg, model_name=model_name, model_path=model_path)
+
+    @classmethod
+    def update_model(
+        cls, config: dict, model_name: str, model_path: str | None = None
+    ) -> dict:
+        """
+        Unified model update API.
+
+        Args:
+            config: DGD config dict
+            model_name: served model name (HF id)
+            model_path: model path inside container (if using PVC/local path). If omitted,
+                defaults to model_name (HF download case for workers).
+        """
+        cfg = Config.model_validate(config)
+        if model_path is None:
+            model_path = model_name
+
+        # Frontend requires a real filesystem path (validate_model_path checks isdir),
+        # so only inject model args when `model_path` looks like a path.
+        patch_frontend = bool(
+            isinstance(model_path, str)
+            and (model_path.startswith("/") or model_path.startswith("."))
+        )
+        cls._apply_model_update_to_cfg(
+            cfg,
+            model_name=model_name,
+            model_path=model_path,
+            patch_frontend=patch_frontend,
+        )
+
+        return cfg.model_dump()
 
     @classmethod
     def update_model_from_pvc(
@@ -279,9 +351,12 @@ class BaseConfigModifier:
                     cfg.spec.services[svc_name], pvc_name, pvc_mount_path
                 )
 
-        cls._update_frontend_cli(cfg, model_name=model_name, model_path=model_path)
-        cls._update_workers_model_args(
-            cfg, model_name=model_name, model_path=model_path
+        # Patch workers + frontend with PVC model path.
+        cls._apply_model_update_to_cfg(
+            cfg,
+            model_name=model_name,
+            model_path=model_path,
+            patch_frontend=True,
         )
 
         return cfg.model_dump()
