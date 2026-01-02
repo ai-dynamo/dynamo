@@ -37,7 +37,7 @@ fi
 
 
 WORK_DIR=${MOUNT_DIR}
-LOG_DIR=$WORK_DIR/dynamo-disagg-bm-${ISL}-${OSL}
+LOG_DIR=$WORK_DIR/dynamo_disagg-bm-${ISL}-${OSL}
 SCRIPTS_DIR=${WORK_DIR}/
 mkdir -p ${LOG_DIR}
 echo "trying to submit job"
