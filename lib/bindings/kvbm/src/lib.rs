@@ -9,7 +9,7 @@ use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_runtime::{self as rs, RuntimeConfig, logging, traits::DistributedRuntimeProvider};
+use dynamo_runtime::{self as rs, RuntimeConfig, logging, traits::DistributedRuntimeProvider, config};
 
 use dynamo_llm::{self as llm_rs};
 
@@ -23,9 +23,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize tokio runtime first to avoid panics when OTEL_EXPORT_ENABLED=1
     init_pyo3_tokio_rt();
 
-    if std::env::var("OTEL_EXPORT_ENABLED")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    if config::env_is_truthy("OTEL_EXPORT_ENABLED")
     {
         // OTLP batch exporter needs runtime context to spawn background tasks
         let handle = get_current_tokio_handle();
