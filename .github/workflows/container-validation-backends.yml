@@ -200,7 +200,7 @@ jobs:
         platform:
           - { arch: amd64, runner: gpu-l40-amd64 }
           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: vllm-cu12 (${{ matrix.platform.arch }})
+    name: vllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Output Node Name
@@ -241,8 +241,8 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tags: ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-${{ matrix.platform.arch }}
-          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-vllm-cuda12-{0}', matrix.platform.arch) || '' }}
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-vllm-{0}', matrix.platform.arch) || '' }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
