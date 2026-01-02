@@ -3,7 +3,7 @@
 
 """Unit tests for Prometheus utilities."""
 
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -21,12 +21,7 @@ pytestmark = [
 class TestGetPrometheusExpfmt:
     """Test class for get_prometheus_expfmt function."""
 
-    @pytest.fixture
-    def sglang_registry(self):
-        """Create a mock registry with SGLang-style metrics."""
-        registry = Mock()
-
-        sample_metrics = """# HELP python_gc_objects_collected_total Objects collected during gc
+    SAMPLE_METRICS = """# HELP python_gc_objects_collected_total Objects collected during gc
 # TYPE python_gc_objects_collected_total counter
 python_gc_objects_collected_total{generation="0"} 123.0
 # HELP process_cpu_seconds_total Total user and system CPU time spent in seconds
@@ -43,25 +38,19 @@ sglang:generation_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct"} 75
 sglang:cache_hit_rate{model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0075
 """
 
-        def mock_generate_latest(reg):
-            return sample_metrics.encode("utf-8")
-
-        import dynamo.common.utils.prometheus
-
-        original_generate_latest = dynamo.common.utils.prometheus.generate_latest
-        dynamo.common.utils.prometheus.generate_latest = mock_generate_latest
-
-        yield registry
-
-        dynamo.common.utils.prometheus.generate_latest = original_generate_latest
-
-    def test_sglang_use_case(self, sglang_registry):
+    def test_sglang_use_case(self):
         """Test SGLang use case: filter to sglang: metrics and exclude python_/process_."""
-        result = get_prometheus_expfmt(
-            sglang_registry,
-            metric_prefix_filters=["sglang:"],
-            exclude_prefixes=["python_", "process_"],
-        )
+        registry = Mock()
+
+        with patch(
+            "prometheus_client.generate_latest",
+            return_value=self.SAMPLE_METRICS.encode("utf-8"),
+        ):
+            result = get_prometheus_expfmt(
+                registry,
+                metric_prefix_filters=["sglang:"],
+                exclude_prefixes=["python_", "process_"],
+            )
 
         # Should only contain sglang: metrics
         assert "sglang:prompt_tokens_total" in result
@@ -80,11 +69,13 @@ sglang:cache_hit_rate{model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0075
 
     def test_error_handling(self):
         """Test error handling when registry fails."""
-        # Create a registry that raises an exception
         bad_registry = Mock()
-        bad_registry.side_effect = Exception("Registry error")
 
-        result = get_prometheus_expfmt(bad_registry)
+        with patch(
+            "prometheus_client.generate_latest",
+            side_effect=Exception("Registry error"),
+        ):
+            result = get_prometheus_expfmt(bad_registry)
 
         # Should return empty string on error
         assert result == ""
