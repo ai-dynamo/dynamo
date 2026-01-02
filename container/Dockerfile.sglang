@@ -456,7 +456,6 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-USER dynamo
 # Copy attribution files
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 
@@ -473,13 +472,14 @@ COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
+# Install packages as root to ensure they go to system location (/usr/local/lib/python3.12/dist-packages)
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
         sglang==${SGLANG_VERSION}
 
-# Install common and test dependencies
+# Install common and test dependencies as root
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         --requirement /mnt/local_src/container/deps/requirements.txt \
@@ -495,6 +495,9 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
         nvidia-nccl-cu12==2.28.3 \
         nvidia-cudnn-cu12==9.16.0.29 \
         nvidia-cutlass-dsl==4.3.0
+
+# Switch back to dynamo user after package installations
+USER dynamo
 
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
@@ -517,9 +520,9 @@ USER dynamo
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
-ENV PATH=/home/dynamo/.local/bin:$PATH
+# Packages are installed system-wide in /usr/local/lib/python3.12/dist-packages
 # PYTHONPATH for root user access to dynamo packages (NVBug 5762058)
-ENV PYTHONPATH=/home/dynamo/.local/lib/python3.12/site-packages:$PYTHONPATH
+# ENV PYTHONPATH=/usr/local/lib/python3.12/dist-packages:$PYTHONPATH  # Not needed as this is default system path
 
 ###########################################################
 ########## Development (run.sh, runs as root user) ########
@@ -620,10 +623,10 @@ RUN mkdir -p /opt/dynamo/venv && \
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
-# Copy all packages from runtime stage user site-packages into venv
+# Copy all packages from runtime stage system site-packages into venv
 # This includes ai-dynamo-runtime, kubernetes, and all other dependencies
 # Use --no-preserve=mode so copied files inherit umask 002 (group-writable)
-RUN cp -r --no-preserve=mode /home/dynamo/.local/lib/python3.12/site-packages/* \
+RUN cp -r --no-preserve=mode /usr/local/lib/python3.12/dist-packages/* \
           /opt/dynamo/venv/lib/python3.12/site-packages/
 
 # Install maturin and uv into venv for development
