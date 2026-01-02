@@ -206,7 +206,7 @@ impl ModelManager {
             .chain(self.list_completions_models())
             .chain(self.list_embeddings_models())
             .chain(self.list_tensor_models())
-            .chain(self.list_prefill_models())
+            //.chain(self.list_prefill_models())
             .collect()
     }
 

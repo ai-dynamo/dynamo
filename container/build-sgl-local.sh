@@ -53,6 +53,14 @@ while [[ $# -gt 0 ]]; do
             PUSH=true
             shift
             ;;
+        --yes|--assume-yes)
+            ASSUME_YES=true
+            shift
+            ;;
+        --no-confirm)
+            NO_CONFIRM=true
+            shift
+            ;;
         --target)
             TARGET="$2"
             shift 2
@@ -69,11 +77,13 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --tag TAG              Docker image tag (required)"
+            echo "  --tag TAG              Local Docker image tag (optional; defaults based on arch/push)"
             echo "  --push                 Push to registry and use buildx with cache"
             echo "  --target TARGET         Build target/stage (optional)"
             echo "  --no-cache             Disable build cache"
             echo "  --platform PLATFORM    Target platform (e.g., linux/amd64)"
+            echo "  --yes, --assume-yes     Skip confirmation prompt"
+            echo "  --no-confirm            Skip confirmation prompt"
             echo "  --help, -h             Show this help message"
             echo ""
             echo "Environment variables:"
@@ -120,15 +130,22 @@ if [[ -z "${arch_suffix}" ]]; then
     esac
 fi
 
+# Determine tags:
+# - If user provided --tag with --push, use that with arch suffix for push
+# - If --push without --tag, use default push tag pattern
+# - For local-only builds without --tag, use a deterministic arch-specific tag
 if [[ "$PUSH" == "true" ]]; then
-    PUSH_TAG="nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-v1-${arch_suffix}"
-fi
-
-# Validate required arguments
-if [[ -z "$TAG" ]]; then
-    echo "Error: --tag is required"
-    echo "Run with --help for usage information"
-    exit 1
+    if [[ -n "$TAG" ]]; then
+        # User provided a custom tag; append arch suffix for push
+        PUSH_TAG="${TAG}-${arch_suffix}"
+        TAG="$PUSH_TAG"
+    else
+        # Default push tag
+        PUSH_TAG="nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-v1-${arch_suffix}"
+        TAG="$PUSH_TAG"
+    fi
+elif [[ -z "$TAG" ]]; then
+    TAG="ai-dynamo-sglang-local:${arch_suffix}"
 fi
 
 # Check for AWS credentials (warn if missing, but don't fail - user might not need S3 cache)
@@ -194,6 +211,7 @@ echo "Building Docker image: ${TAG}"
 if [[ "$PUSH" == "true" ]]; then
     echo "  Push tag: ${PUSH_TAG}"
 fi
+echo "  Arch suffix: ${arch_suffix}"
 echo "  SGLang image: ${SGLANG_IMAGE_TAG}"
 echo "  CUDA version: ${CUDA_VERSION}"
 echo "  SCCACHE bucket: ${SCCACHE_BUCKET}"
@@ -208,6 +226,25 @@ if [[ -z "$NO_CACHE" ]]; then
     echo "  Cache: ${CACHE_IMAGE}"
 fi
 echo ""
+
+ASSUME_YES="${ASSUME_YES:-false}"
+NO_CONFIRM="${NO_CONFIRM:-false}"
+if [[ "$PUSH" == "true" && "$NO_CONFIRM" != "true" && "$ASSUME_YES" != "true" && "${YES:-0}" != "1" ]]; then
+    if [[ -t 0 ]]; then
+        echo "About to push:"
+        echo "  - ${PUSH_TAG}"
+        echo "Using cache:"
+        echo "  - ${CACHE_IMAGE}"
+        read -r -p "Proceed? [y/N] " reply
+        case "${reply}" in
+            y|Y|yes|YES) ;;
+            *) echo "Aborted." ; exit 1 ;;
+        esac
+    else
+        echo "Non-interactive shell detected; refusing to push without --yes (or YES=1)."
+        exit 1
+    fi
+fi
 
 if [[ "$PUSH" == "true" ]]; then
     # Use buildx for pushing with cache support
