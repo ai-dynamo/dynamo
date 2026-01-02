@@ -14,15 +14,34 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Dynamo EPP - Custom Endpoint Picker Plugin for NVIDIA Dynamo
+//
+// This EPP integrates with the Gateway API Inference Extension to provide
+// KV-aware routing for Dynamo inference backends.
+//
+// # Header-Only Routing
+//
+// The Dynamo plugins communicate routing decisions via HTTP headers:
+//
+//   - x-worker-instance-id: Selected worker ID
+//   - x-prefiller-host-port: Prefill worker (disagg mode)
+//   - x-dynamo-token-data: JSON token IDs for KV cache
+//   - x-dynamo-routing-mode: "aggregated" or "disaggregated"
+//   - x-dynamo-backend-instance-id: Worker ID (aggregated)
+//   - x-dynamo-prefill-worker-id: Prefill worker (disagg)
+//   - x-dynamo-decode-worker-id: Decode worker (disagg)
+//
+// Backend workers must read these headers for routing decisions.
 package main
 
 import (
 	"os"
 
 	ctrl "sigs.k8s.io/controller-runtime"
-
-	"sigs.k8s.io/gateway-api-inference-extension/cmd/epp/runner"
 	eppplugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
+
+	// Dynamo runner (registers built-in GAIE plugins)
+	dynamorunner "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/runner"
 
 	// Dynamo plugins
 	dyncleanup "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_cleanup"
@@ -31,13 +50,19 @@ import (
 )
 
 func main() {
-	// Register Dynamo custom plugins
-	eppplugins.Register("dynamo-inject-workerid", dynprereq.InjectWorkerIDPreRequestFactory)
+	// Register built-in GAIE plugins
+	dynamorunner.RegisterInTreePlugins()
+
+	// Register Dynamo custom plugins:
+	// - kv-aware-scorer: Calls Dynamo router to select workers based on KV cache
+	// - dynamo-inject-workerid: Normalizes routing headers for backend consumption
+	// - dynamo-cleanup: Cleans up router state after request completion
 	eppplugins.Register("kv-aware-scorer", dynscorer.KVAwareScorerFactory)
+	eppplugins.Register("dynamo-inject-workerid", dynprereq.InjectWorkerIDPreRequestFactory)
 	eppplugins.Register("dynamo-cleanup", dyncleanup.DynamoCleanupPluginFactory)
 
-	if err := runner.NewRunner().Run(ctrl.SetupSignalHandler()); err != nil {
+	// Run the EPP
+	if err := dynamorunner.NewRunner().Run(ctrl.SetupSignalHandler()); err != nil {
 		os.Exit(1)
 	}
 }
-

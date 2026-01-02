@@ -13,10 +13,9 @@ plugins:
   - name: picker
     type: max-score-picker
 
-  # Dynamo PreRequest: sets up headers for worker routing
-  # NOTE: In v1.2.1, this plugin sets headers that can be used by
-  # gateway-level body transformation (e.g., BBR extension or Envoy filter)
-  # to inject nvext fields into the request body.
+  # Dynamo PreRequest: normalizes routing headers for backend consumption
+  # NOTE: This plugin uses a header-only approach. Backend workers should
+  # read x-dynamo-* headers to extract routing information.
   - name: dyn-pre
     type: dynamo-inject-workerid
     parameters: {}
@@ -26,7 +25,6 @@ plugins:
     type: kv-aware-scorer
 
   # Dynamo Cleanup: frees router bookkeeping when request completes
-  # NOTE: In v1.2.1, this uses the ResponseComplete interface instead of PostResponse
   - name: dyn-cleanup
     type: dynamo-cleanup
 

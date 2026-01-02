@@ -14,6 +14,24 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package dynamo_inject_workerid provides a PreRequest plugin that processes
+// and normalizes Dynamo routing headers before forwarding to the backend.
+//
+// # Header-Only Approach
+//
+// This plugin works with the KV scorer to enable Dynamo routing via HTTP headers.
+// The backend workers must read these headers to extract routing information:
+//
+//   - x-worker-instance-id: The selected worker ID (decode worker in disagg mode)
+//   - x-prefiller-host-port: The prefill worker ID (only in disagg mode)
+//   - x-dynamo-token-data: JSON-encoded token IDs for KV cache routing
+//   - x-dynamo-routing-mode: "aggregated" or "disaggregated"
+//   - x-dynamo-backend-instance-id: Worker ID in aggregated mode
+//   - x-dynamo-prefill-worker-id: Prefill worker in disagg mode
+//   - x-dynamo-decode-worker-id: Decode worker in disagg mode
+//
+// The backend should parse these headers and use them for routing decisions
+// instead of relying on nvext body fields.
 package dynamo_inject_workerid
 
 import (
@@ -28,11 +46,19 @@ import (
 )
 
 const (
-	typeString            = "dynamo-inject-workerid"
-	pluginName            = "dynamo-inject-workerid"
+	typeString = "dynamo-inject-workerid"
+	pluginName = "dynamo-inject-workerid"
+
+	// Headers set by the KV scorer and processed by this plugin
 	WorkerIDHeader        = "x-worker-instance-id"
 	PrefillWorkerIDHeader = "x-prefiller-host-port"
 	TokenDataHeaderKey    = "x-dynamo-token-data"
+
+	// Additional headers set by this plugin for backend consumption
+	RoutingModeHeader       = "x-dynamo-routing-mode"
+	BackendInstanceIDHeader = "x-dynamo-backend-instance-id"
+	PrefillWorkerHeader     = "x-dynamo-prefill-worker-id"
+	DecodeWorkerHeader      = "x-dynamo-decode-worker-id"
 )
 
 var _ plugins.Plugin = (*InjectWorkerIDPreRequest)(nil)
@@ -59,14 +85,15 @@ func InjectWorkerIDPreRequestFactory(name string, _ json.RawMessage, _ plugins.H
 
 func (p *InjectWorkerIDPreRequest) TypedName() plugins.TypedName { return p.typedName }
 
-// PreRequest is called after scheduling and before the request is sent to the model server.
-// In v1.2.1, this interface no longer receives targetPort and no longer has direct body mutation.
-// The request body mutation must happen through a different mechanism (e.g., BBR extension or
-// custom request transformation).
+// PreRequest processes headers set by the KV scorer and adds normalized
+// headers that the backend can easily consume.
 //
-// This plugin now focuses on ensuring headers are properly set for downstream processing.
-// The actual body mutation (adding nvext fields) needs to be handled at the proxy/gateway level
-// based on these headers.
+// The backend should read:
+//   - x-dynamo-routing-mode: "aggregated" or "disaggregated"
+//   - x-dynamo-backend-instance-id: Worker ID (aggregated mode)
+//   - x-dynamo-prefill-worker-id: Prefill worker (disagg mode)
+//   - x-dynamo-decode-worker-id: Decode worker (disagg mode)
+//   - x-dynamo-token-data: JSON array of token IDs
 func (p *InjectWorkerIDPreRequest) PreRequest(
 	_ context.Context,
 	req *schedtypes.LLMRequest,
@@ -79,46 +106,38 @@ func (p *InjectWorkerIDPreRequest) PreRequest(
 		req.Headers = map[string]string{}
 	}
 
-	// Handle worker instance ID - ensure it's trimmed
+	// Get worker IDs from scorer (these are set by kv-aware-scorer)
 	wid := strings.TrimSpace(req.Headers[WorkerIDHeader])
+	prefillWid := strings.TrimSpace(req.Headers[PrefillWorkerIDHeader])
+
+	// Normalize the primary headers
 	if wid != "" {
 		req.Headers[WorkerIDHeader] = wid
 	}
-
-	// Handle prefill worker ID - ensure it's trimmed
-	prefillWid := strings.TrimSpace(req.Headers[PrefillWorkerIDHeader])
 	if prefillWid != "" {
 		req.Headers[PrefillWorkerIDHeader] = prefillWid
 	}
 
-	// In v1.2.1, we cannot directly mutate the request body from PreRequest plugins.
-	// The body mutation for nvext fields (backend_instance_id, prefill_worker_id, decode_worker_id, token_data)
-	// must be handled by a separate mechanism such as:
-	// 1. A custom BBR (Body-Based Router) extension
-	// 2. Gateway-level request transformation
-	// 3. An Envoy filter that reads these headers and modifies the body
-	//
-	// We set special headers that can be read by such mechanisms:
-	// - x-worker-instance-id: The selected worker ID (decode worker in disagg mode)
-	// - x-prefiller-host-port: The prefill worker ID (only in disagg mode)
-	// - x-dynamo-token-data: JSON-encoded token IDs for KV cache routing
-	//
-	// Additionally, we set headers to indicate the routing mode:
-	if prefillWid != "" && prefillWid != wid {
-		// Disaggregated mode
-		req.Headers["x-dynamo-routing-mode"] = "disaggregated"
+	// Set routing mode and normalized worker headers for easy backend consumption
+	if prefillWid != "" && prefillWid != wid && wid != "" {
+		// Disaggregated mode: separate prefill and decode workers
+		req.Headers[RoutingModeHeader] = "disaggregated"
+
 		if prefillWidUint, err := strconv.ParseUint(prefillWid, 10, 64); err == nil {
-			req.Headers["x-dynamo-prefill-worker-id"] = strconv.FormatUint(prefillWidUint, 10)
+			req.Headers[PrefillWorkerHeader] = strconv.FormatUint(prefillWidUint, 10)
 		}
 		if widUint, err := strconv.ParseUint(wid, 10, 64); err == nil {
-			req.Headers["x-dynamo-decode-worker-id"] = strconv.FormatUint(widUint, 10)
+			req.Headers[DecodeWorkerHeader] = strconv.FormatUint(widUint, 10)
 		}
 	} else if wid != "" {
-		// Aggregated mode
-		req.Headers["x-dynamo-routing-mode"] = "aggregated"
+		// Aggregated mode: single worker handles both prefill and decode
+		req.Headers[RoutingModeHeader] = "aggregated"
+
 		if widUint, err := strconv.ParseUint(wid, 10, 64); err == nil {
-			req.Headers["x-dynamo-backend-instance-id"] = strconv.FormatUint(widUint, 10)
+			req.Headers[BackendInstanceIDHeader] = strconv.FormatUint(widUint, 10)
 		}
 	}
-}
 
+	// Token data header is already set by the scorer, just pass it through
+	// Backend should parse: JSON.parse(headers["x-dynamo-token-data"])
+}

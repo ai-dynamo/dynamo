@@ -384,20 +384,45 @@ make all
 | `make all-push` | Build Dynamo lib + Docker image + push to registry |
 | `make all-kind` | Build Dynamo lib + Docker image + load to kind |
 
-### Body Mutation Strategy for v1.2.1
+### Header-Only Routing for v1.2.1
 
-Since v1.2.1 removes `RequestBodyMutator`, the `nvext` field injection (for `backend_instance_id`, `prefill_worker_id`, etc.) must be handled by:
+In v1.2.1, the EPP uses a **header-only approach** for communicating routing decisions.
+The plugins set HTTP headers that are forwarded to the backend workers.
 
-1. **BBR Extension**: Configure the Body-Based Router to inject fields based on headers
-2. **Envoy Filter**: Use a custom Envoy filter to modify request bodies
-3. **Gateway Transformation**: Use gateway-level request transformation
+**Backend workers must read these headers** to extract routing information instead of
+relying on `nvext` body fields.
 
-The `dynamo-inject-workerid` plugin sets the following headers for body transformation:
+#### Headers Set by Dynamo Plugins
 
-| Header | Description |
-|--------|-------------|
-| `x-dynamo-routing-mode` | `aggregated` or `disaggregated` |
-| `x-dynamo-backend-instance-id` | Worker ID (aggregated mode) |
-| `x-dynamo-prefill-worker-id` | Prefill worker ID (disaggregated mode) |
-| `x-dynamo-decode-worker-id` | Decode worker ID (disaggregated mode) |
-| `x-dynamo-token-data` | JSON-encoded token IDs |
+| Header | Description | Set By |
+|--------|-------------|--------|
+| `x-worker-instance-id` | Primary worker ID | kv-aware-scorer |
+| `x-prefiller-host-port` | Prefill worker (disagg mode) | kv-aware-scorer |
+| `x-dynamo-token-data` | JSON-encoded token IDs | kv-aware-scorer |
+| `x-dynamo-routing-mode` | `aggregated` or `disaggregated` | dynamo-inject-workerid |
+| `x-dynamo-backend-instance-id` | Worker ID (aggregated mode) | dynamo-inject-workerid |
+| `x-dynamo-prefill-worker-id` | Prefill worker ID (disagg mode) | dynamo-inject-workerid |
+| `x-dynamo-decode-worker-id` | Decode worker ID (disagg mode) | dynamo-inject-workerid |
+
+#### Backend Integration
+
+Backend workers should parse these headers:
+
+```python
+# Python example for backend worker
+def extract_routing_info(request):
+    headers = request.headers
+    routing_mode = headers.get("x-dynamo-routing-mode", "aggregated")
+
+    if routing_mode == "disaggregated":
+        prefill_worker = headers.get("x-dynamo-prefill-worker-id")
+        decode_worker = headers.get("x-dynamo-decode-worker-id")
+    else:
+        worker_id = headers.get("x-dynamo-backend-instance-id")
+
+    token_data_json = headers.get("x-dynamo-token-data")
+    if token_data_json:
+        token_ids = json.loads(token_data_json)
+```
+
+This approach avoids the need for body mutation while still enabling KV-aware routing.
