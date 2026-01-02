@@ -19,7 +19,9 @@ from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload,
     chat_payload_default,
+    chat_payload_with_logprobs,
     completion_payload_default,
+    completion_payload_with_logprobs,
     embedding_payload,
     embedding_payload_default,
     metric_payload_default,
@@ -241,6 +243,33 @@ sglang_configs = {
         ],
         request_payloads=[
             completion_payload_default(),
+        ],
+    ),
+    "aggregated_logprobs": SGLangConfig(
+        name="aggregated_logprobs",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(240),  # 3x measured time + download time
+        ],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_with_logprobs(
+                repeat_count=2,
+                expected_response=["AI", "knock", "joke"],
+                max_tokens=30,
+                temperature=0.0,
+                top_logprobs=3,
+            ),
+            completion_payload_with_logprobs(
+                repeat_count=2,
+                expected_response=["AI", "knock", "joke"],
+                max_tokens=30,
+                temperature=0.0,
+                logprobs=5,
+            ),
         ],
     ),
 }
