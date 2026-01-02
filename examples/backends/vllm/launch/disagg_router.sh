@@ -12,7 +12,7 @@ MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
 
 # Explicitly set NATS server for KV event publishing
-export NATS_SERVER="nats://localhost:4222"
+export NATS_SERVER="${NATS_SERVER:-nats://localhost:4222}"
 
 # Start frontend with KV routing
 # The frontend will automatically detect prefill workers and activate an internal prefill router
