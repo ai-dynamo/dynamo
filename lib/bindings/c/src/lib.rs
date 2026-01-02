@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use dynamo_llm::{
     discovery::{KvWorkerMonitor, ModelWatcher},
-    kv_router::{indexer::compute_block_hash_for_seq, protocols::*, publisher::KvEventPublisher},
+    kv_router::{protocols::*, publisher::KvEventPublisher},
 };
 use dynamo_runtime::{DistributedRuntime, Worker};
 static WK: OnceCell<Worker> = OnceCell::new();
@@ -1475,6 +1475,7 @@ pub async fn create_worker_selection_pipeline_chat(
     >(
         &card_with_local_files,
         &client,
+        model_manager.clone(),
         router_mode,
         worker_monitor,
         chooser,
