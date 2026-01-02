@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 import contextlib
@@ -113,7 +113,7 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "flags": ["--request-plane"],
         "type": str,
         "choices": ["nats", "http", "tcp"],
-        "default": os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        "default": os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         "help": "Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     },
     "enable-local-indexer": {

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 [workspace]
@@ -7,7 +7,7 @@
 
 [package]
 name = "dynamo-py3"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 authors = ["NVIDIA"]
 license = "Apache-2.0"

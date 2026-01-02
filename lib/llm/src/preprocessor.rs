@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! The Preprocessor consists of the following modules
@@ -31,7 +31,7 @@ use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
-    MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder,
+    MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
 };
 use crate::tokenizers::Encoding;
 
@@ -237,11 +237,16 @@ impl OpenAIPreprocessor {
         builder.output_options(request.extract_output_options()?);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
-        builder.estimated_prefix_hit_num_blocks(None);
-        // Extract backend_instance_id and extra_fields from nvext if present
+        // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
-            builder.backend_instance_id(nvext.backend_instance_id);
-            builder.extra_fields(nvext.extra_fields.clone());
+            // Build routing hints from nvext fields
+            let routing = RoutingHints {
+                backend_instance_id: nvext.backend_instance_id,
+                prefill_worker_id: nvext.prefill_worker_id,
+                decode_worker_id: nvext.decode_worker_id,
+                dp_rank: None, // dp_rank is set later in the pipeline
+            };
+            builder.routing(Some(routing));
         }
 
         Ok(builder)
@@ -343,11 +348,10 @@ impl OpenAIPreprocessor {
         #[cfg(feature = "media-nixl")]
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
-            let results = futures::future::join_all(
-                fetch_tasks
-                    .iter()
-                    .map(|(_, content_part)| loader.fetch_and_decode_media_part(content_part)),
-            )
+            let media_io_kwargs = request.media_io_kwargs();
+            let results = futures::future::join_all(fetch_tasks.iter().map(|(_, content_part)| {
+                loader.fetch_and_decode_media_part(content_part, media_io_kwargs)
+            }))
             .await;
 
             for ((type_str, _), result) in fetch_tasks.into_iter().zip(results.into_iter()) {
@@ -940,7 +944,10 @@ impl
         let response_generator = request.response_generator(context.id().to_string());
 
         // convert the chat completion request to a common completion request
-        let (common_request, annotations) = self.preprocess_request(&request).await?;
+        let (mut common_request, annotations) = self.preprocess_request(&request).await?;
+
+        // Attach the timing tracker to the request so downstream components can record metrics
+        common_request.tracker = response_generator.tracker();
 
         let mut response_generator = Box::new(response_generator);
 
@@ -1089,7 +1096,10 @@ impl
         let annotations = self.gather_tokens(&request, &mut builder, None)?;
         self.gather_multi_modal_data(&request, &mut builder).await?;
 
-        let common_request = builder.build()?;
+        let mut common_request = builder.build()?;
+
+        // Attach the timing tracker to the request so downstream components can record metrics
+        common_request.tracker = response_generator.tracker();
 
         // update isl
         response_generator.update_isl(common_request.token_ids.len() as u32);

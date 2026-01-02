@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
@@ -171,7 +171,12 @@ trtllm_configs = {
         name="disaggregated_multimodal",
         directory=trtllm_dir,
         script_name="disagg_multimodal.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.multimodal],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.nightly,
+        ],
         model="Qwen/Qwen2-VL-7B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=900,
@@ -185,6 +190,7 @@ trtllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
+            pytest.mark.post_merge,
             pytest.mark.timeout(
                 480
             ),  # 3x measured time (83.85s) + download time (210s) for 7B model
@@ -211,16 +217,21 @@ def trtllm_config_test(request):
 
 @pytest.mark.trtllm
 @pytest.mark.e2e
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_deployment(
     trtllm_config_test,
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
+    num_system_ports,
     predownload_models,
 ):
     """
     Test dynamo deployments with different configurations.
     """
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     # Use per-test ports so tests can run safely under pytest-xdist.
     config = dataclasses.replace(
         trtllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
@@ -239,6 +250,7 @@ def test_deployment(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
+@pytest.mark.pre_merge
 @pytest.mark.timeout(660)  # 3x measured time (159.68s) + download time (180s)
 def test_chat_only_aggregated_with_test_logits_processor(
     request,

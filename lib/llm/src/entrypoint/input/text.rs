@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::request_template::RequestTemplate;
@@ -114,6 +114,7 @@ async fn main_loop(
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            media_io_kwargs: None,
             unsupported_fields: Default::default(),
         };
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
@@ -83,7 +83,7 @@ vllm_configs = {
         name="aggregated_logprobs",
         directory=vllm_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[pytest.mark.gpu_1, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_with_logprobs(
@@ -125,6 +125,7 @@ vllm_configs = {
         script_name="agg_lmcache_multiproc.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
@@ -227,6 +228,32 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "multimodal_agg_qwen2vl_2b_epd": VLLMConfig(
+        name="multimodal_agg_qwen2vl_2b_epd",
+        directory=vllm_dir,
+        script_name="agg_multimodal_epd.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen2-VL-2B-Instruct", "--single-gpu"],
+        request_payloads=[
+            chat_payload(
+                [
+                    {
+                        "type": "text",
+                        "text": "What colors are in the following image? Respond only with the colors.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["purple"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
     "multimodal_agg_llava_epd": VLLMConfig(
         name="multimodal_agg_llava_epd",
         directory=vllm_dir,
@@ -284,7 +311,7 @@ vllm_configs = {
         name="multimodal_agg_qwen",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
         delayed_start=0,
@@ -312,7 +339,8 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
         marks=[
-            pytest.mark.gpu_2,
+            pytest.mark.gpu_1,
+            pytest.mark.nightly,
             # https://github.com/ai-dynamo/dynamo/issues/4501
             pytest.mark.xfail(strict=False),
         ],
@@ -374,7 +402,7 @@ vllm_configs = {
         name="multimodal_audio_agg",
         directory="/workspace/examples/multimodal",
         script_name="audio_agg.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="Qwen/Qwen2-Audio-7B-Instruct",
         delayed_start=0,
         script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
@@ -402,7 +430,7 @@ vllm_configs = {
         name="aggregated_toolcalling",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.multimodal],
+        marks=[pytest.mark.gpu_2, pytest.mark.multimodal, pytest.mark.nightly],
         model="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
         script_args=[
             "--model",
@@ -482,6 +510,7 @@ vllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.post_merge,
             pytest.mark.timeout(
                 420
             ),  # 3x estimated time (60s) + download time (240s) for 7B model
@@ -568,7 +597,6 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.nightly
 def test_serve_deployment(
     vllm_config_test,
     request,
@@ -589,9 +617,13 @@ def test_serve_deployment(
 @pytest.mark.vllm
 @pytest.mark.e2e
 @pytest.mark.gpu_2
+@pytest.mark.nightly
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
 def test_multimodal_b64(
-    request, runtime_services_dynamic_ports, dynamo_dynamic_ports, predownload_models
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_models,
 ):
     """
     Test multimodal inference with base64 url passthrough.
@@ -682,7 +714,7 @@ def lora_chat_payload(
 @pytest.mark.gpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
-@pytest.mark.nightly
+@pytest.mark.post_merge
 def test_lora_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -737,13 +769,15 @@ def test_lora_aggregated(
 @pytest.mark.gpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
-@pytest.mark.nightly
+@pytest.mark.post_merge
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_lora_aggregated_router(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
     minio_lora_service,
     dynamo_dynamic_ports,
+    num_system_ports,
 ):
     """
     Test LoRA inference with aggregated vLLM deployment using KV router.
@@ -754,6 +788,9 @@ def test_lora_aggregated_router(
     3. Loads the LoRA adapter on both workers via system API
     4. Runs inference with the LoRA model, verifying KV cache routing
     """
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     minio_config: MinioLoraConfig = minio_lora_service
 
     # Create payloads that load LoRA on both workers and test inference

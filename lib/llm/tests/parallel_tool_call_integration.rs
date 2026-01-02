@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Integration test for parallel tool calling functionality
@@ -91,6 +91,7 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
         common: CommonExt::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
         unsupported_fields: Default::default(),
     }
 }

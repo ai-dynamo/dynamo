@@ -1,11 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Based on https://github.com/64bit/async-openai/ by Himanshu Neema
 // Original Copyright (c) 2022 Himanshu Neema
 // Licensed under MIT License (see ATTRIBUTIONS-Rust.md)
 //
-// Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+// Modifications Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // Licensed under Apache 2.0
 
 use std::{collections::HashMap, pin::Pin};
@@ -13,6 +13,7 @@ use std::{collections::HashMap, pin::Pin};
 use derive_builder::Builder;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::error::OpenAIError;
 
@@ -89,7 +90,7 @@ where
     deserializer.deserialize_option(StrictBoolVisitor)
 }
 
-#[derive(Clone, Serialize, Deserialize, Default, Debug, Builder, PartialEq)]
+#[derive(ToSchema, Clone, Serialize, Deserialize, Default, Debug, Builder, PartialEq)]
 #[builder(name = "CreateCompletionRequestArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]
@@ -197,7 +198,7 @@ pub struct CreateCompletionRequest {
     pub seed: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
+#[derive(ToSchema, Debug, Deserialize, Clone, PartialEq, Serialize)]
 pub struct CreateCompletionResponse {
     /// A unique identifier for the completion.
     pub id: String,

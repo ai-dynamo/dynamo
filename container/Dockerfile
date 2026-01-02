@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.10.0
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # NOTE FOR dynamo_base AND wheel_builder STAGES:
@@ -52,6 +52,7 @@ ARG SCCACHE_REGION=""
 ARG NIXL_UCX_REF
 ARG NIXL_REF
 ARG NIXL_GDRCOPY_REF
+ARG NIXL_LIBFABRIC_REF
 
 ##################################
 ########## Base Image ############
@@ -155,7 +156,11 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         libibumad \
         libibumad-devel \
         librdmacm-devel \
-        numactl-devel
+        numactl-devel \
+        # Libfabric support
+        hwloc \
+        hwloc-devel
+
 
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
@@ -214,6 +219,7 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
 
 # Build FFmpeg from source
+# Do not delete the source tarball for legal reasons
 ARG FFMPEG_VERSION=7.1
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
@@ -231,6 +237,8 @@ if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     cd ffmpeg-${FFMPEG_VERSION} && \
     ./configure \
         --prefix=/usr/local \
+        --disable-gpl \
+        --disable-nonfree \
         --disable-programs \
         --disable-doc \
         --disable-static \
@@ -247,7 +255,8 @@ if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     make install && \
     /tmp/use-sccache.sh show-stats "FFMPEG" && \
     ldconfig && \
-    rm -rf /tmp/ffmpeg-${FFMPEG_VERSION}*; \
+    mkdir -p /usr/local/src/ffmpeg && \
+    mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/; \
 fi
 
 # Build and install UCX
@@ -285,6 +294,37 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
      echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
      ldconfig
 
+ARG NIXL_LIBFABRIC_REF
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
+    cd /usr/local/src && \
+    git clone https://github.com/ofiwg/libfabric.git && \
+    cd libfabric && \
+    git checkout $NIXL_LIBFABRIC_REF && \
+    ./autogen.sh && \
+    ./configure --prefix="/usr/local/libfabric" \
+                --disable-verbs \
+                --disable-psm3 \
+                --disable-opx \
+                --disable-usnic \
+                --disable-rstream \
+                --enable-efa \
+                --with-cuda=/usr/local/cuda \
+                --enable-cuda-dlopen \
+                --with-gdrcopy \
+                --enable-gdrcopy-dlopen && \
+    make -j$(nproc) && \
+    make install && \
+    /tmp/use-sccache.sh show-stats "LIBFABRIC" && \
+    echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
+    ldconfig
+
 # build and install nixl
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
@@ -301,7 +341,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
     -Dcudapath_lib="/usr/local/cuda/lib64" \
     -Dcudapath_inc="/usr/local/cuda/include" \
-    -Ducx_path="/usr/local/ucx" && \
+    -Ducx_path="/usr/local/ucx" \
+    -Dlibfabric_path="/usr/local/libfabric" && \
     cd build && \
     ninja && \
     ninja install && \
@@ -407,6 +448,7 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/; \
     cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/; \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/lib/pkgconfig/; \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/; \
     true # in case ffmpeg not enabled
 
 # Copy built artifacts

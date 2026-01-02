@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
@@ -74,7 +74,7 @@ pub struct BackendOutput {
 ///
 /// This is the minimal raw output from the LLM engine. The Backend may then apply multiple
 /// levels of post-processing before the BackendOutput is returns
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct LLMEngineOutput {
     // new token_ids
     pub token_ids: Vec<TokenIdType>,

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use async_trait::async_trait;
@@ -186,6 +186,7 @@ fn create_chat_request(include_usage: Option<bool>) -> NvCreateChatCompletionReq
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -423,6 +424,7 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
         unsupported_fields: Default::default(),
     }
 }
