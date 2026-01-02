@@ -278,7 +278,9 @@ class GPUMemoryServiceMemorySaverImpl:
         if tag is None or self._is_weights_tag(tag):
             if self._allocator is not None and not self._allocator.is_sleeping:
                 self._allocator.sleep()
-                logger.info("[GPU Memory Service Hybrid] Paused weights (VA-stable sleep)")
+                logger.info(
+                    "[GPU Memory Service Hybrid] Paused weights (VA-stable sleep)"
+                )
 
         # Handle other tags via torch mempool mode
         if tag is None or not self._is_weights_tag(tag):
@@ -289,6 +291,8 @@ class GPUMemoryServiceMemorySaverImpl:
                     "[GPU Memory Service Hybrid] Paused via torch mempool mode (tag=%s)",
                     tag,
                 )
+
+        torch.cuda.synchronize()
 
     def resume(self, tag: Optional[str]):
         """Resume memory for the specified tag.
@@ -304,7 +308,9 @@ class GPUMemoryServiceMemorySaverImpl:
         if tag is None or self._is_weights_tag(tag):
             if self._allocator is not None and self._allocator.is_sleeping:
                 self._allocator.wake()
-                logger.info("[GPU Memory Service Hybrid] Resumed weights (VA-stable wake)")
+                logger.info(
+                    "[GPU Memory Service Hybrid] Resumed weights (VA-stable wake)"
+                )
 
         # Handle other tags via torch mempool mode
         if tag is None or not self._is_weights_tag(tag):
@@ -315,6 +321,8 @@ class GPUMemoryServiceMemorySaverImpl:
                     "[GPU Memory Service Hybrid] Resumed via torch mempool mode (tag=%s)",
                     tag,
                 )
+
+        torch.cuda.synchronize()
 
     def get_cpu_backup(self, x):
         """Get CPU backup for a tensor.
@@ -359,7 +367,9 @@ class GPUMemoryServiceMemorySaverImpl:
             return
 
         if self._allocator is None:
-            raise RuntimeError("Allocator is None in WRITE mode - this should not happen")
+            raise RuntimeError(
+                "Allocator is None in WRITE mode - this should not happen"
+            )
 
         from gpu_memory_service.extensions import _rpc_cumem_ext as cumem
         from gpu_memory_service.tensor import register_module_tensors

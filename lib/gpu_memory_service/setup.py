@@ -34,7 +34,6 @@ def _find_cuda_home():
 def _get_torch_include_dirs():
     """Get PyTorch include directories for building extensions that use torch headers."""
     try:
-        import torch
         from torch.utils.cpp_extension import include_paths
 
         return include_paths()

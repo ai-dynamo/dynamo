@@ -517,37 +517,14 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
         Order of operations:
         1. Wake engine - restore GPU memory
-        2. Re-register model card - publish model metadata
-        3. Re-register endpoint instance - allow frontend to route requests here again
+        2. Re-register endpoint instance - allow frontend to route requests here again
         """
         tags = body.get("tags")
         try:
             # Step 1: Wake engine first - must be ready before accepting requests
             await engine_client.wake_up(tags)
 
-            # Step 2: Re-register the model card
-            try:
-                model_input = (
-                    ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-                )
-                await register_vllm_model(
-                    model_input,
-                    ModelType.Prefill,
-                    generate_endpoint,
-                    config,
-                    engine_client,
-                    vllm_config,
-                    migration_limit=0,  # Prefill doesn't support migration
-                )
-                logger.info(
-                    "[Wake] Re-registered model to discovery - frontend can route here again"
-                )
-            except Exception as reg_err:
-                logger.warning(
-                    f"[Wake] Failed to re-register model to discovery: {reg_err}"
-                )
-
-            # Step 3: Re-register endpoint instance to discovery so frontend can route to us again
+            # Step 2: Re-register endpoint instance to discovery so frontend can route to us again
             try:
                 await register_endpoint_instance(generate_endpoint)
                 logger.info(
@@ -730,38 +707,14 @@ async def init(runtime: DistributedRuntime, config: Config):
 
         Order of operations:
         1. Wake engine - restore GPU memory
-        2. Re-register model card - publish model metadata
-        3. Re-register endpoint instance - allow frontend to route requests here again
+        2. Re-register endpoint instance - allow frontend to route requests here again
         """
         tags = body.get("tags")
         try:
             # Step 1: Wake engine first - must be ready before accepting requests
             await engine_client.wake_up(tags)
 
-            # Step 2: Re-register the model card
-            try:
-                model_input = (
-                    ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-                )
-                model_type = parse_endpoint_types(config.dyn_endpoint_types)
-                await register_vllm_model(
-                    model_input,
-                    model_type,
-                    generate_endpoint,
-                    config,
-                    engine_client,
-                    vllm_config,
-                    migration_limit=config.migration_limit,
-                )
-                logger.info(
-                    "[Wake] Re-registered model to discovery - frontend can route here again"
-                )
-            except Exception as reg_err:
-                logger.warning(
-                    f"[Wake] Failed to re-register model to discovery: {reg_err}"
-                )
-
-            # Step 3: Re-register endpoint instance to discovery so frontend can route to us again
+            # Step 2: Re-register endpoint instance to discovery so frontend can route to us again
             try:
                 await register_endpoint_instance(generate_endpoint)
                 logger.info(

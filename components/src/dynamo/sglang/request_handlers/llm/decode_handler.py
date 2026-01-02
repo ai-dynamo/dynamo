@@ -101,6 +101,24 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Raises:
             RuntimeError: If no bootstrap info received from prefill worker.
         """
+        # TODO: remove
+        # Check if engine is paused (e.g., during sleep/wake) and reject immediately
+        # This prevents requests from hanging indefinitely waiting for is_pause to become False
+        # Race condition: request routed here just as engine is unregistering but before
+        # discovery propagates the removal to all routers
+        try:
+            if self.engine.tokenizer_manager.is_pause:
+                logging.warning(
+                    f"Request {context.id()} rejected: engine is paused (sleeping)"
+                )
+                raise RuntimeError(
+                    "Engine is paused (sleeping) and cannot process requests. "
+                    "This request was routed here before unregistration propagated."
+                )
+        except AttributeError:
+            # tokenizer_manager might not have is_pause attribute in some configurations
+            pass
+
         logging.debug(f"New Request ID: {context.id()}")
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)

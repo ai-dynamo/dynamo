@@ -653,8 +653,11 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # Copy all packages from runtime stage user site-packages into venv
 # This includes ai-dynamo-runtime, kubernetes, and all other dependencies
 # Use --no-preserve=mode so copied files inherit umask 002 (group-writable)
+# Exclude gpu_memory_service - it will be installed editable below
 RUN cp -r --no-preserve=mode /home/dynamo/.local/lib/python3.12/site-packages/* \
-          /opt/dynamo/venv/lib/python3.12/site-packages/
+          /opt/dynamo/venv/lib/python3.12/site-packages/ && \
+    rm -rf /opt/dynamo/venv/lib/python3.12/site-packages/gpu_memory_service/ && \
+    rm -rf /opt/dynamo/venv/lib/python3.12/site-packages/gpu_memory_service-*.dist-info/
 
 # Install maturin and uv into venv for development
 # Uninstall broken maturin from upstream, then reinstall properly into venv
@@ -667,6 +670,9 @@ RUN pip install git+https://github.com/fzyzcjy/torch_memory_saver.git
 # Editable install of dynamo components
 COPY --chown=dynamo:0 --chmod=664 pyproject.toml README.md hatch_build.py /workspace/
 RUN pip install --no-deps -e .
+
+# Editable install of gpu_memory_service for development
+RUN pip install --no-build-isolation --no-deps -e /workspace/lib/gpu_memory_service
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

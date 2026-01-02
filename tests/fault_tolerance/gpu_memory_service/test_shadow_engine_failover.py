@@ -728,7 +728,7 @@ def test_gpu_memory_service_shadow_engine_failover(
     try:
         # Step 2: Start frontend (serves OpenAI-compatible API)
         logger.info("Step 2: Starting frontend")
-        with DynamoFrontendProcess(request, frontend_port=frontend_port) as frontend:
+        with DynamoFrontendProcess(request, frontend_port=frontend_port):
             logger.info(f"Frontend started on port {frontend_port}")
 
             # Step 3: Start shadow engine
@@ -984,14 +984,12 @@ def test_gpu_memory_service_basic_sleep_wake(
             request,
             device=0,
             socket_path=socket_path,
-        ) as gpu_mem_service:
+        ):
             logger.info("GPU Memory Service started")
 
             # Start frontend (serves OpenAI-compatible API)
             logger.info("Starting frontend")
-            with DynamoFrontendProcess(
-                request, frontend_port=frontend_port
-            ) as frontend:
+            with DynamoFrontendProcess(request, frontend_port=frontend_port):
                 logger.info(f"Frontend started on port {frontend_port}")
 
                 # Create ports dict for the factory function
